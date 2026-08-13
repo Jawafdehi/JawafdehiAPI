@@ -17,6 +17,19 @@ from django.conf import settings
 
 from llm.invoke import invoke_json
 
+
+class JudgeUnavailable(RuntimeError):
+    """The judge could not be reached, so some rules have no grade at all.
+
+    Distinct from "the model replied but omitted a rule key": that is a content
+    problem the per-rule retry handles, and its neutral 50 must not fail a gate.
+    This one means the *call* never landed -- expired/revoked credentials, a 429
+    session cap, a network fault -- and the review is therefore unscorable. It
+    must reach the queue as a job failure rather than being folded into a score,
+    because a partially-judged review still reads as a plausible ~70.
+    """
+
+
 # Bounded parallelism for LLM calls. Bedrock throttles aggressively, so we
 # keep this modest; with hundreds of rules this is the wall-clock divisor.
 def _api_max_workers():
@@ -429,9 +442,25 @@ def judge_rules(
 
     # If nothing at all came back, surface the failure to the caller.
     if not any(samples[k] for k in keys) and not narrative:
-        raise RuntimeError(
+        raise JudgeUnavailable(
             f"All {len(tasks)} judge calls failed: {errors[0] if errors else 'unknown'}"
         )
+
+    # Partial reachability is the dangerous case: the quota/credential can die
+    # PART-WAY through a review, so the early rules carry real grades and the
+    # rest silently take the neutral 50. That review is not a low score, it is
+    # an unfinished one -- and it still lands in the 68-71 band that looks like
+    # a genuine near-miss. Only a transport error counts here: an ungraded rule
+    # with no error behind it is the model omitting a key, which the per-rule
+    # retry above already handled and which must stay non-fatal.
+    if errors:
+        ungraded = [k for k in keys if not samples[k]]
+        if ungraded:
+            raise JudgeUnavailable(
+                f"Judge unreachable for {len(ungraded)}/{len(keys)} rule(s) "
+                f"({', '.join(ungraded)}) after {len(errors)} failed call(s): "
+                f"{errors[0]}"
+            )
 
     out = {"_narrative": narrative, "_n_samples": n}
     for k in keys:
