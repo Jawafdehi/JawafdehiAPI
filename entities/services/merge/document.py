@@ -1,21 +1,17 @@
-"""Combine entity documents, and rewrite entity references inside one.
+"""Rewrite entity references inside a stored document.
 
-Merge policy (approved spec): the survivor wins every scalar conflict, fields the
-survivor lacks are filled from the duplicates in order, and list-valued fields are
-unioned with duplicates dropped.
+The merge never copies fields between documents. A survivor that should carry a
+duplicate's description is PATCHed before the merge runs, as its own edit with its own
+author. Everything here moves references, nothing merges content.
 """
 
 from __future__ import annotations
 
-import copy
 import json
-from typing import Any, Dict, FrozenSet, Iterable, List, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Tuple
 
-#: Identity, context and provenance are the survivor's alone.
-#:
-#: Read by two functions: ``merge_documents`` never inherits these, and
-#: ``drop_self_references`` never strips them from the survivor's own document.
-NEVER_INHERITED: frozenset = frozenset(
+#: Identity and provenance: never rewritten, never stripped from a document's own top level.
+IDENTITY_KEYS: frozenset = frozenset(
     {"@id", "@type", "@context", "dateCreated", "jawafdehi:version"}
 )
 
@@ -24,58 +20,20 @@ _VERSION_KEY = "jawafdehi:version"
 
 
 def _entry_key(value: Any) -> str:
-    """A stable identity for a list entry, so a union can drop duplicates."""
+    """A stable identity for a list entry, so a rewrite can drop the duplicates it creates."""
     if isinstance(value, str):
         return value
     return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
-def _union(existing: List[Any], incoming: List[Any]) -> List[Any]:
-    out = list(existing)
-    seen = {_entry_key(v) for v in out}
-    for value in incoming:
-        key = _entry_key(value)
-        if key not in seen:
-            seen.add(key)
-            out.append(value)
-    return out
-
-
-def merge_documents(
-    survivor: Dict[str, Any], duplicates: List[Dict[str, Any]]
-) -> Tuple[Dict[str, Any], Dict[str, str]]:
-    """Merge duplicates into the survivor. Returns (document, inherited field → source IRI)."""
-    merged = copy.deepcopy(survivor)
-    inherited: Dict[str, str] = {}
-    same_as: List[Any] = list(merged.get("sameAs") or [])
-
-    for dup in duplicates:
-        dup_iri = dup.get("@id")
-        for field, value in dup.items():
-            if field in NEVER_INHERITED or field == "sameAs":
-                continue
-            if field not in merged or merged[field] in (None, "", [], {}):
-                merged[field] = copy.deepcopy(value)
-                if dup_iri is not None:
-                    inherited[field] = dup_iri
-            elif isinstance(merged[field], list) and isinstance(value, list):
-                merged[field] = _union(merged[field], value)
-        same_as = _union(same_as, list(dup.get("sameAs") or []))
-        if dup_iri:
-            same_as = _union(same_as, [dup_iri])
-
-    if same_as:
-        merged["sameAs"] = same_as
-    return merged, inherited
-
-
 def drop_self_references(
-    doc: Dict[str, Any], retired: Iterable[str], *, keep: FrozenSet[str] = frozenset({"sameAs"})
+    doc: Dict[str, Any], retired: Iterable[str], *, keep: FrozenSet[str] = frozenset()
 ) -> Tuple[Dict[str, Any], int]:
     """Remove references to a retired IRI from the survivor's own document.
 
-    Pointing them at the survivor instead would assert a relation to itself. ``sameAs``
-    is exempt: that is where the merge deliberately records what it retired.
+    Repointing them at the survivor instead would assert a relation to itself, so they
+    are dropped rather than rewritten. This is the only reason a merge writes the
+    survivor's document at all — if it referenced nothing retired, it is left untouched.
     """
     retired = set(retired)
     count = 0
@@ -90,7 +48,7 @@ def drop_self_references(
         if isinstance(node, dict):
             out: Dict[str, Any] = {}
             for key, value in node.items():
-                if (top and key in NEVER_INHERITED) or key in keep:
+                if (top and key in IDENTITY_KEYS) or key in keep:
                     out[key] = value
                 elif is_retired(value):
                     count += 1

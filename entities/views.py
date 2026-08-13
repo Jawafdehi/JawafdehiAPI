@@ -408,19 +408,12 @@ class EntityMergeView(AuditlogActorMixin, APIView):
                 _err("INVALID_REQUEST", "dry_run must be a boolean."),
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        type_family = body.get("type_family")
-        if type_family is not None and not isinstance(type_family, str):
-            return Response(
-                _err("INVALID_REQUEST", "type_family must be a string."),
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         try:
             result = EntityMergeService().merge(
                 survivor_iri=body.get("survivor", ""),
                 duplicate_iris=body.get("duplicates", []),
                 author_id=_author_id_from_request(request),
                 change_description=body.get("change_description", ""),
-                type_family=type_family,
                 dry_run=dry_run,
             )
         except MergeError as exc:

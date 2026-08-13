@@ -69,7 +69,10 @@ class EntityMergeApiTests(APITestCase):
         dup = StoredEntity.objects.get(pk=LOOSE)
         self.assertTrue(dup.is_deleted)
         self.assertEqual(dup.merged_into, JHAPA)
-        self.assertEqual(resp.data["survivor"]["description"], {"ne": "झापा जिल्ला"})
+        # The duplicate's description is NOT copied over. PATCH the survivor first if
+        # it should carry it — the merge moves references, it does not merge content.
+        self.assertNotIn("description", resp.data["survivor"])
+        self.assertNotIn("fields_inherited", resp.data)
 
     # 2 — relationship transfer, and nothing left pointing at the retired entity
     def test_every_bind_moves_and_nothing_still_points_at_the_retired_entity(self):

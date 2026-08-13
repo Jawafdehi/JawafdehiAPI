@@ -26,8 +26,8 @@ from entities.persistence import EntityRepository
 from entities.services.publication import PublicationService
 
 from . import references
-from .document import drop_self_references, merge_documents
-from .families import FAMILY_NAMES, families_compatible, families_for
+from .document import drop_self_references
+from .types import prefix_mismatch, types_compatible
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +58,12 @@ class EntityMergeService:
         duplicate_iris: List[str],
         author_id: str,
         change_description: str = "",
-        type_family: Optional[str] = None,
         dry_run: bool = False,
         enforce_reference_cap: bool = True,
     ) -> Dict[str, Any]:
         survivor_iri, duplicate_iris = self._canonicalize(survivor_iri, duplicate_iris)
         survivor_doc = self._load_survivor(survivor_iri)
-        candidates = self._classify(survivor_iri, duplicate_iris, survivor_doc, type_family)
+        candidates = self._classify(survivor_iri, duplicate_iris, survivor_doc)
 
         if not candidates:
             # Re-sending is the remedy _reindex's warning names, and is also where a
@@ -82,7 +81,7 @@ class EntityMergeService:
             return self._response(
                 merge_id=None, status="already_merged", dry_run=dry_run,
                 survivor=survivor_doc, retired=duplicate_iris,
-                inherited={}, per_store={}, warnings=warnings,
+                per_store={}, warnings=warnings,
             )
 
         retired = list(candidates)
@@ -107,11 +106,11 @@ class EntityMergeService:
                 409, conflicts=conflicts,
             )
 
-        merged_doc, inherited = merge_documents(
-            survivor_doc, [candidates[iri] for iri in retired]
-        )
-        merged_doc, dropped = drop_self_references(merged_doc, retired)
-        warnings = self._warnings(survivor_doc, candidates)
+        # The survivor's own document changes in one way only: references to an entity
+        # this merge retires are dropped, because repointing them at the survivor would
+        # assert a relation to itself. No field is copied from a duplicate.
+        survivor_after, dropped = drop_self_references(survivor_doc, retired)
+        warnings = self._warnings(survivor_iri, retired)
         if dropped:
             warnings.append(
                 f"{dropped} reference(s) to a retired entity were removed from the "
@@ -120,8 +119,8 @@ class EntityMergeService:
 
         if dry_run:
             return self._response(
-                merge_id=None, status="planned", dry_run=True, survivor=merged_doc,
-                retired=retired, inherited=inherited,
+                merge_id=None, status="planned", dry_run=True, survivor=survivor_after,
+                retired=retired,
                 per_store={k: {"repointed": v, "deduplicated": 0} for k, v in counts.items()},
                 warnings=warnings,
             )
@@ -156,8 +155,8 @@ class EntityMergeService:
             merge_id, len(manifest), json.dumps(manifest, ensure_ascii=False, default=str),
         )
         try:
-            inherited = self._retire(
-                survivor_iri=survivor_iri, retired=retired, candidates=candidates,
+            self._retire(
+                survivor_iri=survivor_iri, retired=retired,
                 author_id=author_id, description=description,
             )
         except MergeError:
@@ -175,7 +174,7 @@ class EntityMergeService:
         return self._response(
             merge_id=merge_id, status="complete", dry_run=False,
             survivor=self.repo.get_entity(survivor_iri), retired=retired,
-            inherited=inherited, per_store=per_store, warnings=warnings,
+            per_store=per_store, warnings=warnings,
         )
 
     # --- phases ---------------------------------------------------------
@@ -268,15 +267,12 @@ class EntityMergeService:
             ) from exc
         return per_store, manifest
 
-    def _retire(self, *, survivor_iri, retired, candidates, author_id,
-                description) -> Dict[str, str]:
-        """Publish the merged survivor and tombstone the duplicates. Atomic in nes.
+    def _retire(self, *, survivor_iri, retired, author_id, description) -> None:
+        """Clean the survivor's own references to the duplicates, then tombstone them.
 
-        The survivor document is rebuilt from a fresh read here rather than reused from
-        the pre-write phase: up to ``MAX_REFERENCES`` references have moved since then,
-        and an edit a caseworker made inside that window would otherwise be overwritten.
-        The fresh read is not itself locked, so this narrows that window rather than
-        closing it. Returns the inherited field → source IRI map the response reports.
+        The survivor is read fresh here and written only when it actually referenced a
+        duplicate. Because the merge copies no fields, an untouched survivor keeps its
+        current version — and keeps whatever a caseworker edited during the repoint.
         """
         with transaction.atomic(using="nes"):
             current = self.repo.get_entity(survivor_iri)
@@ -285,17 +281,15 @@ class EntityMergeService:
                 # Those reference moves are committed and now name a tombstone; the
                 # 409 names its new target so the operator can re-send onto that.
                 self._survivor_retired(survivor_iri)
-            merged_doc, inherited = merge_documents(
-                current, [candidates[iri] for iri in retired]
-            )
-            merged_doc, _dropped = drop_self_references(merged_doc, retired)
-            # validate=False: the merged document is assembled from documents already in
-            # the store, so re-gating it on authoring rules can only wedge a merge,
-            # never prevent a bad one.
-            self.publication.update_entity(
-                doc=merged_doc, author_id=author_id, change_description=description,
-                validate=False,
-            )
+            cleaned, dropped = drop_self_references(current, retired)
+            if dropped:
+                # validate=False: this is the stored document minus references to
+                # entities being retired, so re-gating it on authoring rules can only
+                # wedge a merge, never prevent a bad one.
+                self.publication.update_entity(
+                    doc=cleaned, author_id=author_id, change_description=description,
+                    validate=False,
+                )
             for iri in retired:
                 row = (
                     StoredEntity.objects.select_for_update()
@@ -314,7 +308,6 @@ class EntityMergeService:
                 # update_fields keeps the write (and the auditlog diff) to the flip,
                 # leaving the duplicate's ``data`` and ``version`` as they stand.
                 row.save(update_fields=["is_deleted", "merged_into", "updated_at"])
-        return inherited
 
     def _reindex(self, case_ids, merge_id) -> List[str]:
         """Re-index the cases this merge touched, warning rather than failing on an outage.
@@ -389,20 +382,8 @@ class EntityMergeService:
             )
         raise MergeError("NOT_FOUND", f"Entity {survivor_iri} not found.", 404)
 
-    def _classify(self, survivor_iri, duplicate_iris, survivor_doc, type_family):
+    def _classify(self, survivor_iri, duplicate_iris, survivor_doc):
         """Live duplicates to merge. Already-merged ones drop out; the rest raise."""
-        if type_family is not None:
-            if type_family not in FAMILY_NAMES:
-                raise MergeError(
-                    "INVALID_REQUEST",
-                    f"type_family must be one of {sorted(FAMILY_NAMES)}.", 400,
-                )
-            if type_family not in families_for(survivor_doc):
-                raise MergeError(
-                    "TYPE_MISMATCH",
-                    f"The survivor is not a {type_family} entity.", 422,
-                )
-
         candidates: Dict[str, Dict[str, Any]] = {}
         for iri in duplicate_iris:
             doc = self.repo.get_entity(iri)
@@ -419,31 +400,33 @@ class EntityMergeService:
                         409, merged_into=target,
                     )
                 raise MergeError("NOT_FOUND", f"Entity {iri} not found.", 404)
-            if not families_compatible(survivor_doc, doc):
+            if not types_compatible(survivor_doc, doc):
                 raise MergeError(
                     "TYPE_MISMATCH",
+                    "A person can only be merged with a person. "
                     f"Cannot merge {doc.get('@type')} into {survivor_doc.get('@type')}.",
                     422,
                 )
             candidates[iri] = doc
         return candidates
 
-    def _warnings(self, survivor_doc, candidates) -> List[str]:
-        """Advisory only: flag a survivor that looks thinner than what it is absorbing."""
-        out = []
-        survivor_size = len(survivor_doc)
-        for iri, doc in candidates.items():
-            if len(doc) > survivor_size:
-                out.append(
-                    f"The entity you are retiring ({iri}) holds more fields than the "
-                    "survivor. Check that survivor and duplicate are the right way round."
-                )
-        return out
+    def _warnings(self, survivor_iri, retired) -> List[str]:
+        """Advisory only. A prefix mismatch is odd enough to mention, never to refuse.
+
+        Folding a stray ``kalikot/…`` into ``location/district/…`` is exactly the
+        cleanup this endpoint is for, so the mismatch is reported and allowed.
+        """
+        return [
+            f"{iri} sits under a different prefix from the survivor. Check that these "
+            "are the same thing."
+            for iri in retired
+            if prefix_mismatch(survivor_iri, iri)
+        ]
 
     # --- response -------------------------------------------------------
 
     def _response(self, *, merge_id, status, dry_run, survivor, retired,
-                  inherited, per_store, warnings) -> Dict[str, Any]:
+                  per_store, warnings) -> Dict[str, Any]:
         zero = {"repointed": 0, "deduplicated": 0}
         stores = {key: per_store.get(key, dict(zero)) for key in references.STORE_KEYS}
         total = sum(v["repointed"] + v["deduplicated"] for v in stores.values())
@@ -453,7 +436,6 @@ class EntityMergeService:
             "dry_run": dry_run,
             "survivor": survivor,
             "retired": retired,
-            "fields_inherited": inherited,
             "references": stores,
             "total_references": total,
             "warnings": warnings,

@@ -68,9 +68,11 @@ def test_happy_path_tombstones_the_duplicate_and_keeps_the_survivor():
     assert dup.merged_into == JHAPA
     survivor = StoredEntity.objects.get(pk=JHAPA)
     assert survivor.is_deleted is False
-    assert survivor.version == 2
-    assert survivor.data["description"] == {"ne": "झापा जिल्ला"}
-    assert LOOSE in survivor.data["sameAs"]
+    # The merge copies no fields. The survivor referenced nothing being retired, so its
+    # document is not written at all and it stays on the version it already had.
+    assert survivor.version == 1
+    assert "description" not in survivor.data
+    assert "sameAs" not in survivor.data
 
 
 def test_the_survivor_pointer_lives_in_the_retired_rows_column():
@@ -106,7 +108,7 @@ def test_rerunning_the_same_merge_is_a_safe_noop():
     assert result["status"] == "already_merged"
     assert result["merge_id"] is None
     assert result["total_references"] == 0
-    assert StoredEntity.objects.get(pk=JHAPA).version == 2
+    assert StoredEntity.objects.get(pk=JHAPA).version == 1
 
 
 def test_self_merge_is_rejected():
@@ -125,14 +127,6 @@ def test_cross_family_merge_is_rejected():
     assert exc.value.code == "TYPE_MISMATCH"
     assert exc.value.http_status == 422
     assert StoredEntity.objects.get(pk="https://jawafdehi.org/entity/person/ram-bahadur").is_deleted is False
-
-
-def test_declared_type_family_must_agree_with_the_survivor():
-    _seed_pair()
-    with pytest.raises(MergeError) as exc:
-        _merge(type_family="person")
-    assert exc.value.code == "TYPE_MISMATCH"
-    assert exc.value.http_status == 422
 
 
 def test_unknown_duplicate_is_a_not_found():
@@ -332,13 +326,18 @@ def test_a_search_outage_warns_instead_of_failing_a_finished_merge(monkeypatch):
     assert StoredEntity.objects.get(pk=LOOSE).is_deleted is True
 
 
-def test_warns_when_the_survivor_looks_less_complete_than_the_duplicate():
-    _seed("location", "jhapa", "Place")
-    _seed("location/district", "jhapa-np0104", ["AdministrativeArea", "jawafdehi:District"],
-          identifier=[{"@type": "PropertyValue", "propertyID": "ocha-pcode", "value": "NP0104"}],
-          description={"ne": "झापा जिल्ला"})
-    result = _merge(survivor_iri=LOOSE, duplicate_iris=[JHAPA], dry_run=True)
-    assert result["warnings"]
+def test_a_different_prefix_warns_but_never_refuses():
+    # The stray-prefix entities (kalikot/, mahabai/, deptofsurvey/) are exactly what
+    # this endpoint is for, so the mismatch is reported and the merge still runs.
+    _seed("location/district", "jhapa-np0104", ["AdministrativeArea", "jawafdehi:District"])
+    _seed("kalikot", "jhapa-office", "Place")
+    stray = "https://jawafdehi.org/entity/kalikot/jhapa-office"
+
+    result = _merge(duplicate_iris=[stray])
+
+    assert result["status"] == "complete"
+    assert any("different prefix" in w for w in result["warnings"])
+    assert StoredEntity.objects.get(pk=stray).merged_into == JHAPA
 
 
 def test_a_neighbour_that_no_longer_validates_does_not_wedge_the_merge():
@@ -358,18 +357,21 @@ def test_a_neighbour_that_no_longer_validates_does_not_wedge_the_merge():
     assert row.data["containedInPlace"]["@id"] == JHAPA
 
 
-def test_a_reference_to_another_retired_duplicate_is_dropped_from_the_survivor():
-    _seed("location/district", "jhapa-np0104", ["AdministrativeArea", "jawafdehi:District"])
+def test_the_survivors_own_reference_to_a_duplicate_is_dropped():
+    # The one case where a merge writes the survivor's document. Repointing the
+    # reference at the survivor would assert a relation to itself, so it is removed.
     other = "https://jawafdehi.org/entity/location/jhapa-2"
-    _seed("location", "jhapa", "Place", containedInPlace={"@id": other})
+    _seed("location/district", "jhapa-np0104", ["AdministrativeArea", "jawafdehi:District"],
+          containedInPlace={"@id": other})
+    _seed("location", "jhapa", "Place")
     _seed("location", "jhapa-2", "Place")
 
     result = _merge(duplicate_iris=[LOOSE, other])
     assert result["status"] == "complete"
 
     survivor = StoredEntity.objects.get(pk=JHAPA)
-    without_same_as = {k: v for k, v in survivor.data.items() if k != "sameAs"}
-    assert other not in json.dumps(without_same_as)
+    assert other not in json.dumps(survivor.data)
+    assert survivor.version == 2
     assert any("removed" in w for w in result["warnings"])
 
 
@@ -612,21 +614,22 @@ def test_a_survivor_that_no_longer_validates_does_not_wedge_the_merge():
     # The survivor's stored document carries an @type validate_jsonld_entity no longer
     # accepts. Its publish is derived from what is already in the store, so re-gating it
     # would wedge the merge AFTER repointing committed — and every resend identically.
-    # The @type keeps a known place token so the family check still passes; validation
-    # requires EVERY token to be known, so the document is still invalid.
+    # Neither token is Person, so the type guard still passes; validation requires
+    # EVERY token to be known, so the document is still invalid. The survivor
+    # references the duplicate, which is what makes the merge publish it at all.
     survivor = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
     StoredEntity.objects.create(
         iri=survivor, entity_type="AdministrativeArea,Wizard",
         prefix="location/district", slug="jhapa-np0104",
         data={"@id": survivor, "@type": ["AdministrativeArea", "Wizard"],
-              "name": {"en": "Jhapa"}},
+              "name": {"en": "Jhapa"}, "containedInPlace": {"@id": LOOSE}},
     )
-    _seed("location", "jhapa", "Place", description={"ne": "झापा जिल्ला"})
+    _seed("location", "jhapa", "Place")
 
     result = _merge()
     assert result["status"] == "complete"
     assert StoredEntity.objects.get(pk=LOOSE).is_deleted is True
-    assert StoredEntity.objects.get(pk=survivor).data["description"] == {"ne": "झापा जिल्ला"}
+    assert "containedInPlace" not in StoredEntity.objects.get(pk=survivor).data
 
 
 def test_republishing_a_retired_entity_clears_its_merge_pointer():
