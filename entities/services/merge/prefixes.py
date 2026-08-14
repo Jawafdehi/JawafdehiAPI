@@ -19,6 +19,9 @@ def prefix_root(iri: str) -> str:
     try:
         return parse_entity_iri(iri).prefix.split("/", 1)[0]
     except (ValueError, TypeError):
+        # Swallowed deliberately: an IRI that will not parse has no prefix to compare,
+        # and this only feeds an advisory warning. The malformed-IRI refusal is
+        # _canonicalize's job and has already run by the time anything calls this.
         return ""
 
 

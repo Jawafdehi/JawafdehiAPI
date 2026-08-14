@@ -77,6 +77,15 @@ def test_rewrite_leaves_an_unrelated_document_untouched():
     assert count == 0
 
 
+def test_a_string_never_collides_with_its_own_json_scalar():
+    # The dedupe key used to return strings raw, so "null" and None both keyed as
+    # `null` and the rewrite dropped one of them as a duplicate. Same for "123"/123.
+    doc = {"@id": KOSHI, "jawafdehi:custom": [{"@id": LOOSE}, "null", None, "123", 123]}
+    out, count = rewrite_references(doc, {LOOSE: JHAPA})
+    assert count == 1
+    assert out["jawafdehi:custom"] == [{"@id": JHAPA}, "null", None, "123", 123]
+
+
 def test_an_untouched_list_keeps_its_pre_existing_duplicates():
     doc = {"@id": KOSHI, "tags": ["a", "a"]}
     out, count = rewrite_references(doc, {LOOSE: JHAPA})

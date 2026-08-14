@@ -20,9 +20,12 @@ _VERSION_KEY = "jawafdehi:version"
 
 
 def _entry_key(value: Any) -> str:
-    """A stable identity for a list entry, so a rewrite can drop the duplicates it creates."""
-    if isinstance(value, str):
-        return value
+    """A stable identity for a list entry, so a rewrite can drop the duplicates it creates.
+
+    Everything goes through json.dumps, strings included. Returning a string raw made it
+    collide with its own JSON scalar — ``"null"`` with ``None``, ``"123"`` with ``123`` —
+    and the dedupe would then drop one of the two as a duplicate.
+    """
     return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
