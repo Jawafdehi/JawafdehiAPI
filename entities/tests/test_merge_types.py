@@ -1,7 +1,7 @@
 """The merge's one type rule, and the advisory prefix check (pure logic, no DB)."""
 
 from entities.services.merge.types import (
-    is_person, normalize_type_token, prefix_mismatch, prefix_root, types_compatible,
+    PERSON, is_person, normalize_type_token, prefix_mismatch, prefix_root, types_compatible,
 )
 
 JHAPA = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
@@ -9,6 +9,15 @@ LOOSE = "https://jawafdehi.org/entity/location/jhapa"
 KALIKOT = "https://jawafdehi.org/entity/kalikot/some-office"
 CIAA = "https://jawafdehi.org/entity/organization/government/ciaa/head-office"
 RAM = "https://jawafdehi.org/entity/person/ram-bahadur-thapa"
+
+
+def test_the_person_token_is_the_one_the_vocabulary_defines():
+    # The guard rests on a single literal. This is what stops it drifting: if the
+    # vocabulary ever renames or drops the token, CI says so here instead of the guard
+    # quietly matching nothing and letting a person merge into an office.
+    from entities.validation import KNOWN_SCHEMAORG_TYPES
+
+    assert PERSON in KNOWN_SCHEMAORG_TYPES
 
 
 def test_a_person_may_not_merge_with_a_non_person():

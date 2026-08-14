@@ -8,6 +8,12 @@ with a Person. Everything else is allowed: a ``Place`` folding into an
 
 Nothing here enumerates types. A token added to the vocabulary needs no edit — it is
 simply not ``Person``, which is the safe answer.
+
+``PERSON`` below is one literal, and it is a reference to the vocabulary rather than a
+copy of it: ``test_the_person_token_is_the_one_the_vocabulary_defines`` fails in CI if
+``entities.validation`` ever stops defining that token. A hand-maintained table of type
+families could not be pinned that way — it drifts silently, and the symptom is a merge
+refused with no explanation.
 """
 
 from __future__ import annotations
