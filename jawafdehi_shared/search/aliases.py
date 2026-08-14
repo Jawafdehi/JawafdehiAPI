@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import re
 
+from jawafdehi_shared.search.indexing import is_not_found
+
 # A generation is the alias name plus a zero-padded ordinal. Six digits is
 # arbitrary but fixed: the width is part of the name, so it cannot be widened
 # later without orphaning every existing generation.
@@ -68,7 +70,12 @@ def _generation_indices(client, alias: str) -> dict[str, int]:
     """Every existing generation of ``alias``, as ``{index name: ordinal}``."""
     try:
         names = client.indices.get(index=f"{alias}-*", ignore_unavailable=True) or {}
-    except Exception:  # noqa: BLE001 — a wildcard with no matches must read as none.
+    except Exception as exc:  # noqa: BLE001
+        # ONLY a 404 means "no generations". Swallowing a timeout here would
+        # restart the numbering at -000001 and rebuild into an index that already
+        # exists and is possibly the one still serving.
+        if not is_not_found(exc):
+            raise
         return {}
     found: dict[str, int] = {}
     for name in names:
@@ -89,7 +96,13 @@ def alias_targets(client, alias: str) -> list[str]:
         if not client.indices.exists_alias(name=alias):
             return []
         return sorted(client.indices.get_alias(name=alias) or {})
-    except Exception:  # noqa: BLE001 — absent alias reads as "not aliased yet".
+    except Exception as exc:  # noqa: BLE001
+        # Fail CLOSED. "Not an alias" routes swap_alias into its destructive
+        # bootstrap branch, which issues remove_index against the name — so a
+        # timeout read as "absent" would delete the live index instead of
+        # detaching an alias from it.
+        if not is_not_found(exc):
+            raise
         return []
 
 
@@ -143,14 +156,30 @@ def swap_alias(client, alias: str, new_index: str) -> list[str]:
 
 
 def prune_generations(client, alias: str, keep: str) -> list[str]:
-    """Delete every generation of ``alias`` except ``keep``.
+    """Delete generations of ``alias`` OLDER than ``keep``.
 
-    Runs only AFTER a successful swap, never before one: pruning up front would
-    race a concurrent build for the same alias, and the disk a stale generation
-    holds is not worth that. An orphan from a crashed run therefore survives
-    until the next successful rebuild, which is the intended trade.
+    Two rules, both about not deleting something that is still in use:
+
+    * only AFTER a successful swap, never before one — the disk a stale
+      generation holds is not worth racing a concurrent build for it;
+    * only strictly-lower ordinals. A HIGHER generation is not garbage, it is a
+      rebuild that started after this one and is still filling its index.
+      Deleting it would leave that run bulk-writing into nothing and then
+      swapping the alias onto an index that no longer exists. ``concurrencyPolicy:
+      Forbid`` stops one cron overlapping itself, not a manual run overlapping
+      the cron.
+
+    An orphan from a crashed run therefore survives until a LATER generation
+    goes live, which is the next rebuild. That is the intended trade.
     """
-    doomed = sorted(n for n in _generation_indices(client, alias) if n != keep)
+    keep_ordinal = generation_ordinal(alias, keep)
+    if keep_ordinal is None:  # pragma: no cover — keep is always a generation.
+        return []
+    doomed = sorted(
+        name
+        for name, ordinal in _generation_indices(client, alias).items()
+        if ordinal < keep_ordinal
+    )
     for name in doomed:
         client.indices.delete(index=name, ignore_unavailable=True)
     return doomed

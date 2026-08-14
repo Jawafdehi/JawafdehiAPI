@@ -13,7 +13,7 @@ import pytest
 
 from jawafdehi_shared.search import reindex as reindex_mod
 from jawafdehi_shared.search.reindex import RebuildAborted, reindex, summary
-from jawafdehi_shared.search.tests.fakes import Client
+from jawafdehi_shared.search.tests.fakes import Client, TransportError
 
 ALIAS = "ngm-courtcases"
 
@@ -24,9 +24,16 @@ def build_doc(record):
 
 
 def run(client, records, **kwargs):
-    """Drive the real reindex with bulk writes landing in the fake."""
-    with patch.object(
-        reindex_mod, "stream_bulk", lambda c, index, docs: c.bulk_write(index, docs)
+    """Drive the real reindex with bulk writes/deletes landing in the fake."""
+    with (
+        patch.object(
+            reindex_mod, "stream_bulk", lambda c, index, docs: c.bulk_write(index, docs)
+        ),
+        patch.object(
+            reindex_mod,
+            "stream_bulk_delete",
+            lambda c, index, iris: c.bulk_delete(index, iris),
+        ),
     ):
         return reindex(
             index=ALIAS,
@@ -123,11 +130,61 @@ def test_catchup_recovers_writes_made_during_the_build():
         client,
         records(),
         rebuild=True,
-        catchup=lambda since: list(written_during_build),
+        catchup=lambda since: [(iri, iri) for iri in written_during_build],
     )
 
-    assert result["caught_up"] == 1
+    assert (result["caught_up"], result["evicted"]) == (1, 0)
     assert client.search_ids(ALIAS) == ["a", "b", "mid-build"]
+
+
+def test_catchup_evicts_a_record_that_became_ineligible_during_the_build():
+    """The regression that made catch-up mandatory rather than upsert-only.
+
+    A case indexed early in the scan is reclassified SENSITIVE while the scan is
+    still running. The live signal deletes it — but from the OLD generation. If
+    catch-up only upserted, the swap would put the doc back and a reindex would
+    undo the sensitive floor.
+    """
+    client = Client(indices={ALIAS: {"old": {}}})
+
+    def records():
+        yield "keep"
+        yield "goes-sensitive"
+
+    result = run(
+        client,
+        records(),
+        rebuild=True,
+        # The command's own gate rejected it, so it arrives as a tombstone.
+        catchup=lambda since: [("goes-sensitive", None)],
+    )
+
+    assert (result["caught_up"], result["evicted"]) == (0, 1)
+    assert client.search_ids(ALIAS) == ["keep"]
+
+
+def test_catchup_evicts_when_build_doc_disagrees_with_the_gate():
+    """Belt and braces: a record the gate passed but build_doc will not index."""
+    client = Client(indices={ALIAS: {"old": {}}})
+
+    result = run(
+        client, ["a"], rebuild=True, catchup=lambda since: [("a", "")]
+    )
+
+    assert result["evicted"] == 1
+    assert client.search_ids(ALIAS) == []
+
+
+def test_evicting_an_absent_doc_is_not_an_error():
+    """A row hidden mid-build that the scan never reached has nothing to delete."""
+    client = Client(indices={ALIAS: {"old": {}}})
+
+    result = run(
+        client, ["a"], rebuild=True, catchup=lambda since: [("never-indexed", None)]
+    )
+
+    assert result["evicted"] == 1
+    assert client.search_ids(ALIAS) == ["a"]
 
 
 def test_without_catchup_the_mid_build_write_is_lost():
@@ -190,6 +247,53 @@ def test_each_generation_is_created_fresh_so_mappings_can_change():
     ]
 
 
+def test_an_unreadable_cluster_aborts_instead_of_swapping():
+    """A 5xx on the doc count must not read as "the old index was empty".
+
+    That is the path that turns a transient outage into a destructive swap onto
+    a generation nobody has verified.
+    """
+    client = Client(
+        indices={ALIAS: {"old": {}}}, fail_on={"count": TransportError(503)}
+    )
+
+    with pytest.raises(TransportError):
+        run(client, ["a"], rebuild=True)
+
+    # Untouched: still a concrete index, still serving its docs.
+    assert client.store.aliases == {}
+    assert client.search_ids(ALIAS) == ["old"]
+
+
+def test_an_unreadable_alias_lookup_aborts_before_the_destructive_branch():
+    """`remove_index` DELETES. Reading a timeout as "not an alias" would send a
+    live alias into that branch."""
+    client = Client(
+        indices={"ngm-courtcases-000002": {"old": {}}},
+        aliases={ALIAS: ["ngm-courtcases-000002"]},
+        fail_on={"exists_alias": TransportError(503)},
+    )
+
+    with pytest.raises(TransportError):
+        run(client, ["a"], rebuild=True)
+
+    assert client.store.aliases == {ALIAS: ["ngm-courtcases-000002"]}
+
+
+def test_an_unreadable_generation_listing_aborts_before_reusing_a_name():
+    """Restarting the numbering would build into the index still serving."""
+    client = Client(
+        indices={"ngm-courtcases-000002": {"old": {}}},
+        aliases={ALIAS: ["ngm-courtcases-000002"]},
+        fail_on={"get": TransportError(503)},
+    )
+
+    with pytest.raises(TransportError):
+        run(client, ["a"], rebuild=True)
+
+    assert client.search_ids(ALIAS) == ["old"]
+
+
 def test_summary_reports_the_swap():
     swapped = {
         "indexed": 27222,
@@ -197,11 +301,12 @@ def test_summary_reports_the_swap():
         "index": "ngm-courtcases-000003",
         "swapped": True,
         "caught_up": 4,
+        "evicted": 2,
         "pruned": ["ngm-courtcases-000002"],
     }
     assert summary("ngm-courtcases", swapped) == (
         "ngm-courtcases: indexed=27222 skipped=0 "
-        "swapped->ngm-courtcases-000003 caught_up=4 pruned=1"
+        "swapped->ngm-courtcases-000003 caught_up=4 evicted=2 pruned=1"
     )
     plain = {"indexed": 5, "skipped": 1, "index": ALIAS, "swapped": False}
     assert summary("ngm-courtcases", plain) == "ngm-courtcases: indexed=5 skipped=1"

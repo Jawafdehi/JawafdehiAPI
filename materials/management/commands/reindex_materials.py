@@ -51,13 +51,23 @@ class Command(BaseCommand):
                 qs = qs.filter(updated_at__gte=since)
             return qs.order_by("iri").iterator()
 
+        def changed(since):
+            """``(iri, material_or_None)`` for everything written during the build.
+
+            Unfiltered, so a material soft-deleted or moved off LISTED mid-build
+            arrives as a TOMBSTONE rather than simply going missing from the
+            stream — otherwise the swap re-exposes a draft case's evidence that
+            the live signal had already evicted.
+            """
+            for m in Material.objects.filter(updated_at__gte=since).iterator():
+                listed = not m.is_deleted and m.visibility == Visibility.LISTED
+                yield m.iri, (m if listed else None)
+
         result = reindex(
             index=MATERIAL_INDEX,
             records=stream(None if options["rebuild"] else options.get("since")),
             build_doc=search_index.build_doc,
             rebuild=options["rebuild"],
-            # Materials uploaded while the new generation was building land on the
-            # OLD one and would be lost at the swap.
-            catchup=stream,
+            catchup=changed,
         )
         self.stdout.write(self.style.SUCCESS(summary("ngm-materials", result)))

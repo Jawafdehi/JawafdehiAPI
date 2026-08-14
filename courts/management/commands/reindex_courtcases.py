@@ -54,17 +54,32 @@ class Command(BaseCommand):
 
         def stream(since=None):
             qs = CourtCase.objects.select_related("court").filter(is_deleted=False)
-            if since is not None:
-                # Re-read the publish-link cache: the catch-up pass runs an hour
-                # after the refresh above, and a case published in between changes
-                # which court cases the gate lets through.
-                published_referenced_iris(refresh=True)
+            if since:
                 qs = qs.filter(updated_at__gte=since)
             return (
                 case
                 for case in qs.order_by("court_id", "case_number").iterator()
                 if court_case_public_visible(case)
             )
+
+        def changed(since):
+            """``(iri, case_or_None)`` for every case written during the build.
+
+            NOT filtered on is_deleted or on the gate: a case that became hidden
+            (or was soft-deleted) mid-build must come through as a TOMBSTONE. The
+            live signal evicted it from the old generation, and without the
+            tombstone the swap would put it back — which for a case reclassified
+            to a SENSITIVE type means the sensitive floor is undone by a reindex.
+            """
+            # Re-read the publish-link cache: this runs an hour after the refresh
+            # above, and a case published in between changes which court cases the
+            # gate lets through.
+            published_referenced_iris(refresh=True)
+            qs = CourtCase.objects.select_related("court").filter(
+                updated_at__gte=since
+            )
+            for case in qs.order_by("court_id", "case_number").iterator():
+                yield case.iri, (case if court_case_public_visible(case) else None)
 
         result = reindex(
             index=COURTCASE_INDEX,
@@ -75,6 +90,6 @@ class Command(BaseCommand):
             # and would be lost at the swap. The scan is ~1h wide and the court
             # scrapers run every 12h, so this is a real overlap, not a theoretical
             # one.
-            catchup=stream,
+            catchup=changed,
         )
         self.stdout.write(self.style.SUCCESS(summary("ngm-courtcases", result)))

@@ -331,22 +331,30 @@ def index_now(case: Any, *, client=None) -> None:
         delete_now(case, client=cl)
 
 
-def delete_now(case: Any, *, client=None) -> None:
-    """Delete the case's doc from ``jawafdehi-cases``. RAISES.
+def evictable_iri(case: Any) -> str | None:
+    """The IRI a case's doc is keyed by, even once it has LEFT published state.
 
-    Uses the public IRI when the case is (or was) published; falls back to
-    building one from the slug so a case that has just LEFT published state can
-    still be evicted even though ``public_iri`` now returns ``None``."""
+    ``public_iri`` returns None for a non-published case, so eviction has to fall
+    back to rebuilding the IRI from the slug — otherwise a case that has just been
+    unpublished cannot be addressed to delete it. Used by ``delete_now`` and by
+    the rebuild catch-up, which needs the same answer for a tombstone."""
     iri = _case_iri(case)
-    if not iri:
-        slug = getattr(case, "slug", None)
-        if slug:
-            from jawafdehi_shared.entities.ids import build_case_iri
+    if iri:
+        return iri
+    slug = getattr(case, "slug", None)
+    if not slug:
+        return None
+    from jawafdehi_shared.entities.ids import build_case_iri
 
-            try:
-                iri = build_case_iri(slug)
-            except ValueError:
-                iri = None
+    try:
+        return build_case_iri(slug)
+    except ValueError:
+        return None
+
+
+def delete_now(case: Any, *, client=None) -> None:
+    """Delete the case's doc from ``jawafdehi-cases``. RAISES."""
+    iri = evictable_iri(case)
     if iri:
         delete_doc(client or make_client(), CASE_INDEX, iri)
 

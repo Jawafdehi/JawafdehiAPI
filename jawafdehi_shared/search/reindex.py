@@ -32,7 +32,11 @@ from jawafdehi_shared.search.aliases import (
     resolve_alias,
     swap_alias,
 )
-from jawafdehi_shared.search.indexing import stream_bulk
+from jawafdehi_shared.search.indexing import (
+    is_not_found,
+    stream_bulk,
+    stream_bulk_delete,
+)
 from jawafdehi_shared.search.opensearch import create_index, make_client
 
 
@@ -47,11 +51,18 @@ class RebuildAborted(RuntimeError):
 
 
 def _doc_count(client, index: str) -> int:
-    """Docs currently in ``index`` (0 if it is missing or unreadable)."""
+    """Docs currently in ``index``; 0 if it is MISSING, raise if it is unreadable.
+
+    The distinction is the whole point. This number decides whether a
+    destructive swap is safe, so a timeout or a 5xx must not be allowed to read
+    as "the old index was empty anyway".
+    """
     try:
         return int(client.count(index=index)["count"])
-    except Exception:  # noqa: BLE001 — a missing index is legitimately zero.
-        return 0
+    except Exception as exc:  # noqa: BLE001
+        if is_not_found(exc):
+            return 0
+        raise
 
 
 def _refresh(client, index: str) -> None:
@@ -92,6 +103,51 @@ def _stream(
     return indexed, skipped
 
 
+def _catch_up(
+    client,
+    index: str,
+    pairs: Iterable[tuple[str, Any]],
+    build_doc: Callable[[Any], dict[str, Any]],
+    batch_size: int,
+) -> tuple[int, int]:
+    """Apply post-build changes to ``index``. Returns ``(upserted, evicted)``.
+
+    ``pairs`` is ``(iri, record_or_None)``: the command has already applied its
+    own visibility gate, and a ``None`` record means "this one no longer belongs
+    in the index". Evicting on None is not optional. Without it a row that became
+    hidden DURING the build stays in the new generation — and since the live
+    signal's delete went to the OLD generation, the swap would RESURRECT a doc
+    the platform had already evicted. For court cases that is the sensitive-type
+    floor being undone by a reindex.
+    """
+    upserted = 0
+    evicted = 0
+    batch: list[dict[str, Any]] = []
+    tombstones: list[str] = []
+
+    def flush() -> None:
+        nonlocal upserted, evicted
+        if batch:
+            upserted += stream_bulk(client, index, batch)
+            batch.clear()
+        if tombstones:
+            evicted += stream_bulk_delete(client, index, tombstones)
+            tombstones.clear()
+
+    for iri, record in pairs:
+        # A tombstone for a doc the scan never indexed is a no-op, not an error —
+        # and it is the common case, so both sides are batched.
+        doc = {} if record is None else build_doc(record)
+        if not doc.get("iri"):
+            tombstones.append(iri)
+        else:
+            batch.append(doc)
+        if len(batch) >= batch_size or len(tombstones) >= batch_size:
+            flush()
+    flush()
+    return upserted, evicted
+
+
 def reindex(
     *,
     index: str,
@@ -100,20 +156,22 @@ def reindex(
     rebuild: bool = False,
     client=None,
     batch_size: int = 500,
-    catchup: Callable[[datetime], Iterable[Any]] | None = None,
+    catchup: Callable[[datetime], Iterable[tuple[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Bulk-(re)index ``records`` into ``index``.
 
     * ``rebuild``: build a new generation and swap the alias onto it when it is
       complete (no downtime, and the only mode that evicts).
-    * ``catchup``: called with the UTC time the build started, and must return the
-      records written since. Only meaningful with ``rebuild``. The alias flips
-      BEFORE this runs, so anything written after the swap already lands on the
-      new generation and this only has to cover the build window itself.
+    * ``catchup``: called with the UTC time the build started, and must yield
+      ``(iri, record_or_None)`` for everything written since — ``None`` meaning
+      the row no longer belongs in the index, which is EVICTED rather than
+      skipped. Only meaningful with ``rebuild``. The alias flips BEFORE this
+      runs, so anything written after the swap already lands on the new
+      generation and this only has to cover the build window itself.
     * Records whose ``build_doc`` yields no ``iri`` are skipped (e.g. a
       non-published case).
 
-    Returns ``{"indexed", "skipped", "index", "swapped", "caught_up",
+    Returns ``{"indexed", "skipped", "index", "swapped", "caught_up", "evicted",
     "displaced", "pruned"}`` — ``index`` being the generation actually written,
     which is not ``index`` when a swap happened.
     """
@@ -129,6 +187,7 @@ def reindex(
             "index": index,
             "swapped": False,
             "caught_up": 0,
+            "evicted": 0,
             "displaced": [],
             "pruned": [],
         }
@@ -144,20 +203,25 @@ def reindex(
     indexed, skipped = _stream(client, target, records, build_doc, batch_size)
     _refresh(client, target)
 
+    # Count what actually LANDED, not what was submitted: `indexed` is the number
+    # of docs handed to the bulk helper, which is an upper bound on the number
+    # the cluster stored. The swap is destructive, so it is gated on the real one.
     live = resolve_alias(client, index)
-    if indexed == 0 and _doc_count(client, live or index) > 0:
+    live_count = _doc_count(client, live or index)
+    if _doc_count(client, target) == 0 and live_count > 0:
         client.indices.delete(index=target, ignore_unavailable=True)
         raise RebuildAborted(
             f"{index}: rebuild produced 0 documents while the live index holds "
-            f"{_doc_count(client, live or index)}; refusing to swap. The old "
-            f"index is untouched and still serving."
+            f"{live_count}; refusing to swap. The old index is untouched and "
+            f"still serving."
         )
 
     displaced = swap_alias(client, index, target)
 
     caught_up = 0
+    evicted = 0
     if catchup is not None:
-        caught_up, _ = _stream(
+        caught_up, evicted = _catch_up(
             client, target, catchup(started_at), build_doc, batch_size
         )
         _refresh(client, target)
@@ -169,6 +233,7 @@ def reindex(
         "index": target,
         "swapped": True,
         "caught_up": caught_up,
+        "evicted": evicted,
         "displaced": displaced,
         "pruned": pruned,
     }
@@ -180,6 +245,7 @@ def summary(label: str, result: dict[str, Any]) -> str:
     if result.get("swapped"):
         line += (
             f" swapped->{result['index']} caught_up={result['caught_up']}"
+            f" evicted={result.get('evicted', 0)}"
             f" pruned={len(result['pruned'])}"
         )
     return line

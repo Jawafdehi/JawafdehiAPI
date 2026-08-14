@@ -37,19 +37,26 @@ class Command(BaseCommand):
         # Mirror the live indexer's gate (entities.signals): index ONLY the rows
         # still on the read plane. Without this a reindex re-adds soft-deleted
         # entities to public search — the exact rows the signal evicted.
-        def stream(since=None):
-            qs = StoredEntity.objects.filter(is_deleted=False)
-            if since:
-                # updated_at is NOT auto_now here — entities.persistence sets it on
-                # every re-publish, which is exactly the write we need to catch.
-                qs = qs.filter(updated_at__gte=since)
-            return qs.iterator()
+        def changed(since):
+            """``(iri, entity_or_None)`` for everything written during the build.
+
+            Unfiltered on is_deleted so a DELETE landing mid-build arrives as a
+            TOMBSTONE. NES delete is a soft delete, so without this the swap
+            resurrects the very tombstone the signal evicted — the failure this
+            command's is_deleted gate already exists to prevent, reintroduced
+            through a different door.
+
+            ``updated_at`` is NOT auto_now here; entities.persistence sets it on
+            every re-publish, which is exactly the write we need to catch.
+            """
+            for e in StoredEntity.objects.filter(updated_at__gte=since).iterator():
+                yield e.iri, (None if e.is_deleted else e)
 
         result = reindex(
             index=ENTITY_INDEX,
-            records=stream(),
+            records=StoredEntity.objects.filter(is_deleted=False).iterator(),
             build_doc=search_index.build_doc,
             rebuild=options["rebuild"],
-            catchup=stream,
+            catchup=changed,
         )
         self.stdout.write(self.style.SUCCESS(summary("nes-entities", result)))

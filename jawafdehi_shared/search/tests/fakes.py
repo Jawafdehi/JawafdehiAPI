@@ -27,6 +27,14 @@ class AliasNameConflict(Exception):
     """An alias was pointed at a name that is still a concrete index."""
 
 
+class TransportError(Exception):
+    """A non-404 cluster failure: timeout, 5xx, auth. NOT an empty result."""
+
+    def __init__(self, status_code: int = 503):
+        super().__init__(f"transport error {status_code}")
+        self.status_code = status_code
+
+
 class Store:
     """The cluster state: ``indices`` maps name -> {doc id: doc}."""
 
@@ -47,25 +55,36 @@ class Store:
 class FakeIndices:
     """The ``client.indices`` namespace."""
 
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, fail_on: dict[str, Exception] | None = None):
         self.store = store
         # Names passed to create(), in order — lets a test assert that a rebuild
         # built a FRESH index (the only way a mapping change reaches the cluster)
         # rather than reusing one.
         self.created: list[str] = []
+        # {method name: exception} — injects the cluster failures the driver has
+        # to fail CLOSED on, which is otherwise untestable without a real outage.
+        self.fail_on = fail_on or {}
+
+    def _maybe_fail(self, method: str) -> None:
+        if method in self.fail_on:
+            raise self.fail_on[method]
 
     def exists(self, index: str) -> bool:
+        self._maybe_fail("exists")
         return index in self.store.indices or index in self.store.aliases
 
     def exists_alias(self, name: str) -> bool:
+        self._maybe_fail("exists_alias")
         return name in self.store.aliases
 
     def get_alias(self, name: str) -> dict:
+        self._maybe_fail("get_alias")
         if name not in self.store.aliases:
             raise NotFoundError(name)
         return {i: {"aliases": {name: {}}} for i in self.store.aliases[name]}
 
     def get(self, index: str, ignore_unavailable: bool = False) -> dict:
+        self._maybe_fail("get")
         if "*" in index:
             return {
                 name: {"settings": {}, "mappings": {}}
@@ -126,15 +145,26 @@ class FakeIndices:
 class Client:
     """What the driver is handed: ``.indices`` is the API, ``.store`` the data."""
 
-    def __init__(self, indices=None, aliases=None):
+    def __init__(self, indices=None, aliases=None, fail_on=None):
         self.store = Store(indices=indices, aliases=aliases)
-        self.indices = FakeIndices(self.store)
+        self.fail_on = fail_on or {}
+        self.indices = FakeIndices(self.store, fail_on=self.fail_on)
 
     def count(self, index: str) -> dict:
+        if "count" in self.fail_on:
+            raise self.fail_on["count"]
         target = self.store.resolve(index)
         if target not in self.store.indices:
             raise NotFoundError(index)
         return {"count": len(self.store.indices[target])}
+
+    def delete(self, index: str, id: str) -> dict:  # noqa: A002 — opensearch-py's name
+        """Doc-level delete, as ``indexing.delete_doc`` calls it."""
+        target = self.store.resolve(index)
+        if target not in self.store.indices or id not in self.store.indices[target]:
+            raise NotFoundError(id)
+        del self.store.indices[target][id]
+        return {"result": "deleted"}
 
     def bulk_write(self, index: str, docs) -> int:
         """Test-side stand-in for ``stream_bulk`` (which the tests patch out)."""
@@ -144,6 +174,14 @@ class Client:
         for doc in docs:
             self.store.indices[target][doc["iri"]] = doc
         return len(docs)
+
+    def bulk_delete(self, index: str, iris) -> int:
+        """Stand-in for ``stream_bulk_delete``; an absent doc is a no-op."""
+        target = self.store.resolve(index)
+        ids = list(iris)
+        for iri in ids:
+            self.store.indices.get(target, {}).pop(iri, None)
+        return len(ids)
 
     def search_ids(self, index: str) -> list[str]:
         """The doc ids a search through ``index`` would return."""

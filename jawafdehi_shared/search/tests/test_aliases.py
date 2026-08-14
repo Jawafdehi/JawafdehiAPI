@@ -10,7 +10,12 @@ from __future__ import annotations
 import pytest
 
 from jawafdehi_shared.search import aliases
-from jawafdehi_shared.search.tests.fakes import AliasNameConflict, Client
+from jawafdehi_shared.search.tests.fakes import (
+    AliasNameConflict,
+    Client,
+    NotFoundError,
+    TransportError,
+)
 
 ALIAS = "ngm-courtcases"
 
@@ -156,3 +161,50 @@ def test_prune_keeps_the_live_generation_and_spares_neighbours():
         "ngm-courtcases-archive-000001",
         "ngm-materials",
     }
+
+
+def test_prune_spares_a_newer_generation_still_being_built():
+    """A HIGHER ordinal is not garbage — it is a rebuild that started later and
+    is still filling. Deleting it leaves that run bulk-writing into nothing and
+    then swapping the alias onto an index that no longer exists. `Forbid` stops a
+    cron overlapping itself, not a manual run overlapping the cron."""
+    client = Client(
+        indices={
+            "ngm-courtcases-000001": {},
+            "ngm-courtcases-000002": {},
+            "ngm-courtcases-000003": {},  # in flight, started after this run
+        },
+        aliases={ALIAS: ["ngm-courtcases-000002"]},
+    )
+
+    pruned = aliases.prune_generations(client, ALIAS, keep="ngm-courtcases-000002")
+
+    assert pruned == ["ngm-courtcases-000001"]
+    assert "ngm-courtcases-000003" in client.store.indices
+
+
+def test_alias_targets_propagates_a_non_404_failure():
+    """Fail CLOSED: "not an alias" routes swap_alias into the branch that DELETES
+    the index, so a timeout must never be read as an empty result."""
+    client = Client(
+        indices={"ngm-courtcases-000002": {}},
+        aliases={ALIAS: ["ngm-courtcases-000002"]},
+        fail_on={"exists_alias": TransportError(503)},
+    )
+    with pytest.raises(TransportError):
+        aliases.alias_targets(client, ALIAS)
+
+
+def test_generation_listing_propagates_a_non_404_failure():
+    client = Client(
+        indices={"ngm-courtcases-000002": {}},
+        fail_on={"get": TransportError(500)},
+    )
+    with pytest.raises(TransportError):
+        aliases.next_generation(client, ALIAS)
+
+
+def test_a_genuine_404_still_reads_as_absent():
+    """The fail-closed change must not break the cold-start path."""
+    client = Client(fail_on={"get": NotFoundError("nope")})
+    assert aliases.next_generation(client, ALIAS) == "ngm-courtcases-000001"
