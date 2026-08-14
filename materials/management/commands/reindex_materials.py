@@ -17,7 +17,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 
 from jawafdehi_shared.search.opensearch import MATERIAL_INDEX
-from jawafdehi_shared.search.reindex import reindex
+from jawafdehi_shared.search.reindex import reindex, summary
 from materials import search_index
 from materials.models import Material, Visibility
 
@@ -43,19 +43,21 @@ class Command(BaseCommand):
         # Mirror the live indexer's gate (materials.signals): index ONLY the
         # searchable set (live + LISTED). A --rebuild otherwise resurrects
         # soft-deleted rows and leaks non-LISTED (draft/in-review) evidence.
-        qs = Material.objects.filter(
-            is_deleted=False, visibility=Visibility.LISTED
-        )
-        if options.get("since") and not options["rebuild"]:
-            qs = qs.filter(updated_at__gte=options["since"])
+        def stream(since=None):
+            qs = Material.objects.filter(
+                is_deleted=False, visibility=Visibility.LISTED
+            )
+            if since:
+                qs = qs.filter(updated_at__gte=since)
+            return qs.order_by("iri").iterator()
+
         result = reindex(
             index=MATERIAL_INDEX,
-            records=qs.order_by("iri").iterator(),
+            records=stream(None if options["rebuild"] else options.get("since")),
             build_doc=search_index.build_doc,
             rebuild=options["rebuild"],
+            # Materials uploaded while the new generation was building land on the
+            # OLD one and would be lost at the swap.
+            catchup=stream,
         )
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"ngm-materials: indexed={result['indexed']} skipped={result['skipped']}"
-            )
-        )
+        self.stdout.write(self.style.SUCCESS(summary("ngm-materials", result)))

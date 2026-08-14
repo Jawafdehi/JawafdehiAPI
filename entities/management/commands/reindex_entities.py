@@ -18,7 +18,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 
 from jawafdehi_shared.search.opensearch import ENTITY_INDEX
-from jawafdehi_shared.search.reindex import reindex
+from jawafdehi_shared.search.reindex import reindex, summary
 from entities import search_index
 from entities.models import StoredEntity
 
@@ -37,15 +37,19 @@ class Command(BaseCommand):
         # Mirror the live indexer's gate (entities.signals): index ONLY the rows
         # still on the read plane. Without this a reindex re-adds soft-deleted
         # entities to public search — the exact rows the signal evicted.
-        records = StoredEntity.objects.filter(is_deleted=False).iterator()
+        def stream(since=None):
+            qs = StoredEntity.objects.filter(is_deleted=False)
+            if since:
+                # updated_at is NOT auto_now here — entities.persistence sets it on
+                # every re-publish, which is exactly the write we need to catch.
+                qs = qs.filter(updated_at__gte=since)
+            return qs.iterator()
+
         result = reindex(
             index=ENTITY_INDEX,
-            records=records,
+            records=stream(),
             build_doc=search_index.build_doc,
             rebuild=options["rebuild"],
+            catchup=stream,
         )
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"nes-entities: indexed={result['indexed']} skipped={result['skipped']}"
-            )
-        )
+        self.stdout.write(self.style.SUCCESS(summary("nes-entities", result)))

@@ -13,7 +13,7 @@ from django.core.management.base import BaseCommand
 from cases import search_index
 from cases.models import Case, CaseState
 from jawafdehi_shared.search.opensearch import CASE_INDEX
-from jawafdehi_shared.search.reindex import reindex
+from jawafdehi_shared.search.reindex import reindex, summary
 
 
 class Command(BaseCommand):
@@ -36,16 +36,22 @@ class Command(BaseCommand):
         # under .iterator() (ValueError without it on Django 5.x). Using
         # build_indexed_doc (not the pure build_doc) is what makes a rebuild REFRESH
         # entity names rather than blanking the card.
+        def stream(since=None):
+            qs = Case.objects.filter(state=CaseState.PUBLISHED)
+            if since:
+                qs = qs.filter(updated_at__gte=since)
+            return qs.prefetch_related(
+                "courtcase_references", "entity_relationships"
+            ).iterator(chunk_size=200)
+
         result = reindex(
             index=CASE_INDEX,
-            records=Case.objects.filter(state=CaseState.PUBLISHED)
-            .prefetch_related("courtcase_references", "entity_relationships")
-            .iterator(chunk_size=200),
+            records=stream(),
             build_doc=search_index.build_indexed_doc,
             rebuild=options["rebuild"],
+            # Catches a case published during the build. It does NOT catch a card
+            # gone stale because a REFERENCED entity was renamed — Case.updated_at
+            # does not move for that. The daily reconcile run is what fixes those.
+            catchup=stream,
         )
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"jawafdehi-cases: indexed={result['indexed']} skipped={result['skipped']}"
-            )
-        )
+        self.stdout.write(self.style.SUCCESS(summary("jawafdehi-cases", result)))
