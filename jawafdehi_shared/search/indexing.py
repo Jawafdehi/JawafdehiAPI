@@ -173,6 +173,19 @@ def best_effort(action: str) -> Callable[[Callable], Callable]:
     return decorator
 
 
+def is_not_found(exc: Exception) -> bool:
+    """True for a 404 from the cluster, False for every other failure.
+
+    opensearch-py raises NotFoundError (a TransportError subclass with
+    ``status_code`` 404) for an absent index/alias/doc. Callers that mean
+    "absent" must test for THAT, not for ``Exception``: a timeout, a 5xx or an
+    auth failure is not an empty result, and treating it as one is how a
+    rebuild ends up deciding a live alias does not exist.
+    """
+    status = getattr(exc, "status_code", None)
+    return status == 404 or str(status) == "404"
+
+
 def upsert_doc(client, index: str, doc: dict[str, Any]) -> None:
     """Upsert ``doc`` into ``index`` keyed by its ``iri`` (the document ``_id``).
 
@@ -194,11 +207,9 @@ def delete_doc(client, index: str, iri: str) -> None:
     try:
         client.delete(index=index, id=iri)
     except Exception as exc:  # noqa: BLE001
-        # opensearch-py raises NotFoundError (a subclass of TransportError with
-        # status_code 404). Treat "already gone" as success; re-raise anything
-        # else so best_effort / the command can see a real failure.
-        status = getattr(exc, "status_code", None)
-        if status == 404 or str(status) == "404":
+        # Treat "already gone" as success; re-raise anything else so
+        # best_effort / the command can see a real failure.
+        if is_not_found(exc):
             return
         raise
 
@@ -226,3 +237,32 @@ def stream_bulk(client, index: str, docs: Iterable[dict[str, Any]]) -> int:
 
     bulk(client, counting())
     return count
+
+
+def stream_bulk_delete(client, index: str, iris: Iterable[str]) -> int:
+    """Bulk-delete ``iris`` from ``index``. Returns the number submitted.
+
+    Batched rather than per-doc because the caller (the rebuild catch-up) issues
+    a tombstone for every changed row its gate rejects, and rejection is the
+    COMMON case — only ~1.2% of court cases are public, so a busy window is tens
+    of thousands of tombstones for docs that were mostly never indexed.
+
+    Those per-item 404s are the expected result, not a failure, so errors are
+    collected instead of raised; anything that is NOT a 404 is re-raised, since
+    that means the eviction genuinely did not happen.
+    """
+    from opensearchpy.helpers import bulk  # lazy: optional dependency
+
+    ids = list(iris)
+    if not ids:
+        return 0
+    actions = [{"_op_type": "delete", "_index": index, "_id": iri} for iri in ids]
+    _, errors = bulk(client, actions, raise_on_error=False, stats_only=False)
+    real = [
+        err
+        for err in errors
+        if str((err.get("delete") or {}).get("status")) not in ("404", "200")
+    ]
+    if real:
+        raise RuntimeError(f"bulk delete from {index} failed: {real[:3]}")
+    return len(ids)
