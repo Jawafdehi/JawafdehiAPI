@@ -119,14 +119,18 @@ def test_self_merge_is_rejected():
     assert exc.value.http_status == 422
 
 
-def test_cross_family_merge_is_rejected():
+def test_a_person_into_a_place_is_warned_about_but_allowed():
+    # The operator names both IRIs and owns that call. Nothing is refused for what the
+    # entities are; the odd pairing is reported so a dry run shows it.
     _seed("location/district", "jhapa-np0104", "AdministrativeArea")
     _seed("person", "ram-bahadur", "Person")
-    with pytest.raises(MergeError) as exc:
-        _merge(duplicate_iris=["https://jawafdehi.org/entity/person/ram-bahadur"])
-    assert exc.value.code == "TYPE_MISMATCH"
-    assert exc.value.http_status == 422
-    assert StoredEntity.objects.get(pk="https://jawafdehi.org/entity/person/ram-bahadur").is_deleted is False
+    ram = "https://jawafdehi.org/entity/person/ram-bahadur"
+
+    result = _merge(duplicate_iris=[ram])
+
+    assert result["status"] == "complete"
+    assert any("different prefix" in w for w in result["warnings"])
+    assert StoredEntity.objects.get(pk=ram).merged_into == JHAPA
 
 
 def test_unknown_duplicate_is_a_not_found():

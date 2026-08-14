@@ -119,16 +119,18 @@ class EntityMergeApiTests(APITestCase):
         self.assertEqual(resp.data["status"], "already_merged")
         self.assertEqual(resp.data["total_references"], 0)
 
-    # 7 — wrong type
-    def test_cross_family_merge_is_rejected(self):
+    # 7 — nothing is refused for what the entities are
+    def test_an_odd_pairing_is_warned_about_not_refused(self):
         _seed("person", "ram-bahadur", "Person")
         resp = self._post(duplicates=["https://jawafdehi.org/entity/person/ram-bahadur"])
-        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
-        self.assertEqual(resp.data["error"]["code"], "TYPE_MISMATCH")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(any("different prefix" in w for w in resp.data["warnings"]))
 
-    def test_place_and_administrative_area_are_accepted(self):
-        # The real production pair must NOT be rejected by the type check.
-        self.assertEqual(self._post().status_code, status.HTTP_200_OK)
+    def test_place_and_administrative_area_merge_without_a_warning(self):
+        # The real production pair: one prefix subtree, so nothing to report.
+        resp = self._post()
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["warnings"], [])
 
     # 8 — self merge
     def test_self_merge_is_rejected(self):

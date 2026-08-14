@@ -27,7 +27,7 @@ from entities.services.publication import PublicationService
 
 from . import references
 from .document import drop_self_references
-from .types import prefix_mismatch, types_compatible
+from .prefixes import prefix_mismatch
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class EntityMergeService:
     ) -> Dict[str, Any]:
         survivor_iri, duplicate_iris = self._canonicalize(survivor_iri, duplicate_iris)
         survivor_doc = self._load_survivor(survivor_iri)
-        candidates = self._classify(survivor_iri, duplicate_iris, survivor_doc)
+        candidates = self._classify(survivor_iri, duplicate_iris)
 
         if not candidates:
             # Re-sending is the remedy _reindex's warning names, and is also where a
@@ -382,8 +382,12 @@ class EntityMergeService:
             )
         raise MergeError("NOT_FOUND", f"Entity {survivor_iri} not found.", 404)
 
-    def _classify(self, survivor_iri, duplicate_iris, survivor_doc):
-        """Live duplicates to merge. Already-merged ones drop out; the rest raise."""
+    def _classify(self, survivor_iri, duplicate_iris):
+        """Live duplicates to merge. Already-merged ones drop out; the rest raise.
+
+        Nothing is refused for what the entities are. The caller named both IRIs and
+        owns that decision; ``_warnings`` reports an odd-looking pairing instead.
+        """
         candidates: Dict[str, Dict[str, Any]] = {}
         for iri in duplicate_iris:
             doc = self.repo.get_entity(iri)
@@ -400,13 +404,6 @@ class EntityMergeService:
                         409, merged_into=target,
                     )
                 raise MergeError("NOT_FOUND", f"Entity {iri} not found.", 404)
-            if not types_compatible(survivor_doc, doc):
-                raise MergeError(
-                    "TYPE_MISMATCH",
-                    "A person can only be merged with a person. "
-                    f"Cannot merge {doc.get('@type')} into {survivor_doc.get('@type')}.",
-                    422,
-                )
             candidates[iri] = doc
         return candidates
 
