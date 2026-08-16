@@ -25,6 +25,8 @@ shared Q-id) are NOT merged here — they need the entity-resolution service and
 reported as ``--report`` candidates instead.
 
 ``--dry-run`` reports clusters without writing.
+
+Superseded by ``merge_entities`` — do not run; it hard-deletes and repoints nothing.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, List
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from entities.models import StoredEntity, StoredVersion
@@ -91,8 +93,19 @@ class Command(BaseCommand):
             help="Also merge clusters sharing an exact normalized name (no Q-id). "
             "Default: Q-id clusters only (safest).",
         )
+        parser.add_argument(
+            "--i-know-this-is-unsafe", action="store_true",
+            help="This command hard-deletes duplicates and repoints no references. "
+            "Required to run it at all.",
+        )
 
     def handle(self, *args, **opts):
+        if not opts["i_know_this_is_unsafe"]:
+            raise CommandError(
+                "merge_persons hard-deletes duplicates and repoints no references. "
+                "Use manage.py merge_entities instead, or pass "
+                "--i-know-this-is-unsafe to run this command anyway."
+            )
         dry = opts["dry_run"]
         persons = list(
             StoredEntity.objects.filter(prefix="person").values_list("iri", "data")

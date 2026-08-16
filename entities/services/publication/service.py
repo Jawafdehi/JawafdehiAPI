@@ -89,11 +89,18 @@ class PublicationService:
         return doc
 
     def update_entity(
-        self, doc: Dict[str, Any], author_id: str, change_description: str
+        self, doc: Dict[str, Any], author_id: str, change_description: str,
+        *, validate: bool = True,
     ) -> Dict[str, Any]:
-        """Replace an existing entity's document, bumping its version."""
+        """Replace an existing entity's document, bumping its version.
+
+        ``validate=False`` is for a mechanical rewrite of an already-stored document
+        (the merge's reference repointing): re-gating on authoring rules would let one
+        entity that no longer validates block every merge that touches it.
+        """
         doc = _canonicalize_id(doc)
-        validate_jsonld_entity(doc)
+        if validate:
+            validate_jsonld_entity(doc)
         iri = doc["@id"]
 
         current_version = self.repo.entity_version(iri)
