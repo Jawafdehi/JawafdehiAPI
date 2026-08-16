@@ -46,6 +46,12 @@ class StoredEntity(models.Model):
     # Soft-delete flag (accountability platform: rows are never hard-deleted).
     # Reads/list/search exclude ``is_deleted=True`` rows; DELETE flips this True.
     is_deleted = models.BooleanField(default=False, db_index=True)
+    # The survivor a merge folded this row into (persistence.resolve_tombstone reads
+    # it; the read plane 301-redirects on it). Non-null implies is_deleted=True, and
+    # only the merge writes it: every upsert resets it to None (see
+    # persistence._entity_row_fields), so no authoring path can forge a tombstone.
+    # No db_index — nothing filters or searches by it.
+    merged_into = models.TextField(null=True, blank=True)
     # The repository (persistence.EntityRepository) sets these explicitly to carry
     # publish-time provenance (created_at is preserved across re-publishes), so
     # auto_now_add/auto_now would be WRONG — they'd clobber the explicit value.

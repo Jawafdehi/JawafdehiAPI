@@ -730,19 +730,29 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             with transaction.atomic():
                 case.save()
 
-                # Create entity binds (NES ids) for alleged/related entities
+                # Create entity binds (NES ids) for alleged/related entities.
+                # ``ordinal`` preserves submitted order (accused first, then
+                # related) so the bind list has a stable order from creation —
+                # the PATCH path maintains it from there.
+                ordinal = 0
                 for nes_id in validated.get("alleged_entities", []):
-                    CaseEntityRelationship.objects.get_or_create(
+                    _, was_created = CaseEntityRelationship.objects.get_or_create(
                         case=case,
                         nes_id=nes_id,
                         relationship_type=RelationshipType.ACCUSED,
+                        defaults={"ordinal": ordinal},
                     )
+                    if was_created:
+                        ordinal += 1
                 for nes_id in validated.get("related_entities", []):
-                    CaseEntityRelationship.objects.get_or_create(
+                    _, was_created = CaseEntityRelationship.objects.get_or_create(
                         case=case,
                         nes_id=nes_id,
                         relationship_type=RelationshipType.RELATED,
+                        defaults={"ordinal": ordinal},
                     )
+                    if was_created:
+                        ordinal += 1
 
                 # Create evidence binds (NGM material ids) — the
                 # CaseMaterialReference join. Ordinal preserves submitted order
@@ -765,7 +775,16 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             case.material_references.values_list("material_iri", flat=True)
         )
 
-        return Response(CaseSerializer(case).data, status=status.HTTP_201_CREATED)
+        # Build the echo WITH the request context: CaseSerializer gates internal
+        # casework content (the case ``notes`` field and each entity bind's
+        # ``notes``) on ``_viewer_has_casework_access``, which reads
+        # ``context["request"]`` and returns False when there is none. A
+        # context-less serializer therefore blanks every note it just stored, so
+        # the 201 body looks like the notes were dropped.
+        return Response(
+            CaseSerializer(case, context=self.get_serializer_context()).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @staticmethod
     def _write_material_references(case, evidence_items):
@@ -1041,7 +1060,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # ValidationError would map to 400, and this project has no custom
         # exception handler.
         seen_binds: set[tuple[str, str]] = set()
-        for item in entities:
+        for ordinal, item in enumerate(entities):
             rtype = item["relationship_type"]
             key = (item["nes_id"], rtype)
             if key in seen_binds:
@@ -1073,12 +1092,18 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 # NULL (rejected earlier by the serializer, enforced by the model
                 # save() + CHECK constraint).
                 outcome = None
+            # ``ordinal`` is the item's position in the submitted list — never
+            # client-supplied, so it stays out of the patch snapshot. Position IS
+            # the order: this whole-list replace writes the order back verbatim
+            # instead of letting the recreate re-stamp created_at and flip the
+            # list, and a caller can reorder entities by reordering the array.
             CaseEntityRelationship.objects.create(
                 case=case,
                 nes_id=item["nes_id"],
                 relationship_type=rtype,
                 outcome=outcome,
                 notes=item.get("notes") or "",
+                ordinal=ordinal,
             )
         return None
 
@@ -1434,7 +1459,19 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # fresh optimistic-concurrency token so a client editing in place can
         # PATCH again without a re-fetch.
         case.refresh_from_db(fields=["updated_at"])
-        response = Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
+        # Echo the case WITH the request context. Without it
+        # ``_viewer_has_casework_access`` sees no request and returns False, so
+        # CaseSerializer blanks the internal ``notes`` it just persisted — both
+        # the case-level field and every entity bind's note. A caller that reads
+        # the response back (the MCP patch tool, the SPA editor) then sees
+        # ``notes: ""`` on a write that actually succeeded and concludes the
+        # field was silently dropped. The write was never the problem; this echo
+        # was. Read gating is unchanged — a non-casework viewer still gets "",
+        # exactly as on GET.
+        response = Response(
+            CaseSerializer(case, context=self.get_serializer_context()).data,
+            status=status.HTTP_200_OK,
+        )
         response["ETag"] = _version_token(case)
         return response
 

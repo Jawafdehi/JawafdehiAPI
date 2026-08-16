@@ -610,3 +610,77 @@ def test_non_case_result_has_no_card_key():
     entity = out["results"][0]
     assert entity["type"] == "entity"
     assert "card" not in entity
+
+
+# ── alias generations: a hit reports the CONCRETE index, never the alias ─────
+#
+# Regression (#453): the public index names became ALIASES over numbered
+# generations, but a hit's ``_index`` and an ``_index`` agg bucket both report
+# the backing index (``jawafdehi-cases-000001``). The type lookup was keyed by
+# the alias only, so every result fell through to ``source_app`` — search
+# results came back typed "jawafdehi"/"ngm" instead of case/material, the FE
+# could no longer build a /case/<slug> link from them, and every per-type facet
+# count went to zero.
+
+
+def test_type_for_index_resolves_a_plain_alias():
+    assert svc.type_for_index("jawafdehi-cases") == "case"
+
+
+def test_type_for_index_resolves_a_generation_backing_index():
+    assert svc.type_for_index("jawafdehi-cases-000001") == "case"
+    assert svc.type_for_index("ngm-courtcases-000042") == "courtcase"
+    assert svc.type_for_index("nes-entities-000007") == "entity"
+    assert svc.type_for_index("ngm-materials-000123") == "material"
+
+
+def test_type_for_index_ignores_a_neighbour_that_merely_shares_the_prefix():
+    # Mirrors the anchoring guarantee in aliases._GENERATION_RE: an unrelated
+    # index must not be typed as a case just because the name starts the same.
+    assert svc.type_for_index("jawafdehi-cases-archive-000001") is None
+    assert svc.type_for_index("jawafdehi-cases-000001-restored") is None
+    assert svc.type_for_index("some-other-index") is None
+
+
+def test_serialize_hit_types_a_generation_backed_case_as_case():
+    hit = {
+        "_index": "jawafdehi-cases-000001",
+        "_source": {
+            "iri": "https://jawafdehi.org/case/seed-published",
+            "source_app": "jawafdehi",
+        },
+    }
+    # Not "jawafdehi" — the source_app fallback is for docs we can't place, and
+    # a generation-backed hit is not one of those.
+    assert svc._serialize_hit(hit)["type"] == "case"
+
+
+def test_facets_count_generation_backed_buckets():
+    aggs = {
+        "by_index": {
+            "buckets": [
+                {"key": "jawafdehi-cases-000002", "doc_count": 3},
+                {"key": "nes-entities-000001", "doc_count": 5},
+            ]
+        }
+    }
+    assert svc._facets_from_aggs(aggs) == {"case": 3, "entity": 5}
+
+
+def test_facets_sum_two_generations_of_the_same_alias():
+    # Mid-swap an alias can briefly resolve to two generations; the counts must
+    # add up rather than the last bucket overwriting the first.
+    aggs = {
+        "by_index": {
+            "buckets": [
+                {"key": "jawafdehi-cases-000001", "doc_count": 2},
+                {"key": "jawafdehi-cases-000002", "doc_count": 3},
+            ]
+        }
+    }
+    assert svc._facets_from_aggs(aggs) == {"case": 5}
+
+
+def test_by_index_agg_is_sized_above_the_type_count_for_mid_swap_generations():
+    agg = build_query(q="x")["aggs"]["by_index"]["terms"]
+    assert agg["size"] > len(svc.ALL_TYPES)

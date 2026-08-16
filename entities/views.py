@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import jsonpatch
 from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
@@ -58,6 +58,7 @@ from entities.write_validation import (
     validate_create_payload,
 )
 from entities.services.publication import PublicationService
+from entities.services.merge import EntityMergeService, MergeError
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,20 @@ def _resolve_ref(ref: str) -> Optional[str]:
     return iri if is_valid_entity_iri(iri) else None
 
 
+def _redirect_to_survivor(iri: str, *, suffix: str = "") -> Optional[Response]:
+    """A 301 to the survivor if ``iri`` is a merge tombstone, else None."""
+    repo = EntityRepository()
+    target = repo.resolve_tombstone(iri)
+    # Guard that the target is live, the same way the batch lookup does: a survivor
+    # later soft-deleted would otherwise redirect into a 404.
+    if not target or repo.get_entity(target) is None:
+        return None
+    location = f"/api/entities/{quote(target, safe='')}{suffix}"
+    response = Response(status=status.HTTP_301_MOVED_PERMANENTLY)
+    response["Location"] = location
+    return response
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def health(request):
@@ -116,9 +131,8 @@ def health(request):
 class EntityListCreateView(AuditlogActorMixin, APIView):
     """GET /api/entities (public list/search/batch) + POST /api/entities (create).
 
-    ``AuditlogActorMixin`` attributes any audit entry to the authenticated user
-    (inert until entities models are auditlog-registered; the seam is kept
-    uniform across the platform's write views)."""
+    ``AuditlogActorMixin`` attributes any audit entry to the authenticated user;
+    the seam is kept uniform across the platform's write views."""
 
     def get_permissions(self):
         if self.request.method == "POST":
@@ -194,13 +208,21 @@ class EntityListCreateView(AuditlogActorMixin, APIView):
                      f"Maximum batch size is {MAX_BATCH_SIZE}. Requested: {len(refs)}"),
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        found, not_found = [], []
+        found, not_found, redirected = [], [], {}
+        seen_ids = set()
         for ref in refs:
             iri = _resolve_ref(ref)
             doc = repo.get_entity(iri) if iri else None
+            if doc is None and iri:
+                target = repo.resolve_tombstone(iri)
+                if target:
+                    doc = repo.get_entity(target)
+                    if doc is not None:
+                        redirected[iri] = target
             if doc is None:
                 not_found.append(ref)
-            else:
+            elif doc["@id"] not in seen_ids:
+                seen_ids.add(doc["@id"])
                 found.append(doc)
         body: Dict[str, Any] = {
             "entities": found,
@@ -209,6 +231,8 @@ class EntityListCreateView(AuditlogActorMixin, APIView):
         }
         if not_found:
             body["not_found"] = not_found
+        if redirected:
+            body["redirected"] = redirected
         return Response(body)
 
     # --- POST: create --------------------------------------------------
@@ -250,6 +274,10 @@ class EntityDetailView(AuditlogActorMixin, APIView):
         iri = _resolve_ref(ref)
         doc = EntityRepository().get_entity(iri) if iri else None
         if doc is None:
+            if iri:
+                redirect = _redirect_to_survivor(iri)
+                if redirect is not None:
+                    return redirect
             return Response(
                 _err("NOT_FOUND", f"Entity {ref} not found"),
                 status=status.HTTP_404_NOT_FOUND,
@@ -346,6 +374,10 @@ class EntityVersionsView(APIView):
                 _err("INVALID_ENTITY_ID", f"Invalid entity reference: {ref}"),
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if EntityRepository().get_entity(iri) is None:
+            redirect = _redirect_to_survivor(iri, suffix="/versions")
+            if redirect is not None:
+                return redirect
         limit = _clamp_limit(_int_param(request.query_params.get("limit"), 100))
         offset = _clamp_offset(_int_param(request.query_params.get("offset"), 0))
         service = PublicationService()
@@ -358,6 +390,40 @@ class EntityVersionsView(APIView):
                 "offset": offset,
             }
         )
+
+
+class EntityMergeView(AuditlogActorMixin, APIView):
+    """POST /api/entities/merge — fold duplicate entities into one survivor.
+
+    See docs/superpowers/specs/2026-08-11-entities-merge-api-spec.md for the contract.
+    """
+
+    permission_classes = [HasEntityWriteRole]
+
+    def post(self, request):
+        body = request.data if isinstance(request.data, dict) else {}
+        dry_run = body.get("dry_run", False)
+        if not isinstance(dry_run, bool):
+            return Response(
+                _err("INVALID_REQUEST", "dry_run must be a boolean."),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            result = EntityMergeService().merge(
+                survivor_iri=body.get("survivor", ""),
+                duplicate_iris=body.get("duplicates", []),
+                author_id=_author_id_from_request(request),
+                change_description=body.get("change_description", ""),
+                dry_run=dry_run,
+            )
+        except MergeError as exc:
+            payload = _err(exc.code, exc.message)
+            payload["error"].update(exc.extra)
+            # The spec pairs a 500 MERGE_INCOMPLETE with status "partial".
+            if exc.code == "MERGE_INCOMPLETE":
+                payload["status"] = "partial"
+            return Response(payload, status=exc.http_status)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 @api_view(["GET"])
