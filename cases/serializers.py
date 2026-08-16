@@ -17,6 +17,7 @@ from .models import (
     CaseStateChange,
     Feedback,
     FeedbackType,
+    name_for_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,75 @@ class CaseEntityRelationshipSerializer(serializers.ModelSerializer):
                 f"Invalid relationship type '{value}'. Must be one of: {', '.join(valid_types)}"
             )
         return value
+
+
+class CaseAuthorCandidateSerializer(serializers.Serializer):
+    """One selectable account for the case-author byline picker.
+
+    ``display_name`` prefers the account's ``AuthorProfile`` name, so the picker
+    shows the same name the byline and the profile page will. ``username`` rides
+    along to disambiguate two colleagues with the same display name — never an
+    email or other PII.
+    """
+
+    id = serializers.IntegerField(read_only=True)
+    username = serializers.CharField(read_only=True)
+    display_name = serializers.SerializerMethodField()
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_display_name(self, obj):
+        profile = getattr(obj, "author_profile", None)
+        return profile.display_name if profile else name_for_user(obj)
+
+
+class AuthorProfileSerializer(serializers.Serializer):
+    """A public author profile: the card and the /author/<slug> page.
+
+    ``email`` is opt-in: it is ``null`` unless someone put an address here, so a
+    personal address is never published by default. Null rather than an empty
+    string so the frontend never has to decide whether "" means "no address" or
+    "not loaded"; the key is always present, and the schema says so.
+    """
+
+    slug = serializers.CharField(read_only=True)
+    display_name = serializers.CharField(read_only=True)
+    name_ne = serializers.CharField(read_only=True, allow_blank=True)
+    photo_url = serializers.CharField(read_only=True, allow_blank=True)
+    title = serializers.CharField(read_only=True, allow_blank=True)
+    # Profile page only. Deliberately absent from the byline payload on case
+    # pages: the card shows the one-line title, and shipping a paragraph per
+    # author with every case read would be dead weight.
+    bio = serializers.CharField(read_only=True, allow_blank=True)
+    email = serializers.SerializerMethodField()
+    links = serializers.ListField(child=serializers.DictField(), read_only=True)
+
+    @extend_schema_field(serializers.EmailField(allow_null=True))
+    def get_email(self, obj):
+        return obj.email or None
+
+
+class AuthorCaseSummarySerializer(serializers.Serializer):
+    """One case card on an author's profile page.
+
+    Deliberately slim: the profile page lists what someone wrote, so it needs
+    the handful of fields a card renders and nothing else. Reusing
+    ``CaseSerializer`` here would drag entity resolution (a cross-DB call) across
+    every case an author has ever written.
+    """
+
+    slug = serializers.CharField(read_only=True)
+    title = serializers.CharField(read_only=True)
+    short_description = serializers.CharField(read_only=True, allow_blank=True)
+    case_type = serializers.CharField(read_only=True)
+    thumbnail_url = serializers.CharField(read_only=True, allow_blank=True)
+    case_publish_date = serializers.DateField(read_only=True, allow_null=True)
+    bigo = serializers.IntegerField(read_only=True, allow_null=True)
+
+
+class AuthorProfileDetailSerializer(AuthorProfileSerializer):
+    """An author profile plus the cases they wrote, newest first."""
+
+    cases = AuthorCaseSummarySerializer(many=True, read_only=True)
 
 
 class CaseStateChangeSerializer(serializers.ModelSerializer):
@@ -278,6 +348,77 @@ class CaseSerializer(serializers.ModelSerializer):
             "CaseCourtCaseReference join"
         ),
     )
+    authors = serializers.SerializerMethodField(
+        help_text="Credited authors of this case, in byline order, resolved "
+        "from each author's profile (user_id for casework viewers only)"
+    )
+
+    @extend_schema_field(
+        inline_serializer(
+            name="CaseAuthorCredit",
+            many=True,
+            fields={
+                "user_id": serializers.IntegerField(required=False),
+                "slug": serializers.CharField(),
+                "display_name": serializers.CharField(),
+                "name_ne": serializers.CharField(allow_blank=True),
+                "photo_url": serializers.CharField(allow_blank=True),
+                "title": serializers.CharField(allow_blank=True),
+                "has_public_page": serializers.BooleanField(),
+            },
+        )
+    )
+    def get_authors(self, obj):
+        """The public byline, in order, resolved from each author's profile.
+
+        Every field here is PER-PERSON — name, photo, title — because the
+        byline's only per-case fact is the order these come back in. That is why
+        there is no snapshot: a byline points at a person rather than freezing
+        them, so a rename shows the new name on every case they wrote.
+
+        ``has_public_page`` tells the card whether to link: a profile is created
+        automatically on first credit and starts empty, and linking to an empty
+        page is worse than rendering a plain card.
+
+        ``user_id`` is included only for casework viewers — the editor needs it to
+        round-trip the author list through PATCH, but there is no reason to
+        publish internal account primary keys. This is the same "display label
+        only" boundary ``CaseStateChangeSerializer.actor_name`` holds.
+        """
+        include_user_id = _viewer_has_casework_access(self.context)
+        credits = []
+        for credit in obj.author_credits.all():
+            profile = getattr(credit.user, "author_profile", None)
+            if profile is None:
+                # Defensive: CaseAuthor.save() creates one, so this only happens
+                # for a row written by raw SQL. Render the name, link nowhere.
+                entry = {
+                    "slug": "",
+                    "display_name": name_for_user(credit.user),
+                    "name_ne": "",
+                    "photo_url": "",
+                    "title": "",
+                    "has_public_page": False,
+                }
+            else:
+                entry = {
+                    "slug": profile.slug,
+                    "display_name": profile.display_name,
+                    "name_ne": profile.name_ne,
+                    "photo_url": profile.photo_url,
+                    "title": profile.title,
+                    "has_public_page": profile.has_public_page,
+                }
+            if include_user_id:
+                entry["user_id"] = credit.user_id
+            credits.append(entry)
+        return credits
+
+    public_edit_history = serializers.ListField(
+        child=serializers.DictField(),
+        help_text="Public edit history entries ({date, remarks}) shown on the case page",
+        required=False,
+    )
     tags = serializers.ListField(
         child=serializers.CharField(),
         help_text="List of tags for categorization (e.g., 'land-encroachment', 'national-interest')",
@@ -320,9 +461,14 @@ class CaseSerializer(serializers.ModelSerializer):
             "state",
             "title",
             "short_description",
-            # Public caseworker-authored notes (Case.public_notes): attribution +
-            # human-written edit dates. A plain model field — returned to
-            # everyone, unlike the BB-04-gated internal ``notes`` below.
+            # The structured public byline: who wrote the case, when it first
+            # went live, and the curated list of edits since. All three are
+            # returned to everyone, unlike the BB-04-gated internal ``notes``.
+            "authors",
+            "case_publish_date",
+            "public_edit_history",
+            # DEPRECATED free-text byline, still returned so the frontend can
+            # fall back to it on cases that have no structured authors yet.
             "public_notes",
             "thumbnail_url",
             "banner_url",

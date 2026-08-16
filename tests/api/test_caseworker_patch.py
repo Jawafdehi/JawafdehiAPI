@@ -18,6 +18,7 @@ from cases.models import (
     CaseType,
     RelationshipType,
 )
+from tests.byline import credit_author
 from tests.conftest import create_user_with_role
 
 if TYPE_CHECKING:
@@ -683,6 +684,7 @@ def test_patch_caseworker_can_publish_complete_case():
         nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
         relationship_type=RelationshipType.ACCUSED,
     )
+    credit_author(case)
 
     client = _authed_client(user)
     response = client.patch(
@@ -707,6 +709,7 @@ def test_patch_200_for_draft_to_in_review_transition():
         nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
         relationship_type=RelationshipType.ACCUSED,
     )
+    credit_author(case)
 
     client = _authed_client(user)
     response = client.patch(

@@ -9,7 +9,9 @@ from django.utils.html import format_html
 from cases.widgets import ToastUIEditorWidget
 
 from .models import (
+    AuthorProfile,
     Case,
+    CaseAuthor,
     CaseEntityRelationship,
     CaseState,
     CaseStateChange,
@@ -142,6 +144,10 @@ class CaseAdminForm(forms.ModelForm):
             # which would loosen the model's contract everywhere to satisfy a form
             # that cannot write anyway; ``readonly_fields`` still renders the value.
             "weight",
+            # Edited through CaseAuthorInline, which also carries the byline
+            # ORDER. A plain M2M multi-select here would offer a second, unordered
+            # way to set the same rows and silently drop the ordinal.
+            "authors",
         ]
         widgets = {
             "description": ToastUIEditorWidget(),
@@ -421,6 +427,76 @@ class CaseEntityRelationshipInline(admin.TabularInline):
 # ============================================================================
 
 
+@admin.register(AuthorProfile)
+class AuthorProfileAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
+    """The person behind a byline. This is where a byline is actually edited.
+
+    Rows appear here automatically the first time someone is credited on a case,
+    carrying only a generated slug and their account name. Filling in the photo,
+    title, bio and links and ticking ``has_public_page`` is what publishes
+    /author/<slug>; until then the author's card renders without a link.
+    """
+
+    list_display = ("display_name", "slug", "has_public_page", "credited_cases")
+    list_filter = ("has_public_page",)
+    search_fields = ("slug", "name_en", "name_ne", "user__username")
+    readonly_fields = ("created_at", "updated_at", "credited_cases")
+    # The slug is a public URL, so it is editable (a typo'd auto-slug must be
+    # fixable) but never regenerated behind the editor's back.
+    fieldsets = (
+        (None, {"fields": ("user", "slug", "has_public_page")}),
+        (
+            "Profile",
+            {
+                "fields": ("name_en", "name_ne", "photo_url", "title", "bio"),
+                "description": (
+                    "`title` is the one-line role shown on the author card on "
+                    "every case page — keep it short. `bio` is the longer "
+                    "markdown biography, shown only on the profile page."
+                ),
+            },
+        ),
+        ("Contact", {"fields": ("email", "links")}),
+        (
+            "Metadata",
+            {"fields": ("credited_cases", "created_at", "updated_at"), "classes": ("collapse",)},
+        ),
+    )
+
+    @admin.display(description="Cases credited")
+    def credited_cases(self, obj):
+        return obj.user.authored_cases.count() if obj.user_id else 0
+
+
+class CaseAuthorInline(admin.TabularInline):
+    """Inline for the public byline (the CaseAuthor join), in display order.
+
+    Only the account and its position: name, photo, bio and links are
+    per-person and are edited on the author's AuthorProfile instead.
+    """
+
+    model = CaseAuthor
+    extra = 0
+    fields = ("user", "ordinal")
+    ordering = ("ordinal", "created_at")
+    verbose_name = "Author credit"
+    verbose_name_plural = "Author credits (public byline)"
+
+    # VIEW-ONLY, matching the parent CaseAdmin. An inline does not inherit the
+    # parent's permissions — it falls back to model-level ``cases.*_caseauthor``
+    # perms — so without these three a user holding ``change_caseauthor`` could
+    # rewrite a byline through an admin page that is otherwise read-only, and
+    # bypass the SPA editor that is the single case-write surface.
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(Case)
 class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
@@ -436,7 +512,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
 
     form = CaseAdminForm
-    inlines = [CaseEntityRelationshipInline]
+    inlines = [CaseEntityRelationshipInline, CaseAuthorInline]
 
     class Media:
         js = ("cases/js/widgets.js", "admin/js/case_admin.js")
@@ -514,6 +590,22 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "missing_details",
                     "notes",
                 )
+            },
+        ),
+        (
+            "Public byline",
+            {
+                "fields": (
+                    "case_publish_date",
+                    "public_edit_history",
+                    "public_notes",
+                ),
+                "description": (
+                    "Shown on the public case page. Authors are edited in the "
+                    "Author credits inline below. public_notes is the DEPRECATED "
+                    "free-text byline, kept only until the legacy cases are "
+                    "backfilled."
+                ),
             },
         ),
         (

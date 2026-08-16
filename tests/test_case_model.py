@@ -18,6 +18,7 @@ from cases.models import (
     RelationshipOutcome,
     RelationshipType,
 )
+from tests.byline import credit_author
 from tests.conftest import create_case_with_entities
 from tests.strategies import complete_case_data, minimal_case_data
 
@@ -81,6 +82,7 @@ def test_in_review_validation_is_strict(case_data):
     Validates: Requirements 1.2
     """
     case = create_case_with_entities(**case_data)
+    credit_author(case)
     case.state = CaseState.IN_REVIEW
 
     # Should not raise ValidationError with complete data
@@ -136,6 +138,7 @@ def test_draft_submission_transitions_to_in_review(case_data):
     Validates: Requirements 1.3
     """
     case = create_case_with_entities(**case_data)
+    credit_author(case)
     assert case.state == CaseState.DRAFT
 
     # Submit the draft (this will be a method on the Case model)
@@ -375,6 +378,7 @@ def test_slug_auto_generated_during_validation_for_published_cases():
     # Slug-only API: case.save() already auto-generated a slug on creation.
     # validate() should also be a safe no-op when slug is already populated,
     # and should re-generate one if the slug is cleared.
+    credit_author(case)
     case.slug = ""
     case.state = CaseState.PUBLISHED
     case.validate()
@@ -439,6 +443,7 @@ def test_corruption_does_not_require_accused_entity_for_review():
         description="Description",
         case_type=CaseType.CORRUPTION,
     )
+    credit_author(case)
     case.state = CaseState.IN_REVIEW
 
     try:
@@ -483,6 +488,7 @@ def test_tax_evasion_does_not_require_accused_entity():
         description="Description",
         case_type=CaseType.TAX_EVASION,
     )
+    credit_author(case)
     case.state = CaseState.IN_REVIEW
 
     try:

@@ -9,7 +9,7 @@ import uuid
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
 from jawafdehi_shared.entities.ids import (
@@ -19,6 +19,8 @@ from jawafdehi_shared.entities.ids import (
 )
 
 from .fields import (
+    AuthorLinkListField,
+    EditHistoryListField,
     HttpsURLField,
     TextListField,
     TimelineListField,
@@ -30,6 +32,17 @@ from .validators import (
 )
 
 User = get_user_model()
+
+
+def name_for_user(user):
+    """The display name for an account: full name, else username.
+
+    Mirrors ``CaseStateChangeSerializer.get_actor_name`` — a display label only,
+    never an email or other PII. Used to seed a new ``AuthorProfile`` and as the
+    fallback when a profile carries no name of its own.
+    """
+    full_name = (user.get_full_name() or "").strip()
+    return full_name or user.get_username()
 
 
 # File upload configuration
@@ -509,6 +522,249 @@ class CaseCourtCaseReference(models.Model):
         super().save(*args, **kwargs)
 
 
+class AuthorProfile(models.Model):
+    """The person behind a byline: one row per credited contributor.
+
+    Everything here is PER-PERSON, which is the whole point of splitting it out
+    of the byline. The old free-text ``public_notes`` carried "(BALLB 4th Year
+    Student)" on three of Sambhav Koirala's eleven cases and nowhere else — not
+    because his role differed case to case, but because a hand-copied line drifts.
+    A description belongs to the person, so it is stored once and shows on every
+    case they wrote.
+
+    The trade-off, accepted deliberately: a title goes stale ("BALLB 4th Year
+    Student" will not be true next year), and updating it changes the byline on
+    every case that person ever wrote. That is the correct behaviour for a
+    fact about a person, and it is why there is no per-case name snapshot — a
+    byline points at a person, it does not freeze them.
+
+    The profile is auto-created the first time someone is credited (see
+    ``ensure_for``), so every case author has a slug from the moment they are
+    credited. Photo/title/bio/links start blank and are filled in later;
+    ``has_public_page`` gates the public profile page so an empty one is never
+    published.
+
+    Lives here rather than as columns on ``User`` because this project runs on
+    stock ``django.contrib.auth.models.User`` (``AUTH_USER_MODEL`` is unset), so
+    adding fields to it would mean swapping the user model on a live database.
+    """
+
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="author_profile",
+        help_text="The account this profile describes",
+    )
+    slug = models.SlugField(
+        max_length=60,
+        unique=True,
+        db_index=True,
+        validators=[validate_slug],
+        help_text=(
+            "URL handle for the public profile "
+            "(jawafdehi.org/author/<slug>). Generated from the name on first "
+            "credit and stable thereafter."
+        ),
+    )
+    # Bilingual, mirroring the frontend team page's `displayName {en, ne}`. The
+    # platform is Nepali-first, so a profile with only an English name renders
+    # that in both languages rather than showing nothing.
+    name_en = models.CharField(max_length=150, blank=True, default="")
+    name_ne = models.CharField(max_length=150, blank=True, default="")
+    photo_url = HttpsURLField(
+        blank=True,
+        max_length=500,
+        help_text="Profile picture URL (hosted; the team photos live on R2)",
+    )
+    title = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "One-line role shown under the name and on the author card on every "
+            "case page, e.g. 'Caseworker' or 'BALLB 4th Year Student'. Keep it "
+            "short — the card truncates. Longer prose goes in ``bio``."
+        ),
+    )
+    # Separate from ``title`` because the two have different jobs and different
+    # space: the title rides along on a compact card on every case page, where a
+    # paragraph would wreck the layout, while this renders only on the profile
+    # page.
+    bio = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Longer public biography shown on the author's profile page "
+            "(markdown). Empty = the About section is not rendered."
+        ),
+    )
+    # A personal address, so it is opt-in by presence: blank = not shown. There
+    # is no separate visibility flag because an empty field already says "no".
+    email = models.EmailField(
+        blank=True,
+        default="",
+        help_text="Public contact address. Blank = not shown anywhere.",
+    )
+    links = AuthorLinkListField(
+        help_text="Public social links: [{type, value}] with https:// URLs.",
+    )
+    has_public_page = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text=(
+            "Whether /author/<slug> is published and author cards link to it. "
+            "Off by default: a profile is created automatically on first credit "
+            "and starts empty, and an empty public page is worse than none."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Author Profile"
+        verbose_name_plural = "Author Profiles"
+        ordering = ["name_en", "slug"]
+
+    def __str__(self):
+        return self.display_name
+
+    @property
+    def display_name(self):
+        """The name to show: the profile's English name, else the account's."""
+        return self.name_en.strip() or name_for_user(self.user)
+
+    def name_for_language(self, language="en"):
+        """The profile name in ``language``, falling back to the other one.
+
+        A profile with only an English name must still render on the Nepali site
+        (and vice versa) — showing a blank byline would be worse than showing the
+        name in the wrong script.
+        """
+        if str(language).startswith("ne"):
+            return self.name_ne.strip() or self.display_name
+        return self.display_name
+
+    @classmethod
+    def ensure_for(cls, user):
+        """Get or create this user's profile, minting a slug on first sight.
+
+        Called whenever a credit is written, so "every case author has a slug"
+        holds by construction rather than by remembering to run a backfill.
+        """
+        profile = cls.objects.filter(user=user).first()
+        if profile is not None:
+            return profile
+        name = name_for_user(user)
+        try:
+            # savepoint so a losing race does not poison the caller's atomic
+            # block — on PostgreSQL an IntegrityError aborts the whole
+            # transaction unless the failing statement is rolled back to one.
+            with transaction.atomic():
+                return cls.objects.create(
+                    user=user,
+                    slug=cls._generate_unique_slug(name),
+                    name_en=name,
+                )
+        except IntegrityError:
+            # Lost a race on either ``user`` (another credit for this account
+            # committed first) or ``slug`` (a same-named colleague took the
+            # candidate between the exists() check and the insert). Both are
+            # check-then-create windows and both are benign: re-read.
+            profile = cls.objects.filter(user=user).first()
+            if profile is not None:
+                return profile
+            # The slug collided rather than the user — retry once, now that the
+            # winner's slug is visible to _generate_unique_slug.
+            return cls.objects.create(
+                user=user,
+                slug=cls._generate_unique_slug(name),
+                name_en=name,
+            )
+
+    @staticmethod
+    def _generate_unique_slug(name):
+        """A unique, URL-safe slug derived from a person's name.
+
+        Suffixes ``-2``, ``-3``… on collision rather than a random hex tail (as
+        cases do): an author slug is a person's public handle and is read aloud
+        and typed, so "sambhav-koirala-2" beats "sambhav-koirala-a3f9c1".
+        """
+        from django.utils.text import slugify
+
+        base = slugify(name or "") or "author"
+        # validate_slug requires a leading letter (^[a-zA-Z]).
+        if not base[0].isalpha():
+            base = f"author-{base}"
+        base = base[:55].strip("-") or "author"
+
+        candidate = base
+        suffix = 1
+        while AuthorProfile.objects.filter(slug=candidate).exists():
+            suffix += 1
+            tail = f"-{suffix}"
+            candidate = f"{base[: 60 - len(tail)]}{tail}"
+        return candidate
+
+
+class CaseAuthor(models.Model):
+    """The Case <-> author through table. Carries the byline ORDER, nothing else.
+
+    Everything else about an author — name, photo, description, links — is
+    per-person and lives on ``AuthorProfile``. The only per-case fact is where
+    someone sits in the byline, so that is the only column here beyond the two
+    keys. This is Django's spelling of an ordered many-to-many: ``Case.authors``
+    is the ``ManyToManyField`` and this is its ``through``.
+
+    ``user`` is ``PROTECT``, deliberately unlike ``CaseStateChange.actor``
+    (``SET_NULL``): there the actor is incidental to an internal log, so losing
+    the user row may blank it. Here the name IS published content, so deleting a
+    credited account must fail loudly rather than silently strip a byline off a
+    live case.
+    """
+
+    case = models.ForeignKey(
+        "Case",
+        on_delete=models.CASCADE,
+        related_name="author_credits",
+        help_text="The case this author credit belongs to",
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name="case_authorships",
+        help_text="The Django account credited as an author of this case",
+    )
+    ordinal = models.PositiveIntegerField(
+        default=0,
+        help_text="Display order of this author within the case byline.",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When this author credit was created",
+    )
+
+    class Meta:
+        verbose_name = "Case Author"
+        verbose_name_plural = "Case Authors"
+        ordering = ["ordinal", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["case", "user"],
+                name="unique_case_author",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["case", "ordinal"], name="case_author_ordinal_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.case.slug} - {self.user_id}"
+
+    def save(self, *args, **kwargs):
+        """Guarantee the credited account has a profile (and therefore a slug)."""
+        super().save(*args, **kwargs)
+        AuthorProfile.ensure_for(self.user)
+
+
 class CaseType(models.TextChoices):
     """Enum for case types."""
 
@@ -665,11 +921,43 @@ class Case(models.Model):
     case_end_date = models.DateField(
         null=True, blank=True, help_text="When the alleged incident ended"
     )
+    # The date the case was FIRST published on jawafdehi.org — about our
+    # publication, not about the alleged incident (case_start_date/case_end_date
+    # above). Nullable at the column so DRAFTs can exist without one; required
+    # before a case may leave DRAFT (see validate()). Deliberately NOT derived
+    # from created_at or from the first PUBLISHED CaseStateChange: cases are
+    # routinely published here long after the research was done, and the state
+    # log only goes back to 2026-07. Caseworker-editable for exactly that reason.
+    case_publish_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Date this case was first published on jawafdehi.org (AD). Set by "
+            "casework staff and required before the case can leave DRAFT."
+        ),
+    )
 
     # Entity relationships live on the CaseEntityRelationship bind (the
     # ``entity_relationships`` reverse relation), which holds the canonical NES
     # entity id (nes_id) directly. There is no M2M to a local entity table —
     # NES is the single source of truth for entities.
+
+    # The public byline, as an ORDERED many-to-many: the through table carries
+    # only the ordinal, and everything else about an author (name, photo, bio,
+    # links) is per-person on AuthorProfile. Declared here — rather than relying
+    # on the reverse ``author_credits`` alone — so the reverse accessor
+    # ``user.authored_cases`` exists, which is exactly the query the public
+    # author page runs. NOT ordered by default: an M2M ignores the through
+    # model's Meta.ordering, so every read that cares sorts by
+    # ``caseauthor__ordinal`` (see the ``author_ids`` property and the
+    # serializers).
+    authors = models.ManyToManyField(
+        User,
+        through="CaseAuthor",
+        related_name="authored_cases",
+        blank=True,
+        help_text="Credited authors of this case, ordered by CaseAuthor.ordinal",
+    )
 
     # Content fields
     tags = TextListField(blank=True, help_text="List of tags for categorization")
@@ -712,21 +1000,37 @@ class Case(models.Model):
         help_text="Internal notes about the case (markdown supported)",
     )
     # Public counterpart to ``notes``. Unlike ``notes`` (internal, BB-04-gated on
-    # read), this IS returned to everyone — a caseworker-authored markdown block
-    # shown on the public case page for attribution AND the human-written edit
-    # history (e.g. "Documented by the Jawafdehi research team. First published
-    # Shrawan 2082; last edited Bhadra 2082."). Freeform on purpose: it stays
-    # decoupled from the staff account that pressed publish (that identity lives
-    # on CaseStateChange.actor and is never surfaced publicly) and from the
-    # machine ``created_at``/``updated_at`` timestamps. Empty string = nothing
-    # rendered.
+    # read), this IS returned to everyone.
+    #
+    # SUPERSEDED, kept for one release as a rendering fallback. This single free
+    # text field used to carry the whole byline — attribution AND the "first
+    # published / last edited" line. That is now three structured fields:
+    # ``author_credits`` (who), ``case_publish_date`` (when it went live) and
+    # ``public_edit_history`` (what changed since). The frontend renders the
+    # structured byline when a case has authors and falls back to this text
+    # otherwise, so the ~72 legacy cases keep their byline until they are
+    # backfilled. Nothing new should be written here; it is dropped once the
+    # backfill lands.
     public_notes = models.TextField(
         blank=True,
         default="",
-        help_text="Public notes shown on the case page (markdown): attribution "
-        "byline plus the human-written 'first published / last edited' line. "
-        "Editable by casework staff; independent of the internal account that "
-        "published and of the automatic timestamps. Empty = nothing shown.",
+        help_text="DEPRECATED (superseded by authors / case_publish_date / "
+        "public_edit_history): free-text public byline, still rendered as a "
+        "fallback on cases that have no structured authors yet.",
+    )
+    # The public, caseworker-curated edit log: ``[{date, remarks}]``, e.g.
+    # "2026-08-14 — corrected the bigo figure after the Special Court order".
+    # Distinct from CaseStateChange, which is machine-written, carries moderator
+    # names and send-back reasons, and is gated for every state including
+    # PUBLISHED. A JSON list (like ``timeline``) rather than its own table: it
+    # has no per-row permissions or authorship, and this way it rides the
+    # existing RFC-6902 patch path and the If-Match lock unchanged.
+    public_edit_history = EditHistoryListField(
+        help_text=(
+            "Public edit history shown on the case page: a list of "
+            "{date, remarks} entries, newest handling at the caseworker's "
+            "discretion. Empty = nothing rendered."
+        ),
     )
 
     # New fields for case identification and tracking
@@ -775,6 +1079,9 @@ class Case(models.Model):
     # kwargs (``Case(court_cases=[...])``) via the setter DURING
     # ``super().__init__``, which an ``__init__`` assignment would clobber.
     _pending_court_cases = None
+
+    # Same contract as ``_pending_court_cases`` above, for the CaseAuthor join.
+    _pending_authors = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -844,6 +1151,74 @@ class Case(models.Model):
         # A stale prefetch would otherwise keep serving the pre-sync rows.
         if hasattr(self, "_prefetched_objects_cache"):
             self._prefetched_objects_cache.pop("courtcase_references", None)
+
+    @property
+    def author_ids(self):
+        """Credited account ids in byline order (or the pending assignment).
+
+        The byline's only per-case fact is ORDER, so this is a plain ordered list
+        of user ids — that is the whole writable surface. Display details resolve
+        from each author's ``AuthorProfile``.
+        """
+        if self._pending_authors is not None:
+            return list(self._pending_authors)
+        if self.pk is None:
+            return []
+        return [credit.user_id for credit in self.author_credits.all()]
+
+    @author_ids.setter
+    def author_ids(self, value):
+        if value is None:
+            value = []
+        if not isinstance(value, (list, tuple)):
+            raise ValidationError("authors must be a list")
+        ids = []
+        for entry in value:
+            # Accept a bare id or a {"user_id": N} object, so a client can echo
+            # back the read shape without reshaping it first.
+            user_id = entry.get("user_id") if isinstance(entry, dict) else entry
+            if user_id is None:
+                raise ValidationError("Each author must carry a user_id")
+            try:
+                user_id = int(user_id)
+            except (TypeError, ValueError):
+                raise ValidationError(f"Invalid author id: {user_id!r}")
+            # A duplicate is dropped rather than rejected: the unique constraint
+            # would otherwise turn a double-click in the picker into a 500
+            # mid-rewrite.
+            if user_id not in ids:
+                ids.append(user_id)
+        self._pending_authors = ids
+
+    def _sync_author_credits(self, desired=None):
+        """Persist the byline order to the CaseAuthor through table.
+
+        THE single write path for the join, with the same replace semantics and
+        unchanged-is-a-no-op contract as ``_sync_courtcase_references``. Rows are
+        created one at a time (not ``bulk_create``) so ``CaseAuthor.save()``
+        runs and every credited account is guaranteed an ``AuthorProfile``.
+        """
+        if desired is None:
+            desired = self._pending_authors
+        if desired is None:
+            # Nothing assigned and nothing passed — no write intent.
+            return
+        self._pending_authors = None
+        normalized = []
+        for entry in desired:
+            user_id = entry.get("user_id") if isinstance(entry, dict) else entry
+            user_id = int(user_id)
+            if user_id not in normalized:
+                normalized.append(user_id)
+        current = [credit.user_id for credit in self.author_credits.all()]
+        if normalized == current:
+            return
+        with transaction.atomic():
+            self.author_credits.all().delete()
+            for ordinal, user_id in enumerate(normalized):
+                CaseAuthor(case=self, user_id=user_id, ordinal=ordinal).save()
+        if hasattr(self, "_prefetched_objects_cache"):
+            self._prefetched_objects_cache.pop("author_credits", None)
 
     @property
     def public_iri(self):
@@ -984,6 +1359,10 @@ class Case(models.Model):
         if self._pending_court_cases is not None:
             self._sync_courtcase_references()
 
+        # Same, for a pending `authors` assignment.
+        if self._pending_authors is not None:
+            self._sync_author_credits()
+
     def validate(self):
         """
         Validate case data based on current state.
@@ -1025,6 +1404,25 @@ class Case(models.Model):
             if not self.description or not self.description.strip():
                 errors["description"] = (
                     "Description is required for IN_REVIEW or PUBLISHED state"
+                )
+
+            # A case may not go public unattributed. Reads the ``author_ids``
+            # property, not the reverse manager, so it also sees a pending
+            # assignment on an unsaved instance and returns [] (rather than
+            # raising) when there is no pk yet.
+            if not self.author_ids:
+                errors["authors"] = (
+                    "At least one author is required for IN_REVIEW or PUBLISHED state"
+                )
+
+            # Required from IN_REVIEW onward, same as the rules above. At submit
+            # this is the INTENDED publication date and stays editable; the point
+            # is that no case reaches the public site without one, since the
+            # alternative is the machine created_at, which is routinely wrong by
+            # months for cases researched long before they were entered here.
+            if not self.case_publish_date:
+                errors["case_publish_date"] = (
+                    "A publish date is required for IN_REVIEW or PUBLISHED state"
                 )
 
         # Auto-generate slug for any case without one (slug-only API addressing).

@@ -8,6 +8,7 @@ itself) before the changes are persisted.
 import re
 from datetime import datetime
 
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
@@ -16,6 +17,7 @@ from jawafdehi_shared.entities.ids import (
     is_valid_material_iri,
 )
 
+from .fields import edit_history_date_error, parse_edit_history_date
 from .models import (
     CaseState,
     CaseType,
@@ -23,6 +25,8 @@ from .models import (
     RelationshipType,
 )
 from .validators import validate_courtcase_iri, validate_slug
+
+User = get_user_model()
 
 
 class CaseInsensitiveChoiceField(serializers.ChoiceField):
@@ -145,6 +149,78 @@ class EvidenceItemSerializer(serializers.Serializer):
     def validate_additional_details(self, value):
         # Optional note; normalize null to empty string.
         return (value or "").strip()
+
+
+class AuthorIdListField(serializers.ListField):
+    """The writable byline: an ORDERED list of account ids.
+
+    Order in the list IS the byline order — the only per-case fact about an
+    author. Name, photo, description and links are per-person and are edited on
+    the author's ``AuthorProfile``, never through a case patch.
+
+    Accepts a bare id or a ``{"user_id": N}`` object per entry, so the editor can
+    PATCH back a list derived from the richer read shape without reshaping it.
+    """
+
+    child = serializers.JSONField()
+
+    def to_internal_value(self, data):
+        entries = super().to_internal_value(data)
+        ids = []
+        for entry in entries:
+            raw = entry.get("user_id") if isinstance(entry, dict) else entry
+            # ``bool`` is an ``int`` subclass, so True would otherwise credit
+            # account 1. ``child`` is a JSONField, so a float reaches here too:
+            # 3.7 must be rejected, not silently truncated to account 3.
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise serializers.ValidationError(
+                    f"Each author must be an integer account id or "
+                    f"{{'user_id': N}}: {entry!r}"
+                )
+            user_id = raw
+            # Bounded to the signed 64-bit range the pk column can hold. Without
+            # this, 10**30 passes validation and blows up inside the ``pk__in``
+            # query — a 500 on PostgreSQL, where sqlite quietly returns no rows,
+            # so the test suite would not catch the production behaviour.
+            if not (-(2**63) <= user_id < 2**63):
+                raise serializers.ValidationError(f"Author id out of range: {raw!r}")
+            # Dropped rather than rejected: a double-click in the picker should
+            # not 422 an otherwise-valid save.
+            if user_id not in ids:
+                ids.append(user_id)
+
+        # Resolved here so an unknown id is a 422 on /authors rather than an
+        # IntegrityError partway through the join rewrite.
+        known = set(
+            User.objects.filter(pk__in=ids).values_list("pk", flat=True)
+        )
+        missing = [user_id for user_id in ids if user_id not in known]
+        if missing:
+            raise serializers.ValidationError(
+                f"No user with id {', '.join(str(m) for m in missing)}."
+            )
+        return ids
+
+
+class EditHistoryItemSerializer(serializers.Serializer):
+    """One public edit-history entry: an AD ISO date plus free-text remarks."""
+
+    date = serializers.CharField()
+    remarks = serializers.CharField()
+
+    def validate_date(self, value):
+        # Shared with the model field so the rule cannot drift between layers.
+        try:
+            parse_edit_history_date(value)
+        except (ValueError, TypeError):
+            raise serializers.ValidationError(edit_history_date_error(value))
+        return value
+
+    def validate_remarks(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Remarks cannot be empty.")
+        return value
 
 
 class EntityPatchItemSerializer(serializers.Serializer):
@@ -321,10 +397,22 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     # ``null`` can't be stored — clear notes by sending "" (allow_blank). A literal
     # ``null`` is rejected (422) rather than silently coerced, matching the column.
     notes = serializers.CharField(required=False, allow_blank=True)
-    # Public notes (Case.public_notes TextField, markdown): attribution + edit
-    # dates. Same NOT-NULL/default="" contract as ``notes`` — allow_blank to
-    # clear, NOT allow_null. Returned publicly by the read serializer.
+    # Public notes (Case.public_notes TextField, markdown). DEPRECATED — the
+    # byline is now authors + case_publish_date + public_edit_history below —
+    # but still writable so the ~72 un-backfilled legacy cases can be edited (and
+    # cleared) until the backfill retires the field. Same NOT-NULL/default=""
+    # contract as ``notes``: allow_blank to clear, NOT allow_null.
     public_notes = serializers.CharField(required=False, allow_blank=True)
+    # The date the case first went live. ``allow_null`` (unlike the text fields
+    # above) because the column IS nullable — a DRAFT legitimately has none. The
+    # publish gate lives in ``Case.validate()``, not here, so a caseworker can
+    # still save a half-finished draft.
+    case_publish_date = serializers.DateField(required=False, allow_null=True)
+    public_edit_history = EditHistoryItemSerializer(many=True, required=False)
+    # Declared on the SHARED write serializer, not just the patch one: the SPA's
+    # new-case form posts the whole form in one go, so authors typed there would
+    # be silently dropped if this were PATCH-only.
+    authors = AuthorIdListField(required=False)
     slug = serializers.SlugField(
         max_length=50,
         required=False,

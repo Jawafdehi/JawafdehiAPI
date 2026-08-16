@@ -24,6 +24,7 @@ from cases.models import (
     CaseType,
     RelationshipType,
 )
+from tests.byline import credit_author
 from tests.conftest import create_user_with_role
 
 if TYPE_CHECKING:
@@ -161,7 +162,7 @@ def test_state_transition_entry_attributes_actor():
     """The workflow-save path (Case.save) must also capture the actor."""
     user = _contributor("puja")
     # DRAFT->IN_REVIEW enforces the publish gate (accused entity + allegations +
-    # description), so build a case that satisfies it.
+    # description + byline), so build a case that satisfies it.
     case = _make_case(
         description="Ready for review", key_allegations=["Primary allegation"]
     )
@@ -170,6 +171,7 @@ def test_state_transition_entry_attributes_actor():
         nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
         relationship_type=RelationshipType.ACCUSED,
     )
+    credit_author(case)
 
     response = _authed_client(user).patch(
         URL.format(case.slug),
