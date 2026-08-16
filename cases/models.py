@@ -247,6 +247,18 @@ class CaseEntityRelationship(models.Model):
         max_length=500,
         help_text="Optional notes about this relationship",
     )
+    # Stable display order of this bind within a case. Ordering used to be
+    # ``-created_at`` alone, which is neither stable nor meaningful here: the
+    # PATCH endpoint rewrites the whole list (delete-all + recreate), so every
+    # entities-touching write re-stamped created_at and REVERSED the list, and
+    # rows sharing a timestamp (bulk imports) came back in whatever order the
+    # scan happened to produce. Index-based RFC-6902 paths (/entities/3/notes)
+    # were unsafe as a result, and the public case page reshuffled its accused
+    # list on every edit.
+    ordinal = models.PositiveIntegerField(
+        default=0,
+        help_text="Display order of this entity bind within the case.",
+    )
     created_at = models.DateTimeField(
         auto_now_add=True,
         help_text="When this relationship was created",
@@ -255,7 +267,12 @@ class CaseEntityRelationship(models.Model):
     class Meta:
         verbose_name = "Case Entity Relationship"
         verbose_name_plural = "Case Entity Relationships"
-        ordering = ["-created_at"]
+        # ``pk`` is the final tie-breaker so the order is TOTAL: ordinal and
+        # created_at can both tie (get_or_create paths leave ordinal at 0, bulk
+        # imports share a timestamp), and a partial ORDER BY lets Postgres
+        # return tied rows in any order it likes — including a different one on
+        # successive reads of an unmodified case.
+        ordering = ["ordinal", "created_at", "pk"]
         constraints = [
             models.UniqueConstraint(
                 fields=["case", "nes_id", "relationship_type"],
@@ -279,6 +296,7 @@ class CaseEntityRelationship(models.Model):
                 fields=["nes_id", "relationship_type"],
                 name="entity_relationship_type_idx",
             ),
+            models.Index(fields=["case", "ordinal"], name="case_entity_ordinal_idx"),
         ]
 
     def __str__(self):

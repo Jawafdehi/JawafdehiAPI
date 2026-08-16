@@ -167,6 +167,30 @@ class EntityPatchItemSerializer(serializers.Serializer):
         required=False, allow_blank=True, allow_null=True, default=""
     )
 
+    def to_internal_value(self, data):
+        """Reject undeclared keys instead of dropping them.
+
+        DRF ignores unknown keys, so ``add /entities/0/whatever`` would validate,
+        return 200 with a fresh ETag, and store nothing — a write that reports
+        success while doing nothing is the worst failure mode for an automated
+        caller. The patch snapshot builds each entity from exactly the four
+        declared fields, so any other key can only have come from the caller's
+        own patch document and is always a mistake worth a 422.
+        """
+        if isinstance(data, dict):
+            unknown = sorted(set(data) - set(self.fields))
+            if unknown:
+                raise serializers.ValidationError(
+                    {
+                        field: (
+                            "Unknown field for an entity bind. Writable fields "
+                            f"are: {', '.join(sorted(self.fields))}."
+                        )
+                        for field in unknown
+                    }
+                )
+        return super().to_internal_value(data)
+
     def validate_nes_id(self, value):
         value = (value or "").strip()
         if not is_valid_entity_iri(value):
