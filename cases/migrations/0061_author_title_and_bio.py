@@ -14,7 +14,7 @@ class Migration(migrations.Migration):
     """
 
     dependencies = [
-        ("cases", "0059_author_profiles"),
+        ("cases", "0060_author_profiles"),
     ]
 
     operations = [

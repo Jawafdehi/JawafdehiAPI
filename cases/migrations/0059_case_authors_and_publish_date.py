@@ -9,7 +9,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cases', '0057_case_weight'),
+        ('cases', '0058_caseentityrelationship_ordinal'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
