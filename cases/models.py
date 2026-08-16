@@ -9,7 +9,7 @@ import uuid
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
 from jawafdehi_shared.entities.ids import (
@@ -636,11 +636,31 @@ class AuthorProfile(models.Model):
         if profile is not None:
             return profile
         name = name_for_user(user)
-        return cls.objects.create(
-            user=user,
-            slug=cls._generate_unique_slug(name),
-            name_en=name,
-        )
+        try:
+            # savepoint so a losing race does not poison the caller's atomic
+            # block — on PostgreSQL an IntegrityError aborts the whole
+            # transaction unless the failing statement is rolled back to one.
+            with transaction.atomic():
+                return cls.objects.create(
+                    user=user,
+                    slug=cls._generate_unique_slug(name),
+                    name_en=name,
+                )
+        except IntegrityError:
+            # Lost a race on either ``user`` (another credit for this account
+            # committed first) or ``slug`` (a same-named colleague took the
+            # candidate between the exists() check and the insert). Both are
+            # check-then-create windows and both are benign: re-read.
+            profile = cls.objects.filter(user=user).first()
+            if profile is not None:
+                return profile
+            # The slug collided rather than the user — retry once, now that the
+            # winner's slug is visible to _generate_unique_slug.
+            return cls.objects.create(
+                user=user,
+                slug=cls._generate_unique_slug(name),
+                name_en=name,
+            )
 
     @staticmethod
     def _generate_unique_slug(name):

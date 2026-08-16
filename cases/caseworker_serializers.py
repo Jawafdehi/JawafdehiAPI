@@ -17,6 +17,7 @@ from jawafdehi_shared.entities.ids import (
     is_valid_material_iri,
 )
 
+from .fields import EDIT_HISTORY_DATE_ERROR, parse_edit_history_date
 from .models import (
     CaseState,
     CaseType,
@@ -168,14 +169,21 @@ class AuthorIdListField(serializers.ListField):
         ids = []
         for entry in entries:
             raw = entry.get("user_id") if isinstance(entry, dict) else entry
-            if isinstance(raw, bool) or raw is None:
+            # ``bool`` is an ``int`` subclass, so True would otherwise credit
+            # account 1. ``child`` is a JSONField, so a float reaches here too:
+            # 3.7 must be rejected, not silently truncated to account 3.
+            if isinstance(raw, bool) or not isinstance(raw, int):
                 raise serializers.ValidationError(
-                    f"Each author must be an account id or {{'user_id': N}}: {entry!r}"
+                    f"Each author must be an integer account id or "
+                    f"{{'user_id': N}}: {entry!r}"
                 )
-            try:
-                user_id = int(raw)
-            except (TypeError, ValueError):
-                raise serializers.ValidationError(f"Invalid author id: {raw!r}")
+            user_id = raw
+            # Bounded to the signed 64-bit range the pk column can hold. Without
+            # this, 10**30 passes validation and blows up inside the ``pk__in``
+            # query — a 500 on PostgreSQL, where sqlite quietly returns no rows,
+            # so the test suite would not catch the production behaviour.
+            if not (-(2**63) <= user_id < 2**63):
+                raise serializers.ValidationError(f"Author id out of range: {raw!r}")
             # Dropped rather than rejected: a double-click in the picker should
             # not 422 an otherwise-valid save.
             if user_id not in ids:
@@ -201,12 +209,11 @@ class EditHistoryItemSerializer(serializers.Serializer):
     remarks = serializers.CharField()
 
     def validate_date(self, value):
+        # Shared with the model field so the rule cannot drift between layers.
         try:
-            datetime.fromisoformat(value)
+            parse_edit_history_date(value)
         except (ValueError, TypeError):
-            raise serializers.ValidationError(
-                "Invalid date format (expected ISO format YYYY-MM-DD)"
-            )
+            raise serializers.ValidationError(EDIT_HISTORY_DATE_ERROR)
         return value
 
     def validate_remarks(self, value):

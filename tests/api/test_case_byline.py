@@ -633,12 +633,19 @@ def test_author_page_is_public_and_returns_the_profile():
 
 
 @pytest.mark.django_db
-def test_author_page_omits_email_when_none_is_set():
-    """Opt-in by presence: a blank address is absent, not an empty string."""
+def test_author_page_returns_a_null_email_when_none_is_set():
+    """Opt-in: the key is always present, and null means "no address published".
+
+    Null rather than an empty string so the frontend cannot confuse "not set"
+    with "not loaded"; the key is present so the shape is stable. Contrast
+    ``bio``, which the byline payload omits entirely — see
+    ``test_the_byline_card_payload_carries_the_title_but_not_the_bio``.
+    """
     _user, profile, _case = _published_profile()
 
     response = APIClient().get(f"/api/authors/{profile.slug}/")
 
+    assert "email" in response.data
     assert response.data["email"] is None
 
 
@@ -738,3 +745,155 @@ def test_the_byline_card_payload_carries_the_title_but_not_the_bio():
     author = response.data["authors"][0]
     assert author["title"] == "Caseworker"
     assert "bio" not in author
+
+
+# ---------------------------------------------------------------------------
+# Review hardening (PR #456)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_patch_rejects_a_float_author_id_instead_of_truncating_it():
+    """`child` is a JSONField, so 3.7 would otherwise int() down to account 3."""
+    user = _caseworker("float-id")
+    case = _make_case()
+
+    response = _patch(
+        _client(user), case, [{"op": "replace", "path": "/authors", "value": [3.7]}]
+    )
+
+    assert response.status_code == 422, response.data
+    assert "authors" in response.data
+
+
+@pytest.mark.django_db
+def test_patch_rejects_a_boolean_author_id():
+    """`bool` is an int subclass, so True would otherwise credit account 1."""
+    user = _caseworker("bool-id")
+    case = _make_case()
+
+    response = _patch(
+        _client(user), case, [{"op": "replace", "path": "/authors", "value": [True]}]
+    )
+
+    assert response.status_code == 422, response.data
+
+
+@pytest.mark.django_db
+def test_patch_rejects_an_out_of_range_author_id():
+    """Without a bound this reaches the pk__in query and 500s on PostgreSQL."""
+    user = _caseworker("huge-id")
+    case = _make_case()
+
+    response = _patch(
+        _client(user), case, [{"op": "replace", "path": "/authors", "value": [10**30]}]
+    )
+
+    assert response.status_code == 422, response.data
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-08-14T10:30:00",  # a full timestamp
+        "20260814",  # ISO basic format
+        "2026-W33-5",  # an ISO week date
+    ],
+)
+def test_patch_rejects_edit_history_dates_that_are_not_plain_iso_dates(value):
+    """datetime.fromisoformat accepts all of these on 3.11+; date.fromisoformat
+    does not, and these are rendered verbatim on the public case page."""
+    user = _caseworker(f"date-{abs(hash(value)) % 10000}")
+    case = _make_case()
+
+    response = _patch(
+        _client(user),
+        case,
+        [
+            {
+                "op": "replace",
+                "path": "/public_edit_history",
+                "value": [{"date": value, "remarks": "Something"}],
+            }
+        ],
+    )
+
+    assert response.status_code == 422, response.data
+
+
+@pytest.mark.django_db
+def test_the_model_field_rejects_the_same_loose_dates_as_the_serializer():
+    """One rule, both layers — a raw ORM write must not slip a timestamp in."""
+    case = _make_case()
+    case.public_edit_history = [{"date": "2026-08-14T10:30:00", "remarks": "x"}]
+
+    with pytest.raises(ValidationError):
+        case.full_clean()
+
+
+@pytest.mark.django_db
+def test_ensure_for_is_idempotent_under_a_repeated_call():
+    """The check-then-create window is retried, not raised, on a lost race."""
+    user = get_user_model().objects.create_user(username="racer")
+
+    first = AuthorProfile.ensure_for(user)
+    second = AuthorProfile.ensure_for(user)
+
+    assert first.pk == second.pk
+    assert AuthorProfile.objects.filter(user=user).count() == 1
+
+
+@pytest.mark.django_db
+def test_picker_orders_by_the_name_the_byline_will_show():
+    """Sorting the raw account fields would disagree with the displayed name."""
+    staff = _caseworker("picker-order")
+    # Account name sorts last ("Zed"), profile name sorts first ("Aaron").
+    renamed = get_user_model().objects.create_user(
+        username="zzz", first_name="Zed", last_name="Zimmer"
+    )
+    CaseAuthor.objects.create(case=_make_case(), user=renamed)
+    profile = AuthorProfile.objects.get(user=renamed)
+    profile.name_en = "Aaron Adhikari"
+    profile.save()
+
+    rows = _client(staff).get(PICKER_URL).data
+    names = [row["display_name"] for row in rows]
+
+    assert names == sorted(names)
+    assert names[0] == "Aaron Adhikari"
+
+
+@pytest.mark.django_db
+def test_the_author_inline_is_view_only_in_the_django_admin():
+    """It does not inherit CaseAdmin's read-only gate — it falls back to
+    model-level caseauthor perms, so the byline would be editable there."""
+    from django.contrib.admin.sites import AdminSite
+
+    from cases.admin import CaseAuthorInline
+
+    inline = CaseAuthorInline(Case, AdminSite())
+    assert inline.has_add_permission(None, None) is False
+    assert inline.has_change_permission(None, None) is False
+    assert inline.has_delete_permission(None, None) is False
+
+
+@pytest.mark.django_db
+def test_patch_rejects_an_impossible_edit_history_date():
+    """The shape check alone would pass 2026-02-31; the parser catches it."""
+    user = _caseworker("impossible-date")
+    case = _make_case()
+
+    response = _patch(
+        _client(user),
+        case,
+        [
+            {
+                "op": "replace",
+                "path": "/public_edit_history",
+                "value": [{"date": "2026-02-31", "remarks": "Something"}],
+            }
+        ],
+    )
+
+    assert response.status_code == 422, response.data

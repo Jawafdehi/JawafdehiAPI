@@ -15,7 +15,8 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.contrib.auth import get_user_model
-from django.db.models import Exists, F, OuterRef, Q
+from django.db.models import Exists, F, OuterRef, Q, Value
+from django.db.models.functions import Coalesce, Concat, NullIf, Trim
 from django.http import Http404, HttpResponse, HttpResponsePermanentRedirect
 from django.urls import reverse
 from django.utils import timezone
@@ -1649,9 +1650,19 @@ class CaseAuthorCandidateView(ListAPIView):
                 | Q(first_name__icontains=search)
                 | Q(last_name__icontains=search)
             )
-        # Order by the name the byline will actually show, so the picker reads in
-        # the same order the credits do.
-        return queryset.order_by("first_name", "last_name", "username")
+        # Order by the name the byline will actually SHOW, which is the profile's
+        # name_en when it has one and the account name otherwise — exactly what
+        # CaseAuthorCandidateSerializer.get_display_name resolves. Sorting the
+        # raw account fields instead would put the picker in a different order
+        # from the byline for anyone whose profile name differs from their login.
+        display_name = Coalesce(
+            NullIf(Trim("author_profile__name_en"), Value("")),
+            NullIf(Trim(Concat("first_name", Value(" "), "last_name")), Value("")),
+            "username",
+        )
+        return queryset.annotate(_display_name=display_name).order_by(
+            "_display_name", "username"
+        )
 
 
 @extend_schema(

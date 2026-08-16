@@ -121,10 +121,10 @@ class CaseAuthorCandidateSerializer(serializers.Serializer):
 class AuthorProfileSerializer(serializers.Serializer):
     """A public author profile: the card and the /author/<slug> page.
 
-    ``email`` is opt-in BY PRESENCE — a blank field is simply absent from the
-    payload rather than an empty string, so the frontend never has to decide
-    whether "" means "no address" or "not loaded". A personal address is not
-    published unless someone put one here.
+    ``email`` is opt-in: it is ``null`` unless someone put an address here, so a
+    personal address is never published by default. Null rather than an empty
+    string so the frontend never has to decide whether "" means "no address" or
+    "not loaded"; the key is always present, and the schema says so.
     """
 
     slug = serializers.CharField(read_only=True)
@@ -139,7 +139,7 @@ class AuthorProfileSerializer(serializers.Serializer):
     email = serializers.SerializerMethodField()
     links = serializers.ListField(child=serializers.DictField(), read_only=True)
 
-    @extend_schema_field(OpenApiTypes.STR)
+    @extend_schema_field(serializers.EmailField(allow_null=True))
     def get_email(self, obj):
         return obj.email or None
 

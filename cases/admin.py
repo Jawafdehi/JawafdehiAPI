@@ -482,6 +482,20 @@ class CaseAuthorInline(admin.TabularInline):
     verbose_name = "Author credit"
     verbose_name_plural = "Author credits (public byline)"
 
+    # VIEW-ONLY, matching the parent CaseAdmin. An inline does not inherit the
+    # parent's permissions — it falls back to model-level ``cases.*_caseauthor``
+    # perms — so without these three a user holding ``change_caseauthor`` could
+    # rewrite a byline through an admin page that is otherwise read-only, and
+    # bypass the SPA editor that is the single case-write surface.
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
 
 @admin.register(Case)
 class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):

@@ -6,7 +6,7 @@ plus ``HttpsURLField`` (a Django-6-ready ``URLField``).
 """
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from django.core.exceptions import ValidationError
@@ -168,6 +168,32 @@ class TimelineListField(models.JSONField):
                     )
 
 
+EDIT_HISTORY_DATE_ERROR = "Invalid date format (expected ISO format YYYY-MM-DD)"
+
+#: Extended YYYY-MM-DD only. A shape check is required IN ADDITION to
+#: ``date.fromisoformat``, not instead of it: on Python 3.11+ that parser also
+#: accepts ISO basic format ("20260814") and ISO week dates ("2026-W33-5"), both
+#: of which would be stored verbatim in ``public_edit_history`` and rendered on
+#: the public case page in a shape the frontend does not expect.
+#: ``datetime.fromisoformat`` is looser still (timestamps, UTC offsets).
+#: Mirrors ``TimelineListField._BS_DATE_RE``, which shape-checks for the same
+#: reason.
+_EDIT_HISTORY_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_edit_history_date(value):
+    """Return the ``date`` for an edit-history entry, or raise ValueError.
+
+    Shared by ``EditHistoryListField`` (model layer) and
+    ``EditHistoryItemSerializer`` (API layer) so the rule and its error text
+    cannot drift apart.
+    """
+    if not isinstance(value, str) or not _EDIT_HISTORY_DATE_RE.match(value):
+        raise ValueError(EDIT_HISTORY_DATE_ERROR)
+    # The regex fixes the shape; the parser rejects impossible dates (2026-02-31).
+    return date.fromisoformat(value)
+
+
 class AuthorLinkListField(models.JSONField):
     """
     Stores an author's social links: a list of ``{type, value}`` entries.
@@ -264,15 +290,10 @@ class EditHistoryListField(models.JSONField):
                     )
 
             date_str = entry["date"]
-            if not isinstance(date_str, str):
-                raise ValidationError(f"Edit history date must be a string: {date_str}")
-
             try:
-                datetime.fromisoformat(date_str)
+                parse_edit_history_date(date_str)
             except (ValueError, TypeError):
-                raise ValidationError(
-                    f"Invalid date format (expected ISO format YYYY-MM-DD): {date_str}"
-                )
+                raise ValidationError(f"{EDIT_HISTORY_DATE_ERROR}: {date_str}")
 
             if not isinstance(entry["remarks"], str) or not entry["remarks"].strip():
                 raise ValidationError(
