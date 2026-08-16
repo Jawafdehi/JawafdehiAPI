@@ -157,6 +157,12 @@ def _run_judge(judge_summary, excerpts, ctype, llm_rules, config, usage):
 
     A judge failure is not fatal: ``judged`` falls back to the neutral shape and
     the error string is threaded through so each rule can explain itself.
+
+    The exception is ``JudgeUnavailable`` -- the judge was unreachable for at
+    least one rule (dead credential, 429 session cap, network) -- which is
+    deliberately NOT caught. Scoring a review whose LLM rules never ran produces
+    a confident-looking ~70 that is indistinguishable from a real near-miss, so
+    it must fail the job instead and let ``on_failure`` mark the review failed.
     """
     judged = {"_narrative": "", "_n_samples": 0}
     if not llm_rules:
@@ -185,6 +191,8 @@ def _run_judge(judge_summary, excerpts, ctype, llm_rules, config, usage):
             ),
             None,
         )
+    except judge.JudgeUnavailable:
+        raise
     except Exception as e:  # noqa: BLE001 - judge failure degrades to neutral scores
         return judged, str(e)
 
