@@ -178,7 +178,10 @@ class EntityPatchItemSerializer(serializers.Serializer):
         own patch document and is always a mistake worth a 422.
         """
         if isinstance(data, dict):
-            unknown = sorted(set(data) - set(self.fields))
+            # str() the keys rather than sorting the raw dict keys: a JSON object
+            # always has string keys, but the checker only knows them as
+            # ``object``, which is not orderable.
+            unknown = sorted(str(key) for key in data if key not in self.fields)
             if unknown:
                 raise serializers.ValidationError(
                     {
