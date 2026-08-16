@@ -25,6 +25,7 @@ from cases.models import (
     CaseType,
     RelationshipType,
 )
+from tests.byline import credit_author
 from tests.conftest import create_user_with_role
 
 URL = "/api/cases/{}/"
@@ -53,6 +54,8 @@ def _publishable_case(state=CaseState.DRAFT, **kwargs) -> Case:
         nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
         relationship_type=RelationshipType.ACCUSED,
     )
+    # The byline half of the same gate: >=1 credited author + a publish date.
+    credit_author(case)
     return case
 
 

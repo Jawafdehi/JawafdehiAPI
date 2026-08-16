@@ -13,6 +13,7 @@ from rest_framework import serializers
 
 from .models import (
     Case,
+    CaseAuthor,
     CaseEntityRelationship,
     CaseStateChange,
     Feedback,
@@ -96,6 +97,24 @@ class CaseEntityRelationshipSerializer(serializers.ModelSerializer):
                 f"Invalid relationship type '{value}'. Must be one of: {', '.join(valid_types)}"
             )
         return value
+
+
+class CaseAuthorCandidateSerializer(serializers.Serializer):
+    """One selectable account for the case-author byline picker.
+
+    ``display_name`` is computed by the same helper the join uses
+    (``CaseAuthor.name_for``), so what the picker shows is exactly what gets
+    snapshotted onto the credit. ``username`` rides along to disambiguate two
+    colleagues with the same display name — never an email or other PII.
+    """
+
+    id = serializers.IntegerField(read_only=True)
+    username = serializers.CharField(read_only=True)
+    display_name = serializers.SerializerMethodField()
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_display_name(self, obj):
+        return CaseAuthor.name_for(obj)
 
 
 class CaseStateChangeSerializer(serializers.ModelSerializer):
@@ -278,6 +297,48 @@ class CaseSerializer(serializers.ModelSerializer):
             "CaseCourtCaseReference join"
         ),
     )
+    authors = serializers.SerializerMethodField(
+        help_text="Credited authors of this case, in byline order "
+        "(display_name + optional credit_note; user_id for casework viewers only)"
+    )
+
+    @extend_schema_field(
+        inline_serializer(
+            name="CaseAuthorCredit",
+            many=True,
+            fields={
+                "user_id": serializers.IntegerField(required=False),
+                "display_name": serializers.CharField(),
+                "credit_note": serializers.CharField(allow_blank=True),
+            },
+        )
+    )
+    def get_authors(self, obj):
+        """The public byline, in order.
+
+        ``user_id`` is included only for casework viewers: the editor needs it to
+        round-trip the author list through PATCH, but there is no reason to
+        publish internal account primary keys. Public callers get the name and
+        credit note, which is all the byline renders — the same "display label
+        only" boundary ``CaseStateChangeSerializer.actor_name`` holds.
+        """
+        include_user_id = _viewer_has_casework_access(self.context)
+        credits = []
+        for credit in obj.author_credits.all():
+            entry = {
+                "display_name": credit.display_name,
+                "credit_note": credit.credit_note,
+            }
+            if include_user_id:
+                entry["user_id"] = credit.user_id
+            credits.append(entry)
+        return credits
+
+    public_edit_history = serializers.ListField(
+        child=serializers.DictField(),
+        help_text="Public edit history entries ({date, remarks}) shown on the case page",
+        required=False,
+    )
     tags = serializers.ListField(
         child=serializers.CharField(),
         help_text="List of tags for categorization (e.g., 'land-encroachment', 'national-interest')",
@@ -320,9 +381,14 @@ class CaseSerializer(serializers.ModelSerializer):
             "state",
             "title",
             "short_description",
-            # Public caseworker-authored notes (Case.public_notes): attribution +
-            # human-written edit dates. A plain model field — returned to
-            # everyone, unlike the BB-04-gated internal ``notes`` below.
+            # The structured public byline: who wrote the case, when it first
+            # went live, and the curated list of edits since. All three are
+            # returned to everyone, unlike the BB-04-gated internal ``notes``.
+            "authors",
+            "case_publish_date",
+            "public_edit_history",
+            # DEPRECATED free-text byline, still returned so the frontend can
+            # fall back to it on cases that have no structured authors yet.
             "public_notes",
             "thumbnail_url",
             "banner_url",

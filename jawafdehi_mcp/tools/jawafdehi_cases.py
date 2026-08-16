@@ -70,6 +70,27 @@ EVIDENCE_ITEM_INPUT_SCHEMA = {
     "required": ["material_iri"],
     "additionalProperties": False,
 }
+EDIT_HISTORY_ITEM_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "date": {"type": "string", "format": "date"},
+        "remarks": {"type": "string", "minLength": 1},
+    },
+    "required": ["date", "remarks"],
+    "additionalProperties": False,
+}
+# ``display_name`` is accepted so a caller can echo back a case it just read,
+# but the API ignores it and snapshots the name from the account itself.
+AUTHOR_ITEM_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "user_id": {"type": "integer"},
+        "display_name": {"type": "string"},
+        "credit_note": {"type": "string", "maxLength": 120},
+    },
+    "required": ["user_id"],
+    "additionalProperties": False,
+}
 CASE_CREATE_PROPERTIES: dict[str, Any] = {
     "case_type": {
         "type": "string",
@@ -101,7 +122,35 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
     "timeline": {"type": "array", "items": TIMELINE_ITEM_INPUT_SCHEMA},
     "evidence": {"type": "array", "items": EVIDENCE_ITEM_INPUT_SCHEMA},
     "notes": {"type": "string"},
-    "public_notes": {"type": "string"},
+    "public_notes": {
+        "type": "string",
+        "description": (
+            "DEPRECATED free-text byline. Use authors / case_publish_date / "
+            "public_edit_history instead."
+        ),
+    },
+    "case_publish_date": _nullable_schema(
+        {
+            "type": "string",
+            "format": "date",
+            "description": (
+                "Date the case first went live on jawafdehi.org. Required before "
+                "the case can leave DRAFT."
+            ),
+        }
+    ),
+    "public_edit_history": {
+        "type": "array",
+        "items": EDIT_HISTORY_ITEM_INPUT_SCHEMA,
+    },
+    "authors": {
+        "type": "array",
+        "items": AUTHOR_ITEM_INPUT_SCHEMA,
+        "description": (
+            "Credited authors, in byline order. At least one is required before "
+            "the case can leave DRAFT."
+        ),
+    },
     "alleged_entities": {
         "type": "array",
         "items": {"type": "string", "format": "uri"},

@@ -8,6 +8,7 @@ itself) before the changes are persisted.
 import re
 from datetime import datetime
 
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
@@ -23,6 +24,8 @@ from .models import (
     RelationshipType,
 )
 from .validators import validate_courtcase_iri, validate_slug
+
+User = get_user_model()
 
 
 class CaseInsensitiveChoiceField(serializers.ChoiceField):
@@ -145,6 +148,57 @@ class EvidenceItemSerializer(serializers.Serializer):
     def validate_additional_details(self, value):
         # Optional note; normalize null to empty string.
         return (value or "").strip()
+
+
+class AuthorPatchItemSerializer(serializers.Serializer):
+    """One credited author = a reference to a Django account (the CaseAuthor join).
+
+    ``user_id`` is the only thing a client may choose. ``display_name`` is
+    accepted but IGNORED: the byline name is snapshotted server-side from the
+    account, so a client cannot publish an arbitrary name against someone else's
+    id. It is declared here only so the editor can PATCH back the exact author
+    list it read without tripping the unknown-field check.
+    """
+
+    user_id = serializers.IntegerField()
+    display_name = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
+    credit_note = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, default=""
+    )
+
+    def validate_user_id(self, value):
+        # Resolved here rather than at persist time so an unknown id is a 422
+        # field error on /authors, not an IntegrityError mid-rewrite.
+        if not User.objects.filter(pk=value).exists():
+            raise serializers.ValidationError(f"No user with id {value}.")
+        return value
+
+    def validate_credit_note(self, value):
+        return (value or "").strip()
+
+
+class EditHistoryItemSerializer(serializers.Serializer):
+    """One public edit-history entry: an AD ISO date plus free-text remarks."""
+
+    date = serializers.CharField()
+    remarks = serializers.CharField()
+
+    def validate_date(self, value):
+        try:
+            datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            raise serializers.ValidationError(
+                "Invalid date format (expected ISO format YYYY-MM-DD)"
+            )
+        return value
+
+    def validate_remarks(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Remarks cannot be empty.")
+        return value
 
 
 class EntityPatchItemSerializer(serializers.Serializer):
@@ -294,10 +348,22 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     # ``null`` can't be stored — clear notes by sending "" (allow_blank). A literal
     # ``null`` is rejected (422) rather than silently coerced, matching the column.
     notes = serializers.CharField(required=False, allow_blank=True)
-    # Public notes (Case.public_notes TextField, markdown): attribution + edit
-    # dates. Same NOT-NULL/default="" contract as ``notes`` — allow_blank to
-    # clear, NOT allow_null. Returned publicly by the read serializer.
+    # Public notes (Case.public_notes TextField, markdown). DEPRECATED — the
+    # byline is now authors + case_publish_date + public_edit_history below —
+    # but still writable so the ~72 un-backfilled legacy cases can be edited (and
+    # cleared) until the backfill retires the field. Same NOT-NULL/default=""
+    # contract as ``notes``: allow_blank to clear, NOT allow_null.
     public_notes = serializers.CharField(required=False, allow_blank=True)
+    # The date the case first went live. ``allow_null`` (unlike the text fields
+    # above) because the column IS nullable — a DRAFT legitimately has none. The
+    # publish gate lives in ``Case.validate()``, not here, so a caseworker can
+    # still save a half-finished draft.
+    case_publish_date = serializers.DateField(required=False, allow_null=True)
+    public_edit_history = EditHistoryItemSerializer(many=True, required=False)
+    # Declared on the SHARED write serializer, not just the patch one: the SPA's
+    # new-case form posts the whole form in one go, so authors typed there would
+    # be silently dropped if this were PATCH-only.
+    authors = AuthorPatchItemSerializer(many=True, required=False)
     slug = serializers.SlugField(
         max_length=50,
         required=False,

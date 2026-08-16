@@ -168,3 +168,57 @@ class TimelineListField(models.JSONField):
                     )
 
 
+class EditHistoryListField(models.JSONField):
+    """
+    Stores the case's PUBLIC edit history: a list of ``{date, remarks}`` entries.
+
+    Each entry must have: date (AD ISO format), remarks (non-empty string).
+
+    This is the caseworker-curated, publicly rendered counterpart to
+    ``CaseStateChange`` — which is machine-written, carries moderator names and
+    send-back reasons, and is gated for every state. The two are deliberately
+    separate: a public "corrected the bigo figure" line is not the same record
+    as "sent back to draft by <moderator>".
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs["default"] = list
+        kwargs["blank"] = True
+        super().__init__(*args, **kwargs)
+
+    def validate(self, value, model_instance):
+        """Validate that value is a list of valid edit-history entries."""
+        super().validate(value, model_instance)
+
+        if not isinstance(value, list):
+            raise ValidationError("Value must be a list")
+
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise ValidationError(
+                    f"Edit history entry must be a dictionary: {entry}"
+                )
+
+            for field in ("date", "remarks"):
+                if field not in entry:
+                    raise ValidationError(
+                        f"Edit history entry missing required field '{field}': {entry}"
+                    )
+
+            date_str = entry["date"]
+            if not isinstance(date_str, str):
+                raise ValidationError(f"Edit history date must be a string: {date_str}")
+
+            try:
+                datetime.fromisoformat(date_str)
+            except (ValueError, TypeError):
+                raise ValidationError(
+                    f"Invalid date format (expected ISO format YYYY-MM-DD): {date_str}"
+                )
+
+            if not isinstance(entry["remarks"], str) or not entry["remarks"].strip():
+                raise ValidationError(
+                    f"Edit history remarks must be a non-empty string: {entry}"
+                )
+
+

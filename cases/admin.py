@@ -10,6 +10,7 @@ from cases.widgets import ToastUIEditorWidget
 
 from .models import (
     Case,
+    CaseAuthor,
     CaseEntityRelationship,
     CaseState,
     CaseStateChange,
@@ -421,6 +422,23 @@ class CaseEntityRelationshipInline(admin.TabularInline):
 # ============================================================================
 
 
+class CaseAuthorInline(admin.TabularInline):
+    """Inline for the public byline (the CaseAuthor join), in display order.
+
+    ``display_name`` is shown read-only: it is a snapshot taken from the account
+    when the credit is written, and letting it be typed here would reintroduce
+    exactly the free-text drift the structured byline replaced.
+    """
+
+    model = CaseAuthor
+    extra = 0
+    fields = ("user", "display_name", "credit_note", "ordinal")
+    readonly_fields = ("display_name",)
+    ordering = ("ordinal", "created_at")
+    verbose_name = "Author credit"
+    verbose_name_plural = "Author credits (public byline)"
+
+
 @admin.register(Case)
 class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
@@ -436,7 +454,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
 
     form = CaseAdminForm
-    inlines = [CaseEntityRelationshipInline]
+    inlines = [CaseEntityRelationshipInline, CaseAuthorInline]
 
     class Media:
         js = ("cases/js/widgets.js", "admin/js/case_admin.js")
@@ -514,6 +532,22 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "missing_details",
                     "notes",
                 )
+            },
+        ),
+        (
+            "Public byline",
+            {
+                "fields": (
+                    "case_publish_date",
+                    "public_edit_history",
+                    "public_notes",
+                ),
+                "description": (
+                    "Shown on the public case page. Authors are edited in the "
+                    "Author credits inline below. public_notes is the DEPRECATED "
+                    "free-text byline, kept only until the legacy cases are "
+                    "backfilled."
+                ),
             },
         ),
         (

@@ -8,6 +8,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .api_views import (
+    CaseAuthorCandidateView,
     CaseViewSet,
     FeedbackTriageViewSet,
     FeedbackView,
@@ -35,6 +36,14 @@ urlpatterns = [
     # search moved to the ``search`` app (``GET /api/search/``, see
     # config/urls.py + search), replacing this cases-scoped
     # in-process search in the OpenSearch cutover (plan decision #5).
+    # Roster for the case-editor byline picker. A flat path rather than a
+    # router registration: it lists User rows, not cases, and has no detail /
+    # write routes to hang off a viewset.
+    path(
+        "case-authors/",
+        CaseAuthorCandidateView.as_view(),
+        name="case-author-candidates",
+    ),
     path("statistics/", StatisticsView.as_view(), name="statistics"),
     path("feedback/", FeedbackView.as_view(), name="feedback"),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
