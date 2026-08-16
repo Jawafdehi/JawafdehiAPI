@@ -248,7 +248,7 @@ def test_renaming_an_account_does_not_change_the_profile_name():
 
 
 @pytest.mark.django_db
-def test_a_description_is_per_person_so_it_shows_on_every_case_they_wrote():
+def test_a_title_is_per_person_so_it_shows_on_every_case_they_wrote():
     """The point of moving it off the join: one fact, stored once."""
     user = get_user_model().objects.create_user(
         username="sambhav2", first_name="Sambhav", last_name="Koirala"
@@ -259,12 +259,12 @@ def test_a_description_is_per_person_so_it_shows_on_every_case_they_wrote():
     CaseAuthor.objects.create(case=second, user=user)
 
     profile = AuthorProfile.objects.get(user=user)
-    profile.description = "BALLB 4th Year Student"
+    profile.title = "BALLB 4th Year Student"
     profile.save()
 
     for case in (first, second):
         response = APIClient().get(URL.format(case.slug))
-        assert response.data["authors"][0]["description"] == "BALLB 4th Year Student"
+        assert response.data["authors"][0]["title"] == "BALLB 4th Year Student"
 
 
 @pytest.mark.django_db
@@ -502,14 +502,14 @@ def test_publish_date_can_be_cleared_back_to_null_on_a_draft():
 @pytest.mark.django_db
 def test_anonymous_reader_gets_the_byline_but_not_account_ids():
     case = _make_case(state=CaseState.PUBLISHED)
-    credit_author(case, description="BALLB 4th Year Student")
+    credit_author(case, title="BALLB 4th Year Student")
 
     response = APIClient().get(URL.format(case.slug))
 
     assert response.status_code == 200
     author = response.data["authors"][0]
     assert author["display_name"] == "Byline Author"
-    assert author["description"] == "BALLB 4th Year Student"
+    assert author["title"] == "BALLB 4th Year Student"
     assert author["slug"] == "byline-author"
     assert "user_id" not in author
     assert response.data["case_publish_date"] == "2026-08-01"
@@ -616,7 +616,8 @@ def _published_profile(username="published-author", **fields):
 @pytest.mark.django_db
 def test_author_page_is_public_and_returns_the_profile():
     _user, profile, _case = _published_profile(
-        description="Caseworker",
+        title="Caseworker",
+        bio="Documents CIAA procurement cases. **Law student** at TU.",
         photo_url="https://s3.jawafdehi.org/team/subodh.jpeg",
         links=[{"type": "instagram", "value": "https://instagram.com/subodh"}],
     )
@@ -625,7 +626,8 @@ def test_author_page_is_public_and_returns_the_profile():
 
     assert response.status_code == 200
     assert response.data["display_name"] == "Subodh Kandel"
-    assert response.data["description"] == "Caseworker"
+    assert response.data["title"] == "Caseworker"
+    assert response.data["bio"].startswith("Documents CIAA procurement cases.")
     assert response.data["photo_url"] == "https://s3.jawafdehi.org/team/subodh.jpeg"
     assert response.data["links"][0]["type"] == "instagram"
 
@@ -714,3 +716,25 @@ def test_case_byline_reports_whether_the_author_has_a_public_page():
 
     assert response.data["authors"][0]["has_public_page"] is True
     assert response.data["authors"][0]["slug"]
+
+
+@pytest.mark.django_db
+def test_author_page_returns_an_empty_bio_when_none_is_written():
+    """The About section is simply not rendered; it is not an error."""
+    _user, profile, _case = _published_profile()
+
+    response = APIClient().get(f"/api/authors/{profile.slug}/")
+
+    assert response.data["bio"] == ""
+
+
+@pytest.mark.django_db
+def test_the_byline_card_payload_carries_the_title_but_not_the_bio():
+    """A paragraph per author on every case read would be dead weight."""
+    _user, _profile, case = _published_profile(title="Caseworker", bio="A long bio.")
+
+    response = APIClient().get(URL.format(case.slug))
+
+    author = response.data["authors"][0]
+    assert author["title"] == "Caseworker"
+    assert "bio" not in author

@@ -514,15 +514,15 @@ class AuthorProfile(models.Model):
     A description belongs to the person, so it is stored once and shows on every
     case they wrote.
 
-    The trade-off, accepted deliberately: a description goes stale ("BALLB 4th
-    Year Student" will not be true next year), and updating it changes the byline
-    on every case that person ever wrote. That is the correct behaviour for a
+    The trade-off, accepted deliberately: a title goes stale ("BALLB 4th Year
+    Student" will not be true next year), and updating it changes the byline on
+    every case that person ever wrote. That is the correct behaviour for a
     fact about a person, and it is why there is no per-case name snapshot — a
     byline points at a person, it does not freeze them.
 
     The profile is auto-created the first time someone is credited (see
     ``ensure_for``), so every case author has a slug from the moment they are
-    credited. Photo/description/links start blank and are filled in later;
+    credited. Photo/title/bio/links start blank and are filled in later;
     ``has_public_page`` gates the public profile page so an empty one is never
     published.
 
@@ -558,12 +558,25 @@ class AuthorProfile(models.Model):
         max_length=500,
         help_text="Profile picture URL (hosted; the team photos live on R2)",
     )
-    description = models.TextField(
+    title = models.TextField(
         blank=True,
         default="",
         help_text=(
-            "Short public bio shown on the author card and profile page, e.g. "
-            "'Caseworker' or 'BALLB 4th Year Student'."
+            "One-line role shown under the name and on the author card on every "
+            "case page, e.g. 'Caseworker' or 'BALLB 4th Year Student'. Keep it "
+            "short — the card truncates. Longer prose goes in ``bio``."
+        ),
+    )
+    # Separate from ``title`` because the two have different jobs and different
+    # space: the title rides along on a compact card on every case page, where a
+    # paragraph would wreck the layout, while this renders only on the profile
+    # page.
+    bio = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Longer public biography shown on the author's profile page "
+            "(markdown). Empty = the About section is not rendered."
         ),
     )
     # A personal address, so it is opt-in by presence: blank = not shown. There

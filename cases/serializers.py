@@ -131,7 +131,11 @@ class AuthorProfileSerializer(serializers.Serializer):
     display_name = serializers.CharField(read_only=True)
     name_ne = serializers.CharField(read_only=True, allow_blank=True)
     photo_url = serializers.CharField(read_only=True, allow_blank=True)
-    description = serializers.CharField(read_only=True, allow_blank=True)
+    title = serializers.CharField(read_only=True, allow_blank=True)
+    # Profile page only. Deliberately absent from the byline payload on case
+    # pages: the card shows the one-line title, and shipping a paragraph per
+    # author with every case read would be dead weight.
+    bio = serializers.CharField(read_only=True, allow_blank=True)
     email = serializers.SerializerMethodField()
     links = serializers.ListField(child=serializers.DictField(), read_only=True)
 
@@ -359,7 +363,7 @@ class CaseSerializer(serializers.ModelSerializer):
                 "display_name": serializers.CharField(),
                 "name_ne": serializers.CharField(allow_blank=True),
                 "photo_url": serializers.CharField(allow_blank=True),
-                "description": serializers.CharField(allow_blank=True),
+                "title": serializers.CharField(allow_blank=True),
                 "has_public_page": serializers.BooleanField(),
             },
         )
@@ -367,7 +371,7 @@ class CaseSerializer(serializers.ModelSerializer):
     def get_authors(self, obj):
         """The public byline, in order, resolved from each author's profile.
 
-        Every field here is PER-PERSON — name, photo, description — because the
+        Every field here is PER-PERSON — name, photo, title — because the
         byline's only per-case fact is the order these come back in. That is why
         there is no snapshot: a byline points at a person rather than freezing
         them, so a rename shows the new name on every case they wrote.
@@ -393,7 +397,7 @@ class CaseSerializer(serializers.ModelSerializer):
                     "display_name": name_for_user(credit.user),
                     "name_ne": "",
                     "photo_url": "",
-                    "description": "",
+                    "title": "",
                     "has_public_page": False,
                 }
             else:
@@ -402,7 +406,7 @@ class CaseSerializer(serializers.ModelSerializer):
                     "display_name": profile.display_name,
                     "name_ne": profile.name_ne,
                     "photo_url": profile.photo_url,
-                    "description": profile.description,
+                    "title": profile.title,
                     "has_public_page": profile.has_public_page,
                 }
             if include_user_id:

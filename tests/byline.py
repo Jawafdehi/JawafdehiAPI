@@ -20,7 +20,7 @@ def credit_author(
     case,
     username="byline-author",
     publish_date=DEFAULT_PUBLISH_DATE,
-    description=None,
+    title=None,
 ):
     """Give ``case`` the author + publish date the publish gate requires.
 
@@ -39,12 +39,12 @@ def credit_author(
         defaults={"first_name": "Byline", "last_name": "Author"},
     )
     CaseAuthor.objects.get_or_create(case=case, user=user, defaults={"ordinal": 0})
-    if description is not None:
+    if title is not None:
         # Per-person, not per-case: it lives on the profile CaseAuthor.save()
         # just created.
         profile = AuthorProfile.objects.get(user=user)
-        profile.description = description
-        profile.save(update_fields=["description"])
+        profile.title = title
+        profile.save(update_fields=["title"])
     if publish_date is not None:
         Case.objects.filter(pk=case.pk).update(case_publish_date=publish_date)
         # Keep the caller's in-memory instance consistent: most callers transition

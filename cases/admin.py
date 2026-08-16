@@ -433,7 +433,7 @@ class AuthorProfileAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
     Rows appear here automatically the first time someone is credited on a case,
     carrying only a generated slug and their account name. Filling in the photo,
-    description and links and ticking ``has_public_page`` is what publishes
+    title, bio and links and ticking ``has_public_page`` is what publishes
     /author/<slug>; until then the author's card renders without a link.
     """
 
@@ -445,7 +445,17 @@ class AuthorProfileAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     # fixable) but never regenerated behind the editor's back.
     fieldsets = (
         (None, {"fields": ("user", "slug", "has_public_page")}),
-        ("Profile", {"fields": ("name_en", "name_ne", "photo_url", "description")}),
+        (
+            "Profile",
+            {
+                "fields": ("name_en", "name_ne", "photo_url", "title", "bio"),
+                "description": (
+                    "`title` is the one-line role shown on the author card on "
+                    "every case page — keep it short. `bio` is the longer "
+                    "markdown biography, shown only on the profile page."
+                ),
+            },
+        ),
         ("Contact", {"fields": ("email", "links")}),
         (
             "Metadata",
