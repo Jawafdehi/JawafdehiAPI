@@ -170,6 +170,17 @@ class TimelineListField(models.JSONField):
 
 EDIT_HISTORY_DATE_ERROR = "Invalid date format (expected ISO format YYYY-MM-DD)"
 
+
+def edit_history_date_error(value):
+    """The single edit-history date error message, in ONE format.
+
+    Both layers use this, so the same bad value cannot produce two different
+    messages depending on whether it arrived through the API or a direct ORM
+    write. The offending value is included because the model field validates a
+    whole list, where "which entry?" is the first question.
+    """
+    return f"{EDIT_HISTORY_DATE_ERROR}: {value!r}"
+
 #: Extended YYYY-MM-DD only. A shape check is required IN ADDITION to
 #: ``date.fromisoformat``, not instead of it: on Python 3.11+ that parser also
 #: accepts ISO basic format ("20260814") and ISO week dates ("2026-W33-5"), both
@@ -293,7 +304,7 @@ class EditHistoryListField(models.JSONField):
             try:
                 parse_edit_history_date(date_str)
             except (ValueError, TypeError):
-                raise ValidationError(f"{EDIT_HISTORY_DATE_ERROR}: {date_str}")
+                raise ValidationError(edit_history_date_error(date_str))
 
             if not isinstance(entry["remarks"], str) or not entry["remarks"].strip():
                 raise ValidationError(

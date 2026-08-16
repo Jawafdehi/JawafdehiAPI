@@ -17,7 +17,7 @@ from jawafdehi_shared.entities.ids import (
     is_valid_material_iri,
 )
 
-from .fields import EDIT_HISTORY_DATE_ERROR, parse_edit_history_date
+from .fields import edit_history_date_error, parse_edit_history_date
 from .models import (
     CaseState,
     CaseType,
@@ -213,7 +213,7 @@ class EditHistoryItemSerializer(serializers.Serializer):
         try:
             parse_edit_history_date(value)
         except (ValueError, TypeError):
-            raise serializers.ValidationError(EDIT_HISTORY_DATE_ERROR)
+            raise serializers.ValidationError(edit_history_date_error(value))
         return value
 
     def validate_remarks(self, value):

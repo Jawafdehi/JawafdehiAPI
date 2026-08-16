@@ -802,8 +802,14 @@ def test_patch_rejects_an_out_of_range_author_id():
     ],
 )
 def test_patch_rejects_edit_history_dates_that_are_not_plain_iso_dates(value):
-    """datetime.fromisoformat accepts all of these on 3.11+; date.fromisoformat
-    does not, and these are rendered verbatim on the public case page."""
+    """None of these is a plain YYYY-MM-DD date, and all would be rendered
+    verbatim on the public case page.
+
+    Worth being precise about why the shape check exists: on 3.11+ BOTH parsers
+    accept the basic form ("20260814") and the week form ("2026-W33-5").
+    ``date.fromisoformat`` only narrows ``datetime.fromisoformat`` by rejecting
+    timestamps and offsets — so swapping parsers is not on its own enough, and
+    ``parse_edit_history_date`` shape-checks with a regex before parsing."""
     user = _caseworker(f"date-{abs(hash(value)) % 10000}")
     case = _make_case()
 
@@ -897,3 +903,25 @@ def test_patch_rejects_an_impossible_edit_history_date():
     )
 
     assert response.status_code == 422, response.data
+
+
+@pytest.mark.django_db
+def test_both_layers_report_the_same_message_for_a_bad_edit_history_date():
+    """One rule, one error format — API and direct ORM write must agree."""
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    from cases.caseworker_serializers import EditHistoryItemSerializer
+
+    bad = "2026-W33-5"
+
+    serializer = EditHistoryItemSerializer(data={"date": bad, "remarks": "x"})
+    assert not serializer.is_valid()
+    api_message = str(serializer.errors["date"][0])
+
+    case = _make_case()
+    case.public_edit_history = [{"date": bad, "remarks": "x"}]
+    with pytest.raises(DjangoValidationError) as exc:
+        case.full_clean()
+    model_message = exc.value.message_dict["public_edit_history"][0]
+
+    assert api_message == model_message
