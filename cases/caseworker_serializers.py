@@ -150,33 +150,48 @@ class EvidenceItemSerializer(serializers.Serializer):
         return (value or "").strip()
 
 
-class AuthorPatchItemSerializer(serializers.Serializer):
-    """One credited author = a reference to a Django account (the CaseAuthor join).
+class AuthorIdListField(serializers.ListField):
+    """The writable byline: an ORDERED list of account ids.
 
-    ``user_id`` is the only thing a client may choose. ``display_name`` is
-    accepted but IGNORED: the byline name is snapshotted server-side from the
-    account, so a client cannot publish an arbitrary name against someone else's
-    id. It is declared here only so the editor can PATCH back the exact author
-    list it read without tripping the unknown-field check.
+    Order in the list IS the byline order — the only per-case fact about an
+    author. Name, photo, description and links are per-person and are edited on
+    the author's ``AuthorProfile``, never through a case patch.
+
+    Accepts a bare id or a ``{"user_id": N}`` object per entry, so the editor can
+    PATCH back a list derived from the richer read shape without reshaping it.
     """
 
-    user_id = serializers.IntegerField()
-    display_name = serializers.CharField(
-        required=False, allow_blank=True, allow_null=True
-    )
-    credit_note = serializers.CharField(
-        required=False, allow_blank=True, allow_null=True, default=""
-    )
+    child = serializers.JSONField()
 
-    def validate_user_id(self, value):
-        # Resolved here rather than at persist time so an unknown id is a 422
-        # field error on /authors, not an IntegrityError mid-rewrite.
-        if not User.objects.filter(pk=value).exists():
-            raise serializers.ValidationError(f"No user with id {value}.")
-        return value
+    def to_internal_value(self, data):
+        entries = super().to_internal_value(data)
+        ids = []
+        for entry in entries:
+            raw = entry.get("user_id") if isinstance(entry, dict) else entry
+            if isinstance(raw, bool) or raw is None:
+                raise serializers.ValidationError(
+                    f"Each author must be an account id or {{'user_id': N}}: {entry!r}"
+                )
+            try:
+                user_id = int(raw)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(f"Invalid author id: {raw!r}")
+            # Dropped rather than rejected: a double-click in the picker should
+            # not 422 an otherwise-valid save.
+            if user_id not in ids:
+                ids.append(user_id)
 
-    def validate_credit_note(self, value):
-        return (value or "").strip()
+        # Resolved here so an unknown id is a 422 on /authors rather than an
+        # IntegrityError partway through the join rewrite.
+        known = set(
+            User.objects.filter(pk__in=ids).values_list("pk", flat=True)
+        )
+        missing = [user_id for user_id in ids if user_id not in known]
+        if missing:
+            raise serializers.ValidationError(
+                f"No user with id {', '.join(str(m) for m in missing)}."
+            )
+        return ids
 
 
 class EditHistoryItemSerializer(serializers.Serializer):
@@ -363,7 +378,7 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     # Declared on the SHARED write serializer, not just the patch one: the SPA's
     # new-case form posts the whole form in one go, so authors typed there would
     # be silently dropped if this were PATCH-only.
-    authors = AuthorPatchItemSerializer(many=True, required=False)
+    authors = AuthorIdListField(required=False)
     slug = serializers.SlugField(
         max_length=50,
         required=False,

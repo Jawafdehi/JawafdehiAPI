@@ -79,17 +79,19 @@ EDIT_HISTORY_ITEM_INPUT_SCHEMA = {
     "required": ["date", "remarks"],
     "additionalProperties": False,
 }
-# ``display_name`` is accepted so a caller can echo back a case it just read,
-# but the API ignores it and snapshots the name from the account itself.
+# The byline's only per-case fact is ORDER, so an author is just an account id.
+# A ``{"user_id": N}`` object is accepted too, so a caller can echo back the
+# richer read shape without reshaping it. Name, photo and description are
+# per-person and live on the author's profile, not on the case.
 AUTHOR_ITEM_INPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "user_id": {"type": "integer"},
-        "display_name": {"type": "string"},
-        "credit_note": {"type": "string", "maxLength": 120},
-    },
-    "required": ["user_id"],
-    "additionalProperties": False,
+    "oneOf": [
+        {"type": "integer"},
+        {
+            "type": "object",
+            "properties": {"user_id": {"type": "integer"}},
+            "required": ["user_id"],
+        },
+    ]
 }
 CASE_CREATE_PROPERTIES: dict[str, Any] = {
     "case_type": {
@@ -147,8 +149,9 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
         "type": "array",
         "items": AUTHOR_ITEM_INPUT_SCHEMA,
         "description": (
-            "Credited authors, in byline order. At least one is required before "
-            "the case can leave DRAFT."
+            "Credited author account ids, in byline order. At least one is "
+            "required before the case can leave DRAFT. Author names, photos and "
+            "bios are per-person and are edited on the author's profile."
         ),
     },
     "alleged_entities": {

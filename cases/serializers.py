@@ -13,11 +13,11 @@ from rest_framework import serializers
 
 from .models import (
     Case,
-    CaseAuthor,
     CaseEntityRelationship,
     CaseStateChange,
     Feedback,
     FeedbackType,
+    name_for_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,10 +102,10 @@ class CaseEntityRelationshipSerializer(serializers.ModelSerializer):
 class CaseAuthorCandidateSerializer(serializers.Serializer):
     """One selectable account for the case-author byline picker.
 
-    ``display_name`` is computed by the same helper the join uses
-    (``CaseAuthor.name_for``), so what the picker shows is exactly what gets
-    snapshotted onto the credit. ``username`` rides along to disambiguate two
-    colleagues with the same display name — never an email or other PII.
+    ``display_name`` prefers the account's ``AuthorProfile`` name, so the picker
+    shows the same name the byline and the profile page will. ``username`` rides
+    along to disambiguate two colleagues with the same display name — never an
+    email or other PII.
     """
 
     id = serializers.IntegerField(read_only=True)
@@ -114,7 +114,54 @@ class CaseAuthorCandidateSerializer(serializers.Serializer):
 
     @extend_schema_field(OpenApiTypes.STR)
     def get_display_name(self, obj):
-        return CaseAuthor.name_for(obj)
+        profile = getattr(obj, "author_profile", None)
+        return profile.display_name if profile else name_for_user(obj)
+
+
+class AuthorProfileSerializer(serializers.Serializer):
+    """A public author profile: the card and the /author/<slug> page.
+
+    ``email`` is opt-in BY PRESENCE — a blank field is simply absent from the
+    payload rather than an empty string, so the frontend never has to decide
+    whether "" means "no address" or "not loaded". A personal address is not
+    published unless someone put one here.
+    """
+
+    slug = serializers.CharField(read_only=True)
+    display_name = serializers.CharField(read_only=True)
+    name_ne = serializers.CharField(read_only=True, allow_blank=True)
+    photo_url = serializers.CharField(read_only=True, allow_blank=True)
+    description = serializers.CharField(read_only=True, allow_blank=True)
+    email = serializers.SerializerMethodField()
+    links = serializers.ListField(child=serializers.DictField(), read_only=True)
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_email(self, obj):
+        return obj.email or None
+
+
+class AuthorCaseSummarySerializer(serializers.Serializer):
+    """One case card on an author's profile page.
+
+    Deliberately slim: the profile page lists what someone wrote, so it needs
+    the handful of fields a card renders and nothing else. Reusing
+    ``CaseSerializer`` here would drag entity resolution (a cross-DB call) across
+    every case an author has ever written.
+    """
+
+    slug = serializers.CharField(read_only=True)
+    title = serializers.CharField(read_only=True)
+    short_description = serializers.CharField(read_only=True, allow_blank=True)
+    case_type = serializers.CharField(read_only=True)
+    thumbnail_url = serializers.CharField(read_only=True, allow_blank=True)
+    case_publish_date = serializers.DateField(read_only=True, allow_null=True)
+    bigo = serializers.IntegerField(read_only=True, allow_null=True)
+
+
+class AuthorProfileDetailSerializer(AuthorProfileSerializer):
+    """An author profile plus the cases they wrote, newest first."""
+
+    cases = AuthorCaseSummarySerializer(many=True, read_only=True)
 
 
 class CaseStateChangeSerializer(serializers.ModelSerializer):
@@ -298,8 +345,8 @@ class CaseSerializer(serializers.ModelSerializer):
         ),
     )
     authors = serializers.SerializerMethodField(
-        help_text="Credited authors of this case, in byline order "
-        "(display_name + optional credit_note; user_id for casework viewers only)"
+        help_text="Credited authors of this case, in byline order, resolved "
+        "from each author's profile (user_id for casework viewers only)"
     )
 
     @extend_schema_field(
@@ -308,27 +355,56 @@ class CaseSerializer(serializers.ModelSerializer):
             many=True,
             fields={
                 "user_id": serializers.IntegerField(required=False),
+                "slug": serializers.CharField(),
                 "display_name": serializers.CharField(),
-                "credit_note": serializers.CharField(allow_blank=True),
+                "name_ne": serializers.CharField(allow_blank=True),
+                "photo_url": serializers.CharField(allow_blank=True),
+                "description": serializers.CharField(allow_blank=True),
+                "has_public_page": serializers.BooleanField(),
             },
         )
     )
     def get_authors(self, obj):
-        """The public byline, in order.
+        """The public byline, in order, resolved from each author's profile.
 
-        ``user_id`` is included only for casework viewers: the editor needs it to
+        Every field here is PER-PERSON — name, photo, description — because the
+        byline's only per-case fact is the order these come back in. That is why
+        there is no snapshot: a byline points at a person rather than freezing
+        them, so a rename shows the new name on every case they wrote.
+
+        ``has_public_page`` tells the card whether to link: a profile is created
+        automatically on first credit and starts empty, and linking to an empty
+        page is worse than rendering a plain card.
+
+        ``user_id`` is included only for casework viewers — the editor needs it to
         round-trip the author list through PATCH, but there is no reason to
-        publish internal account primary keys. Public callers get the name and
-        credit note, which is all the byline renders — the same "display label
+        publish internal account primary keys. This is the same "display label
         only" boundary ``CaseStateChangeSerializer.actor_name`` holds.
         """
         include_user_id = _viewer_has_casework_access(self.context)
         credits = []
         for credit in obj.author_credits.all():
-            entry = {
-                "display_name": credit.display_name,
-                "credit_note": credit.credit_note,
-            }
+            profile = getattr(credit.user, "author_profile", None)
+            if profile is None:
+                # Defensive: CaseAuthor.save() creates one, so this only happens
+                # for a row written by raw SQL. Render the name, link nowhere.
+                entry = {
+                    "slug": "",
+                    "display_name": name_for_user(credit.user),
+                    "name_ne": "",
+                    "photo_url": "",
+                    "description": "",
+                    "has_public_page": False,
+                }
+            else:
+                entry = {
+                    "slug": profile.slug,
+                    "display_name": profile.display_name,
+                    "name_ne": profile.name_ne,
+                    "photo_url": profile.photo_url,
+                    "description": profile.description,
+                    "has_public_page": profile.has_public_page,
+                }
             if include_user_id:
                 entry["user_id"] = credit.user_id
             credits.append(entry)

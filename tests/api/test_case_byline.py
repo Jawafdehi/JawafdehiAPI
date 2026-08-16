@@ -1,8 +1,9 @@
 """The structured public byline: authors, publish date, and edit history.
 
 Replaces the free-text ``Case.public_notes`` attribution. Covers the publish
-gate, the author join's replace semantics, the display-name snapshot, the
-casework-only ``user_id`` boundary, and the author-picker endpoint.
+gate, the author join's replace semantics and ordering, the auto-created
+AuthorProfile (slug, per-person description), the casework-only ``user_id``
+boundary, the author-picker endpoint, and the public profile page.
 """
 
 from datetime import date
@@ -14,6 +15,7 @@ from django.db.models import ProtectedError
 from rest_framework.test import APIClient
 
 from cases.models import (
+    AuthorProfile,
     Case,
     CaseAuthor,
     CaseEntityRelationship,
@@ -148,7 +150,7 @@ def test_existing_published_case_without_a_byline_still_saves():
     catastrophic "cleanup".
     """
     case = _make_case(state=CaseState.PUBLISHED)
-    assert not case.authors and case.case_publish_date is None
+    assert not case.author_ids and case.case_publish_date is None
 
     case.title = "Edited without a byline"
     case.save()
@@ -171,33 +173,68 @@ def test_republishing_a_legacy_case_does_require_a_byline():
 
 
 # ---------------------------------------------------------------------------
-# The CaseAuthor join
+# The CaseAuthor join + AuthorProfile
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_display_name_is_snapshotted_from_the_account():
+def test_crediting_someone_creates_their_profile_and_slug():
+    """"Every case author has a slug" holds by construction, not by backfill."""
     user = get_user_model().objects.create_user(
         username="rujit", first_name="Rujit", last_name="Kafle"
     )
     case = _make_case()
-    credit = CaseAuthor.objects.create(case=case, user=user)
+    CaseAuthor.objects.create(case=case, user=user)
 
-    assert credit.display_name == "Rujit Kafle"
+    profile = AuthorProfile.objects.get(user=user)
+    assert profile.slug == "rujit-kafle"
+    assert profile.display_name == "Rujit Kafle"
+    # Empty until someone fills it in, so it is not published yet.
+    assert profile.has_public_page is False
 
 
 @pytest.mark.django_db
-def test_display_name_falls_back_to_username_when_there_is_no_full_name():
+def test_profile_slug_falls_back_to_username_without_a_full_name():
     user = get_user_model().objects.create_user(username="mononym")
     case = _make_case()
-    credit = CaseAuthor.objects.create(case=case, user=user)
+    CaseAuthor.objects.create(case=case, user=user)
 
-    assert credit.display_name == "mononym"
+    assert AuthorProfile.objects.get(user=user).slug == "mononym"
 
 
 @pytest.mark.django_db
-def test_renaming_an_account_does_not_rewrite_a_published_byline():
-    """The whole point of snapshotting rather than reading through."""
+def test_profile_slugs_do_not_collide_for_identical_names():
+    """Suffixed -2, not a random tail: a slug is a person's public handle."""
+    case = _make_case()
+    for username in ("a", "b"):
+        user = get_user_model().objects.create_user(
+            username=username, first_name="Ram", last_name="Gautam"
+        )
+        CaseAuthor.objects.create(case=_make_case() if username == "b" else case, user=user)
+
+    assert sorted(AuthorProfile.objects.values_list("slug", flat=True)) == [
+        "ram-gautam",
+        "ram-gautam-2",
+    ]
+
+
+@pytest.mark.django_db
+def test_a_slug_is_generated_even_for_a_name_with_no_latin_letters():
+    """validate_slug requires a leading letter; a Devanagari name has none."""
+    user = get_user_model().objects.create_user(
+        username="\u0938\u0941\u092c\u094b\u0927", first_name="\u0938\u0941\u092c\u094b\u0927", last_name="\u0915\u0901\u0921\u0947\u0932"
+    )
+    case = _make_case()
+    CaseAuthor.objects.create(case=case, user=user)
+
+    profile = AuthorProfile.objects.get(user=user)
+    assert profile.slug
+    assert profile.slug[0].isalpha()
+
+
+@pytest.mark.django_db
+def test_renaming_an_account_does_not_change_the_profile_name():
+    """The profile name is the canonical one; the account name only seeds it."""
     user = get_user_model().objects.create_user(
         username="sambhav", first_name="Sambhav", last_name="Koirala"
     )
@@ -207,8 +244,43 @@ def test_renaming_an_account_does_not_rewrite_a_published_byline():
     user.last_name = "Koirala-Sharma"
     user.save()
 
-    case.refresh_from_db()
-    assert case.authors[0]["display_name"] == "Sambhav Koirala"
+    assert AuthorProfile.objects.get(user=user).display_name == "Sambhav Koirala"
+
+
+@pytest.mark.django_db
+def test_a_description_is_per_person_so_it_shows_on_every_case_they_wrote():
+    """The point of moving it off the join: one fact, stored once."""
+    user = get_user_model().objects.create_user(
+        username="sambhav2", first_name="Sambhav", last_name="Koirala"
+    )
+    first = _make_case(state=CaseState.PUBLISHED)
+    second = _make_case(state=CaseState.PUBLISHED)
+    CaseAuthor.objects.create(case=first, user=user)
+    CaseAuthor.objects.create(case=second, user=user)
+
+    profile = AuthorProfile.objects.get(user=user)
+    profile.description = "BALLB 4th Year Student"
+    profile.save()
+
+    for case in (first, second):
+        response = APIClient().get(URL.format(case.slug))
+        assert response.data["authors"][0]["description"] == "BALLB 4th Year Student"
+
+
+@pytest.mark.django_db
+def test_nepali_name_falls_back_to_english_when_unset():
+    user = get_user_model().objects.create_user(
+        username="niroj", first_name="Niroj", last_name="Aryal"
+    )
+    case = _make_case()
+    CaseAuthor.objects.create(case=case, user=user)
+    profile = AuthorProfile.objects.get(user=user)
+
+    assert profile.name_for_language("ne") == "Niroj Aryal"
+    profile.name_ne = "\u0928\u093f\u0930\u094b\u091c \u0905\u0930\u094d\u092f\u093e\u0932"
+    profile.save()
+    assert profile.name_for_language("ne") == "\u0928\u093f\u0930\u094b\u091c \u0905\u0930\u094d\u092f\u093e\u0932"
+    assert profile.name_for_language("en") == "Niroj Aryal"
 
 
 @pytest.mark.django_db
@@ -223,7 +295,7 @@ def test_deleting_a_credited_account_is_refused():
 
 
 @pytest.mark.django_db
-def test_authors_property_orders_by_ordinal_not_insertion():
+def test_author_ids_order_by_ordinal_not_insertion():
     first = get_user_model().objects.create_user(username="second-added")
     second = get_user_model().objects.create_user(username="first-added")
     case = _make_case()
@@ -231,10 +303,7 @@ def test_authors_property_orders_by_ordinal_not_insertion():
     CaseAuthor.objects.create(case=case, user=second, ordinal=0)
 
     case.refresh_from_db()
-    assert [a["display_name"] for a in case.authors] == [
-        "first-added",
-        "second-added",
-    ]
+    assert case.author_ids == [second.id, first.id]
 
 
 @pytest.mark.django_db
@@ -242,39 +311,31 @@ def test_assigning_authors_deduplicates_on_user():
     """A double-click in the picker must not 500 on the unique constraint."""
     user = get_user_model().objects.create_user(username="dupe")
     case = _make_case()
-    case.authors = [{"user_id": user.id}, {"user_id": user.id}]
+    case.author_ids = [user.id, user.id]
     case.save()
 
     case.refresh_from_db()
-    assert len(case.authors) == 1
+    assert case.author_ids == [user.id]
 
 
 @pytest.mark.django_db
-def test_authors_on_an_unsaved_case_is_empty_rather_than_raising():
+def test_author_ids_on_an_unsaved_case_is_empty_rather_than_raising():
     """``validate()`` reads the property; an unsaved instance has no reverse rows."""
-    assert Case(title="Unsaved").authors == []
+    assert Case(title="Unsaved").author_ids == []
 
 
 @pytest.mark.django_db
-def test_rewriting_the_same_authors_preserves_the_snapshotted_name():
-    """A no-op re-send must not re-derive names from since-renamed accounts."""
-    user = get_user_model().objects.create_user(
-        username="niroj", first_name="Niroj", last_name="Aryal"
-    )
-    case = _make_case()
-    case.authors = [{"user_id": user.id}]
-    case.save()
+def test_the_m2m_reverse_accessor_lists_the_cases_someone_wrote():
+    """``user.authored_cases`` is what the public author page queries."""
+    user = get_user_model().objects.create_user(username="prolific")
+    first, second = _make_case(), _make_case()
+    CaseAuthor.objects.create(case=first, user=user)
+    CaseAuthor.objects.create(case=second, user=user)
 
-    user.first_name = "N."
-    user.save()
-
-    # Same list, but with a credit_note — forces a real rewrite, not a no-op.
-    case.authors = [{"user_id": user.id, "credit_note": "BALLB 5th Year Student"}]
-    case.save()
-
-    case.refresh_from_db()
-    assert case.authors[0]["display_name"] == "Niroj Aryal"
-    assert case.authors[0]["credit_note"] == "BALLB 5th Year Student"
+    assert set(user.authored_cases.values_list("pk", flat=True)) == {
+        first.pk,
+        second.pk,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -290,11 +351,7 @@ def test_patch_sets_authors_publish_date_and_edit_history():
         _client(user),
         case,
         [
-            {
-                "op": "replace",
-                "path": "/authors",
-                "value": [{"user_id": user.id, "credit_note": "Research lead"}],
-            },
+            {"op": "replace", "path": "/authors", "value": [user.id]},
             {"op": "replace", "path": "/case_publish_date", "value": "2026-08-14"},
             {
                 "op": "replace",
@@ -306,7 +363,7 @@ def test_patch_sets_authors_publish_date_and_edit_history():
 
     assert response.status_code == 200, response.data
     case.refresh_from_db()
-    assert [a["credit_note"] for a in case.authors] == ["Research lead"]
+    assert case.author_ids == [user.id]
     assert case.case_publish_date == date(2026, 8, 14)
     assert case.public_edit_history == [
         {"date": "2026-08-15", "remarks": "Corrected the bigo."}
@@ -339,7 +396,7 @@ def test_scalar_only_patch_leaves_the_author_list_untouched():
     user = _caseworker("untouched")
     case = _make_case()
     credit_author(case)
-    before = case.authors
+    before = case.author_ids
 
     response = _patch(
         _client(user), case, [{"op": "replace", "path": "/title", "value": "Retitled"}]
@@ -347,7 +404,7 @@ def test_scalar_only_patch_leaves_the_author_list_untouched():
 
     assert response.status_code == 200, response.data
     case.refresh_from_db()
-    assert case.authors == before
+    assert case.author_ids == before
 
 
 @pytest.mark.django_db
@@ -357,7 +414,7 @@ def test_patch_with_an_unknown_user_id_is_a_422_not_a_500():
     response = _patch(
         _client(user),
         case,
-        [{"op": "replace", "path": "/authors", "value": [{"user_id": 9_999_999}]}],
+        [{"op": "replace", "path": "/authors", "value": [9_999_999]}],
     )
 
     assert response.status_code == 422, response.data
@@ -365,28 +422,21 @@ def test_patch_with_an_unknown_user_id_is_a_422_not_a_500():
 
 
 @pytest.mark.django_db
-def test_patch_ignores_a_client_supplied_display_name():
-    """A client must not be able to publish an arbitrary name against an id."""
-    user = _caseworker("no-spoofing")
-    user.first_name, user.last_name = "Real", "Name"
-    user.save()
+def test_patch_preserves_the_order_the_ids_were_sent_in():
+    """List order IS byline order — the only per-case fact about an author."""
+    user = _caseworker("order-setter")
+    other = get_user_model().objects.create_user(username="second-author")
     case = _make_case()
 
     response = _patch(
         _client(user),
         case,
-        [
-            {
-                "op": "replace",
-                "path": "/authors",
-                "value": [{"user_id": user.id, "display_name": "Someone Else"}],
-            }
-        ],
+        [{"op": "replace", "path": "/authors", "value": [other.id, user.id]}],
     )
 
     assert response.status_code == 200, response.data
     case.refresh_from_db()
-    assert case.authors[0]["display_name"] == "Real Name"
+    assert case.author_ids == [other.id, user.id]
 
 
 @pytest.mark.django_db
@@ -452,14 +502,15 @@ def test_publish_date_can_be_cleared_back_to_null_on_a_draft():
 @pytest.mark.django_db
 def test_anonymous_reader_gets_the_byline_but_not_account_ids():
     case = _make_case(state=CaseState.PUBLISHED)
-    credit_author(case, credit_note="BALLB 4th Year Student")
+    credit_author(case, description="BALLB 4th Year Student")
 
     response = APIClient().get(URL.format(case.slug))
 
     assert response.status_code == 200
     author = response.data["authors"][0]
     assert author["display_name"] == "Byline Author"
-    assert author["credit_note"] == "BALLB 4th Year Student"
+    assert author["description"] == "BALLB 4th Year Student"
+    assert author["slug"] == "byline-author"
     assert "user_id" not in author
     assert response.data["case_publish_date"] == "2026-08-01"
 
@@ -540,3 +591,126 @@ def test_picker_is_not_truncated_by_the_default_page_size():
     # A flat list, not a {count, results} page.
     assert isinstance(response.data, list)
     assert len(response.data) >= 31
+
+
+# ---------------------------------------------------------------------------
+# The public author profile page
+# ---------------------------------------------------------------------------
+
+
+def _published_profile(username="published-author", **fields):
+    """A credited author whose profile has been filled in and published."""
+    user = get_user_model().objects.create_user(
+        username=username, first_name="Subodh", last_name="Kandel"
+    )
+    case = _make_case(state=CaseState.PUBLISHED)
+    CaseAuthor.objects.create(case=case, user=user)
+    profile = AuthorProfile.objects.get(user=user)
+    profile.has_public_page = True
+    for key, value in fields.items():
+        setattr(profile, key, value)
+    profile.save()
+    return user, profile, case
+
+
+@pytest.mark.django_db
+def test_author_page_is_public_and_returns_the_profile():
+    _user, profile, _case = _published_profile(
+        description="Caseworker",
+        photo_url="https://s3.jawafdehi.org/team/subodh.jpeg",
+        links=[{"type": "instagram", "value": "https://instagram.com/subodh"}],
+    )
+
+    response = APIClient().get(f"/api/authors/{profile.slug}/")
+
+    assert response.status_code == 200
+    assert response.data["display_name"] == "Subodh Kandel"
+    assert response.data["description"] == "Caseworker"
+    assert response.data["photo_url"] == "https://s3.jawafdehi.org/team/subodh.jpeg"
+    assert response.data["links"][0]["type"] == "instagram"
+
+
+@pytest.mark.django_db
+def test_author_page_omits_email_when_none_is_set():
+    """Opt-in by presence: a blank address is absent, not an empty string."""
+    _user, profile, _case = _published_profile()
+
+    response = APIClient().get(f"/api/authors/{profile.slug}/")
+
+    assert response.data["email"] is None
+
+
+@pytest.mark.django_db
+def test_author_page_shows_an_email_that_was_set():
+    _user, profile, _case = _published_profile(email="kandel@example.org")
+
+    response = APIClient().get(f"/api/authors/{profile.slug}/")
+
+    assert response.data["email"] == "kandel@example.org"
+
+
+@pytest.mark.django_db
+def test_unpublished_profile_404s():
+    """A profile is auto-created empty on first credit; that is not a page."""
+    user = get_user_model().objects.create_user(username="not-published")
+    CaseAuthor.objects.create(case=_make_case(), user=user)
+    profile = AuthorProfile.objects.get(user=user)
+    assert profile.has_public_page is False
+
+    assert APIClient().get(f"/api/authors/{profile.slug}/").status_code == 404
+
+
+@pytest.mark.django_db
+def test_author_page_lists_cases_newest_published_first():
+    user, profile, first = _published_profile()
+    Case.objects.filter(pk=first.pk).update(case_publish_date=date(2025, 7, 1))
+
+    middle = _make_case(state=CaseState.PUBLISHED, case_publish_date=date(2026, 8, 14))
+    newest = _make_case(state=CaseState.PUBLISHED, case_publish_date=date(2026, 8, 20))
+    for case in (middle, newest):
+        CaseAuthor.objects.create(case=case, user=user)
+
+    response = APIClient().get(f"/api/authors/{profile.slug}/")
+
+    assert [c["slug"] for c in response.data["cases"]] == [
+        newest.slug,
+        middle.slug,
+        first.slug,
+    ]
+
+
+@pytest.mark.django_db
+def test_author_page_sorts_undated_cases_last_not_first():
+    """A NULL publish date must not float to the top of the list."""
+    user, profile, undated = _published_profile()
+    Case.objects.filter(pk=undated.pk).update(case_publish_date=None)
+    dated = _make_case(state=CaseState.PUBLISHED, case_publish_date=date(2026, 8, 20))
+    CaseAuthor.objects.create(case=dated, user=user)
+
+    response = APIClient().get(f"/api/authors/{profile.slug}/")
+
+    assert [c["slug"] for c in response.data["cases"]] == [dated.slug, undated.slug]
+
+
+@pytest.mark.django_db
+def test_author_page_never_lists_a_draft():
+    """An author page must not become the one place a draft's existence leaks."""
+    user, profile, published = _published_profile()
+    draft = _make_case(state=CaseState.DRAFT, title="Secret draft")
+    CaseAuthor.objects.create(case=draft, user=user)
+
+    response = APIClient().get(f"/api/authors/{profile.slug}/")
+
+    slugs = [c["slug"] for c in response.data["cases"]]
+    assert slugs == [published.slug]
+    assert "Secret draft" not in str(response.data)
+
+
+@pytest.mark.django_db
+def test_case_byline_reports_whether_the_author_has_a_public_page():
+    """The card links only when there is a page to link to."""
+    _user, _profile, case = _published_profile()
+    response = APIClient().get(URL.format(case.slug))
+
+    assert response.data["authors"][0]["has_public_page"] is True
+    assert response.data["authors"][0]["slug"]

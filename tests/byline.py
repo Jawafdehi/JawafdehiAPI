@@ -10,7 +10,7 @@ from datetime import date
 
 from django.contrib.auth import get_user_model
 
-from cases.models import Case, CaseAuthor
+from cases.models import AuthorProfile, Case, CaseAuthor
 
 #: Arbitrary but fixed — tests assert on transitions, never on this value.
 DEFAULT_PUBLISH_DATE = date(2026, 8, 1)
@@ -20,7 +20,7 @@ def credit_author(
     case,
     username="byline-author",
     publish_date=DEFAULT_PUBLISH_DATE,
-    credit_note="",
+    description=None,
 ):
     """Give ``case`` the author + publish date the publish gate requires.
 
@@ -38,11 +38,13 @@ def credit_author(
         username=username,
         defaults={"first_name": "Byline", "last_name": "Author"},
     )
-    CaseAuthor.objects.get_or_create(
-        case=case,
-        user=user,
-        defaults={"ordinal": 0, "credit_note": credit_note},
-    )
+    CaseAuthor.objects.get_or_create(case=case, user=user, defaults={"ordinal": 0})
+    if description is not None:
+        # Per-person, not per-case: it lives on the profile CaseAuthor.save()
+        # just created.
+        profile = AuthorProfile.objects.get(user=user)
+        profile.description = description
+        profile.save(update_fields=["description"])
     if publish_date is not None:
         Case.objects.filter(pk=case.pk).update(case_publish_date=publish_date)
         # Keep the caller's in-memory instance consistent: most callers transition

@@ -15,7 +15,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.contrib.auth import get_user_model
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, F, OuterRef, Q
 from django.http import Http404, HttpResponse, HttpResponsePermanentRedirect
 from django.urls import reverse
 from django.utils import timezone
@@ -30,7 +30,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import filters, mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.generics import ListAPIView
+from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, DjangoModelPermissions, IsAuthenticated
@@ -54,6 +54,7 @@ from .caseworker_serializers import (
 )
 from .permissions import IsCaseAuthorPicker, IsFeedbackTriager
 from .models import (
+    AuthorProfile,
     Case,
     CaseEntityRelationship,
     CaseMaterialReference,
@@ -74,6 +75,8 @@ from .rules.predicates import (
     is_readonly,
 )
 from .serializers import (
+    AuthorCaseSummarySerializer,
+    AuthorProfileDetailSerializer,
     CaseAuthorCandidateSerializer,
     CaseDetailSerializer,
     CaseSerializer,
@@ -512,8 +515,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # ``CaseSerializer.get_evidence`` iterates ``material_references``;
             # prefetch it so a list page doesn't fire one query per card (N+1).
             "material_references",
-            # Same for ``get_authors`` and the byline.
-            "author_credits",
+            # Same for ``get_authors``; through to the profile, which the byline
+            # resolves every name/photo/description from.
+            "author_credits__user__author_profile",
         )
 
         # Reverse lookup: cases citing a specific NGM court case by its canonical
@@ -744,9 +748,10 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 # (ADR: cases own no docs).
                 self._write_material_references(case, validated.get("evidence", []))
 
-                # Credited authors — the CaseAuthor join. Only when the payload
-                # carried the key: passing [] unconditionally would be a write
-                # intent, and _sync_author_credits treats that as "clear".
+                # Credited authors — the CaseAuthor join (an ordered list of
+                # account ids). Only when the payload carried the key: passing []
+                # unconditionally would be a write intent, and
+                # _sync_author_credits treats that as "clear".
                 if "authors" in validated:
                     case._sync_author_credits(validated["authors"])
         except ValidationError as exc:
@@ -1542,12 +1547,54 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "public_edit_history": (
                 list(case.public_edit_history) if case.public_edit_history else []
             ),
-            # Single property read over the CaseAuthor join, same as court_cases.
-            # Carries display_name so the editor can render the list it just read
-            # without a second lookup; the write side ignores it (the name is
-            # snapshotted server-side).
-            "authors": case.authors,
+            # The byline's ONLY per-case fact is order, so the writable shape is
+            # a plain ordered list of account ids. Display details (name, photo,
+            # description) are per-person and come back on the READ serializer,
+            # resolved from each author's AuthorProfile.
+            "authors": case.author_ids,
         }
+
+
+@extend_schema(
+    summary="Get a public author profile",
+    description=(
+        "An author's public profile and the cases they wrote, newest first. "
+        "Public. 404s unless the profile is published (`has_public_page`) — a "
+        "profile row is created automatically the first time someone is "
+        "credited, so an unpublished one is an empty placeholder, not a page."
+    ),
+    responses={200: AuthorProfileDetailSerializer},
+    tags=["cases"],
+)
+class AuthorProfileView(RetrieveAPIView):
+    """GET /api/authors/<slug>/ — a public author profile page.
+
+    Only PUBLISHED cases are listed. A caseworker's draft is not public
+    elsewhere, and an author page must not become the one place a draft's
+    existence leaks.
+
+    Ordered by ``case_publish_date`` descending — the date the case actually went
+    live, not ``created_at`` (which is when the row was typed in, routinely
+    months later). Cases with no publish date sort last rather than first, which
+    is what ``F(...).desc(nulls_last=True)`` buys over a plain ``-`` prefix.
+    """
+
+    serializer_class = AuthorProfileDetailSerializer
+    permission_classes = [AllowAny]
+    lookup_field = "slug"
+
+    def get_queryset(self):
+        return AuthorProfile.objects.filter(has_public_page=True).select_related("user")
+
+    def retrieve(self, request, *args, **kwargs):
+        profile = self.get_object()
+        cases = (
+            profile.user.authored_cases.filter(state=CaseState.PUBLISHED)
+            .order_by(F("case_publish_date").desc(nulls_last=True), "-created_at")
+        )
+        data = self.get_serializer(profile).data
+        data["cases"] = AuthorCaseSummarySerializer(cases, many=True).data
+        return Response(data)
 
 
 @extend_schema(
@@ -1592,7 +1639,9 @@ class CaseAuthorCandidateView(ListAPIView):
     pagination_class = None
 
     def get_queryset(self):
-        queryset = User.objects.filter(is_active=True)
+        # select_related so the serializer's profile-name lookup doesn't fan out
+        # into one query per candidate.
+        queryset = User.objects.filter(is_active=True).select_related("author_profile")
         search = (self.request.query_params.get("search") or "").strip()
         if search:
             queryset = queryset.filter(

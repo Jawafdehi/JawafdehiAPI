@@ -8,6 +8,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .api_views import (
+    AuthorProfileView,
     CaseAuthorCandidateView,
     CaseViewSet,
     FeedbackTriageViewSet,
@@ -43,6 +44,12 @@ urlpatterns = [
         "case-authors/",
         CaseAuthorCandidateView.as_view(),
         name="case-author-candidates",
+    ),
+    # Public author profile + the cases they wrote.
+    path(
+        "authors/<slug:slug>/",
+        AuthorProfileView.as_view(),
+        name="author-profile",
     ),
     path("statistics/", StatisticsView.as_view(), name="statistics"),
     path("feedback/", FeedbackView.as_view(), name="feedback"),

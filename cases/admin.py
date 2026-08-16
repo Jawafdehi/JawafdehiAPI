@@ -9,6 +9,7 @@ from django.utils.html import format_html
 from cases.widgets import ToastUIEditorWidget
 
 from .models import (
+    AuthorProfile,
     Case,
     CaseAuthor,
     CaseEntityRelationship,
@@ -143,6 +144,10 @@ class CaseAdminForm(forms.ModelForm):
             # which would loosen the model's contract everywhere to satisfy a form
             # that cannot write anyway; ``readonly_fields`` still renders the value.
             "weight",
+            # Edited through CaseAuthorInline, which also carries the byline
+            # ORDER. A plain M2M multi-select here would offer a second, unordered
+            # way to set the same rows and silently drop the ordinal.
+            "authors",
         ]
         widgets = {
             "description": ToastUIEditorWidget(),
@@ -422,18 +427,47 @@ class CaseEntityRelationshipInline(admin.TabularInline):
 # ============================================================================
 
 
+@admin.register(AuthorProfile)
+class AuthorProfileAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
+    """The person behind a byline. This is where a byline is actually edited.
+
+    Rows appear here automatically the first time someone is credited on a case,
+    carrying only a generated slug and their account name. Filling in the photo,
+    description and links and ticking ``has_public_page`` is what publishes
+    /author/<slug>; until then the author's card renders without a link.
+    """
+
+    list_display = ("display_name", "slug", "has_public_page", "credited_cases")
+    list_filter = ("has_public_page",)
+    search_fields = ("slug", "name_en", "name_ne", "user__username")
+    readonly_fields = ("created_at", "updated_at", "credited_cases")
+    # The slug is a public URL, so it is editable (a typo'd auto-slug must be
+    # fixable) but never regenerated behind the editor's back.
+    fieldsets = (
+        (None, {"fields": ("user", "slug", "has_public_page")}),
+        ("Profile", {"fields": ("name_en", "name_ne", "photo_url", "description")}),
+        ("Contact", {"fields": ("email", "links")}),
+        (
+            "Metadata",
+            {"fields": ("credited_cases", "created_at", "updated_at"), "classes": ("collapse",)},
+        ),
+    )
+
+    @admin.display(description="Cases credited")
+    def credited_cases(self, obj):
+        return obj.user.authored_cases.count() if obj.user_id else 0
+
+
 class CaseAuthorInline(admin.TabularInline):
     """Inline for the public byline (the CaseAuthor join), in display order.
 
-    ``display_name`` is shown read-only: it is a snapshot taken from the account
-    when the credit is written, and letting it be typed here would reintroduce
-    exactly the free-text drift the structured byline replaced.
+    Only the account and its position: name, photo, bio and links are
+    per-person and are edited on the author's AuthorProfile instead.
     """
 
     model = CaseAuthor
     extra = 0
-    fields = ("user", "display_name", "credit_note", "ordinal")
-    readonly_fields = ("display_name",)
+    fields = ("user", "ordinal")
     ordering = ("ordinal", "created_at")
     verbose_name = "Author credit"
     verbose_name_plural = "Author credits (public byline)"

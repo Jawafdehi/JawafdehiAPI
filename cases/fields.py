@@ -168,6 +168,64 @@ class TimelineListField(models.JSONField):
                     )
 
 
+class AuthorLinkListField(models.JSONField):
+    """
+    Stores an author's social links: a list of ``{type, value}`` entries.
+
+    The ``type`` vocabulary deliberately mirrors ``ContactType`` in the
+    frontend's ``src/data/team.ts``, so the author card and the team page speak
+    the same language and can share icon rendering. ``email`` is NOT one of them
+    — it is its own field on ``AuthorProfile``, because a personal address is
+    worth handling (and withholding) separately from a public profile link.
+    """
+
+    #: Kept in sync with `ContactType` in src/data/team.ts.
+    LINK_TYPES = frozenset(
+        {"facebook", "instagram", "linkedin", "github", "website", "twitter"}
+    )
+
+    def __init__(self, *args, **kwargs):
+        kwargs["default"] = list
+        kwargs["blank"] = True
+        super().__init__(*args, **kwargs)
+
+    def validate(self, value, model_instance):
+        """Validate that value is a list of known-type links with https URLs."""
+        super().validate(value, model_instance)
+
+        if not isinstance(value, list):
+            raise ValidationError("Value must be a list")
+
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise ValidationError(f"Author link must be a dictionary: {entry}")
+
+            for field in ("type", "value"):
+                if field not in entry:
+                    raise ValidationError(
+                        f"Author link missing required field '{field}': {entry}"
+                    )
+
+            link_type = entry["type"]
+            if link_type not in self.LINK_TYPES:
+                raise ValidationError(
+                    f"Unknown author link type '{link_type}'. Must be one of: "
+                    f"{', '.join(sorted(self.LINK_TYPES))}"
+                )
+
+            url = entry["value"]
+            if not isinstance(url, str) or not url.strip():
+                raise ValidationError(
+                    f"Author link value must be a non-empty string: {entry}"
+                )
+            # These render as outbound anchors on a public page; an unscheme'd or
+            # javascript: value must not reach the DOM.
+            if not url.startswith("https://"):
+                raise ValidationError(
+                    f"Author link value must be an https:// URL: {url}"
+                )
+
+
 class EditHistoryListField(models.JSONField):
     """
     Stores the case's PUBLIC edit history: a list of ``{date, remarks}`` entries.
