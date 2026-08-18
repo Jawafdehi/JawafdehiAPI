@@ -766,14 +766,14 @@ def test_search_returns_the_bigo_extent_as_whole_rupees():
     response["aggregations"] = {
         "bigo_extent": {
             "stats": {"count": 68, "min": 45220.0, "max": 6.6e10},
+            "distribution": {"buckets": {"buckets": []}},
         }
     }
     client.search.return_value = response
-    envelope = SearchService(client=client).search(q="x", types=["case"])
-    assert envelope["extents"] == {
-        "bigo": {"min": 45220, "max": 66_000_000_000, "count": 68}
-    }
-    assert isinstance(envelope["extents"]["bigo"]["max"], int)
+    bigo = SearchService(client=client).search(q="x", types=["case"])["extents"]["bigo"]
+    # The axis only — the bars have their own test below.
+    assert (bigo["min"], bigo["max"], bigo["count"]) == (45220, 66_000_000_000, 68)
+    assert isinstance(bigo["max"], int)
 
 
 def test_search_reports_no_extent_when_nothing_records_an_amount():
@@ -782,7 +782,10 @@ def test_search_reports_no_extent_when_nothing_records_an_amount():
     client = MagicMock()
     response = _canned_response()
     response["aggregations"] = {
-        "bigo_extent": {"stats": {"count": 0, "min": None, "max": None}}
+        "bigo_extent": {
+            "stats": {"count": 0, "min": None, "max": None},
+            "distribution": {"buckets": {"buckets": []}},
+        }
     }
     client.search.return_value = response
     assert SearchService(client=client).search(q="x", types=["case"])["extents"] == {}
@@ -865,3 +868,100 @@ def test_facets_sum_two_generations_of_the_same_alias():
 def test_by_index_agg_is_sized_above_the_type_count_for_mid_swap_generations():
     agg = build_query(q="x")["aggs"]["by_index"]["terms"]
     assert agg["size"] > len(svc.ALL_TYPES)
+
+
+# ── बिगो distribution (histogram bars) ─────────────────────────────────────────
+#
+# The bars answer "where do the cases I am searching actually sit?", so unlike the
+# axis they DO follow the query and the exact-match facets. What they must not
+# follow is the बिगो range itself — the control being drawn.
+
+
+def _distribution(body):
+    return body["aggs"]["bigo_extent"]["aggs"]["distribution"]
+
+
+def test_distribution_buckets_are_contiguous_and_open_at_both_ends():
+    """Every amount must land in exactly one bar, and none may fall off an end.
+
+    OpenSearch ``range`` buckets are half-open (``from`` inclusive, ``to``
+    exclusive), so adjacent edges must touch exactly — a gap silently loses
+    documents from the histogram, an overlap double-counts them.
+    """
+    ranges = _distribution(build_query(q="x", types=["case"]))["aggs"]["buckets"][
+        "range"
+    ]["ranges"]
+    assert ranges[0] == {"to": svc.BIGO_BUCKET_EDGES[0]}
+    assert ranges[-1] == {"from": svc.BIGO_BUCKET_EDGES[-1]}
+    for lower, upper in zip(ranges, ranges[1:]):
+        assert lower.get("to") == upper.get("from")
+
+
+def test_distribution_bars_are_coarser_than_the_slider_stops():
+    """Deliberate: ~68 cases record an amount, so a bar per 1/2/5 step is ~3 each
+    — noise rather than a distribution. Decade bars put ~10 in each."""
+    assert len(svc.BIGO_BUCKET_EDGES) < len(svc.BIGO_STOPS)
+    assert set(svc.BIGO_BUCKET_EDGES).issubset(set(svc.BIGO_STOPS))
+
+
+def test_distribution_follows_the_query_and_the_terms_facets():
+    """The reader wants the shape of what they are searching, not of the corpus."""
+    body = build_query(q="deuba", types=["case"], filters={"case_type": ["CORRUPTION"]})
+    scoped = _distribution(body)["filter"]["bool"]
+    assert {"terms": {"case_type": ["CORRUPTION"]}} in scoped["filter"]
+    assert scoped["must"] == body["query"]["bool"]["must"]
+
+
+def test_distribution_ignores_the_active_bigo_range():
+    """The regression this whole split exists to prevent.
+
+    A histogram narrowed by the very bound being dragged collapses under the
+    reader's own hand: bars outside the selection would read as empty, so the
+    shape that tells them where to drag NEXT disappears exactly when they need it.
+    """
+    unbounded = _distribution(build_query(q="x", types=["case"]))
+    bounded = _distribution(
+        build_query(q="x", types=["case"], ranges={"bigo_min": 10**9})
+    )
+    assert unbounded == bounded
+    # ...while the HITS are still narrowed by it.
+    clauses = build_query(q="x", types=["case"], ranges={"bigo_min": 10**9})["query"][
+        "bool"
+    ]["filter"]
+    assert {"range": {"bigo": {"gte": 10**9}}} in clauses
+
+
+def test_distribution_applies_in_browse_mode():
+    """An empty ``q`` is the primary way this filter is used, so the bars must
+    still be aggregated — over ``match_all`` rather than a text clause."""
+    scoped = _distribution(build_query(q="", types=["case"]))["filter"]["bool"]
+    assert scoped["must"] == [{"match_all": {}}]
+
+
+def test_search_returns_histogram_bars_with_whole_rupee_edges():
+    """Bucket bounds come back as doubles like the stats do, and the open-ended
+    first/last bars carry no bound at all — ``None``, not a fabricated one."""
+    client = MagicMock()
+    response = _canned_response()
+    response["aggregations"] = {
+        "bigo_extent": {
+            "stats": {"count": 68, "min": 45220.0, "max": 6.6e10},
+            "distribution": {
+                "buckets": {
+                    "buckets": [
+                        {"to": 1.0, "doc_count": 0},
+                        {"from": 1.0, "to": 10.0, "doc_count": 3},
+                        {"from": 10.0, "doc_count": 65},
+                    ]
+                }
+            },
+        }
+    }
+    client.search.return_value = response
+    bigo = SearchService(client=client).search(q="x", types=["case"])["extents"]["bigo"]
+    assert bigo["buckets"] == [
+        {"from": None, "to": 1, "count": 0},
+        {"from": 1, "to": 10, "count": 3},
+        {"from": 10, "to": None, "count": 65},
+    ]
+    assert bigo["stops"] == list(svc.BIGO_STOPS)

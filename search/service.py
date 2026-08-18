@@ -208,6 +208,47 @@ RANGE_FIELDS: dict[str, tuple[str, str]] = {
 }
 
 
+# ── बिगो scale: the ladders the SPA's amount control is drawn from ─────────────
+#
+# Both live here, server-side, rather than in the SPA. The bar counts below are
+# aggregated on exactly these edges, so a ladder invented independently by the
+# client would draw bars whose counts belong to different buckets.
+#
+# The scale is LOGARITHMIC because the corpus is: amounts run from ~रु ४५ हजार to
+# ~रु ६६ अरब with a median near रु ५ करोड. Baymard's filter research measured the
+# linear failure exactly — on one site 50% of a slider's width controlled 2% of
+# the catalogue while 5% of the width controlled 50% — and found 83% of sliders
+# get this wrong. Round 1/2/5 × 10^k steps also mean a reader lands on रु १ करोड,
+# never रु १.०३ करोड.
+_NICE_AMOUNTS: tuple[int, ...] = tuple(
+    mantissa * 10**exponent for exponent in range(0, 13) for mantissa in (1, 2, 5)
+)
+
+# Selectable positions for the slider thumbs — the FINE ladder.
+BIGO_STOPS: tuple[int, ...] = _NICE_AMOUNTS
+
+# Bar edges for the distribution histogram — the COARSE ladder (decades only).
+# Deliberately coarser than the stops: only ~68 published cases record an amount,
+# and spreading those over every 1/2/5 step gives ~3 per bar, which reads as noise
+# rather than as a distribution. One bar per decade puts ~10 in each and the shape
+# is legible. Widen this (add the 5× steps back) once the corpus can carry it.
+BIGO_BUCKET_EDGES: tuple[int, ...] = tuple(10**exponent for exponent in range(0, 13))
+
+
+def _bigo_bucket_ranges() -> list[dict[str, int]]:
+    """``range`` agg buckets over :data:`BIGO_BUCKET_EDGES`.
+
+    Contiguous and half-open — OpenSearch ``range`` buckets include ``from`` and
+    exclude ``to`` — so every amount lands in exactly one bar, with the first and
+    last left open so nothing falls off either end of the histogram.
+    """
+    edges = BIGO_BUCKET_EDGES
+    buckets: list[dict[str, int]] = [{"to": edges[0]}]
+    buckets += [{"from": low, "to": high} for low, high in zip(edges, edges[1:])]
+    buckets.append({"from": edges[-1]})
+    return buckets
+
+
 def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
     """``range`` filter clauses for the given bounds (one clause per field).
 
@@ -353,33 +394,46 @@ def build_query(
 
     # Exact-match facet filters (entity_type/case_type/tags) compose with the text
     # query as bool ``filter`` clauses (no scoring impact, just narrowing).
-    filter_clauses: list[dict[str, Any]] = []
+    #
+    # The two clause KINDS are built apart and merged only for the query itself.
+    # The बिगो distribution agg below re-applies the terms half WITHOUT the range
+    # half — a histogram narrowed by the very bound the reader is dragging would
+    # collapse under their own hand.
+    terms_clauses: list[dict[str, Any]] = []
     for param, values in (filters or {}).items():
         field = FACET_FIELDS.get(param)
         if field and values:
-            filter_clauses.append({"terms": {field: list(values)}})
+            terms_clauses.append({"terms": {field: list(values)}})
     # Range filters (bigo_min/bigo_max) narrow the same way — ANDed alongside the
     # exact-match ones, and equally inert for scoring.
-    filter_clauses.extend(_range_clauses(ranges))
+    range_clauses = _range_clauses(ranges)
+    filter_clauses: list[dict[str, Any]] = [*terms_clauses, *range_clauses]
 
     # ``q`` is OPTIONAL. With a term, build the tuned recall+precision bool query;
     # with an empty/blank ``q`` it's a BROWSE — ``match_all`` so the facet filters,
     # type selection, sort and paging still apply (list/page the corpus with no
     # search term). An empty multi_match would match nothing, so we must branch.
     has_query = bool(q and q.strip())
+    # Hoisted so the बिगो distribution agg can re-apply the SAME recall clause.
+    # ``match_all`` in browse mode, so that agg needs no branch of its own.
+    must_clauses: list[dict[str, Any]] = (
+        [
+            {
+                "multi_match": {
+                    "query": q,
+                    "fields": _weighted_query_fields(lang),
+                    "type": "most_fields",
+                    "operator": "or",
+                }
+            }
+        ]
+        if has_query
+        else [{"match_all": {}}]
+    )
     if has_query:
         bool_query: dict[str, Any] = {
             # Recall clause: at least one of the bilingual fields must match.
-            "must": [
-                {
-                    "multi_match": {
-                        "query": q,
-                        "fields": _weighted_query_fields(lang),
-                        "type": "most_fields",
-                        "operator": "or",
-                    }
-                }
-            ],
+            "must": must_clauses,
             # Precision boost: adjacent-term (phrase) title match adds score but is
             # not required, so single-term queries still match.
             "should": [
@@ -400,7 +454,7 @@ def build_query(
         # ordered by ``sort`` (relevance is uniform here, so a date/title sort is
         # the useful default for browsing — the caller picks via ``sort``).
         bool_query = {
-            "must": [{"match_all": {}}],
+            "must": must_clauses,
             "filter": filter_clauses,
         }
 
@@ -442,7 +496,27 @@ def build_query(
     if CASE_INDEX in _index_for_types(types).split(","):
         aggs["bigo_extent"] = {
             "global": {},
-            "aggs": {"stats": {"stats": {"field": "bigo"}}},
+            "aggs": {
+                # The AXIS. Unfiltered on purpose, so the track is a fixed
+                # property of the corpus and cannot shrink under a dragging hand.
+                "stats": {"stats": {"field": "bigo"}},
+                # The BARS. Re-applies the query and the exact-match facets — the
+                # reader wants "where do the cases I'm searching sit?" — but NOT
+                # the बिगो range, which is the control being drawn. This is the
+                # standard facet-excludes-its-own-filter shape, and it is why the
+                # terms and range clauses were built separately above.
+                "distribution": {
+                    "filter": {"bool": {"must": must_clauses, "filter": terms_clauses}},
+                    "aggs": {
+                        "buckets": {
+                            "range": {
+                                "field": "bigo",
+                                "ranges": _bigo_bucket_ranges(),
+                            }
+                        }
+                    },
+                },
+            },
         }
 
     body: dict[str, Any] = {
@@ -648,18 +722,39 @@ def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
     absent extent as "no rails available" rather than as a zero-width range,
     which would be a slider pinned shut.
     """
-    stats = ((aggs.get("bigo_extent") or {}).get("stats")) or {}
+    extent = (aggs.get("bigo_extent") or {})
+    stats = extent.get("stats") or {}
     count = stats.get("count") or 0
     if not count or stats.get("min") is None or stats.get("max") is None:
         return {}
     # ``stats`` returns doubles; बिगो is a ``long`` of whole rupees, so hand back
     # ints — a JSON float would lose precision past 2**53, which the corpus
     # already reaches (amounts into the tens of अरब).
+    #
+    # ``buckets`` are the histogram bars, ``stops`` the positions a slider thumb
+    # may take. Both are emitted rather than left to the client to reinvent: the
+    # counts below were aggregated on exactly these edges, so a ladder derived
+    # independently would draw bars whose numbers belong to other buckets.
+    raw_buckets = (
+        ((extent.get("distribution") or {}).get("buckets") or {}).get("buckets") or []
+    )
     return {
         "bigo": {
             "min": int(stats["min"]),
             "max": int(stats["max"]),
             "count": int(count),
+            "buckets": [
+                {
+                    # ``from``/``to`` come back as doubles too, and are absent on
+                    # the open-ended first and last bars — where ``None`` is the
+                    # honest answer, not a fabricated bound.
+                    "from": None if b.get("from") is None else int(b["from"]),
+                    "to": None if b.get("to") is None else int(b["to"]),
+                    "count": int(b.get("doc_count") or 0),
+                }
+                for b in raw_buckets
+            ],
+            "stops": list(BIGO_STOPS),
         }
     }
 
