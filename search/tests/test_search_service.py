@@ -945,7 +945,9 @@ def test_search_returns_histogram_bars_with_whole_rupee_edges():
     response = _canned_response()
     response["aggregations"] = {
         "bigo_extent": {
-            "stats": {"count": 68, "min": 45220.0, "max": 6.6e10},
+            # Stats and bars must describe the same corpus, or the trim below
+            # legitimately discards bars that cannot hold a case.
+            "stats": {"count": 68, "min": 0.0, "max": 50.0},
             "distribution": {
                 "buckets": {
                     "buckets": [
@@ -964,4 +966,59 @@ def test_search_returns_histogram_bars_with_whole_rupee_edges():
         {"from": 1, "to": 10, "count": 3},
         {"from": 10, "to": None, "count": 65},
     ]
-    assert bigo["stops"] == list(svc.BIGO_STOPS)
+    assert bigo["stops"] == svc._stops_bracketing(0, 50)
+
+
+def test_extent_stops_bracket_the_corpus_instead_of_the_whole_ladder():
+    """The track must span the DATA, not the ladder's full reach to रु ५ खरब.
+
+    Spending most of the slider on amounts no case has is the exact failure the
+    log scale exists to fix — Baymard measured a site where 50% of a slider's
+    width controlled 2% of the catalogue. One stop below the smallest amount and
+    one at or above the largest, so an end-parked thumb really is "no bound".
+    """
+    client = MagicMock()
+    response = _canned_response()
+    response["aggregations"] = {
+        "bigo_extent": {
+            "stats": {"count": 68, "min": 45220.0, "max": 6.6e10},
+            "distribution": {"buckets": {"buckets": []}},
+        }
+    }
+    client.search.return_value = response
+    stops = SearchService(client=client).search(q="x", types=["case"])["extents"][
+        "bigo"
+    ]["stops"]
+    assert stops[0] <= 45_220 and stops[1] > 45_220
+    assert stops[-1] >= 66_000_000_000 and stops[-2] < 66_000_000_000
+    assert len(stops) < len(svc.BIGO_STOPS)
+
+
+def test_extent_trims_bars_that_cannot_hold_a_case():
+    """Bars are requested for the whole ladder — the agg's edges must be fixed
+    before the stats come back, and one round trip beats two — so the ends are
+    trimmed here. Padding both sides with empties just flattens the shape."""
+    client = MagicMock()
+    response = _canned_response()
+    response["aggregations"] = {
+        "bigo_extent": {
+            "stats": {"count": 2, "min": 5000.0, "max": 50000.0},
+            "distribution": {
+                "buckets": {
+                    "buckets": [
+                        {"to": 1000.0, "doc_count": 0},
+                        {"from": 1000.0, "to": 10000.0, "doc_count": 1},
+                        {"from": 10000.0, "to": 100000.0, "doc_count": 1},
+                        {"from": 100000.0, "to": 1000000.0, "doc_count": 0},
+                        {"from": 1000000.0, "doc_count": 0},
+                    ]
+                }
+            },
+        }
+    }
+    client.search.return_value = response
+    buckets = SearchService(client=client).search(q="x", types=["case"])["extents"][
+        "bigo"
+    ]["buckets"]
+    # The 1k–10k and 10k–100k bars straddle the data; the rest cannot hold a case.
+    assert [(b["from"], b["to"]) for b in buckets] == [(1000, 10000), (10000, 100000)]

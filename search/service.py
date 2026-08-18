@@ -735,13 +735,14 @@ def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
     # may take. Both are emitted rather than left to the client to reinvent: the
     # counts below were aggregated on exactly these edges, so a ladder derived
     # independently would draw bars whose numbers belong to other buckets.
+    low, high = int(stats["min"]), int(stats["max"])
     raw_buckets = (
         ((extent.get("distribution") or {}).get("buckets") or {}).get("buckets") or []
     )
     return {
         "bigo": {
-            "min": int(stats["min"]),
-            "max": int(stats["max"]),
+            "min": low,
+            "max": high,
             "count": int(count),
             "buckets": [
                 {
@@ -752,11 +753,52 @@ def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
                     "to": None if b.get("to") is None else int(b["to"]),
                     "count": int(b.get("doc_count") or 0),
                 }
-                for b in raw_buckets
+                for b in _trim_to_corpus(raw_buckets, low, high)
             ],
-            "stops": list(BIGO_STOPS),
+            "stops": _stops_bracketing(low, high),
         }
     }
+
+
+def _stops_bracketing(low: int, high: int) -> list[int]:
+    """The slider stops, cut to the window that brackets the corpus.
+
+    The full ladder runs to रु ५ खरब. Handing all of it to the SPA would spend most
+    of the track on amounts no case has — which is the very failure the log scale
+    exists to fix (Baymard measured a site where 50% of a slider's width
+    controlled 2% of the catalogue). Cut to one stop below the smallest recorded
+    amount and one at or above the largest, so the ends bracket the data and a
+    thumb parked on either genuinely means "no bound".
+    """
+    at_or_below = [s for s in BIGO_STOPS if s <= low] or [BIGO_STOPS[0]]
+    at_or_above = [s for s in BIGO_STOPS if s >= high] or [BIGO_STOPS[-1]]
+    floor, ceiling = at_or_below[-1], at_or_above[0]
+    window = [s for s in BIGO_STOPS if floor <= s <= ceiling]
+    # A corpus spanning less than one step would leave a single position — a
+    # slider pinned shut. Widen so there is always a track to drag along.
+    if len(window) < 2:
+        start = max(0, BIGO_STOPS.index(floor) - 1)
+        window = list(BIGO_STOPS[start : start + 3])
+    return window
+
+
+def _trim_to_corpus(
+    buckets: list[dict[str, Any]], low: int, high: int
+) -> list[dict[str, Any]]:
+    """Drop the bars that sit entirely outside the recorded range.
+
+    The ``range`` agg is asked for the whole ladder because the edges must be
+    fixed before the stats come back — one round trip, not two. Trimming here
+    keeps the histogram to the span that can actually hold a case, instead of
+    padding both ends with empties that flatten the shape.
+    """
+    kept = [
+        b
+        for b in buckets
+        if (b.get("to") is None or b["to"] > low)
+        and (b.get("from") is None or b["from"] <= high)
+    ]
+    return kept or buckets
 
 
 def _named_facets_from_aggs(aggs: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
