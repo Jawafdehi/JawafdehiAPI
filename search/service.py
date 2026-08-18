@@ -414,6 +414,26 @@ def build_query(
         },
     }
 
+    # बिगो extent, for a UI that needs RAILS rather than buckets (an amount
+    # slider): the smallest and largest recorded amount, and how many documents
+    # carry one at all.
+    #
+    # ``global`` on purpose — the ONE aggregation here that must NOT reflect the
+    # query or the filters. Every other agg above is a refine facet, where
+    # narrowing along with the result set is the wanted behaviour. Rails are not:
+    # if they tracked the active range, dragging a thumb inward would pull the
+    # track in behind it and the reader could never widen the selection again.
+    # ``global`` escapes the query context entirely, so the track stays a fixed
+    # property of the corpus no matter what is typed or filtered.
+    #
+    # Only cases carry the field, so it is requested only when the case index is
+    # in scope — an entity-only search should not pay for a corpus-wide agg.
+    if CASE_INDEX in _index_for_types(types).split(","):
+        body["aggs"]["bigo_extent"] = {
+            "global": {},
+            "aggs": {"stats": {"stats": {"field": "bigo"}}},
+        }
+
     indices_boost = _indices_boost()
     if indices_boost:
         body["indices_boost"] = indices_boost
@@ -582,6 +602,32 @@ def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
+def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Range-filter RAILS from the ``global`` extent aggs, keyed by request param
+    prefix (``bigo`` covers ``bigo_min``/``bigo_max``).
+
+    ``{}`` when the agg was not requested (no case index in scope) — and the
+    entry is omitted when the corpus holds no recorded amount at all, in which
+    case ``stats`` reports ``count: 0`` with null bounds. A caller must treat an
+    absent extent as "no rails available" rather than as a zero-width range,
+    which would be a slider pinned shut.
+    """
+    stats = ((aggs.get("bigo_extent") or {}).get("stats")) or {}
+    count = stats.get("count") or 0
+    if not count or stats.get("min") is None or stats.get("max") is None:
+        return {}
+    # ``stats`` returns doubles; बिगो is a ``long`` of whole rupees, so hand back
+    # ints — a JSON float would lose precision past 2**53, which the corpus
+    # already reaches (amounts into the tens of अरब).
+    return {
+        "bigo": {
+            "min": int(stats["min"]),
+            "max": int(stats["max"]),
+            "count": int(count),
+        }
+    }
+
+
 def _named_facets_from_aggs(aggs: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """The exposed refine facets (entity_type/case_type/tags) as ``{name, count}``
     lists from their ``terms`` aggregations. Display names are derived client-side.
@@ -678,6 +724,7 @@ class SearchService:
         aggregations = response.get("aggregations") or {}
         counts = _facets_from_aggs(aggregations)
         facets = _named_facets_from_aggs(aggregations)
+        extents = _extents_from_aggs(aggregations)
 
         # next_cursor is the last hit's sort values — present only when the page
         # was full (a short page means there is nothing after it).
@@ -697,6 +744,9 @@ class SearchService:
             "count": count,
             "counts": counts,
             "facets": facets,
+            # Rails for the range filters, distinct from ``facets`` (which are
+            # term buckets). Empty unless the case index is in scope.
+            "extents": extents,
             "results": results,
             "next_cursor": next_cursor,
         }

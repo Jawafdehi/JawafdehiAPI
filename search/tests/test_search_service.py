@@ -714,3 +714,82 @@ def test_non_case_result_has_no_card_key():
     entity = out["results"][0]
     assert entity["type"] == "entity"
     assert "card" not in entity
+
+
+# ── बिगो extent (slider rails) ─────────────────────────────────────────────────
+#
+# A THIRD aggregation kind, alongside the per-type counts and the terms facets:
+# the corpus extent of a range field, for a UI that needs rails rather than
+# buckets. What makes it different is that it must not narrow with the results.
+
+
+def test_build_query_requests_the_bigo_extent_as_a_global_agg():
+    """The rails must escape the query context.
+
+    Every other agg here is a refine facet, which correctly narrows with the
+    result set. Rails must not: if they tracked the active range, dragging a
+    slider thumb inward would pull the track in behind it and the selection could
+    never be widened again. ``global`` is what buys that.
+    """
+    extent = build_query(q="x", types=["case"])["aggs"]["bigo_extent"]
+    assert extent["global"] == {}
+    assert extent["aggs"]["stats"] == {"stats": {"field": "bigo"}}
+
+
+def test_build_query_extent_survives_an_active_bigo_range():
+    """Belt and braces on the point above — the agg is identical with a bound
+    applied, so the rails a dragging reader sees never move."""
+    unbounded = build_query(q="x", types=["case"])["aggs"]["bigo_extent"]
+    bounded = build_query(q="x", types=["case"], ranges={"bigo_min": 10**9})["aggs"][
+        "bigo_extent"
+    ]
+    assert unbounded == bounded
+
+
+def test_build_query_omits_the_extent_when_no_case_index_is_in_scope():
+    """Only cases carry an amount, so an entity-only search must not pay for a
+    corpus-wide aggregation it cannot use."""
+    assert "bigo_extent" not in build_query(q="x", types=["entity"])["aggs"]
+    assert "bigo_extent" not in build_query(q="x", types=["material"])["aggs"]
+    # An unscoped search DOES include cases, so it keeps the extent.
+    assert "bigo_extent" in build_query(q="x")["aggs"]
+
+
+def test_search_returns_the_bigo_extent_as_whole_rupees():
+    """``stats`` hands back doubles; बिगो is a ``long`` of whole rupees.
+
+    Passing the float through would lose precision past 2**53 — which this corpus
+    already reaches, with amounts into the tens of अरब.
+    """
+    client = MagicMock()
+    response = _canned_response()
+    response["aggregations"] = {
+        "bigo_extent": {
+            "stats": {"count": 68, "min": 45220.0, "max": 6.6e10},
+        }
+    }
+    client.search.return_value = response
+    envelope = SearchService(client=client).search(q="x", types=["case"])
+    assert envelope["extents"] == {
+        "bigo": {"min": 45220, "max": 66_000_000_000, "count": 68}
+    }
+    assert isinstance(envelope["extents"]["bigo"]["max"], int)
+
+
+def test_search_reports_no_extent_when_nothing_records_an_amount():
+    """``count: 0`` with null bounds is "no rails", NOT a zero-width range — the
+    latter would render as a slider pinned shut."""
+    client = MagicMock()
+    response = _canned_response()
+    response["aggregations"] = {
+        "bigo_extent": {"stats": {"count": 0, "min": None, "max": None}}
+    }
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="x", types=["case"])["extents"] == {}
+
+
+def test_search_reports_no_extent_when_the_agg_was_not_requested():
+    """An entity-only search carries no extent block at all."""
+    client = MagicMock()
+    client.search.return_value = _canned_response()
+    assert SearchService(client=client).search(q="x", types=["entity"])["extents"] == {}
