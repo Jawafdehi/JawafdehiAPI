@@ -404,6 +404,47 @@ def build_query(
             "filter": filter_clauses,
         }
 
+    # Aggregations: per-type ``counts`` (by physical index) PLUS the exposed
+    # facets (entity_type via the schema.org ``type`` token, case_type, and tags
+    # via ``keywords``). Facet counts reflect the query but NOT the facet filters
+    # (OpenSearch aggregates over the post-filter result set; that's the accepted
+    # behaviour for these refine-style facets).
+    #
+    # Built as its own ``dict[str, Any]`` rather than inline in ``body``: the
+    # nested literal would otherwise pin a narrow value type that the extent agg
+    # below — which nests an ``aggs`` of its own — does not fit.
+    aggs: dict[str, Any] = {
+        # Sized 2x the type count, not 1x: the bucket key is the CONCRETE
+        # backing index, and mid-swap an alias can briefly resolve to two
+        # generations. At exactly len(ALL_TYPES) the extra bucket would push
+        # a real one out and silently zero that type's facet count.
+        "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
+        "entity_type": {"terms": {"field": "type", "size": 50}},
+        "case_type": {"terms": {"field": "case_type", "size": 50}},
+        "tags": {"terms": {"field": "keywords", "size": 50}},
+        "status": {"terms": {"field": "case_status", "size": 50}},
+    }
+
+    # बिगो extent, for a UI that needs RAILS rather than buckets (an amount
+    # slider): the smallest and largest recorded amount, and how many documents
+    # carry one at all.
+    #
+    # ``global`` on purpose — the ONE aggregation here that must NOT reflect the
+    # query or the filters. Every other agg above is a refine facet, where
+    # narrowing along with the result set is the wanted behaviour. Rails are not:
+    # if they tracked the active range, dragging a thumb inward would pull the
+    # track in behind it and the reader could never widen the selection again.
+    # ``global`` escapes the query context entirely, so the track stays a fixed
+    # property of the corpus no matter what is typed or filtered.
+    #
+    # Only cases carry the field, so it is requested only when the case index is
+    # in scope — an entity-only search should not pay for a corpus-wide agg.
+    if CASE_INDEX in _index_for_types(types).split(","):
+        aggs["bigo_extent"] = {
+            "global": {},
+            "aggs": {"stats": {"stats": {"field": "bigo"}}},
+        }
+
     body: dict[str, Any] = {
         "size": page_size,
         # Count past OpenSearch's default 10,000-hit cap so ``count`` in the
@@ -422,43 +463,8 @@ def build_query(
                 "body": {},
             }
         },
-        # Aggregations: per-type ``counts`` (by physical index) PLUS the exposed
-        # facets (entity_type via the schema.org ``type`` token, case_type, and
-        # tags via ``keywords``). Facet counts reflect the query but NOT the facet
-        # filters (OpenSearch aggregates over the post-filter result set; that's the
-        # accepted behaviour for these refine-style facets).
-        "aggs": {
-            # Sized 2x the type count, not 1x: the bucket key is the CONCRETE
-            # backing index, and mid-swap an alias can briefly resolve to two
-            # generations. At exactly len(ALL_TYPES) the extra bucket would push
-            # a real one out and silently zero that type's facet count.
-            "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
-            "entity_type": {"terms": {"field": "type", "size": 50}},
-            "case_type": {"terms": {"field": "case_type", "size": 50}},
-            "tags": {"terms": {"field": "keywords", "size": 50}},
-            "status": {"terms": {"field": "case_status", "size": 50}},
-        },
+        "aggs": aggs,
     }
-
-    # बिगो extent, for a UI that needs RAILS rather than buckets (an amount
-    # slider): the smallest and largest recorded amount, and how many documents
-    # carry one at all.
-    #
-    # ``global`` on purpose — the ONE aggregation here that must NOT reflect the
-    # query or the filters. Every other agg above is a refine facet, where
-    # narrowing along with the result set is the wanted behaviour. Rails are not:
-    # if they tracked the active range, dragging a thumb inward would pull the
-    # track in behind it and the reader could never widen the selection again.
-    # ``global`` escapes the query context entirely, so the track stays a fixed
-    # property of the corpus no matter what is typed or filtered.
-    #
-    # Only cases carry the field, so it is requested only when the case index is
-    # in scope — an entity-only search should not pay for a corpus-wide agg.
-    if CASE_INDEX in _index_for_types(types).split(","):
-        body["aggs"]["bigo_extent"] = {
-            "global": {},
-            "aggs": {"stats": {"stats": {"field": "bigo"}}},
-        }
 
     indices_boost = _indices_boost()
     if indices_boost:
