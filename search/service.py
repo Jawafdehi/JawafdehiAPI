@@ -21,6 +21,7 @@ import json
 import logging
 from typing import Any
 
+from jawafdehi_shared.search.aliases import generation_ordinal
 from jawafdehi_shared.search.opensearch import (
     CASE_INDEX,
     COURTCASE_INDEX,
@@ -42,6 +43,27 @@ TYPE_TO_INDEX: dict[str, str] = {
 }
 INDEX_TO_TYPE: dict[str, str] = {v: k for k, v in TYPE_TO_INDEX.items()}
 ALL_TYPES: tuple[str, ...] = ("entity", "material", "courtcase", "case")
+
+
+def type_for_index(index: str) -> str | None:
+    """Result type for the index a hit came from, or None if it isn't ours.
+
+    We QUERY the four public names, but every name is now an ALIAS over a
+    numbered generation, and OpenSearch reports the CONCRETE backing index on
+    both a hit's ``_index`` and an ``_index`` aggregation bucket — never the
+    alias we asked for. So a straight ``INDEX_TO_TYPE`` lookup started missing
+    the moment the aliases landed: ``jawafdehi-cases-000001`` is not a key.
+
+    Strip a trailing generation suffix and retry, so both the aliased and the
+    pre-alias plain-index shapes resolve. Anything else is not one of ours.
+    """
+    result_type = INDEX_TO_TYPE.get(index)
+    if result_type is not None:
+        return result_type
+    for alias, candidate in INDEX_TO_TYPE.items():
+        if generation_ordinal(alias, index) is not None:
+            return candidate
+    return None
 
 # ── Relevance weights (the ONE place to tune ranking) ───────────────────────────
 #
@@ -406,7 +428,11 @@ def build_query(
         # filters (OpenSearch aggregates over the post-filter result set; that's the
         # accepted behaviour for these refine-style facets).
         "aggs": {
-            "by_index": {"terms": {"field": "_index", "size": len(ALL_TYPES)}},
+            # Sized 2x the type count, not 1x: the bucket key is the CONCRETE
+            # backing index, and mid-swap an alias can briefly resolve to two
+            # generations. At exactly len(ALL_TYPES) the extra bucket would push
+            # a real one out and silently zero that type's facet count.
+            "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
             "entity_type": {"terms": {"field": "type", "size": 50}},
             "case_type": {"terms": {"field": "case_type", "size": 50}},
             "tags": {"terms": {"field": "keywords", "size": 50}},
@@ -549,7 +575,7 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     """One OpenSearch hit → the common result envelope."""
     source = hit.get("_source") or {}
     index = hit.get("_index", "")
-    result_type = INDEX_TO_TYPE.get(index, source.get("source_app", "unknown"))
+    result_type = type_for_index(index) or source.get("source_app", "unknown")
     highlight = hit.get("highlight") or {}
 
     extra: dict[str, Any] = {}
@@ -596,9 +622,13 @@ def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
     counts: dict[str, int] = {}
     buckets = (aggs.get("by_index") or {}).get("buckets") or []
     for bucket in buckets:
-        result_type = INDEX_TO_TYPE.get(bucket.get("key"))
+        # Buckets are keyed by the CONCRETE backing index, not the alias we
+        # queried — so this needs the same generation-aware resolution as a hit.
+        result_type = type_for_index(bucket.get("key") or "")
         if result_type:
-            counts[result_type] = bucket.get("doc_count", 0)
+            counts[result_type] = counts.get(result_type, 0) + bucket.get(
+                "doc_count", 0
+            )
     return counts
 
 

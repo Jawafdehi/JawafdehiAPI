@@ -18,6 +18,7 @@ from cases.models import (
 )
 from materials.jsonld import documentsource_to_jsonld
 from materials.models import Material, Policy, Visibility
+from tests.byline import credit_author
 from tests.conftest import create_user_with_role
 
 URL = "/api/cases/{}/"
@@ -185,13 +186,14 @@ class TestEvidenceVisibilityTriggers:
         # flip PRIVATE -> UNLISTED via the recompute trigger.
         user = create_user_with_role("mod", "mod@example.com", "Moderator")
         mat = _store_material("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
-        # IN_REVIEW requires an accused entity + a key allegation.
+        # IN_REVIEW requires an accused entity, a key allegation and a byline.
         case = _make_case(key_allegations=["Took a bribe of Rs 10 lakh"])
         CaseEntityRelationship.objects.create(
             case=case,
             nes_id="https://jawafdehi.org/entity/person/accused-one",
             relationship_type=RelationshipType.ACCUSED,
         )
+        credit_author(case)
         CaseMaterialReference.objects.create(case=case, material_iri=mat.iri, ordinal=0)
         client = _authed(user)
         with django_capture_on_commit_callbacks(execute=True):

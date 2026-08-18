@@ -19,6 +19,7 @@ from cases.models import (
     CaseType,
     RelationshipType,
 )
+from tests.byline import credit_author
 from tests.conftest import (
     create_case_with_entities,
     create_entities_from_ids,
@@ -290,6 +291,7 @@ class TestDjangoAdminWorkflows:
         case.key_allegations = ["Complete allegation statement"]
         case.description = "Complete description with sufficient detail"
         case.save()
+        credit_author(case)
 
         # Step 4: Successfully transition to IN_REVIEW
         case.submit()
@@ -604,6 +606,7 @@ class TestDjangoAdminWorkflows:
         )
 
         assert case.state == CaseState.DRAFT
+        credit_author(case)
 
         case_slug = case.slug
 
@@ -1181,6 +1184,7 @@ class TestDjangoAdminWorkflows:
         case.key_allegations = ["Test allegation"]
         case.description = "Test description"
         case.save()
+        credit_author(case)
 
         # Now submit should work
         case.submit()
@@ -1246,6 +1250,7 @@ class TestDjangoAdminWorkflows:
             relationship_type=RelationshipType.ACCUSED,
         )
         case.save()
+        credit_author(case)
 
         case.publish()
 

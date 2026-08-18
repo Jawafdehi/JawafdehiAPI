@@ -15,6 +15,7 @@ from hypothesis import strategies as st
 
 from cases.models import CaseState, CaseType
 from cases.rules.predicates import can_transition_case_state
+from tests.byline import credit_author
 from tests.conftest import create_case_with_entities, create_user_with_role
 from tests.strategies import complete_case_data, user_with_role
 
@@ -41,6 +42,7 @@ def test_moderators_can_publish_cases(case_data, moderator_data):
 
     # Create a case in IN_REVIEW state
     case = create_case_with_entities(**case_data)
+    credit_author(case)
     case.state = CaseState.IN_REVIEW
     case.save()
 
@@ -146,6 +148,7 @@ def test_transition_to_in_review_updates_version_info(case_data):
     """
     # Create a case in DRAFT state
     case = create_case_with_entities(**case_data)
+    credit_author(case)
     assert case.state == CaseState.DRAFT
 
     # Record time before transition
@@ -190,6 +193,7 @@ def test_transition_to_published_updates_version_info(case_data):
     """
     # Create a case in IN_REVIEW state
     case = create_case_with_entities(**case_data)
+    credit_author(case)
     case.state = CaseState.IN_REVIEW
     case.save()
 
@@ -240,6 +244,7 @@ def test_state_transitions_always_update_version_info(case_data, target_state):
     """
     # Create a case
     case = create_case_with_entities(**case_data)
+    credit_author(case)
 
     # Clear versionInfo to test that it gets updated
     case.versionInfo = {}

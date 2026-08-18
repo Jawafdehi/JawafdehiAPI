@@ -14,7 +14,9 @@ import jsonpatch
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Exists, OuterRef
+from django.contrib.auth import get_user_model
+from django.db.models import Exists, F, OuterRef, Q, Value
+from django.db.models.functions import Coalesce, Concat, NullIf, Trim
 from django.http import Http404, HttpResponse, HttpResponsePermanentRedirect
 from django.urls import reverse
 from django.utils import timezone
@@ -29,6 +31,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import filters, mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, DjangoModelPermissions, IsAuthenticated
@@ -50,8 +53,9 @@ from .caseworker_serializers import (
     CaseCreateSerializer,
     CasePatchSerializer,
 )
-from .permissions import IsFeedbackTriager
+from .permissions import IsCaseAuthorPicker, IsFeedbackTriager
 from .models import (
+    AuthorProfile,
     Case,
     CaseEntityRelationship,
     CaseMaterialReference,
@@ -72,6 +76,9 @@ from .rules.predicates import (
     is_readonly,
 )
 from .serializers import (
+    AuthorCaseSummarySerializer,
+    AuthorProfileDetailSerializer,
+    CaseAuthorCandidateSerializer,
     CaseDetailSerializer,
     CaseSerializer,
     CaseStateChangeSerializer,
@@ -85,6 +92,8 @@ from .services.statistics import (
 )
 
 logger = logging.getLogger(__name__)
+
+User = get_user_model()
 
 # PATCH-writable fields that map directly to Case model columns (persisted via a
 # bulk UPDATE in partial_update). Module-level because it is a constant: it was
@@ -118,6 +127,10 @@ _PATCH_SCALAR_FIELDS = frozenset(
         # Public notes (Case.public_notes TextField: attribution + edit dates) —
         # also a scalar column; same persist path, read publicly.
         "public_notes",
+        # The structured byline's two scalar halves. ``authors`` is NOT here —
+        # it is a join, written by _sync_author_credits like court_cases.
+        "case_publish_date",
+        "public_edit_history",
     ]
 )
 
@@ -503,6 +516,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # ``CaseSerializer.get_evidence`` iterates ``material_references``;
             # prefetch it so a list page doesn't fire one query per card (N+1).
             "material_references",
+            # Same for ``get_authors``; through to the profile, which the byline
+            # resolves every name/photo/description from.
+            "author_credits__user__author_profile",
         )
 
         # Reverse lookup: cases citing a specific NGM court case by its canonical
@@ -637,6 +653,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "timeline",
             "notes",
             "public_notes",
+            "case_publish_date",
+            "public_edit_history",
             "slug",
             "court_cases",
             "missing_details",
@@ -712,24 +730,41 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             with transaction.atomic():
                 case.save()
 
-                # Create entity binds (NES ids) for alleged/related entities
+                # Create entity binds (NES ids) for alleged/related entities.
+                # ``ordinal`` preserves submitted order (accused first, then
+                # related) so the bind list has a stable order from creation —
+                # the PATCH path maintains it from there.
+                ordinal = 0
                 for nes_id in validated.get("alleged_entities", []):
-                    CaseEntityRelationship.objects.get_or_create(
+                    _, was_created = CaseEntityRelationship.objects.get_or_create(
                         case=case,
                         nes_id=nes_id,
                         relationship_type=RelationshipType.ACCUSED,
+                        defaults={"ordinal": ordinal},
                     )
+                    if was_created:
+                        ordinal += 1
                 for nes_id in validated.get("related_entities", []):
-                    CaseEntityRelationship.objects.get_or_create(
+                    _, was_created = CaseEntityRelationship.objects.get_or_create(
                         case=case,
                         nes_id=nes_id,
                         relationship_type=RelationshipType.RELATED,
+                        defaults={"ordinal": ordinal},
                     )
+                    if was_created:
+                        ordinal += 1
 
                 # Create evidence binds (NGM material ids) — the
                 # CaseMaterialReference join. Ordinal preserves submitted order
                 # (ADR: cases own no docs).
                 self._write_material_references(case, validated.get("evidence", []))
+
+                # Credited authors — the CaseAuthor join (an ordered list of
+                # account ids). Only when the payload carried the key: passing []
+                # unconditionally would be a write intent, and
+                # _sync_author_credits treats that as "clear".
+                if "authors" in validated:
+                    case._sync_author_credits(validated["authors"])
         except ValidationError as exc:
             detail = getattr(exc, "message_dict", None) or {"detail": exc.messages}
             return Response(detail, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
@@ -740,7 +775,16 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             case.material_references.values_list("material_iri", flat=True)
         )
 
-        return Response(CaseSerializer(case).data, status=status.HTTP_201_CREATED)
+        # Build the echo WITH the request context: CaseSerializer gates internal
+        # casework content (the case ``notes`` field and each entity bind's
+        # ``notes``) on ``_viewer_has_casework_access``, which reads
+        # ``context["request"]`` and returns False when there is none. A
+        # context-less serializer therefore blanks every note it just stored, so
+        # the 201 body looks like the notes were dropped.
+        return Response(
+            CaseSerializer(case, context=self.get_serializer_context()).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @staticmethod
     def _write_material_references(case, evidence_items):
@@ -1016,7 +1060,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # ValidationError would map to 400, and this project has no custom
         # exception handler.
         seen_binds: set[tuple[str, str]] = set()
-        for item in entities:
+        for ordinal, item in enumerate(entities):
             rtype = item["relationship_type"]
             key = (item["nes_id"], rtype)
             if key in seen_binds:
@@ -1048,12 +1092,18 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 # NULL (rejected earlier by the serializer, enforced by the model
                 # save() + CHECK constraint).
                 outcome = None
+            # ``ordinal`` is the item's position in the submitted list — never
+            # client-supplied, so it stays out of the patch snapshot. Position IS
+            # the order: this whole-list replace writes the order back verbatim
+            # instead of letting the recreate re-stamp created_at and flip the
+            # list, and a caller can reorder entities by reordering the array.
             CaseEntityRelationship.objects.create(
                 case=case,
                 nes_id=item["nes_id"],
                 relationship_type=rtype,
                 outcome=outcome,
                 notes=item.get("notes") or "",
+                ordinal=ordinal,
             )
         return None
 
@@ -1143,13 +1193,15 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             _recompute_material_visibility(affected_material_iris)
 
     def _write_joins(self, case, validated, touched):
-        """Rewrite the entity / evidence / court-case joins that the patch touched.
+        """Rewrite the entity / evidence / court-case / author joins the patch touched.
 
         Returns ``(error_response, affected_material_iris)``. Each join is written
         only when an op actually targeted its path — writing unconditionally would
         wipe the join on every scalar PATCH.
         """
-        entities_touched, evidence_touched, court_cases_touched = touched
+        entities_touched, evidence_touched, court_cases_touched, authors_touched = (
+            touched
+        )
 
         if entities_touched:
             dup_response = self._rewrite_entity_binds(case, validated["entities"])
@@ -1173,6 +1225,10 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # unchanged); same gating rationale as evidence.
         if court_cases_touched:
             case._sync_courtcase_references(validated.get("court_cases") or [])
+
+        # Same contract for the author byline.
+        if authors_touched:
+            case._sync_author_credits(validated.get("authors") or [])
 
         return None, affected_material_iris
 
@@ -1287,6 +1343,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         entities_touched = self._touches(patch_ops, "/entities")
         evidence_touched = self._touches(patch_ops, "/evidence")
         court_cases_touched = self._touches(patch_ops, "/court_cases")
+        authors_touched = self._touches(patch_ops, "/authors")
 
         with transaction.atomic():
             # Re-check ``If-Match`` under a row lock, INSIDE the transaction that
@@ -1356,7 +1413,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             join_error, affected_material_iris = self._write_joins(
                 case,
                 validated,
-                (entities_touched, evidence_touched, court_cases_touched),
+                (
+                    entities_touched,
+                    evidence_touched,
+                    court_cases_touched,
+                    authors_touched,
+                ),
             )
             if join_error is not None:
                 return join_error
@@ -1368,7 +1430,10 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # never touches the Case row — leaving ``updated_at`` (and the derived
             # ETag) stale, so a concurrent relation edit could clobber unseen.
             relations_touched = (
-                entities_touched or evidence_touched or court_cases_touched
+                entities_touched
+                or evidence_touched
+                or court_cases_touched
+                or authors_touched
             )
             if relations_touched and not scalar_updates:
                 Case.objects.filter(pk=case.pk).update(updated_at=timezone.now())
@@ -1394,7 +1459,19 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # fresh optimistic-concurrency token so a client editing in place can
         # PATCH again without a re-fetch.
         case.refresh_from_db(fields=["updated_at"])
-        response = Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
+        # Echo the case WITH the request context. Without it
+        # ``_viewer_has_casework_access`` sees no request and returns False, so
+        # CaseSerializer blanks the internal ``notes`` it just persisted — both
+        # the case-level field and every entity bind's note. A caller that reads
+        # the response back (the MCP patch tool, the SPA editor) then sees
+        # ``notes: ""`` on a write that actually succeeded and concludes the
+        # field was silently dropped. The write was never the problem; this echo
+        # was. Read gating is unchanged — a non-casework viewer still gets "",
+        # exactly as on GET.
+        response = Response(
+            CaseSerializer(case, context=self.get_serializer_context()).data,
+            status=status.HTTP_200_OK,
+        )
         response["ETag"] = _version_token(case)
         return response
 
@@ -1498,7 +1575,131 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # Public notes (Case.public_notes TextField, NOT NULL / default="").
             # Coerce a NULL read-back to "" for the same reason as notes above.
             "public_notes": case.public_notes or "",
+            # The structured byline. ``case_publish_date`` is stringified like the
+            # other dates above so the patched snapshot round-trips through
+            # ``CasePatchSerializer.DateField``; None stays None (the column is
+            # nullable and a DRAFT legitimately has no publish date).
+            "case_publish_date": (
+                str(case.case_publish_date) if case.case_publish_date else None
+            ),
+            "public_edit_history": (
+                list(case.public_edit_history) if case.public_edit_history else []
+            ),
+            # The byline's ONLY per-case fact is order, so the writable shape is
+            # a plain ordered list of account ids. Display details (name, photo,
+            # description) are per-person and come back on the READ serializer,
+            # resolved from each author's AuthorProfile.
+            "authors": case.author_ids,
         }
+
+
+@extend_schema(
+    summary="Get a public author profile",
+    description=(
+        "An author's public profile and the cases they wrote, newest first. "
+        "Public. 404s unless the profile is published (`has_public_page`) — a "
+        "profile row is created automatically the first time someone is "
+        "credited, so an unpublished one is an empty placeholder, not a page."
+    ),
+    responses={200: AuthorProfileDetailSerializer},
+    tags=["cases"],
+)
+class AuthorProfileView(RetrieveAPIView):
+    """GET /api/authors/<slug>/ — a public author profile page.
+
+    Only PUBLISHED cases are listed. A caseworker's draft is not public
+    elsewhere, and an author page must not become the one place a draft's
+    existence leaks.
+
+    Ordered by ``case_publish_date`` descending — the date the case actually went
+    live, not ``created_at`` (which is when the row was typed in, routinely
+    months later). Cases with no publish date sort last rather than first, which
+    is what ``F(...).desc(nulls_last=True)`` buys over a plain ``-`` prefix.
+    """
+
+    serializer_class = AuthorProfileDetailSerializer
+    permission_classes = [AllowAny]
+    lookup_field = "slug"
+
+    def get_queryset(self):
+        return AuthorProfile.objects.filter(has_public_page=True).select_related("user")
+
+    def retrieve(self, request, *args, **kwargs):
+        profile = self.get_object()
+        cases = (
+            profile.user.authored_cases.filter(state=CaseState.PUBLISHED)
+            .order_by(F("case_publish_date").desc(nulls_last=True), "-created_at")
+        )
+        data = self.get_serializer(profile).data
+        data["cases"] = AuthorCaseSummarySerializer(cases, many=True).data
+        return Response(data)
+
+
+@extend_schema(
+    summary="List case-author candidates",
+    description=(
+        "The accounts that may be credited as a case author, for the byline "
+        "picker in the case editor. Casework-role only. Optional `?search=` "
+        "matches username, first name and last name (case-insensitive, "
+        "substring)."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="search",
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            description="Filter candidates by username or name.",
+        )
+    ],
+    responses={200: CaseAuthorCandidateSerializer(many=True)},
+    tags=["cases"],
+)
+class CaseAuthorCandidateView(ListAPIView):
+    """GET /api/case-authors/ — accounts creditable as a case author.
+
+    Exists because ``CaseAuthor.user`` is a REQUIRED foreign key: a byline can
+    only name a real account, so the editor needs the roster to pick from. There
+    was no user-listing endpoint on this API before.
+
+    ACTIVE accounts only. Deactivating someone removes them from the picker but
+    does NOT touch bylines they already carry — those are ``PROTECT``-ed rows
+    holding a snapshotted ``display_name``.
+
+    Deliberately UNPAGINATED. The default page size is 20, and a picker that
+    silently stops at the 20th colleague is the kind of bug nobody reports for a
+    year; the staff table is small and bounded. If it ever isn't, add pagination
+    here AND teach the picker to page — don't let the default do it quietly.
+    """
+
+    serializer_class = CaseAuthorCandidateSerializer
+    permission_classes = [IsCaseAuthorPicker]
+    pagination_class = None
+
+    def get_queryset(self):
+        # select_related so the serializer's profile-name lookup doesn't fan out
+        # into one query per candidate.
+        queryset = User.objects.filter(is_active=True).select_related("author_profile")
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(username__icontains=search)
+                | Q(first_name__icontains=search)
+                | Q(last_name__icontains=search)
+            )
+        # Order by the name the byline will actually SHOW, which is the profile's
+        # name_en when it has one and the account name otherwise — exactly what
+        # CaseAuthorCandidateSerializer.get_display_name resolves. Sorting the
+        # raw account fields instead would put the picker in a different order
+        # from the byline for anyone whose profile name differs from their login.
+        display_name = Coalesce(
+            NullIf(Trim("author_profile__name_en"), Value("")),
+            NullIf(Trim(Concat("first_name", Value(" "), "last_name")), Value("")),
+            "username",
+        )
+        return queryset.annotate(_display_name=display_name).order_by(
+            "_display_name", "username"
+        )
 
 
 @extend_schema(

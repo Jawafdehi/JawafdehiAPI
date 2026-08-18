@@ -7,6 +7,7 @@ from unittest import mock
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from cases.api_views import CaseViewSet
@@ -17,6 +18,7 @@ from cases.models import (
     CaseType,
     RelationshipType,
 )
+from tests.byline import credit_author
 from tests.conftest import create_user_with_role
 
 if TYPE_CHECKING:
@@ -138,9 +140,9 @@ def test_patch_replace_notes_persists_on_case_without_notes():
     case.refresh_from_db()
     assert case.notes == "internal note"
     # And it survives the editor's reload path — the casework read serializer
-    # returns notes to casework viewers (BB-04). (The PATCH response body itself
-    # blanks notes because CaseSerializer is built there without request context;
-    # that's pre-existing and orthogonal to this persistence fix.)
+    # returns notes to casework viewers (BB-04). (The PATCH response body used to
+    # blank notes here, because CaseSerializer was built without request context;
+    # it now echoes them — see test_patch_echo_matches_a_read_back_of_the_same_case.)
     reload = client.get(URL.format(case.slug))
     assert reload.status_code == 200
     assert reload.data["notes"] == "internal note"
@@ -682,6 +684,7 @@ def test_patch_caseworker_can_publish_complete_case():
         nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
         relationship_type=RelationshipType.ACCUSED,
     )
+    credit_author(case)
 
     client = _authed_client(user)
     response = client.patch(
@@ -706,6 +709,7 @@ def test_patch_200_for_draft_to_in_review_transition():
         nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
         relationship_type=RelationshipType.ACCUSED,
     )
+    credit_author(case)
 
     client = _authed_client(user)
     response = client.patch(
@@ -961,3 +965,194 @@ def test_patch_replace_entities_preserves_outcome_when_client_omits_it():
         CaseEntityRelationship.objects.get(case=case, nes_id=entity).outcome
         == "convicted"
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-entity notes: the write echo must not blank what it just stored
+# ---------------------------------------------------------------------------
+
+_ROLE_NOTE = "तत्कालीन सब-इन्जिनियर, खानेपानी, सिंचाई तथा उर्जा विकास कार्यालय, गमगढी"
+
+
+def _bind(case, slug, ordinal=0, **kwargs):
+    return CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id=f"https://jawafdehi.org/entity/person/{slug}",
+        relationship_type=RelationshipType.ACCUSED,
+        ordinal=ordinal,
+        **kwargs,
+    )
+
+
+@pytest.mark.django_db
+def test_patch_entity_notes_echoed_back_not_blanked():
+    # Reported as "per-entity notes are silently dropped": PATCH returned 200 with
+    # a fresh ETag but every entity in the BODY came back notes:"", so the caller
+    # concluded the write was discarded. The write was fine — the echo was built
+    # as CaseSerializer(case) with no context, so _viewer_has_casework_access saw
+    # no request, returned False, and blanked every internal note on the way out.
+    user = _contributor("subodh")
+    case = _make_case()
+    _bind(case, "rajiva-rimala")
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/entities/0/notes", "value": _ROLE_NOTE}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+
+    # Stored...
+    assert case.entity_relationships.get().notes == _ROLE_NOTE
+    # ...AND visible in the write's own response, so a caller reading the body
+    # back can tell a real write from a dropped one.
+    assert response.data["entities"][0]["notes"] == _ROLE_NOTE
+
+
+@pytest.mark.django_db
+def test_patch_case_notes_echoed_back_not_blanked():
+    # Same context bug on the case-level internal note.
+    user = _contributor("kabita")
+    case = _make_case()
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/notes", "value": "internal note"}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    assert response.data["notes"] == "internal note"
+
+
+@pytest.mark.django_db
+def test_patch_echo_matches_a_read_back_of_the_same_case():
+    # The invariant behind the fix: the write echo and a GET by the same caller
+    # must agree. They disagreed before (echo blank, GET populated), which is
+    # exactly what made a successful write look like a dropped one. Every
+    # principal allowed to PATCH is a casework role — can_change_case rejects
+    # everyone else with a 403 — so the public-blanking half of the BB-04 gate is
+    # covered on the GET path (see the anonymous-reader test above), not here.
+    user = _contributor("hira")
+    case = _make_case(state=CaseState.PUBLISHED, notes="case-level internal note")
+    _bind(case, "hira-bahadura-sahi")
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/entities/0/notes", "value": _ROLE_NOTE}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+
+    read_back = client.get(URL.format(case.slug))
+    assert response.data["notes"] == read_back.data["notes"]
+    assert [e["notes"] for e in response.data["entities"]] == [
+        e["notes"] for e in read_back.data["entities"]
+    ]
+    assert response.data["entities"][0]["notes"] == _ROLE_NOTE
+
+    # ...and the public reader still sees neither note.
+    anon = APIClient().get(URL.format(case.slug))
+    assert anon.data["notes"] == ""
+    assert [e["notes"] for e in anon.data["entities"]] == [""]
+
+
+@pytest.mark.django_db
+def test_patch_rejects_unknown_entity_field_instead_of_dropping_it():
+    # The reporter's fallback ask: a field the write surface does not know must
+    # 422, not vanish into a 200 with a fresh ETag.
+    user = _contributor("prakash")
+    case = _make_case()
+    _bind(case, "teja-bahadura-sahi")
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "add", "path": "/entities/0/designation", "value": "engineer"}],
+        format="json",
+    )
+    assert response.status_code == 422, response.data
+    assert "designation" in str(response.data)
+
+
+# ---------------------------------------------------------------------------
+# Entity ordering must be stable across writes (index-based paths depend on it)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_entities_keep_their_order_across_an_entities_patch():
+    # Ordering was "-created_at" while the PATCH rewrites the list as delete-all
+    # + recreate, so every entities-touching write re-stamped created_at and
+    # REVERSED the list. Index-based paths (/entities/3/notes) were unsafe and
+    # the public accused list reshuffled on each edit.
+    user = _contributor("bishal")
+    case = _make_case()
+    for i in range(5):
+        _bind(case, f"p{i}", ordinal=i)
+
+    client = _authed_client(user)
+    before = [e["nes_id"] for e in client.get(URL.format(case.slug)).data["entities"]]
+
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/entities/0/notes", "value": "first"}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+
+    after = [e["nes_id"] for e in client.get(URL.format(case.slug)).data["entities"]]
+    assert after == before
+    # The note landed on the entity the caller actually indexed.
+    assert case.entity_relationships.all()[0].notes == "first"
+
+
+@pytest.mark.django_db
+def test_entity_order_is_total_when_created_at_ties():
+    # Bulk-imported binds share a created_at and every get_or_create path leaves
+    # ordinal at 0, so without the pk tie-break the DB may return tied rows in a
+    # different order on successive reads of an unmodified case.
+    case = _make_case()
+    shared = timezone.now()
+    for i in range(6):
+        rel = _bind(case, f"tied{i}")
+        CaseEntityRelationship.objects.filter(pk=rel.pk).update(created_at=shared)
+
+    order = [r.pk for r in case.entity_relationships.all()]
+    assert order == sorted(order)
+    for _ in range(3):
+        assert [r.pk for r in case.entity_relationships.all()] == order
+
+
+@pytest.mark.django_db
+def test_entities_can_be_reordered_by_moving_a_list_item():
+    # Position is the order, so a caller reorders with a plain RFC-6902 replace
+    # of the whole list rather than needing a separate ordering field.
+    user = _contributor("anita")
+    case = _make_case()
+    for i in range(3):
+        _bind(case, f"e{i}", ordinal=i)
+
+    client = _authed_client(user)
+    entities = client.get(URL.format(case.slug)).data["entities"]
+    reversed_ids = [e["nes_id"] for e in entities][::-1]
+
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/entities",
+                "value": [
+                    {"nes_id": nes_id, "relationship_type": "ACCUSED"}
+                    for nes_id in reversed_ids
+                ],
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    after = [e["nes_id"] for e in client.get(URL.format(case.slug)).data["entities"]]
+    assert after == reversed_ids

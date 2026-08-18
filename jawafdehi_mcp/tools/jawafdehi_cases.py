@@ -70,6 +70,29 @@ EVIDENCE_ITEM_INPUT_SCHEMA = {
     "required": ["material_iri"],
     "additionalProperties": False,
 }
+EDIT_HISTORY_ITEM_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "date": {"type": "string", "format": "date"},
+        "remarks": {"type": "string", "minLength": 1},
+    },
+    "required": ["date", "remarks"],
+    "additionalProperties": False,
+}
+# The byline's only per-case fact is ORDER, so an author is just an account id.
+# A ``{"user_id": N}`` object is accepted too, so a caller can echo back the
+# richer read shape without reshaping it. Name, photo and description are
+# per-person and live on the author's profile, not on the case.
+AUTHOR_ITEM_INPUT_SCHEMA = {
+    "oneOf": [
+        {"type": "integer"},
+        {
+            "type": "object",
+            "properties": {"user_id": {"type": "integer"}},
+            "required": ["user_id"],
+        },
+    ]
+}
 CASE_CREATE_PROPERTIES: dict[str, Any] = {
     "case_type": {
         "type": "string",
@@ -101,7 +124,36 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
     "timeline": {"type": "array", "items": TIMELINE_ITEM_INPUT_SCHEMA},
     "evidence": {"type": "array", "items": EVIDENCE_ITEM_INPUT_SCHEMA},
     "notes": {"type": "string"},
-    "public_notes": {"type": "string"},
+    "public_notes": {
+        "type": "string",
+        "description": (
+            "DEPRECATED free-text byline. Use authors / case_publish_date / "
+            "public_edit_history instead."
+        ),
+    },
+    "case_publish_date": _nullable_schema(
+        {
+            "type": "string",
+            "format": "date",
+            "description": (
+                "Date the case first went live on jawafdehi.org. Required before "
+                "the case can leave DRAFT."
+            ),
+        }
+    ),
+    "public_edit_history": {
+        "type": "array",
+        "items": EDIT_HISTORY_ITEM_INPUT_SCHEMA,
+    },
+    "authors": {
+        "type": "array",
+        "items": AUTHOR_ITEM_INPUT_SCHEMA,
+        "description": (
+            "Credited author account ids, in byline order. At least one is "
+            "required before the case can leave DRAFT. Author names, photos and "
+            "bios are per-person and are edited on the author's profile."
+        ),
+    },
     "alleged_entities": {
         "type": "array",
         "items": {"type": "string", "format": "uri"},

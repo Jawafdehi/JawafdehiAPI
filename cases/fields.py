@@ -6,7 +6,7 @@ plus ``HttpsURLField`` (a Django-6-ready ``URLField``).
 """
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from django.core.exceptions import ValidationError
@@ -166,5 +166,149 @@ class TimelineListField(models.JSONField):
                     raise ValidationError(
                         f"Timeline end_date must be on or after date: {entry}"
                     )
+
+
+EDIT_HISTORY_DATE_ERROR = "Invalid date format (expected ISO format YYYY-MM-DD)"
+
+
+def edit_history_date_error(value):
+    """The single edit-history date error message, in ONE format.
+
+    Both layers use this, so the same bad value cannot produce two different
+    messages depending on whether it arrived through the API or a direct ORM
+    write. The offending value is included because the model field validates a
+    whole list, where "which entry?" is the first question.
+    """
+    return f"{EDIT_HISTORY_DATE_ERROR}: {value!r}"
+
+#: Extended YYYY-MM-DD only. A shape check is required IN ADDITION to
+#: ``date.fromisoformat``, not instead of it: on Python 3.11+ that parser also
+#: accepts ISO basic format ("20260814") and ISO week dates ("2026-W33-5"), both
+#: of which would be stored verbatim in ``public_edit_history`` and rendered on
+#: the public case page in a shape the frontend does not expect.
+#: ``datetime.fromisoformat`` is looser still (timestamps, UTC offsets).
+#: Mirrors ``TimelineListField._BS_DATE_RE``, which shape-checks for the same
+#: reason.
+_EDIT_HISTORY_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_edit_history_date(value):
+    """Return the ``date`` for an edit-history entry, or raise ValueError.
+
+    Shared by ``EditHistoryListField`` (model layer) and
+    ``EditHistoryItemSerializer`` (API layer) so the rule and its error text
+    cannot drift apart.
+    """
+    if not isinstance(value, str) or not _EDIT_HISTORY_DATE_RE.match(value):
+        raise ValueError(EDIT_HISTORY_DATE_ERROR)
+    # The regex fixes the shape; the parser rejects impossible dates (2026-02-31).
+    return date.fromisoformat(value)
+
+
+class AuthorLinkListField(models.JSONField):
+    """
+    Stores an author's social links: a list of ``{type, value}`` entries.
+
+    The ``type`` vocabulary deliberately mirrors ``ContactType`` in the
+    frontend's ``src/data/team.ts``, so the author card and the team page speak
+    the same language and can share icon rendering. ``email`` is NOT one of them
+    — it is its own field on ``AuthorProfile``, because a personal address is
+    worth handling (and withholding) separately from a public profile link.
+    """
+
+    #: Kept in sync with `ContactType` in src/data/team.ts.
+    LINK_TYPES = frozenset(
+        {"facebook", "instagram", "linkedin", "github", "website", "twitter"}
+    )
+
+    def __init__(self, *args, **kwargs):
+        kwargs["default"] = list
+        kwargs["blank"] = True
+        super().__init__(*args, **kwargs)
+
+    def validate(self, value, model_instance):
+        """Validate that value is a list of known-type links with https URLs."""
+        super().validate(value, model_instance)
+
+        if not isinstance(value, list):
+            raise ValidationError("Value must be a list")
+
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise ValidationError(f"Author link must be a dictionary: {entry}")
+
+            for field in ("type", "value"):
+                if field not in entry:
+                    raise ValidationError(
+                        f"Author link missing required field '{field}': {entry}"
+                    )
+
+            link_type = entry["type"]
+            if link_type not in self.LINK_TYPES:
+                raise ValidationError(
+                    f"Unknown author link type '{link_type}'. Must be one of: "
+                    f"{', '.join(sorted(self.LINK_TYPES))}"
+                )
+
+            url = entry["value"]
+            if not isinstance(url, str) or not url.strip():
+                raise ValidationError(
+                    f"Author link value must be a non-empty string: {entry}"
+                )
+            # These render as outbound anchors on a public page; an unscheme'd or
+            # javascript: value must not reach the DOM.
+            if not url.startswith("https://"):
+                raise ValidationError(
+                    f"Author link value must be an https:// URL: {url}"
+                )
+
+
+class EditHistoryListField(models.JSONField):
+    """
+    Stores the case's PUBLIC edit history: a list of ``{date, remarks}`` entries.
+
+    Each entry must have: date (AD ISO format), remarks (non-empty string).
+
+    This is the caseworker-curated, publicly rendered counterpart to
+    ``CaseStateChange`` — which is machine-written, carries moderator names and
+    send-back reasons, and is gated for every state. The two are deliberately
+    separate: a public "corrected the bigo figure" line is not the same record
+    as "sent back to draft by <moderator>".
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs["default"] = list
+        kwargs["blank"] = True
+        super().__init__(*args, **kwargs)
+
+    def validate(self, value, model_instance):
+        """Validate that value is a list of valid edit-history entries."""
+        super().validate(value, model_instance)
+
+        if not isinstance(value, list):
+            raise ValidationError("Value must be a list")
+
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise ValidationError(
+                    f"Edit history entry must be a dictionary: {entry}"
+                )
+
+            for field in ("date", "remarks"):
+                if field not in entry:
+                    raise ValidationError(
+                        f"Edit history entry missing required field '{field}': {entry}"
+                    )
+
+            date_str = entry["date"]
+            try:
+                parse_edit_history_date(date_str)
+            except (ValueError, TypeError):
+                raise ValidationError(edit_history_date_error(date_str))
+
+            if not isinstance(entry["remarks"], str) or not entry["remarks"].strip():
+                raise ValidationError(
+                    f"Edit history remarks must be a non-empty string: {entry}"
+                )
 
 

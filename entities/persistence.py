@@ -94,9 +94,12 @@ def _entity_row_fields(doc: Dict[str, Any], *, version: int, created_at: datetim
         "version": version,
         "created_at": created_at,
         "updated_at": updated_at,
-        # A (re-)publish revives a soft-deleted row: the write is the source of
-        # truth, so clear the soft-delete flag on every upsert.
+        # A (re-)publish revives a soft-deleted row: the write is the source of truth,
+        # so clear the soft-delete flag on every upsert.
         "is_deleted": False,
+        # Resetting the pointer here is what makes it unforgeable: no authoring path
+        # writes this column, so only EntityMergeService._retire can set it.
+        "merged_into": None,
     }
 
 
@@ -189,6 +192,26 @@ class EntityRepository:
         entity.updated_at = datetime.now(timezone.utc)
         entity.save(update_fields=["is_deleted", "updated_at"])
         return True
+
+    def resolve_tombstone(self, iri: str, *, max_hops: int = 10) -> Optional[str]:
+        """The live survivor a retired ``iri`` was merged into, or None if it is not a tombstone.
+
+        The pointer only counts on a soft-deleted row, so a live row carrying one is
+        inert. Follows a chain of merges; ``max_hops`` bounds it so a cycle terminates.
+        """
+        current = iri
+        for _ in range(max_hops):
+            target = (
+                StoredEntity.objects.filter(pk=current, is_deleted=True)
+                .values_list("merged_into", flat=True)
+                .first()
+            )
+            if not target or target == current:
+                return None if current == iri else current
+            current = target
+            if not StoredEntity.objects.filter(pk=current, is_deleted=True).exists():
+                return current
+        return current
 
     def entity_version(self, iri: str) -> Optional[int]:
         """The current promoted version number for a live entity (or None)."""

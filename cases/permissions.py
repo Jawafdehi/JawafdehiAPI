@@ -38,3 +38,22 @@ class IsFeedbackTriager(permissions.BasePermission):
         # is_admin_or_moderator already carries the is_superuser term (it is
         # documented as the only predicate that does), so don't re-OR it.
         return bool(is_admin_or_moderator(user))
+
+
+class IsCaseAuthorPicker(permissions.BasePermission):
+    """Content staff, for the case-author picker's roster of accounts.
+
+    Same principal set as ``IsFeedbackTriager``, gating a different thing, so it
+    is a separate class rather than a reuse: this one hands out a list of staff
+    names, and the reason to restrict it is that a roster of who works here is
+    not public. ReadOnly is excluded because the picker exists only to build a
+    byline, which ReadOnly cannot write anyway.
+    """
+
+    message = "Listing case-author candidates requires the Caseworker role."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return bool(is_admin_or_moderator(user))

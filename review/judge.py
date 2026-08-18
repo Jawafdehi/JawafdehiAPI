@@ -17,6 +17,57 @@ from django.conf import settings
 
 from llm.invoke import invoke_json
 
+
+class JudgeUnavailable(RuntimeError):
+    """The judge could not be reached, so some rules have no grade at all.
+
+    Distinct from "the model replied but omitted a rule key": that is a content
+    problem the per-rule retry handles, and its neutral 50 must not fail a gate.
+    This one means the *call* never landed -- expired/revoked credentials, a 429
+    session cap, a network fault -- and the review is therefore unscorable. It
+    must reach the queue as a job failure rather than being folded into a score,
+    because a partially-judged review still reads as a plausible ~70.
+    """
+
+
+# Failures that are NOT evidence the judge is unreachable. A dirty or truncated
+# reply means the call landed and `salvage_json` still could not make an object
+# of it; the rest are our own bugs (a malformed rule dict, a typo in prompt
+# building). Both leave a rule ungraded, and both must keep the lenient
+# degrade-to-neutral path -- failing the job over them would turn every content
+# hiccup into a dead-lettered review. Anything else a provider raises for a real
+# transport fault (a 429 cap wrapped in RuntimeError, an expired token, a
+# timeout, a botocore ClientError) is not enumerable, so transport is the
+# default and this list is the exception.
+_NON_TRANSPORT_ERRORS = (
+    json.JSONDecodeError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    NotImplementedError,
+)
+
+
+def _is_transport_error(exc):
+    """Did the call fail to *land*, as opposed to landing badly or hitting a bug?"""
+    return not isinstance(exc, _NON_TRANSPORT_ERRORS)
+
+
+def _task_rule_keys(task):
+    """The rule keys a task is carrying; the narrative task carries none.
+
+    Reachability is per rule, so a failure is only evidence about the rules whose
+    grades that particular call was going to produce.
+    """
+    kind = task[0]
+    if kind == "batch":
+        return [r["key"] for r in task[2]]
+    if kind == "rule":
+        return [task[2]["key"]]
+    return []
+
+
 # Bounded parallelism for LLM calls. Bedrock throttles aggressively, so we
 # keep this modest; with hundreds of rules this is the wall-clock divisor.
 def _api_max_workers():
@@ -350,6 +401,11 @@ def judge_rules(
     last_suggestions = {k: [] for k in keys}
     narrative = ""
     errors = []
+    # Rule key -> the transport error that left it unreached on its LATEST
+    # attempt. Kept per rule rather than as one shared list because a failure
+    # says nothing about a rule that some other call graded: a dead narrative
+    # call, or a bug in one batch, must not mark every ungraded rule unreachable.
+    unreachable = {}
 
     def _apply(key, parsed):
         if key not in samples or not isinstance(parsed, dict):
@@ -397,7 +453,21 @@ def judge_rules(
         return ("rule", rule["key"], parsed)
 
     def _drain(pool_tasks):
+        """Run a round of tasks, then record which rules this round never reached.
+
+        A rule counts as unreached only if EVERY call carrying it in this round
+        failed on transport — one landed reply is enough to say the judge was
+        there, whatever the reply contained. The verdict is per round, because
+        the per-rule retry below is a fresh attempt: it can rescue a rule the
+        batch failed to reach, and it can equally be the call that dies when the
+        quota runs out part-way through a review.
+        """
         nonlocal narrative
+        # rule key -> [calls carrying it, calls that failed on transport, first error]
+        covered = {}
+        for t in pool_tasks:
+            for k in _task_rule_keys(t):
+                covered.setdefault(k, [0, 0, ""])[0] += 1
         with ThreadPoolExecutor(max_workers=_effective_max_workers()) as pool:
             futures = {pool.submit(_run, t): t for t in pool_tasks}
             for fut in as_completed(futures):
@@ -405,6 +475,10 @@ def judge_rules(
                     res = fut.result()
                 except Exception as e:  # noqa: BLE001 - collect, decide later
                     errors.append(str(e))
+                    if _is_transport_error(e):
+                        for k in _task_rule_keys(futures[fut]):
+                            covered[k][1] += 1
+                            covered[k][2] = covered[k][2] or str(e)
                     continue
                 kind = res[0]
                 if kind == "narrative":
@@ -415,6 +489,11 @@ def judge_rules(
                         _apply(k, rr)
                 else:  # per-rule
                     _apply(res[1], res[2])
+        for k, (n_calls, n_dead, err) in covered.items():
+            if n_dead == n_calls:
+                unreachable[k] = err
+            else:
+                unreachable.pop(k, None)
 
     _drain(tasks)
 
@@ -427,7 +506,27 @@ def judge_rules(
     if omitted:
         _drain([("rule", _tier_for_rule(r), r) for r in omitted])
 
-    # If nothing at all came back, surface the failure to the caller.
+    # Partial reachability is the dangerous case: the quota/credential can die
+    # PART-WAY through a review, so the early rules carry real grades and the
+    # rest silently take the neutral 50. That review is not a low score, it is
+    # an unfinished one -- and it still lands in the 68-71 band that looks like
+    # a genuine near-miss. Total failure is just this with every rule in it.
+    #
+    # Only a rule whose OWN last call never landed counts. An ungraded rule with
+    # a landed call behind it is the model omitting a key, which the per-rule
+    # retry above already handled and which must stay non-fatal.
+    dead = [k for k in keys if not samples[k] and k in unreachable]
+    if dead:
+        raise JudgeUnavailable(
+            f"Judge unreachable for {len(dead)}/{len(keys)} rule(s) "
+            f"({', '.join(dead)}) after {len(errors)} failed call(s): "
+            f"{unreachable[dead[0]]}"
+        )
+
+    # Nothing came back, but the judge was reachable throughout -- unparseable
+    # replies, or a bug of ours. Keep the old lenient handling: the scorer
+    # catches this and records it as `judge_error` over neutral scores, because
+    # dead-lettering a review over a content hiccup is the wrong trade.
     if not any(samples[k] for k in keys) and not narrative:
         raise RuntimeError(
             f"All {len(tasks)} judge calls failed: {errors[0] if errors else 'unknown'}"
