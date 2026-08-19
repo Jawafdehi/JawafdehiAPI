@@ -141,8 +141,14 @@ class ArticlePage(HeadlessPreviewMixin, Page):  # ty: ignore[invalid-method-over
     # this size is measured in megabytes (1600x900 lands at ~2.7MB as PNG vs
     # ~330KB as WebP — smaller than the 640KB the 800x450 PNG costs today).
     #
-    # NOTE ``fill-`` upscales silently, so a thumbnail uploaded below 1600px wide
-    # yields a soft, needlessly heavy hero rather than an error. Article
+    # NOTE ``fill-`` never upscales — ``FillOperation`` crops to the target ratio
+    # and then only resizes when ``scale < 1.0``. So a source below the target
+    # doesn't error and doesn't blur: it silently returns a SMALLER rendition,
+    # and both specs collapse to the same size. Live example: a 750x400 source
+    # yields 712x400 for `thumbnail` AND `thumbnail_large`, so that article keeps
+    # a soft hero until a bigger source is uploaded. The payload's width/height
+    # report the real size, so the client's intrinsic sizing stays honest —
+    # nothing breaks, you just don't get the resolution you asked for. Article
     # thumbnails want to be >=1600px on the long edge.
     api_fields = [
         APIField("category"),

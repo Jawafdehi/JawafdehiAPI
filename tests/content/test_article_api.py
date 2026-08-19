@@ -15,6 +15,7 @@ list query names `thumbnail` and so must not be charged for the hero rendition.
 import datetime
 
 import pytest
+from django.core.cache import caches
 from wagtail.images import get_image_model
 from wagtail.images.tests.utils import get_test_image_file
 
@@ -32,6 +33,19 @@ JSON = {"HTTP_ACCEPT": "application/json"}
 # Exactly what `src/services/cms-api.ts` sends for the /updates grid. Kept
 # verbatim so a rename on either side shows up as a failure here.
 LIST_FIELDS = "title,category,date,excerpt,thumbnail"
+
+
+def _isolate_rendition_cache():
+    """Drop Wagtail's rendition cache between image fixtures.
+
+    Wagtail caches renditions keyed on image pk + filter spec, NOT on the file.
+    Under pytest each test rolls back, so every fixture image is created as pk=1
+    — meaning a second test's image inherits the FIRST one's cached rendition and
+    reports its dimensions. That looked exactly like `fill-` upscaling a small
+    source to 800x450. It isn't: in production images have distinct pks.
+    """
+    for cache in caches.all():
+        cache.clear()
 
 
 @pytest.fixture
@@ -97,6 +111,7 @@ def article_with_thumbnail(db, settings, tmp_path):
     # FileSystemStorage under the test settings (no AWS creds). Point it at tmp
     # so generating them doesn't litter the checkout's MEDIA_ROOT.
     settings.MEDIA_ROOT = str(tmp_path)
+    _isolate_rendition_cache()
 
     image = get_image_model().objects.create(
         title="जलहरी मुद्दाको तस्बिर",
@@ -181,6 +196,60 @@ def test_og_image_is_jpeg_at_social_aspect_ratio(client, article_with_thumbnail)
     og = resp.json()["items"][0]["og_image"]
     assert (og["width"], og["height"]) == (1200, 630)
     assert og["url"].endswith(".jpg")
+
+
+@pytest.fixture
+def article_with_a_small_thumbnail(db, settings, tmp_path):
+    """A thumbnail narrower than the 1600px hero target — the case that revealed
+    `fill-` does not upscale."""
+    settings.MEDIA_ROOT = str(tmp_path)
+    _isolate_rendition_cache()
+
+    image = get_image_model().objects.create(
+        title="सानो तस्बिर",
+        file=get_test_image_file(filename="sano.png", size=(750, 400)),
+    )
+    index = ArticleIndexPage.objects.first()
+    article = ArticlePage(
+        title="Update with a small thumbnail",
+        slug="update-with-a-small-thumbnail",
+        category=ArticleCategory.UPDATE,
+        date=datetime.date(2026, 8, 19),
+        excerpt="Small image",
+        thumbnail=image,
+    )
+    index.add_child(instance=article)
+    article.save_revision().publish()
+    return article
+
+
+@pytest.mark.django_db
+def test_a_small_source_downgrades_rather_than_upscaling(
+    client, article_with_a_small_thumbnail
+):
+    """`fill-` crops to the ratio then resizes only when `scale < 1.0`, so a
+    source below the target yields a SMALLER rendition and both specs collapse to
+    the same size. Pinned because the payload's width/height are what the client
+    reserves space with — if this ever started upscaling, callers would silently
+    get a blurry, much heavier hero instead of an honest small one."""
+    resp = client.get(
+        PAGES_URL,
+        {
+            "type": "content.ArticlePage",
+            "slug": article_with_a_small_thumbnail.slug,
+            "fields": "*",
+        },
+        **JSON,
+    )
+
+    data = resp.json()["items"][0]
+    small = (data["thumbnail"]["width"], data["thumbnail"]["height"])
+    large = (data["thumbnail_large"]["width"], data["thumbnail_large"]["height"])
+
+    assert small == (712, 400)
+    assert large == small
+    # Never larger than the source could honestly support.
+    assert data["og_image"]["width"] <= 750
 
 
 @pytest.mark.django_db
