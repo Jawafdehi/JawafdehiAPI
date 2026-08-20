@@ -171,10 +171,48 @@ class CauselistVerdictPromotionTests(_NgmTestCase):
     def test_relist_of_the_same_sitting_is_idempotent(self):
         self._decided("083-CR-0008")
         before = self._row("083-CR-0008").verdict_date_ad
-        self._decided("083-CR-0008")
+        # The same sitting is re-listed on every lookback pass. The row must not
+        # change AND the run must not claim a fresh recovery, or a re-crawl reports
+        # thousands of verdicts it did not actually recover.
+        stats = self._decided("083-CR-0008")
+        self.assertEqual(stats["verdicts_promoted"], 0)
         case = self._row("083-CR-0008")
         self.assertEqual(case.verdict_type, ACQUITTED)
         self.assertEqual(case.verdict_date_ad, before)
+
+    def test_undated_sitting_spares_a_bs_only_verdict_date(self):
+        # bs_to_ad returns None for a date outside the calendar tables and DQ-03
+        # stores the pair regardless, so a row can hold BS with a NULL AD. An
+        # undated sitting must not strand this row's date beside a new outcome.
+        upsert_causelist([(_case("083-CR-0010"), _hearing("083-CR-0010"))])
+        case = self._row("083-CR-0010")
+        case.verdict_type, case.verdict_date_bs = CONVICTED, "2083-03-25"
+        case.verdict_date_ad = None
+        case.save(using="ngm")
+        stats = self._decided(
+            "083-CR-0010", date_bs="", decision="सफाई",
+            hearing_date_ad=None, serial="4",
+        )
+        self.assertEqual(stats["verdicts_promoted"], 0)
+        case.refresh_from_db()
+        self.assertEqual(case.verdict_type, CONVICTED)
+        self.assertEqual(case.verdict_date_bs, "2083-03-25")
+
+    def test_older_sitting_does_not_regress_a_bs_only_verdict_date(self):
+        # Same BS-without-AD row, but the candidate IS dated and older. Ordering
+        # falls back to the canonical zero-padded BS string.
+        upsert_causelist([(_case("083-CR-0011"), _hearing("083-CR-0011"))])
+        case = self._row("083-CR-0011")
+        case.verdict_type, case.verdict_date_bs = CONVICTED, "2083-03-25"
+        case.verdict_date_ad = None
+        case.save(using="ngm")
+        stats = self._decided(
+            "083-CR-0011", date_bs="2082-05-03", decision="सफाई",
+            hearing_date_ad=date(2025, 8, 19), serial="5",
+        )
+        self.assertEqual(stats["verdicts_promoted"], 0)
+        case.refresh_from_db()
+        self.assertEqual(case.verdict_type, CONVICTED)
 
     def test_promotion_still_unions_extra_data(self):
         # The promotion must not cost us the never-clobber rule.

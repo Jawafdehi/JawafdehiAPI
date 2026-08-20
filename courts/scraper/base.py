@@ -111,7 +111,7 @@ def _causelist_verdict(
     routinely — and a case can be decided, reopened on review and decided again,
     where only the latest disposition is operative. So an older sitting never
     overwrites a newer verdict, and an undated sitting is promoted only onto a row
-    with no verdict date to lose.
+    holding no verdict date at all.
     """
     outcome = cs.outcome_from_hearings(
         [{"case_status": phearing.case_status, "decision_type": phearing.decision_type}]
@@ -124,11 +124,27 @@ def _causelist_verdict(
     # 1900-01-01 on the hearing row (that column is NOT NULL) and that sentinel
     # must never become a verdict date.
     dated = bool(phearing.hearing_date_bs and phearing.hearing_date_ad)
-    verdict_date_ad = phearing.hearing_date_ad if dated else None
 
-    held = existing.verdict_date_ad if existing else None
-    if held is not None and (verdict_date_ad is None or verdict_date_ad < held):
-        return None
+    held_ad = existing.verdict_date_ad if existing else None
+    held_bs = existing.verdict_date_bs if existing else None
+
+    # An undated sitting must not touch a row that already holds a dated verdict:
+    # it writes verdict_type without a date, leaving this sitting's outcome beside
+    # another sitting's date. Both columns are checked because a row can hold a BS
+    # date whose AD conversion failed (bs_to_ad returns None on a date outside the
+    # calendar tables, and DQ-03 stores the pair regardless).
+    if not dated:
+        if held_ad is not None or held_bs:
+            return None
+    elif held_ad is not None:
+        if phearing.hearing_date_ad < held_ad:
+            return None
+    elif held_bs:
+        # AD is missing but BS is held, so order on BS. Safe because the stored
+        # form is canonical zero-padded ``YYYY-MM-DD`` (measured corpus-wide: zero
+        # malformed), which sorts lexicographically.
+        if phearing.hearing_date_bs < held_bs:
+            return None
 
     promoted: dict[str, object] = {
         # The court's own label for the sitting ("फैसला"), which parse_case_status
@@ -177,8 +193,14 @@ def upsert_causelist(rows: list[tuple[ParsedCase, ParsedHearing]], *, using: str
         }
         # A sitting that disposed of the case promotes its outcome onto the case
         # row — the one place the cause list may write enrichment-owned columns.
+        # Only write (and only count) when a column actually changes: the same
+        # decisive sitting is re-listed on every lookback pass, and a re-crawl that
+        # changes nothing must not report thousands of recovered verdicts.
         promoted = _causelist_verdict(phearing, existing)
-        if promoted is not None:
+        if promoted is not None and (
+            existing is None
+            or any(getattr(existing, col) != value for col, value in promoted.items())
+        ):
             listing.update(promoted)
             stats["verdicts_promoted"] += 1
         CourtCase.objects.using(using).update_or_create(

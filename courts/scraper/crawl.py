@@ -20,9 +20,10 @@ class CrawlStats:
     cases: int = 0
     hearings: int = 0
     enriched: int = 0
-    #: Case rows whose verdict was promoted from a decisive sitting. Reported so a
-    #: run that recovers verdicts is distinguishable from one that only re-lists;
-    #: dry-run (write=False) always leaves this 0, since nothing is promoted.
+    #: Case rows whose verdict CHANGED because a decisive sitting was promoted onto
+    #: them. Reported so a run that recovers verdicts is distinguishable from one
+    #: that only re-lists — re-listing the same sitting counts 0, not a fresh
+    #: recovery. Dry-run (write=False) always leaves this 0: nothing is promoted.
     verdicts_promoted: int = 0
     per_date: list[str] = field(default_factory=list)
 
