@@ -6,7 +6,7 @@ from datetime import date
 
 from django.test import TestCase
 
-from courts.case_status import ACQUITTED
+from courts.case_status import ACQUITTED, CONVICTED, PARTIALLY_CONVICTED
 from courts.models import CaseEntity, Court, CourtCase, CourtCaseHearing, ScrapedDate
 from courts.scraper.base import (
     apply_enrichment,
@@ -29,16 +29,19 @@ def _case(cn="082-CR-0015", **extra):
 
 
 def _hearing(cn="082-CR-0015", date_bs="2082-01-05", serial="1", **kw):
+    # hearing_date_ad is overridable (via kw) so the verdict-promotion tests can
+    # pin a BS/AD pair, or drop the AD date to exercise the undated path.
     return ParsedHearing(
         case_number=cn, court_identifier="special", hearing_date_bs=date_bs,
-        hearing_date_ad=date(2025, 4, 18), serial_no=serial, **kw,
+        hearing_date_ad=kw.pop("hearing_date_ad", date(2025, 4, 18)),
+        serial_no=serial, **kw,
     )
 
 
 class CauselistUpsertTests(_NgmTestCase):
     def test_upsert_creates_case_and_hearing(self):
         stats = upsert_causelist([(_case(), _hearing(case_status="पेशी"))])
-        self.assertEqual(stats, {"cases": 1, "hearings": 1})
+        self.assertEqual(stats, {"cases": 1, "hearings": 1, "verdicts_promoted": 0})
         case = CourtCase.objects.using("ngm").get(court_id="special", case_number="082-CR-0015")
         self.assertEqual(case.case_type, "भ्रष्टाचार")
         self.assertEqual(case.extra_data["category"], "फाँट क")
@@ -72,6 +75,155 @@ class CauselistUpsertTests(_NgmTestCase):
         case.refresh_from_db()
         self.assertEqual(case.extra_data["division"], "रिट १")
         self.assertEqual(case.extra_data["new"], "x")
+
+
+class CauselistVerdictPromotionTests(_NgmTestCase):
+    """A decisive sitting must land on the CASE row, not just the hearing row.
+
+    Regression: enrichment runs once per case (crawl excludes status="enriched")
+    and is the only writer of case_status/verdict_*, so a case decided after that
+    one pass read as ongoing forever — 114 Special Court cases held a फैसला
+    hearing while their case row still said चलिरहेको.
+    """
+
+    # The real 081-CR-0111 disposing sitting: BS 2083-03-25 == AD 2026-07-09,
+    # decided सफाई. Kept a true BS/AD pair so the fixtures can't teach a wrong one.
+    _VERDICT_BS = "2083-03-25"
+    _VERDICT_AD = date(2026, 7, 9)
+
+    def _decided(self, cn, date_bs=_VERDICT_BS, decision="सफाई", **kw):
+        kw.setdefault("hearing_date_ad", self._VERDICT_AD)
+        return upsert_causelist(
+            [(_case(cn), _hearing(cn, date_bs=date_bs, case_status="फैसला",
+                                  decision_type=decision, **kw))]
+        )
+
+    def _row(self, cn):
+        return CourtCase.objects.using("ngm").get(court_id="special", case_number=cn)
+
+    def test_faisala_promotes_onto_the_case_row(self):
+        stats = self._decided("083-CR-0001")
+        self.assertEqual(stats["verdicts_promoted"], 1)
+        case = self._row("083-CR-0001")
+        self.assertEqual(case.case_status, "फैसला")
+        self.assertEqual(case.verdict_type, ACQUITTED)
+        self.assertEqual(case.verdict_date_bs, self._VERDICT_BS)
+        self.assertEqual(case.verdict_date_ad, self._VERDICT_AD)
+
+    def test_promotion_overwrites_an_ongoing_status_from_enrichment(self):
+        # The exact 081-CR-0111 shape: enriched pre-verdict, so the case row says
+        # ongoing with NULL verdicts, then the deciding sitting is listed.
+        upsert_causelist([(_case("083-CR-0002"), _hearing("083-CR-0002"))])
+        case = self._row("083-CR-0002")
+        case.case_status, case.status = "चलिरहेको", "enriched"
+        case.save(using="ngm")
+        self._decided("083-CR-0002")
+        case.refresh_from_db()
+        self.assertEqual(case.case_status, "फैसला")
+        self.assertEqual(case.verdict_type, ACQUITTED)
+
+    def test_interlocutory_sitting_promotes_nothing(self):
+        stats = upsert_causelist([
+            (_case("083-CR-0003"),
+             _hearing("083-CR-0003", case_status="आदेश", decision_type="साक्षी बुझ्ने")),
+        ])
+        self.assertEqual(stats["verdicts_promoted"], 0)
+        case = self._row("083-CR-0003")
+        self.assertIsNone(case.case_status)
+        self.assertIsNone(case.verdict_type)
+
+    def test_unrecognised_decision_is_not_guessed(self):
+        # Terminal status, but a decision_type outside the vocabulary: record
+        # nothing rather than a guess.
+        stats = self._decided("083-CR-0004", decision="कुनै अज्ञात व्यहोरा")
+        self.assertEqual(stats["verdicts_promoted"], 0)
+        self.assertIsNone(self._row("083-CR-0004").verdict_type)
+
+    def test_partial_conviction_is_not_recorded_as_full(self):
+        # आंशिक must be matched ahead of ठहर — 593 rows once carried CONVICTED
+        # when their own hearing said आंशिक ठहर.
+        self._decided("083-CR-0005", decision="आंशिक ठहर")
+        self.assertEqual(self._row("083-CR-0005").verdict_type, PARTIALLY_CONVICTED)
+
+    def test_older_relist_does_not_regress_a_newer_verdict(self):
+        # Lookbacks re-crawl historical dates, and a case can be decided, reopened
+        # and decided again. The earlier sitting must not overwrite the later one.
+        self._decided("083-CR-0006", decision="ठहर")
+        self._decided(
+            "083-CR-0006", date_bs="2082-05-03", decision="सफाई",
+            hearing_date_ad=date(2025, 8, 19), serial="2",
+        )
+        case = self._row("083-CR-0006")
+        self.assertEqual(case.verdict_type, CONVICTED)
+        self.assertEqual(case.verdict_date_bs, self._VERDICT_BS)
+
+    def test_undated_sitting_never_clobbers_a_held_verdict_date(self):
+        self._decided("083-CR-0007", decision="ठहर")
+        stats = self._decided(
+            "083-CR-0007", date_bs="", decision="सफाई",
+            hearing_date_ad=None, serial="3",
+        )
+        self.assertEqual(stats["verdicts_promoted"], 0)
+        case = self._row("083-CR-0007")
+        self.assertEqual(case.verdict_type, CONVICTED)
+        self.assertEqual(case.verdict_date_ad, self._VERDICT_AD)
+
+    def test_relist_of_the_same_sitting_is_idempotent(self):
+        self._decided("083-CR-0008")
+        before = self._row("083-CR-0008").verdict_date_ad
+        # The same sitting is re-listed on every lookback pass. The row must not
+        # change AND the run must not claim a fresh recovery, or a re-crawl reports
+        # thousands of verdicts it did not actually recover.
+        stats = self._decided("083-CR-0008")
+        self.assertEqual(stats["verdicts_promoted"], 0)
+        case = self._row("083-CR-0008")
+        self.assertEqual(case.verdict_type, ACQUITTED)
+        self.assertEqual(case.verdict_date_ad, before)
+
+    def test_undated_sitting_spares_a_bs_only_verdict_date(self):
+        # bs_to_ad returns None for a date outside the calendar tables and DQ-03
+        # stores the pair regardless, so a row can hold BS with a NULL AD. An
+        # undated sitting must not strand this row's date beside a new outcome.
+        upsert_causelist([(_case("083-CR-0010"), _hearing("083-CR-0010"))])
+        case = self._row("083-CR-0010")
+        case.verdict_type, case.verdict_date_bs = CONVICTED, "2083-03-25"
+        case.verdict_date_ad = None
+        case.save(using="ngm")
+        stats = self._decided(
+            "083-CR-0010", date_bs="", decision="सफाई",
+            hearing_date_ad=None, serial="4",
+        )
+        self.assertEqual(stats["verdicts_promoted"], 0)
+        case.refresh_from_db()
+        self.assertEqual(case.verdict_type, CONVICTED)
+        self.assertEqual(case.verdict_date_bs, "2083-03-25")
+
+    def test_older_sitting_does_not_regress_a_bs_only_verdict_date(self):
+        # Same BS-without-AD row, but the candidate IS dated and older. Ordering
+        # falls back to the canonical zero-padded BS string.
+        upsert_causelist([(_case("083-CR-0011"), _hearing("083-CR-0011"))])
+        case = self._row("083-CR-0011")
+        case.verdict_type, case.verdict_date_bs = CONVICTED, "2083-03-25"
+        case.verdict_date_ad = None
+        case.save(using="ngm")
+        stats = self._decided(
+            "083-CR-0011", date_bs="2082-05-03", decision="सफाई",
+            hearing_date_ad=date(2025, 8, 19), serial="5",
+        )
+        self.assertEqual(stats["verdicts_promoted"], 0)
+        case.refresh_from_db()
+        self.assertEqual(case.verdict_type, CONVICTED)
+
+    def test_promotion_still_unions_extra_data(self):
+        # The promotion must not cost us the never-clobber rule.
+        upsert_causelist([(_case("083-CR-0009"), _hearing("083-CR-0009"))])
+        case = self._row("083-CR-0009")
+        case.extra_data = {"category": "फाँट क", "enrichment_hearings": [{"d": "2081"}]}
+        case.save(using="ngm")
+        self._decided("083-CR-0009")
+        case.refresh_from_db()
+        self.assertEqual(case.extra_data["enrichment_hearings"], [{"d": "2081"}])
+        self.assertEqual(case.verdict_type, ACQUITTED)
 
 
 class FrontierTests(_NgmTestCase):
