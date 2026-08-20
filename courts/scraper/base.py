@@ -22,8 +22,11 @@ from courts.scraper.rows import ParsedCase, ParsedEnrichment, ParsedHearing
 
 NGM_DB = "ngm"
 
-# Court-owned typed columns the enrichment may set (never touched by the cause-list
-# upsert, which only writes listing fields).
+# Court-owned typed columns the enrichment may set. The cause-list upsert writes
+# listing fields only, with ONE exception: a decisive sitting promotes
+# case_status/verdict_* onto the case row (see _causelist_verdict). Enrichment
+# runs once per case and the verdict usually lands later, so without that
+# promotion a decided case reads as ongoing forever.
 _ENRICH_COLUMNS = {
     "case_status", "verdict_type", "verdict_date_bs", "verdict_date_ad",
     "verdict_judge", "case_subject", "hearing_count", "registration_number",
@@ -84,16 +87,72 @@ def _ensure_court(court_id: str, *, using: str) -> None:
     )
 
 
+def _causelist_verdict(
+    phearing: ParsedHearing, existing: CourtCase | None
+) -> dict[str, object] | None:
+    """Verdict columns to promote from a decisive cause-list sitting, else ``None``.
+
+    The cause list already carries the disposition — for the Special Court it is
+    cells 9 and 10 of the row, e.g. ``फैसला`` / ``सफाई``. We were writing that pair
+    onto the hearing and dropping it from the case row, so a case decided after
+    its one-shot enrichment kept ``case_status='चलिरहेको'`` with NULL verdicts
+    permanently (measured 2026-08-20: 114 Special Court cases).
+
+    Classification goes through :func:`courts.case_status.outcome_from_hearings`
+    rather than a local substring test, so this inherits the shared vocabulary and
+    its guarantees: only the terminal bucket counts (the portal writes
+    ``अन्तिम आदेश`` on plainly interlocutory orders), an unrecognised decision
+    yields nothing rather than a guess, and ``आंशिक`` is matched ahead of ``ठहर``
+    so a PARTIAL conviction is never recorded as a full one.
+
+    Returns ``None`` when the sitting decided nothing, and also when promoting it
+    would REGRESS the row. That second guard matters because the lookback horizons
+    reach back years (BS 2070 for special), so historical dates are re-crawled
+    routinely — and a case can be decided, reopened on review and decided again,
+    where only the latest disposition is operative. So an older sitting never
+    overwrites a newer verdict, and an undated sitting is promoted only onto a row
+    with no verdict date to lose.
+    """
+    outcome = cs.outcome_from_hearings(
+        [{"case_status": phearing.case_status, "decision_type": phearing.decision_type}]
+    )
+    if outcome is None:
+        return None
+
+    # The sitting's date comes from the parser's typed fields, never from
+    # re-parsing text. Both must be present: hearing_date_ad falls back to
+    # 1900-01-01 on the hearing row (that column is NOT NULL) and that sentinel
+    # must never become a verdict date.
+    dated = bool(phearing.hearing_date_bs and phearing.hearing_date_ad)
+    verdict_date_ad = phearing.hearing_date_ad if dated else None
+
+    held = existing.verdict_date_ad if existing else None
+    if held is not None and (verdict_date_ad is None or verdict_date_ad < held):
+        return None
+
+    promoted: dict[str, object] = {
+        # The court's own label for the sitting ("फैसला"), which parse_case_status
+        # reads as DECIDED. The typed columns below carry the structured outcome.
+        "case_status": phearing.case_status,
+        "verdict_type": outcome.verdict_type,
+    }
+    if dated:
+        promoted["verdict_date_bs"] = phearing.hearing_date_bs
+        promoted["verdict_date_ad"] = phearing.hearing_date_ad
+    return promoted
+
+
 @transaction.atomic(using=NGM_DB)
 def upsert_causelist(rows: list[tuple[ParsedCase, ParsedHearing]], *, using: str = NGM_DB) -> dict[str, int]:
     """Persist one date's cause-list ``(case, hearing)`` rows.
 
-    Cases are upserted on the natural key ``(court, case_number)`` writing only
-    listing fields; ``extra_data`` is UNIONed onto any existing row so an already
-    enriched row's payload is never clobbered by a re-list. Hearings are appended
-    (deduped on court/case/date/serial).
+    Cases are upserted on the natural key ``(court, case_number)`` writing listing
+    fields, plus ``case_status``/``verdict_*`` when the sitting disposed of the case
+    (:func:`_causelist_verdict`); ``extra_data`` is UNIONed onto any existing row so
+    an already enriched row's payload is never clobbered by a re-list. Hearings are
+    appended (deduped on court/case/date/serial).
     """
-    stats = {"cases": 0, "hearings": 0}
+    stats = {"cases": 0, "hearings": 0, "verdicts_promoted": 0}
     for pcase, phearing in rows:
         _ensure_court(pcase.court_identifier, using=using)
         existing = (
@@ -116,6 +175,12 @@ def upsert_causelist(rows: list[tuple[ParsedCase, ParsedHearing]], *, using: str
             "defendant": pcase.defendant,
             "extra_data": merged_extra or None,
         }
+        # A sitting that disposed of the case promotes its outcome onto the case
+        # row — the one place the cause list may write enrichment-owned columns.
+        promoted = _causelist_verdict(phearing, existing)
+        if promoted is not None:
+            listing.update(promoted)
+            stats["verdicts_promoted"] += 1
         CourtCase.objects.using(using).update_or_create(
             court_id=pcase.court_identifier,
             case_number=pcase.case_number,

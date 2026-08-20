@@ -20,6 +20,10 @@ class CrawlStats:
     cases: int = 0
     hearings: int = 0
     enriched: int = 0
+    #: Case rows whose verdict was promoted from a decisive sitting. Reported so a
+    #: run that recovers verdicts is distinguishable from one that only re-lists;
+    #: dry-run (write=False) always leaves this 0, since nothing is promoted.
+    verdicts_promoted: int = 0
     per_date: list[str] = field(default_factory=list)
 
 
@@ -69,6 +73,7 @@ def run_crawl(
                 counts = base.upsert_causelist(rows)
                 stats.cases += counts["cases"]
                 stats.hearings += counts["hearings"]
+                stats.verdicts_promoted += counts["verdicts_promoted"]
                 touched.update(c.case_number for c, _ in rows)
                 base.mark_scraped(court_id, date_bs, note=f"{len(rows)} rows")
             else:
