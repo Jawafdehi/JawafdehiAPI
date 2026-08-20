@@ -334,7 +334,13 @@ _APPELLATE_REFERRAL = frozenset({
 
 #: ``status`` values that MIGHT be terminal — a necessary condition, never a
 #: sufficient one (see the note above). ``order_type`` decides.
-_HEARING_TERMINAL_STATUSES = ("फैसला", "अन्तिम आदेश")
+#:
+#: Public because it is also the candidate FILTER for the hearing-verdict backfill:
+#: a hearing whose status is outside this set can never dispose of a case, so it
+#: never needs loading. Selecting on it is an optimisation, not a decision —
+#: :func:`outcome_from_hearings` still re-checks it and still requires a
+#: classifiable ``decision_type``.
+HEARING_TERMINAL_STATUSES = ("फैसला", "अन्तिम आदेश")
 
 _DECIDED_MARKERS = ("फैसला", "अन्तिम आदेश", "आदेश")
 
@@ -540,7 +546,7 @@ def outcome_from_hearings(hearings) -> HearingOutcome | None:
         if not isinstance(hearing, dict):
             continue
         status = _ws(hearing.get("case_status") or hearing.get("status"))
-        if status not in _HEARING_TERMINAL_STATUSES:
+        if status not in HEARING_TERMINAL_STATUSES:
             continue
         raw = hearing.get("decision_type") or hearing.get("order_type") or ""
         bucket, verdict = classify_order_type(raw)
