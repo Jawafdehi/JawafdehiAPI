@@ -127,11 +127,50 @@ class ArticlePage(HeadlessPreviewMixin, Page):  # ty: ignore[invalid-method-over
         """
         return [rel.case for rel in self.related_cases_through.all()]
 
+    # Two renditions off the one ``thumbnail`` FK, because the same image is
+    # consumed at wildly different sizes: a card in the /updates grid, and a
+    # full-bleed hero on the article page. `thumbnail_large` carries an explicit
+    # ``source`` so it reads the same FK under a different payload key.
+    #
+    # The hero sits in a ``max-w-4xl`` (896px) column at ``w-full``, so 800px was
+    # being upscaled by the browser even at DPR 1. 1600px covers it at ~1.8x;
+    # a true 2x isn't reachable anyway, since the article thumbnails we hold top
+    # out around 1672px wide.
+    #
+    # ``format-webp`` is on both: these are PNG uploads, and a PNG rendition at
+    # this size is measured in megabytes (1600x900 lands at ~2.7MB as PNG vs
+    # ~330KB as WebP — smaller than the 640KB the 800x450 PNG costs today).
+    #
+    # NOTE ``fill-`` never upscales — ``FillOperation`` crops to the target ratio
+    # and then only resizes when ``scale < 1.0``. So a source below the target
+    # doesn't error and doesn't blur: it silently returns a SMALLER rendition,
+    # and both specs collapse to the same size. Live example: a 750x400 source
+    # yields 712x400 for `thumbnail` AND `thumbnail_large`, so that article keeps
+    # a soft hero until a bigger source is uploaded. The payload's width/height
+    # report the real size, so the client's intrinsic sizing stays honest —
+    # nothing breaks, you just don't get the resolution you asked for. Article
+    # thumbnails want to be >=1600px on the long edge.
     api_fields = [
         APIField("category"),
         APIField("date"),
         APIField("excerpt"),
-        APIField("thumbnail", serializer=ImageRenditionField("fill-800x450")),
+        APIField("thumbnail", serializer=ImageRenditionField("fill-800x450|format-webp")),
+        APIField(
+            "thumbnail_large",
+            serializer=ImageRenditionField(
+                "fill-1600x900|format-webp", source="thumbnail"
+            ),
+        ),
+        # Social preview. Deliberately NOT WebP and NOT 16:9: link unfurlers
+        # want 1200x630 (1.91:1), and WhatsApp/LinkedIn previews are unreliable
+        # with WebP. Without this field the og:image would have silently become
+        # a WebP the moment `thumbnail` did.
+        APIField(
+            "og_image",
+            serializer=ImageRenditionField(
+                "fill-1200x630|format-jpeg|jpegquality-85", source="thumbnail"
+            ),
+        ),
         APIField("body"),
         APIField("related_cases", serializer=RelatedCaseSerializer(many=True)),
     ]

@@ -34,6 +34,22 @@ from storages.backends.s3boto3 import S3Boto3Storage
 #: module has no dependency on the cases app).
 DEFAULT_LINK_ROLE = "RAW"
 
+#: Content types for the media we serve, pinned rather than guessed. See
+#: :meth:`HashedFilenameS3Boto3Storage.get_object_parameters` — ``mimetypes``
+#: reads a registry that differs between interpreter builds and container base
+#: images, so relying on it makes the stored header environment-dependent.
+#: Anything absent here still falls back to ``mimetypes``.
+MEDIA_CONTENT_TYPES = {
+    ".avif": "image/avif",
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+    ".pdf": "application/pdf",
+}
+
 
 class HashedFilenameS3Boto3Storage(S3Boto3Storage):
     """
@@ -96,18 +112,32 @@ class HashedFilenameS3Boto3Storage(S3Boto3Storage):
 
     def get_object_parameters(self, name):
         """
-        Ensure text uploads carry an explicit UTF-8 charset.
+        Pin the ContentType for images, and give text uploads a UTF-8 charset.
 
-        django-storages derives ContentType from ``mimetypes.guess_type`` when
-        none is supplied, which yields bare types like ``text/markdown`` with no
-        charset. Browsers opening such a ``text/*`` response with no charset fall
-        back to a legacy locale encoding (Latin-1), turning UTF-8 content (e.g.
-        Devanagari) into mojibake. We append ``; charset=utf-8`` to any text type
-        that lacks a charset so the bytes are decoded correctly.
+        django-storages only guesses ContentType when the caller supplies none:
+        it tries ``mimetypes.guess_type(name)`` and otherwise falls back to
+        ``application/octet-stream``. That guess reads a registry which varies by
+        interpreter build and by whether ``/etc/mime.types`` is present, so the
+        stored header depends on the image the app happens to be running in
+        rather than on the bytes.
+
+        It bit us: after WebP renditions shipped, every ``.webp`` in R2 came back
+        as ``application/octet-stream`` while ``.jpg`` alongside it was correctly
+        ``image/jpeg`` — and the write path reproduces as ``image/webp`` locally,
+        so the divergence is environmental. Rather than chase the registry, map
+        the media extensions we actually serve and only fall back to
+        ``mimetypes`` for everything else. Deterministic across environments.
+
+        Also: a bare ``text/*`` with no charset makes browsers fall back to a
+        legacy locale encoding (Latin-1), turning UTF-8 content (e.g. Devanagari)
+        into mojibake, so those get an explicit ``; charset=utf-8``.
         """
         params = super().get_object_parameters(name)
 
         content_type = params.get("ContentType")
+        if content_type is None:
+            _, extension = os.path.splitext(name)
+            content_type = MEDIA_CONTENT_TYPES.get(extension.lower())
         if content_type is None:
             content_type, _encoding = mimetypes.guess_type(name)
 
@@ -116,7 +146,12 @@ class HashedFilenameS3Boto3Storage(S3Boto3Storage):
             and content_type.startswith("text/")
             and "charset=" not in content_type.lower()
         ):
-            params["ContentType"] = f"{content_type}; charset=utf-8"
+            content_type = f"{content_type}; charset=utf-8"
+
+        # Set it explicitly rather than leaving django-storages to re-derive it,
+        # so a resolved type can't be downgraded to octet-stream downstream.
+        if content_type:
+            params["ContentType"] = content_type
 
         return params
 

@@ -64,7 +64,8 @@ class Command(BaseCommand):
             for s in stats:
                 self.stdout.write(
                     f"  {key}/{s.court_id}: dates={s.dates} cases={s.cases} "
-                    f"hearings={s.hearings} enriched={s.enriched}"
+                    f"hearings={s.hearings} enriched={s.enriched} "
+                    f"verdicts_promoted={s.verdicts_promoted}"
                 )
 
     @staticmethod
