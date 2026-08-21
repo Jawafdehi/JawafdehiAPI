@@ -200,53 +200,17 @@ FACET_FIELDS: dict[str, str] = {
 # bound with ``?type=case``; the API view's OpenAPI description says so outright.
 #
 # Adding ``date_from``/``date_to`` is two entries here — ``("date", "gte")`` and
-# ``("date", "lte")`` — and nothing else. That generality is the point: the range
-# mechanism is deliberately field-agnostic so a second one never gets built.
+# ``("date", "lte")`` — PLUS the two matching fields on ``SearchQuerySerializer``.
+# Both halves, always: the view reads bounds out of ``validated_data``, and DRF
+# discards any param the serializer does not declare, so an entry added here
+# alone is accepted and then silently ignored — no clause, no 400, no log.
+# ``test_every_range_field_is_declared_on_the_query_serializer`` fails if the two
+# ever drift. The clause-building itself is genuinely field-agnostic, which is
+# the point: a second range mechanism never gets built.
 RANGE_FIELDS: dict[str, tuple[str, str]] = {
     "bigo_min": ("bigo", "gte"),
     "bigo_max": ("bigo", "lte"),
 }
-
-
-# ── बिगो scale: the ladders the SPA's amount control is drawn from ─────────────
-#
-# Both live here, server-side, rather than in the SPA. The bar counts below are
-# aggregated on exactly these edges, so a ladder invented independently by the
-# client would draw bars whose counts belong to different buckets.
-#
-# The scale is LOGARITHMIC because the corpus is: amounts run from ~रु ४५ हजार to
-# ~रु ६६ अरब with a median near रु ५ करोड. Baymard's filter research measured the
-# linear failure exactly — on one site 50% of a slider's width controlled 2% of
-# the catalogue while 5% of the width controlled 50% — and found 83% of sliders
-# get this wrong. Round 1/2/5 × 10^k steps also mean a reader lands on रु १ करोड,
-# never रु १.०३ करोड.
-_NICE_AMOUNTS: tuple[int, ...] = tuple(
-    mantissa * 10**exponent for exponent in range(0, 13) for mantissa in (1, 2, 5)
-)
-
-# Selectable positions for the slider thumbs — the FINE ladder.
-BIGO_STOPS: tuple[int, ...] = _NICE_AMOUNTS
-
-# Bar edges for the distribution histogram — the COARSE ladder (decades only).
-# Deliberately coarser than the stops: only ~68 published cases record an amount,
-# and spreading those over every 1/2/5 step gives ~3 per bar, which reads as noise
-# rather than as a distribution. One bar per decade puts ~10 in each and the shape
-# is legible. Widen this (add the 5× steps back) once the corpus can carry it.
-BIGO_BUCKET_EDGES: tuple[int, ...] = tuple(10**exponent for exponent in range(0, 13))
-
-
-def _bigo_bucket_ranges() -> list[dict[str, int]]:
-    """``range`` agg buckets over :data:`BIGO_BUCKET_EDGES`.
-
-    Contiguous and half-open — OpenSearch ``range`` buckets include ``from`` and
-    exclude ``to`` — so every amount lands in exactly one bar, with the first and
-    last left open so nothing falls off either end of the histogram.
-    """
-    edges = BIGO_BUCKET_EDGES
-    buckets: list[dict[str, int]] = [{"to": edges[0]}]
-    buckets += [{"from": low, "to": high} for low, high in zip(edges, edges[1:])]
-    buckets.append({"from": edges[-1]})
-    return buckets
 
 
 def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -395,10 +359,9 @@ def build_query(
     # Exact-match facet filters (entity_type/case_type/tags) compose with the text
     # query as bool ``filter`` clauses (no scoring impact, just narrowing).
     #
-    # The two clause KINDS are built apart and merged only for the query itself.
-    # The बिगो distribution agg below re-applies the terms half WITHOUT the range
-    # half — a histogram narrowed by the very bound the reader is dragging would
-    # collapse under their own hand.
+    # The two clause KINDS are built apart because they merge differently: bounds
+    # sharing a field collapse into ONE ``range`` clause, so ?bigo_min=X&bigo_max=Y
+    # is a single bounded interval rather than two unrelated constraints.
     terms_clauses: list[dict[str, Any]] = []
     for param, values in (filters or {}).items():
         field = FACET_FIELDS.get(param)
@@ -414,8 +377,7 @@ def build_query(
     # type selection, sort and paging still apply (list/page the corpus with no
     # search term). An empty multi_match would match nothing, so we must branch.
     has_query = bool(q and q.strip())
-    # Hoisted so the बिगो distribution agg can re-apply the SAME recall clause.
-    # ``match_all`` in browse mode, so that agg needs no branch of its own.
+    # Hoisted out of the branch below so browse and query modes share one shape.
     must_clauses: list[dict[str, Any]] = (
         [
             {
@@ -430,33 +392,33 @@ def build_query(
         if has_query
         else [{"match_all": {}}]
     )
+    # ONE query shape for both modes. Hoisting ``must_clauses`` above already
+    # absorbed the difference that used to justify a branch — ``match_all`` in
+    # browse mode, ``multi_match`` with a term — so ``must`` and ``filter`` are now
+    # the same expression either way. Keeping two arms meant a change to "the real
+    # query" arm silently skipped browse mode, which is the primary way this
+    # filter is used (a बिगो range with no search term).
+    bool_query: dict[str, Any] = {
+        # Recall clause: at least one of the bilingual fields must match, or
+        # match_all when browsing.
+        "must": must_clauses,
+        # Exact-match facet + range narrowing (empty when nothing is requested).
+        "filter": filter_clauses,
+    }
     if has_query:
-        bool_query: dict[str, Any] = {
-            # Recall clause: at least one of the bilingual fields must match.
-            "must": must_clauses,
-            # Precision boost: adjacent-term (phrase) title match adds score but is
-            # not required, so single-term queries still match.
-            "should": [
-                {
-                    "multi_match": {
-                        "query": q,
-                        "fields": PHRASE_FIELDS,
-                        "type": "phrase",
-                        "boost": PHRASE_BOOST,
-                    }
+        # The only thing a search term adds: an adjacent-term (phrase) title match
+        # that boosts score without being required, so single-term queries still
+        # match. Meaningless while browsing, where every document scores alike.
+        bool_query["should"] = [
+            {
+                "multi_match": {
+                    "query": q,
+                    "fields": PHRASE_FIELDS,
+                    "type": "phrase",
+                    "boost": PHRASE_BOOST,
                 }
-            ],
-            # Exact-match facet narrowing (omitted when no filters requested).
-            "filter": filter_clauses,
-        }
-    else:
-        # Browse mode: match everything (optionally narrowed by facet filters),
-        # ordered by ``sort`` (relevance is uniform here, so a date/title sort is
-        # the useful default for browsing — the caller picks via ``sort``).
-        bool_query = {
-            "must": must_clauses,
-            "filter": filter_clauses,
-        }
+            }
+        ]
 
     # Aggregations: per-type ``counts`` (by physical index) PLUS the exposed
     # facets (entity_type via the schema.org ``type`` token, case_type, and tags
@@ -479,43 +441,45 @@ def build_query(
         "status": {"terms": {"field": "case_status", "size": 50}},
     }
 
-    # बिगो extent, for a UI that needs RAILS rather than buckets (an amount
-    # slider): the smallest and largest recorded amount, and how many documents
-    # carry one at all.
+    # बिगो extent: the smallest and largest recorded amount, how many documents
+    # carry one at all — the three numbers the SPA's slider ladder is cut from.
     #
     # ``global`` on purpose — the ONE aggregation here that must NOT reflect the
     # query or the filters. Every other agg above is a refine facet, where
-    # narrowing along with the result set is the wanted behaviour. Rails are not:
-    # if they tracked the active range, dragging a thumb inward would pull the
-    # track in behind it and the reader could never widen the selection again.
-    # ``global`` escapes the query context entirely, so the track stays a fixed
-    # property of the corpus no matter what is typed or filtered.
+    # narrowing along with the result set is the wanted behaviour. The extent is
+    # not: if it tracked the active range, dragging a thumb inward would pull the
+    # track in behind it and the reader could never widen back out. ``global``
+    # escapes the query context entirely, so the scale stays a fixed property of
+    # the corpus no matter what is typed or filtered.
     #
-    # Only cases carry the field, so it is requested only when the case index is
-    # in scope — an entity-only search should not pay for a corpus-wide agg.
-    if CASE_INDEX in _index_for_types(types).split(","):
+    # Requested ONLY for a case-only search — not merely when the case index is
+    # somewhere in scope.
+    #
+    # A ``global`` agg is not a cheap re-label of the result set: it escapes the
+    # query context by running a second collection over ``match_all`` across every
+    # index in the search context. On an unscoped search that is entities +
+    # materials + court cases too (~560k docs in production). Cost is therefore
+    # decoupled from selectivity: a query matching nothing walks the whole corpus
+    # anyway.
+    #
+    # Nothing consumes it outside a case view either — the SPA gates the control
+    # on ``selectedType === "case"`` — so the widest, most expensive scope was the
+    # one whose payload was always discarded. Narrowing to case-only puts the
+    # global bucket back on the case index, which is what makes it affordable.
+    if _index_for_types(types) == CASE_INDEX:
         aggs["bigo_extent"] = {
             "global": {},
             "aggs": {
-                # The AXIS. Unfiltered on purpose, so the track is a fixed
-                # property of the corpus and cannot shrink under a dragging hand.
+                # The AXIS, and now the whole of it: smallest and largest recorded
+                # amount plus how many documents carry one. The SPA derives its
+                # slider ladder from these three numbers.
+                #
+                # A ``range`` sub-agg for a distribution histogram used to hang
+                # here too. The SPA no longer draws one — the control is a slider
+                # over a log ladder — and it was the expensive half: a 14-bucket
+                # range agg that re-ran the user's ``multi_match`` across the whole
+                # global bucket. ``stats`` on a single numeric field is cheap.
                 "stats": {"stats": {"field": "bigo"}},
-                # The BARS. Re-applies the query and the exact-match facets — the
-                # reader wants "where do the cases I'm searching sit?" — but NOT
-                # the बिगो range, which is the control being drawn. This is the
-                # standard facet-excludes-its-own-filter shape, and it is why the
-                # terms and range clauses were built separately above.
-                "distribution": {
-                    "filter": {"bool": {"must": must_clauses, "filter": terms_clauses}},
-                    "aggs": {
-                        "buckets": {
-                            "range": {
-                                "field": "bigo",
-                                "ranges": _bigo_bucket_ranges(),
-                            }
-                        }
-                    },
-                },
             },
         }
 
@@ -713,92 +677,30 @@ def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
 
 
 def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Range-filter RAILS from the ``global`` extent aggs, keyed by request param
+    """Range-filter EXTENT from the ``global`` extent agg, keyed by request param
     prefix (``bigo`` covers ``bigo_min``/``bigo_max``).
 
-    ``{}`` when the agg was not requested (no case index in scope) — and the
-    entry is omitted when the corpus holds no recorded amount at all, in which
-    case ``stats`` reports ``count: 0`` with null bounds. A caller must treat an
-    absent extent as "no rails available" rather than as a zero-width range,
-    which would be a slider pinned shut.
+    ``{}`` when the agg was not requested (no case-only scope) — and the entry is
+    omitted when the corpus holds no recorded amount at all, in which case
+    ``stats`` reports ``count: 0`` with null bounds. A caller must treat an absent
+    extent as "no control to render" rather than as a zero-width range.
+
+    Bounds come back from ``stats`` as JSON doubles and are cast to ``int``: the
+    corpus already reaches the tens of अरब, and a float would lose precision past
+    2**53. The SPA derives its slider ladder from these three numbers, so there is
+    nothing here for a client to reinvent and nothing to keep in step.
     """
-    extent = (aggs.get("bigo_extent") or {})
+    extent = aggs.get("bigo_extent") or {}
     stats = extent.get("stats") or {}
-    count = stats.get("count") or 0
-    if not count or stats.get("min") is None or stats.get("max") is None:
+    if not stats.get("count") or stats.get("min") is None or stats.get("max") is None:
         return {}
-    # ``stats`` returns doubles; बिगो is a ``long`` of whole rupees, so hand back
-    # ints — a JSON float would lose precision past 2**53, which the corpus
-    # already reaches (amounts into the tens of अरब).
-    #
-    # ``buckets`` are the histogram bars, ``stops`` the positions a slider thumb
-    # may take. Both are emitted rather than left to the client to reinvent: the
-    # counts below were aggregated on exactly these edges, so a ladder derived
-    # independently would draw bars whose numbers belong to other buckets.
-    low, high = int(stats["min"]), int(stats["max"])
-    raw_buckets = (
-        ((extent.get("distribution") or {}).get("buckets") or {}).get("buckets") or []
-    )
     return {
         "bigo": {
-            "min": low,
-            "max": high,
-            "count": int(count),
-            "buckets": [
-                {
-                    # ``from``/``to`` come back as doubles too, and are absent on
-                    # the open-ended first and last bars — where ``None`` is the
-                    # honest answer, not a fabricated bound.
-                    "from": None if b.get("from") is None else int(b["from"]),
-                    "to": None if b.get("to") is None else int(b["to"]),
-                    "count": int(b.get("doc_count") or 0),
-                }
-                for b in _trim_to_corpus(raw_buckets, low, high)
-            ],
-            "stops": _stops_bracketing(low, high),
+            "min": int(stats["min"]),
+            "max": int(stats["max"]),
+            "count": int(stats["count"]),
         }
     }
-
-
-def _stops_bracketing(low: int, high: int) -> list[int]:
-    """The slider stops, cut to the window that brackets the corpus.
-
-    The full ladder runs to रु ५ खरब. Handing all of it to the SPA would spend most
-    of the track on amounts no case has — which is the very failure the log scale
-    exists to fix (Baymard measured a site where 50% of a slider's width
-    controlled 2% of the catalogue). Cut to one stop below the smallest recorded
-    amount and one at or above the largest, so the ends bracket the data and a
-    thumb parked on either genuinely means "no bound".
-    """
-    at_or_below = [s for s in BIGO_STOPS if s <= low] or [BIGO_STOPS[0]]
-    at_or_above = [s for s in BIGO_STOPS if s >= high] or [BIGO_STOPS[-1]]
-    floor, ceiling = at_or_below[-1], at_or_above[0]
-    window = [s for s in BIGO_STOPS if floor <= s <= ceiling]
-    # A corpus spanning less than one step would leave a single position — a
-    # slider pinned shut. Widen so there is always a track to drag along.
-    if len(window) < 2:
-        start = max(0, BIGO_STOPS.index(floor) - 1)
-        window = list(BIGO_STOPS[start : start + 3])
-    return window
-
-
-def _trim_to_corpus(
-    buckets: list[dict[str, Any]], low: int, high: int
-) -> list[dict[str, Any]]:
-    """Drop the bars that sit entirely outside the recorded range.
-
-    The ``range`` agg is asked for the whole ladder because the edges must be
-    fixed before the stats come back — one round trip, not two. Trimming here
-    keeps the histogram to the span that can actually hold a case, instead of
-    padding both ends with empties that flatten the shape.
-    """
-    kept = [
-        b
-        for b in buckets
-        if (b.get("to") is None or b["to"] > low)
-        and (b.get("from") is None or b["from"] <= high)
-    ]
-    return kept or buckets
 
 
 def _named_facets_from_aggs(aggs: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -917,8 +819,8 @@ class SearchService:
             "count": count,
             "counts": counts,
             "facets": facets,
-            # Rails for the range filters, distinct from ``facets`` (which are
-            # term buckets). Empty unless the case index is in scope.
+            # Corpus extent for the range filters, distinct from ``facets``
+            # (which are term buckets). Empty unless the search is case-only.
             "extents": extents,
             "results": results,
             "next_cursor": next_cursor,

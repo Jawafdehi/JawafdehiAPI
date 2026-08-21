@@ -250,8 +250,12 @@ class UnifiedSearchView(APIView):
         # different clause kind (``range`` vs ``terms``) and a different value shape
         # (a scalar, not a list). Emptiness is ``is None`` — a truthiness test would
         # drop a legitimate ``bigo_min=0``.
-        # Driven off RANGE_FIELDS rather than a hand-listed pair, so adding
-        # date_from/date_to there does not silently fail to reach the service.
+        # Driven off RANGE_FIELDS rather than a hand-listed pair, so a new bound
+        # reaches the service without editing this comprehension. Note the limit:
+        # it reads ``validated_data``, so a RANGE_FIELDS entry with no serializer
+        # field above resolves to None forever and the bound is silently dropped.
+        # Both halves are required — pinned by
+        # ``test_every_range_field_is_declared_on_the_query_serializer``.
         active_ranges = {
             param: value
             for param in RANGE_FIELDS

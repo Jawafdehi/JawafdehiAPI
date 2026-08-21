@@ -272,6 +272,30 @@ def test_search_api_equal_bigo_bounds_are_allowed():
     assert clauses == [{"range": {"bigo": {"gte": 500, "lte": 500}}}]
 
 
+def test_every_range_field_is_declared_on_the_query_serializer():
+    """``RANGE_FIELDS`` and the serializer have to grow together.
+
+    ``RANGE_FIELDS``' own comment promises that adding ``date_from``/``date_to``
+    is "two entries here … and nothing else", and the view's says its
+    ``active_ranges`` comprehension is driven off ``RANGE_FIELDS`` "so adding
+    them there does not silently fail to reach the service". Both overstate it:
+    the comprehension reads ``serializer.validated_data``, and DRF discards any
+    query param the serializer does not declare. An entry with no matching field
+    is therefore ``None`` on every request — no clause, no 400, no log, just a
+    bound that looks accepted and does nothing.
+
+    This is the assertion that turns that silent no-op into a red test.
+    """
+    from search.service import RANGE_FIELDS
+    from search.views import SearchQuerySerializer
+
+    undeclared = set(RANGE_FIELDS) - set(SearchQuerySerializer().get_fields())
+    assert not undeclared, (
+        "these RANGE_FIELDS params reach no serializer field, so the API will "
+        f"accept and silently ignore them: {sorted(undeclared)}"
+    )
+
+
 @pytest.mark.django_db
 def test_search_api_400_on_invalid_sort():
     resp = APIClient().get("/api/search/", {"q": "x", "sort": "bogus"})

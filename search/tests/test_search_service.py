@@ -716,20 +716,20 @@ def test_non_case_result_has_no_card_key():
     assert "card" not in entity
 
 
-# ── बिगो extent (slider rails) ─────────────────────────────────────────────────
+# ── बिगो extent (the histogram's axis and bars) ────────────────────────────────
 #
 # A THIRD aggregation kind, alongside the per-type counts and the terms facets:
-# the corpus extent of a range field, for a UI that needs rails rather than
-# buckets. What makes it different is that it must not narrow with the results.
+# the corpus extent of a range field. What makes it different is that it must not
+# narrow with the results — the bars ARE the control the reader clicks.
 
 
 def test_build_query_requests_the_bigo_extent_as_a_global_agg():
-    """The rails must escape the query context.
+    """The extent must escape the query context.
 
     Every other agg here is a refine facet, which correctly narrows with the
-    result set. Rails must not: if they tracked the active range, dragging a
-    slider thumb inward would pull the track in behind it and the selection could
-    never be widened again. ``global`` is what buys that.
+    result set. The extent must not: if it tracked the active range, selecting a
+    bar would delete the bars on either side of it and the reader could never
+    widen back out. ``global`` is what buys that.
     """
     extent = build_query(q="x", types=["case"])["aggs"]["bigo_extent"]
     assert extent["global"] == {}
@@ -737,8 +737,8 @@ def test_build_query_requests_the_bigo_extent_as_a_global_agg():
 
 
 def test_build_query_extent_survives_an_active_bigo_range():
-    """Belt and braces on the point above — the agg is identical with a bound
-    applied, so the rails a dragging reader sees never move."""
+    """Belt and braces on the point above — the agg is byte-identical with a
+    bound applied, so the axis never moves under the reader's own selection."""
     unbounded = build_query(q="x", types=["case"])["aggs"]["bigo_extent"]
     bounded = build_query(q="x", types=["case"], ranges={"bigo_min": 10**9})["aggs"][
         "bigo_extent"
@@ -746,13 +746,33 @@ def test_build_query_extent_survives_an_active_bigo_range():
     assert unbounded == bounded
 
 
+def test_build_query_omits_the_extent_unless_the_search_is_case_only():
+    """A ``global`` agg is a second collection pass over every searched index.
+
+    It is not scoped to the case index — it escapes the query context entirely,
+    so on an unscoped search it walks entities + materials + court cases too
+    (~560k docs in production) and re-runs the ``multi_match`` for each of them
+    inside ``distribution``. The cost is decoupled from how selective the query
+    is: ``?q=<matches nothing>`` goes from nearly free to a full-corpus scan.
+
+    And nothing reads it there. The SPA gates the control on
+    ``selectedType === "case"``, so ``extents`` is discarded on every other
+    view. Emitting it only for a case-only search shrinks the global bucket to
+    the case index, which is the whole reason the agg is affordable at all.
+    """
+    assert "bigo_extent" in build_query(q="x", types=["case"])["aggs"]
+    # Unscoped: the widest possible bucket, and the SPA cannot render it.
+    assert "bigo_extent" not in build_query(q="x")["aggs"]
+    assert "bigo_extent" not in build_query(q="x", types=[])["aggs"]
+    # Mixed scope still drags the other indices into the global bucket.
+    assert "bigo_extent" not in build_query(q="x", types=["case", "entity"])["aggs"]
+
+
 def test_build_query_omits_the_extent_when_no_case_index_is_in_scope():
     """Only cases carry an amount, so an entity-only search must not pay for a
     corpus-wide aggregation it cannot use."""
     assert "bigo_extent" not in build_query(q="x", types=["entity"])["aggs"]
     assert "bigo_extent" not in build_query(q="x", types=["material"])["aggs"]
-    # An unscoped search DOES include cases, so it keeps the extent.
-    assert "bigo_extent" in build_query(q="x")["aggs"]
 
 
 def test_search_returns_the_bigo_extent_as_whole_rupees():
@@ -777,8 +797,8 @@ def test_search_returns_the_bigo_extent_as_whole_rupees():
 
 
 def test_search_reports_no_extent_when_nothing_records_an_amount():
-    """``count: 0`` with null bounds is "no rails", NOT a zero-width range — the
-    latter would render as a slider pinned shut."""
+    """``count: 0`` with null bounds means "no control to render", NOT a
+    zero-width range — the latter would draw a chart with nothing clickable."""
     client = MagicMock()
     response = _canned_response()
     response["aggregations"] = {
@@ -818,207 +838,33 @@ def test_type_for_index_resolves_a_generation_backing_index():
     assert svc.type_for_index("ngm-materials-000123") == "material"
 
 
-def test_type_for_index_ignores_a_neighbour_that_merely_shares_the_prefix():
-    # Mirrors the anchoring guarantee in aliases._GENERATION_RE: an unrelated
-    # index must not be typed as a case just because the name starts the same.
-    assert svc.type_for_index("jawafdehi-cases-archive-000001") is None
-    assert svc.type_for_index("jawafdehi-cases-000001-restored") is None
-    assert svc.type_for_index("some-other-index") is None
+def test_extent_is_stats_only_and_carries_no_histogram():
+    """One agg, three numbers.
 
+    A ``range`` sub-agg for a distribution histogram used to hang off this
+    ``global`` bucket, plus a second ``stops`` ladder for slider thumbs. Both are
+    gone: the SPA draws a slider over a log ladder it derives from ``min``/``max``,
+    so there is nothing for a client to line up against and nothing to keep in
+    step across two repos.
 
-def test_serialize_hit_types_a_generation_backed_case_as_case():
-    hit = {
-        "_index": "jawafdehi-cases-000001",
-        "_source": {
-            "iri": "https://jawafdehi.org/case/seed-published",
-            "source_app": "jawafdehi",
-        },
-    }
-    # Not "jawafdehi" — the source_app fallback is for docs we can't place, and
-    # a generation-backed hit is not one of those.
-    assert svc._serialize_hit(hit)["type"] == "case"
-
-
-def test_facets_count_generation_backed_buckets():
-    aggs = {
-        "by_index": {
-            "buckets": [
-                {"key": "jawafdehi-cases-000002", "doc_count": 3},
-                {"key": "nes-entities-000001", "doc_count": 5},
-            ]
-        }
-    }
-    assert svc._facets_from_aggs(aggs) == {"case": 3, "entity": 5}
-
-
-def test_facets_sum_two_generations_of_the_same_alias():
-    # Mid-swap an alias can briefly resolve to two generations; the counts must
-    # add up rather than the last bucket overwriting the first.
-    aggs = {
-        "by_index": {
-            "buckets": [
-                {"key": "jawafdehi-cases-000001", "doc_count": 2},
-                {"key": "jawafdehi-cases-000002", "doc_count": 3},
-            ]
-        }
-    }
-    assert svc._facets_from_aggs(aggs) == {"case": 5}
-
-
-def test_by_index_agg_is_sized_above_the_type_count_for_mid_swap_generations():
-    agg = build_query(q="x")["aggs"]["by_index"]["terms"]
-    assert agg["size"] > len(svc.ALL_TYPES)
-
-
-# ── बिगो distribution (histogram bars) ─────────────────────────────────────────
-#
-# The bars answer "where do the cases I am searching actually sit?", so unlike the
-# axis they DO follow the query and the exact-match facets. What they must not
-# follow is the बिगो range itself — the control being drawn.
-
-
-def _distribution(body):
-    return body["aggs"]["bigo_extent"]["aggs"]["distribution"]
-
-
-def test_distribution_buckets_are_contiguous_and_open_at_both_ends():
-    """Every amount must land in exactly one bar, and none may fall off an end.
-
-    OpenSearch ``range`` buckets are half-open (``from`` inclusive, ``to``
-    exclusive), so adjacent edges must touch exactly — a gap silently loses
-    documents from the histogram, an overlap double-counts them.
+    It was also the expensive half — a 14-bucket range agg that re-ran the user's
+    ``multi_match`` across the whole global bucket. Anything re-adding it is
+    re-adding both that cost and that coupling.
     """
-    ranges = _distribution(build_query(q="x", types=["case"]))["aggs"]["buckets"][
-        "range"
-    ]["ranges"]
-    assert ranges[0] == {"to": svc.BIGO_BUCKET_EDGES[0]}
-    assert ranges[-1] == {"from": svc.BIGO_BUCKET_EDGES[-1]}
-    for lower, upper in zip(ranges, ranges[1:]):
-        assert lower.get("to") == upper.get("from")
+    extent = build_query(q="x", types=["case"])["aggs"]["bigo_extent"]
+    assert extent["global"] == {}
+    assert extent["aggs"] == {"stats": {"stats": {"field": "bigo"}}}
 
 
-def test_distribution_bars_are_coarser_than_the_slider_stops():
-    """Deliberate: ~68 cases record an amount, so a bar per 1/2/5 step is ~3 each
-    — noise rather than a distribution. Decade bars put ~10 in each."""
-    assert len(svc.BIGO_BUCKET_EDGES) < len(svc.BIGO_STOPS)
-    assert set(svc.BIGO_BUCKET_EDGES).issubset(set(svc.BIGO_STOPS))
-
-
-def test_distribution_follows_the_query_and_the_terms_facets():
-    """The reader wants the shape of what they are searching, not of the corpus."""
-    body = build_query(q="deuba", types=["case"], filters={"case_type": ["CORRUPTION"]})
-    scoped = _distribution(body)["filter"]["bool"]
-    assert {"terms": {"case_type": ["CORRUPTION"]}} in scoped["filter"]
-    assert scoped["must"] == body["query"]["bool"]["must"]
-
-
-def test_distribution_ignores_the_active_bigo_range():
-    """The regression this whole split exists to prevent.
-
-    A histogram narrowed by the very bound being dragged collapses under the
-    reader's own hand: bars outside the selection would read as empty, so the
-    shape that tells them where to drag NEXT disappears exactly when they need it.
-    """
-    unbounded = _distribution(build_query(q="x", types=["case"]))
-    bounded = _distribution(
-        build_query(q="x", types=["case"], ranges={"bigo_min": 10**9})
-    )
-    assert unbounded == bounded
-    # ...while the HITS are still narrowed by it.
-    clauses = build_query(q="x", types=["case"], ranges={"bigo_min": 10**9})["query"][
-        "bool"
-    ]["filter"]
-    assert {"range": {"bigo": {"gte": 10**9}}} in clauses
-
-
-def test_distribution_applies_in_browse_mode():
-    """An empty ``q`` is the primary way this filter is used, so the bars must
-    still be aggregated — over ``match_all`` rather than a text clause."""
-    scoped = _distribution(build_query(q="", types=["case"]))["filter"]["bool"]
-    assert scoped["must"] == [{"match_all": {}}]
-
-
-def test_search_returns_histogram_bars_with_whole_rupee_edges():
-    """Bucket bounds come back as doubles like the stats do, and the open-ended
-    first/last bars carry no bound at all — ``None``, not a fabricated one."""
+def test_search_returns_the_extent_as_three_whole_rupee_numbers():
     client = MagicMock()
     response = _canned_response()
+    # ``stats`` returns JSON doubles; the corpus already reaches tens of अरब, so a
+    # float would lose precision past 2**53.
     response["aggregations"] = {
-        "bigo_extent": {
-            # Stats and bars must describe the same corpus, or the trim below
-            # legitimately discards bars that cannot hold a case.
-            "stats": {"count": 68, "min": 0.0, "max": 50.0},
-            "distribution": {
-                "buckets": {
-                    "buckets": [
-                        {"to": 1.0, "doc_count": 0},
-                        {"from": 1.0, "to": 10.0, "doc_count": 3},
-                        {"from": 10.0, "doc_count": 65},
-                    ]
-                }
-            },
-        }
+        "bigo_extent": {"stats": {"count": 68, "min": 45220.0, "max": 6.6e10}}
     }
     client.search.return_value = response
     bigo = SearchService(client=client).search(q="x", types=["case"])["extents"]["bigo"]
-    assert bigo["buckets"] == [
-        {"from": None, "to": 1, "count": 0},
-        {"from": 1, "to": 10, "count": 3},
-        {"from": 10, "to": None, "count": 65},
-    ]
-    assert bigo["stops"] == svc._stops_bracketing(0, 50)
-
-
-def test_extent_stops_bracket_the_corpus_instead_of_the_whole_ladder():
-    """The track must span the DATA, not the ladder's full reach to रु ५ खरब.
-
-    Spending most of the slider on amounts no case has is the exact failure the
-    log scale exists to fix — Baymard measured a site where 50% of a slider's
-    width controlled 2% of the catalogue. One stop below the smallest amount and
-    one at or above the largest, so an end-parked thumb really is "no bound".
-    """
-    client = MagicMock()
-    response = _canned_response()
-    response["aggregations"] = {
-        "bigo_extent": {
-            "stats": {"count": 68, "min": 45220.0, "max": 6.6e10},
-            "distribution": {"buckets": {"buckets": []}},
-        }
-    }
-    client.search.return_value = response
-    stops = SearchService(client=client).search(q="x", types=["case"])["extents"][
-        "bigo"
-    ]["stops"]
-    assert stops[0] <= 45_220 and stops[1] > 45_220
-    assert stops[-1] >= 66_000_000_000 and stops[-2] < 66_000_000_000
-    assert len(stops) < len(svc.BIGO_STOPS)
-
-
-def test_extent_trims_bars_that_cannot_hold_a_case():
-    """Bars are requested for the whole ladder — the agg's edges must be fixed
-    before the stats come back, and one round trip beats two — so the ends are
-    trimmed here. Padding both sides with empties just flattens the shape."""
-    client = MagicMock()
-    response = _canned_response()
-    response["aggregations"] = {
-        "bigo_extent": {
-            "stats": {"count": 2, "min": 5000.0, "max": 50000.0},
-            "distribution": {
-                "buckets": {
-                    "buckets": [
-                        {"to": 1000.0, "doc_count": 0},
-                        {"from": 1000.0, "to": 10000.0, "doc_count": 1},
-                        {"from": 10000.0, "to": 100000.0, "doc_count": 1},
-                        {"from": 100000.0, "to": 1000000.0, "doc_count": 0},
-                        {"from": 1000000.0, "doc_count": 0},
-                    ]
-                }
-            },
-        }
-    }
-    client.search.return_value = response
-    buckets = SearchService(client=client).search(q="x", types=["case"])["extents"][
-        "bigo"
-    ]["buckets"]
-    # The 1k–10k and 10k–100k bars straddle the data; the rest cannot hold a case.
-    assert [(b["from"], b["to"]) for b in buckets] == [(1000, 10000), (10000, 100000)]
+    assert bigo == {"min": 45220, "max": 66_000_000_000, "count": 68}
+    assert all(isinstance(v, int) for v in bigo.values())
