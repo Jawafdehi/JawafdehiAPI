@@ -8,6 +8,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .api_views import (
+    AuthorOgCardView,
     AuthorProfileView,
     CaseAuthorCandidateView,
     CaseViewSet,
@@ -46,6 +47,16 @@ urlpatterns = [
         name="case-author-candidates",
     ),
     # Public author profile + the cases they wrote.
+    #
+    # The share card is registered BEFORE the profile route. `<slug:slug>` would
+    # otherwise swallow nothing here (the paths differ in their trailing
+    # segment), but keeping the more specific pattern first means adding a
+    # broader author route later cannot silently shadow the card.
+    path(
+        "authors/<slug:slug>/og-card.jpg",
+        AuthorOgCardView.as_view(),
+        name="author-og-card",
+    ),
     path(
         "authors/<slug:slug>/",
         AuthorProfileView.as_view(),

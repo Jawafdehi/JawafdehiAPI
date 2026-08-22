@@ -53,6 +53,7 @@ from .caseworker_serializers import (
     CaseCreateSerializer,
     CasePatchSerializer,
 )
+from .og_cards import ShapingUnavailable, fetch_photo, render_author_card
 from .permissions import IsCaseAuthorPicker, IsFeedbackTriager
 from .models import (
     AuthorProfile,
@@ -1633,6 +1634,74 @@ class AuthorProfileView(RetrieveAPIView):
         data = self.get_serializer(profile).data
         data["cases"] = AuthorCaseSummarySerializer(cases, many=True).data
         return Response(data)
+
+
+@extend_schema(
+    summary="Get an author's Open Graph share card",
+    description=(
+        "A 1200x630 JPEG share card for an author page: their photograph, their "
+        "name in both scripts, and their role, on the site's navy/crimson "
+        "ground. Public, and 404s under the same rule as the profile itself. "
+        "Cached for a day — the frontend Worker serves this under its own origin "
+        "so shared links keep a `jawafdehi.org` image URL."
+    ),
+    responses={(200, "image/jpeg"): OpenApiTypes.BINARY},
+    tags=["cases"],
+)
+class AuthorOgCardView(APIView):
+    """GET /api/authors/<slug>/og-card.jpg — the author's composed share card.
+
+    Rendered on demand rather than committed to the frontend as static files so
+    that a newly credited author gets a correct preview with no rebuild. One
+    render per author per cache period; see cases/og_cards.py for why this is
+    server-side at all (shaping) and why it is not the raw headshot (WebP, and
+    the 1.91:1 crop).
+
+    ``renderer_classes`` is pinned to JSONRenderer only so DRF's content
+    negotiation does not try to wrap the JPEG; the successful path returns a
+    plain HttpResponse and bypasses the renderer entirely.
+    """
+
+    permission_classes = [AllowAny]
+    renderer_classes = [JSONRenderer]
+
+    # A day, matching what the Worker caches for. `s-maxage` targets the shared
+    # caches (Cloudflare, the Worker) rather than the crawler's own store, so a
+    # profile edit is picked up on the next day's revalidation instead of being
+    # pinned in every scraper's cache.
+    CACHE_SECONDS = 86400
+
+    def get(self, request, slug: str) -> HttpResponse:
+        profile = (
+            AuthorProfile.objects.filter(has_public_page=True, slug=slug)
+            .select_related("user")
+            .first()
+        )
+        if profile is None:
+            raise Http404("No public author profile with that slug")
+
+        photo = fetch_photo(profile.photo_url or "")
+        try:
+            payload = render_author_card(
+                display_name=profile.display_name,
+                name_ne=profile.name_ne or "",
+                title=profile.title or "",
+                photo=photo,
+            )
+        except ShapingUnavailable:
+            # The image is missing libfribidi, so a Devanagari name would render
+            # with detached matras. Fail loudly in the logs and 503 rather than
+            # publish a mangled name: the Worker falls back to the site banner,
+            # which is generic but not wrong.
+            logger.exception("cannot render author card for %s: no text shaping", slug)
+            return HttpResponse(status=503)
+        finally:
+            if photo is not None:
+                photo.close()
+
+        response = HttpResponse(payload, content_type="image/jpeg")
+        response["Cache-Control"] = f"public, max-age=300, s-maxage={self.CACHE_SECONDS}"
+        return response
 
 
 @extend_schema(
