@@ -73,6 +73,11 @@ DESCRIPTOR_RUNS = (
     (" Archive", WHITE),
 )
 WORDMARK_NE = "जवाफदेही"
+WORDMARK_EN = "JAWAFDEHI"
+# How the descriptor breaks when it is set as the site banner's headline. The
+# break falls BEFORE "Corruption" so the crimson run sits whole on one line.
+DESCRIPTOR_LINE_1 = "Nepal’s Permanent"
+DESCRIPTOR_LINE_2_RUNS = (("Corruption Case", CRIMSON), (" Archive", WHITE))
 TAGLINE = "— who, what, and when."
 DOMAIN = "jawafdehi.org"
 
@@ -241,6 +246,51 @@ def _draw_masthead(card: Image.Image, x: int, y: int) -> int:
     # is.
     _draw_runs(draw, text_x, y + 48, DESCRIPTOR_RUNS, _vesper(31, "Medium"))
     return y + mark_size
+
+
+def render_site_card() -> bytes:
+    """The site-wide banner as PNG bytes — the card every page that is not a
+    case, update or author page unfurls with.
+
+    Lives here, next to the author card, so both share one dot field, one logo
+    treatment and one descriptor rather than drifting apart in two repos. It is
+    NOT served from an endpoint, though: the frontend commits the output as a
+    static asset, because it is also the FALLBACK the Worker uses when this
+    service cannot answer, and a fallback that depends on the service being up is
+    not a fallback. Regenerate it with `manage.py render_og_site_card` when the
+    branding changes.
+
+    PNG rather than JPEG: it carries no photograph, only flat colour and type.
+    """
+    card = _ground()
+    draw = ImageDraw.Draw(card)
+
+    mark_size = 272
+    card.alpha_composite(_logo_mark(mark_size), (90, (HEIGHT - mark_size) // 2))
+
+    x = 437
+    draw.text((x, 92), WORDMARK_NE, font=_devanagari(84), fill=WHITE)
+    # Letterspaced by inserting spaces: PIL has no tracking control, and drawing
+    # glyph by glyph instead would lose the font's kerning.
+    draw.text((x, 210), " ".join(WORDMARK_EN), font=_vesper(33, "Medium"), fill=WHITE)
+    draw.rectangle((x, 290, x + 138, 295), fill=CRIMSON)
+
+    headline = _vesper(44, "Bold")
+    draw.text((x, 336), DESCRIPTOR_LINE_1, font=headline, fill=WHITE)
+    _draw_runs(draw, x, 412, DESCRIPTOR_LINE_2_RUNS, headline)
+    draw.text((x, 494), TAGLINE, font=_vesper(30, "Regular"), fill=MUTED)
+
+    domain_font = _vesper(29, "Medium")
+    draw.text(
+        (RIGHT_EDGE - domain_font.getlength(DOMAIN), HEIGHT - 82),
+        DOMAIN,
+        font=domain_font,
+        fill=MUTED,
+    )
+
+    buffer = BytesIO()
+    card.convert("RGB").save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
 
 
 def _circular(photo: Image.Image, size: int) -> Image.Image:
