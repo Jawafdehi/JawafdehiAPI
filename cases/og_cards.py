@@ -40,6 +40,7 @@ import logging
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image, ImageDraw, ImageFont, features
@@ -112,6 +113,34 @@ PHOTO_TIMEOUT = 6
 # A headshot is tens of KB. Anything far past that is not a portrait, and
 # decoding it would be a denial-of-service vector via a hostile photo_url.
 PHOTO_MAX_BYTES = 8 * 1024 * 1024
+# Compressed size is not the real bound: a few-KB file can decode to gigabytes
+# (a "decompression bomb"). A team headshot is well under a megapixel and the
+# card draws it at 300x300, so this is generous by two orders of magnitude and
+# still refuses anything built to exhaust memory.
+PHOTO_MAX_PIXELS = 32_000_000
+
+# Hosts an author photograph may be fetched from.
+#
+# This endpoint is public and unauthenticated, and it fetches a URL taken from
+# the database, from INSIDE the cluster — that is server-side request forgery
+# unless the target is constrained. `photo_url` is a superuser-only admin field
+# today, so the path is narrow, but "only an admin can set it" is not a control
+# that survives the next feature that writes to the field.
+#
+# An allowlist rather than IP-range filtering: every seeded profile points at
+# jawafdehi.org/assets/teammembers/<name>.webp, so the set of legitimate hosts is
+# tiny and known, and matching on the name avoids the DNS-rebinding race that
+# resolve-then-check has. Mirrors DOCUMENT_PREVIEW_ALLOWED_HOSTS in the
+# frontend's worker.ts. Redirects are refused outright below, so a permitted host
+# cannot bounce the request onward to an internal address.
+PHOTO_ALLOWED_HOSTS = frozenset(
+    {
+        "jawafdehi.org",
+        "www.jawafdehi.org",
+        "portal.jawafdehi.org",
+        "s3.jawafdehi.org",
+    }
+)
 
 
 class ShapingUnavailable(RuntimeError):
@@ -340,29 +369,73 @@ def _fit_text(
 def fetch_photo(url: str) -> Image.Image | None:
     """The author's headshot, or None when it cannot be had.
 
-    Never raises: a card without the portrait is a reasonable card, and an
-    unreachable photo host must not turn into a 500 on a share preview.
+    NEVER raises. A card without the portrait is a reasonable card, and an
+    unreachable or hostile photo host must not become a 500 on a share preview.
+    Callers rely on this: the view has no other error path for the photo.
     """
     if not url or not url.startswith("https://"):
         return None
+
+    host = urlparse(url).hostname or ""
+    if host.lower() not in PHOTO_ALLOWED_HOSTS:
+        logger.warning("author photo host not allowed, skipping: %s", url)
+        return None
+
     try:
-        response = requests.get(
+        # Context-managed: with stream=True the connection is only returned to
+        # the pool once the body is consumed or the response is closed, and
+        # neither raise_for_status() nor the bounded read below does that on
+        # every path.
+        with requests.get(
             url,
             timeout=PHOTO_TIMEOUT,
             # Cloudflare fronts the origin these are served from and 403s a
             # default client UA.
             headers={"User-Agent": "jawafdehi-og-cards/1.0", "Accept": "image/*"},
             stream=True,
-        )
-        response.raise_for_status()
-        payload = response.raw.read(PHOTO_MAX_BYTES + 1, decode_content=True)
+            # An allowed host must not be able to bounce us to an internal
+            # address. A redirect therefore fails the request rather than being
+            # followed and re-checked.
+            allow_redirects=False,
+        ) as response:
+            response.raise_for_status()
+            payload = response.raw.read(PHOTO_MAX_BYTES + 1, decode_content=True)
+
         if len(payload) > PHOTO_MAX_BYTES:
-            logger.warning("author photo over %d bytes, skipping: %s", PHOTO_MAX_BYTES, url)
+            logger.warning(
+                "author photo over %d bytes, skipping: %s", PHOTO_MAX_BYTES, url
+            )
             return None
+
         image = Image.open(BytesIO(payload))
+        # Checked BEFORE load(): open() parses only the header, so the pixel
+        # count is known while the bytes are still compressed. Deciding after
+        # load() would mean having already allocated whatever it claimed.
+        width, height = image.size
+        if width * height > PHOTO_MAX_PIXELS:
+            logger.warning(
+                "author photo is %dx%d, over the %d-pixel limit, skipping: %s",
+                width,
+                height,
+                PHOTO_MAX_PIXELS,
+                url,
+            )
+            image.close()
+            return None
+
         image.load()
         return image
-    except (requests.RequestException, OSError, ValueError) as err:
+    except (
+        requests.RequestException,
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        OSError,
+        ValueError,
+    ) as err:
+        # DecompressionBomb* is caught as well as size-checked: Pillow raises it
+        # from load() against its own global ceiling, and it is a Warning
+        # subclass in one case and an Exception in the other, so neither is
+        # covered by OSError/ValueError.
         logger.warning("author photo unreadable (%s): %s", url, err)
         return None
 

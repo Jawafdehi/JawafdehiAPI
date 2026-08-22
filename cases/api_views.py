@@ -12,6 +12,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 
 import jsonpatch
 from django.conf import settings
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.contrib.auth import get_user_model
@@ -21,6 +22,7 @@ from django.http import Http404, HttpResponse, HttpResponsePermanentRedirect
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.cache import patch_vary_headers
+from django.views import View
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
@@ -1636,39 +1638,32 @@ class AuthorProfileView(RetrieveAPIView):
         return Response(data)
 
 
-@extend_schema(
-    summary="Get an author's Open Graph share card",
-    description=(
-        "A 1200x630 JPEG share card for an author page: their photograph, their "
-        "name in both scripts, and their role, on the site's navy/crimson "
-        "ground. Public, and 404s under the same rule as the profile itself. "
-        "Cached for a day — the frontend Worker serves this under its own origin "
-        "so shared links keep a `jawafdehi.org` image URL."
-    ),
-    responses={(200, "image/jpeg"): OpenApiTypes.BINARY},
-    tags=["cases"],
-)
-class AuthorOgCardView(APIView):
+class AuthorOgCardView(View):
     """GET /api/authors/<slug>/og-card.jpg — the author's composed share card.
 
     Rendered on demand rather than committed to the frontend as static files so
-    that a newly credited author gets a correct preview with no rebuild. One
-    render per author per cache period; see cases/og_cards.py for why this is
-    server-side at all (shaping) and why it is not the raw headshot (WebP, and
-    the 1.91:1 crop).
+    that a newly credited author gets a correct preview with no rebuild. See
+    cases/og_cards.py for why this is server-side at all (text shaping) and why
+    it is not simply the raw headshot (WebP, and the 1.91:1 crop).
 
-    ``renderer_classes`` is pinned to JSONRenderer only so DRF's content
-    negotiation does not try to wrap the JPEG; the successful path returns a
-    plain HttpResponse and bypasses the renderer entirely.
+    A plain Django ``View``, NOT a DRF ``APIView``, and deliberately so. DRF
+    performs content negotiation in ``initial()``, BEFORE the handler runs, so a
+    view whose renderers do not advertise ``image/jpeg`` answers 406 to any
+    client that asks for an image — which is exactly what the frontend Worker
+    sends (``Accept: image/jpeg,image/*``). The whole feature would have failed
+    closed in production while every test passed, because DRF's APIClient sends
+    ``Accept: */*`` by default and that matches anything. Nothing here needs DRF:
+    there is no serializer, no auth beyond public, and the body is raw bytes.
+    The cost is that the endpoint is absent from the OpenAPI schema, which is
+    normal for an image route.
+
+    The rendered bytes are cached server-side under the profile's own
+    ``updated_at``, so a repeat request is a cache read rather than an outbound
+    photo fetch plus a render, and editing a profile invalidates it immediately
+    rather than waiting out a TTL.
     """
 
-    permission_classes = [AllowAny]
-    renderer_classes = [JSONRenderer]
-
-    # A day, matching what the Worker caches for. `s-maxage` targets the shared
-    # caches (Cloudflare, the Worker) rather than the crawler's own store, so a
-    # profile edit is picked up on the next day's revalidation instead of being
-    # pinned in every scraper's cache.
+    # A day, matching what the Worker caches for.
     CACHE_SECONDS = 86400
 
     def get(self, request, slug: str) -> HttpResponse:
@@ -1680,27 +1675,42 @@ class AuthorOgCardView(APIView):
         if profile is None:
             raise Http404("No public author profile with that slug")
 
-        photo = fetch_photo(profile.photo_url or "")
-        try:
-            payload = render_author_card(
-                display_name=profile.display_name,
-                name_ne=profile.name_ne or "",
-                title=profile.title or "",
-                photo=photo,
-            )
-        except ShapingUnavailable:
-            # The image is missing libfribidi, so a Devanagari name would render
-            # with detached matras. Fail loudly in the logs and 503 rather than
-            # publish a mangled name: the Worker falls back to the site banner,
-            # which is generic but not wrong.
-            logger.exception("cannot render author card for %s: no text shaping", slug)
-            return HttpResponse(status=503)
-        finally:
-            if photo is not None:
-                photo.close()
+        # `updated_at` in the key means an edited profile gets a new card at
+        # once; without it a corrected photo or role would sit behind the TTL.
+        cache_key = f"author-og-card:{profile.slug}:{profile.updated_at.timestamp()}"
+        payload = cache.get(cache_key)
+
+        if payload is None:
+            photo = fetch_photo(profile.photo_url or "")
+            try:
+                payload = render_author_card(
+                    display_name=profile.display_name,
+                    name_ne=profile.name_ne or "",
+                    title=profile.title or "",
+                    photo=photo,
+                )
+            except ShapingUnavailable:
+                # The image is missing libfribidi, so a Devanagari name would
+                # render with detached matras. Log and 503 rather than publish a
+                # mangled name: the Worker falls back to the site banner, which
+                # is generic but not wrong. Not cached — it is a deploy defect
+                # that a rebuild fixes, and caching it would outlive the fix.
+                logger.exception(
+                    "cannot render author card for %s: no text shaping", slug
+                )
+                return HttpResponse(status=503)
+            finally:
+                if photo is not None:
+                    photo.close()
+            cache.set(cache_key, payload, self.CACHE_SECONDS)
 
         response = HttpResponse(payload, content_type="image/jpeg")
-        response["Cache-Control"] = f"public, max-age=300, s-maxage={self.CACHE_SECONDS}"
+        # `s-maxage` targets the shared caches (Cloudflare, the Worker) rather
+        # than the crawler's own store, so a profile edit is picked up on the
+        # next day's revalidation instead of being pinned in every scraper.
+        response["Cache-Control"] = (
+            f"public, max-age=300, s-maxage={self.CACHE_SECONDS}"
+        )
         return response
 
 
