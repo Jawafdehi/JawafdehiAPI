@@ -65,6 +65,13 @@ FROM ${PYTHON_IMAGE} AS runtime
 COPY --from=uv /uv /uvx /bin/
 RUN apt-get update && apt-get install -y --no-install-recommends \
     antiword \
+    # Devanagari shaping for the composed Open Graph cards (cases/og_cards.py).
+    # Pillow VENDORS Raqm but dlopen()s its backends at runtime: libharfbuzz
+    # ships inside the Pillow wheel, libfribidi does NOT. Without this package
+    # PIL.features.check("raqm") is False and Pillow silently falls back to
+    # unshaped rendering — Nepali names come out with their matras and conjuncts
+    # detached, with no error and no failed test. ~30 KB; do not drop it.
+    libfribidi0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 jawafdehi \
     && useradd --system --uid 10001 --gid jawafdehi \
