@@ -189,6 +189,114 @@ def test_search_api_threads_status_facet_through():
 
 
 @pytest.mark.django_db
+def test_search_api_threads_bigo_range_through():
+    """?type=case&bigo_min=…&bigo_max=… reaches the DSL as ONE range clause."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {"q": "", "type": "case", "bigo_min": "10000000", "bigo_max": "100000000"},
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert {
+        "range": {"bigo": {"gte": 10_000_000, "lte": 100_000_000}}
+    } in body["query"]["bool"]["filter"]
+
+
+@pytest.mark.django_db
+def test_search_api_bigo_min_alone_is_an_open_ended_lower_bound():
+    """The common case — "cases over रु १ करोड" — needs no upper bound."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "", "bigo_min": "10000000"})
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert clauses == [{"range": {"bigo": {"gte": 10_000_000}}}]
+
+
+@pytest.mark.django_db
+def test_search_api_no_range_clause_when_no_bound_given():
+    """An absent bound must not become an implicit ``bigo >= 0``, which would drop
+    every non-case result from an ordinary search."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "x"})
+    assert resp.status_code == 200
+    assert client.search.call_args.kwargs["body"]["query"]["bool"]["filter"] == []
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_inverted_bigo_range():
+    """An inverted interval matches nothing — a 400 beats a confident empty page
+    the reader would read as "no such cases"."""
+    resp = APIClient().get(
+        "/api/search/", {"q": "x", "bigo_min": "100", "bigo_max": "10"}
+    )
+    assert resp.status_code == 400
+    assert "bigo_min" in json.dumps(resp.json())
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_malformed_bigo_bounds():
+    """Bad input is a client error, never a query sent on to OpenSearch.
+
+    ``2**63`` overflows the ``long`` mapping: unbounded, it would come back from
+    the cluster as a number_format_exception and surface as a 503.
+    """
+    for params in (
+        {"bigo_min": "abc"},
+        {"bigo_min": "-1"},
+        {"bigo_max": "-5"},
+        {"bigo_min": str(2**63)},
+        {"bigo_max": "1e9"},
+    ):
+        resp = APIClient().get("/api/search/", {"q": "x", **params})
+        assert resp.status_code == 400, params
+
+
+@pytest.mark.django_db
+def test_search_api_equal_bigo_bounds_are_allowed():
+    """min == max is an exact-amount lookup, not an inverted range."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "bigo_min": "500", "bigo_max": "500"}
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert clauses == [{"range": {"bigo": {"gte": 500, "lte": 500}}}]
+
+
+def test_every_range_field_is_declared_on_the_query_serializer():
+    """``RANGE_FIELDS`` and the serializer have to grow together.
+
+    ``RANGE_FIELDS``' own comment promises that adding ``date_from``/``date_to``
+    is "two entries here … and nothing else", and the view's says its
+    ``active_ranges`` comprehension is driven off ``RANGE_FIELDS`` "so adding
+    them there does not silently fail to reach the service". Both overstate it:
+    the comprehension reads ``serializer.validated_data``, and DRF discards any
+    query param the serializer does not declare. An entry with no matching field
+    is therefore ``None`` on every request — no clause, no 400, no log, just a
+    bound that looks accepted and does nothing.
+
+    This is the assertion that turns that silent no-op into a red test.
+    """
+    from search.service import RANGE_FIELDS
+    from search.views import SearchQuerySerializer
+
+    undeclared = set(RANGE_FIELDS) - set(SearchQuerySerializer().get_fields())
+    assert not undeclared, (
+        "these RANGE_FIELDS params reach no serializer field, so the API will "
+        f"accept and silently ignore them: {sorted(undeclared)}"
+    )
+
+
+@pytest.mark.django_db
 def test_search_api_400_on_invalid_sort():
     resp = APIClient().get("/api/search/", {"q": "x", "sort": "bogus"})
     assert resp.status_code == 400

@@ -185,6 +185,51 @@ FACET_FIELDS: dict[str, str] = {
     "status": "case_status",
 }
 
+# RANGE filters: the request param name -> (indexed field, the ``range`` bound it
+# sets). The second filter KIND, alongside the exact-match ``terms`` facets above
+# — every filter before this one was exact-match, and there was no range path in
+# the query builder at all.
+#
+# Params sharing a field are merged into ONE ``range`` clause, so
+# ``?bigo_min=X&bigo_max=Y`` becomes a single bounded interval rather than two
+# clauses that read as unrelated constraints.
+#
+# ``bigo`` is CASE-ONLY: no entity/material/court-case document carries an amount,
+# so a bound excludes every non-case hit. That is the same shape as the ``status``
+# facet above (also case-only, also applied globally) and callers should pair a
+# bound with ``?type=case``; the API view's OpenAPI description says so outright.
+#
+# Adding ``date_from``/``date_to`` is two entries here — ``("date", "gte")`` and
+# ``("date", "lte")`` — PLUS the two matching fields on ``SearchQuerySerializer``.
+# Both halves, always: the view reads bounds out of ``validated_data``, and DRF
+# discards any param the serializer does not declare, so an entry added here
+# alone is accepted and then silently ignored — no clause, no 400, no log.
+# ``test_every_range_field_is_declared_on_the_query_serializer`` fails if the two
+# ever drift. The clause-building itself is genuinely field-agnostic, which is
+# the point: a second range mechanism never gets built.
+RANGE_FIELDS: dict[str, tuple[str, str]] = {
+    "bigo_min": ("bigo", "gte"),
+    "bigo_max": ("bigo", "lte"),
+}
+
+
+def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """``range`` filter clauses for the given bounds (one clause per field).
+
+    Iterates :data:`RANGE_FIELDS` (not the caller's dict) so unknown params are
+    ignored and the emitted DSL is byte-stable regardless of query-string order.
+
+    A bound of ``None`` means "not requested" and is skipped. The test is
+    ``is None``, NOT falsiness: ``0`` is a legitimate lower bound and must survive.
+    """
+    bounds: dict[str, dict[str, Any]] = {}
+    for param, (field, bound) in RANGE_FIELDS.items():
+        value = (ranges or {}).get(param)
+        if value is None:
+            continue
+        bounds.setdefault(field, {})[bound] = value
+    return [{"range": {field: b}} for field, b in bounds.items()]
+
 
 class SearchError(Exception):
     """A client-side search error (→ HTTP 400), e.g. a malformed cursor or an
@@ -272,6 +317,7 @@ def build_query(
     lang: str = "both",
     sort: str = SORT_RELEVANCE,
     filters: dict[str, list[str]] | None = None,
+    ranges: dict[str, Any] | None = None,
     page: int = 1,
     page_size: int = 10,
     search_after: list[Any] | None = None,
@@ -299,6 +345,10 @@ def build_query(
     ``max_result_window`` ceiling. Otherwise shallow offset (``from``/``size``)
     paging is used.
 
+    Narrowing comes in two kinds, both ANDed into the bool ``filter`` (no scoring
+    impact): exact-match ``terms`` from ``filters`` (:data:`FACET_FIELDS`) and
+    numeric/date ``range`` bounds from ``ranges`` (:data:`RANGE_FIELDS`).
+
     Per-type facet counts come from a ``_index`` terms aggregation (one index per
     type — exact regardless of ``source_app``, which is not 1:1 with type since
     ngm owns both materials and courtcases).
@@ -308,52 +358,129 @@ def build_query(
 
     # Exact-match facet filters (entity_type/case_type/tags) compose with the text
     # query as bool ``filter`` clauses (no scoring impact, just narrowing).
-    filter_clauses: list[dict[str, Any]] = []
+    #
+    # The two clause KINDS are built apart because they merge differently: bounds
+    # sharing a field collapse into ONE ``range`` clause, so ?bigo_min=X&bigo_max=Y
+    # is a single bounded interval rather than two unrelated constraints.
+    terms_clauses: list[dict[str, Any]] = []
     for param, values in (filters or {}).items():
         field = FACET_FIELDS.get(param)
         if field and values:
-            filter_clauses.append({"terms": {field: list(values)}})
+            terms_clauses.append({"terms": {field: list(values)}})
+    # Range filters (bigo_min/bigo_max) narrow the same way — ANDed alongside the
+    # exact-match ones, and equally inert for scoring.
+    range_clauses = _range_clauses(ranges)
+    filter_clauses: list[dict[str, Any]] = [*terms_clauses, *range_clauses]
 
     # ``q`` is OPTIONAL. With a term, build the tuned recall+precision bool query;
     # with an empty/blank ``q`` it's a BROWSE — ``match_all`` so the facet filters,
     # type selection, sort and paging still apply (list/page the corpus with no
     # search term). An empty multi_match would match nothing, so we must branch.
     has_query = bool(q and q.strip())
+    # Hoisted out of the branch below so browse and query modes share one shape.
+    must_clauses: list[dict[str, Any]] = (
+        [
+            {
+                "multi_match": {
+                    "query": q,
+                    "fields": _weighted_query_fields(lang),
+                    "type": "most_fields",
+                    "operator": "or",
+                }
+            }
+        ]
+        if has_query
+        else [{"match_all": {}}]
+    )
+    # ONE query shape for both modes. Hoisting ``must_clauses`` above already
+    # absorbed the difference that used to justify a branch — ``match_all`` in
+    # browse mode, ``multi_match`` with a term — so ``must`` and ``filter`` are now
+    # the same expression either way. Keeping two arms meant a change to "the real
+    # query" arm silently skipped browse mode, which is the primary way this
+    # filter is used (a बिगो range with no search term).
+    bool_query: dict[str, Any] = {
+        # Recall clause: at least one of the bilingual fields must match, or
+        # match_all when browsing.
+        "must": must_clauses,
+        # Exact-match facet + range narrowing (empty when nothing is requested).
+        "filter": filter_clauses,
+    }
     if has_query:
-        bool_query: dict[str, Any] = {
-            # Recall clause: at least one of the bilingual fields must match.
-            "must": [
-                {
-                    "multi_match": {
-                        "query": q,
-                        "fields": _weighted_query_fields(lang),
-                        "type": "most_fields",
-                        "operator": "or",
-                    }
+        # The only thing a search term adds: an adjacent-term (phrase) title match
+        # that boosts score without being required, so single-term queries still
+        # match. Meaningless while browsing, where every document scores alike.
+        bool_query["should"] = [
+            {
+                "multi_match": {
+                    "query": q,
+                    "fields": PHRASE_FIELDS,
+                    "type": "phrase",
+                    "boost": PHRASE_BOOST,
                 }
-            ],
-            # Precision boost: adjacent-term (phrase) title match adds score but is
-            # not required, so single-term queries still match.
-            "should": [
-                {
-                    "multi_match": {
-                        "query": q,
-                        "fields": PHRASE_FIELDS,
-                        "type": "phrase",
-                        "boost": PHRASE_BOOST,
-                    }
-                }
-            ],
-            # Exact-match facet narrowing (omitted when no filters requested).
-            "filter": filter_clauses,
-        }
-    else:
-        # Browse mode: match everything (optionally narrowed by facet filters),
-        # ordered by ``sort`` (relevance is uniform here, so a date/title sort is
-        # the useful default for browsing — the caller picks via ``sort``).
-        bool_query = {
-            "must": [{"match_all": {}}],
-            "filter": filter_clauses,
+            }
+        ]
+
+    # Aggregations: per-type ``counts`` (by physical index) PLUS the exposed
+    # facets (entity_type via the schema.org ``type`` token, case_type, and tags
+    # via ``keywords``). Facet counts reflect the query but NOT the facet filters
+    # (OpenSearch aggregates over the post-filter result set; that's the accepted
+    # behaviour for these refine-style facets).
+    #
+    # Built as its own ``dict[str, Any]`` rather than inline in ``body``: the
+    # nested literal would otherwise pin a narrow value type that the extent agg
+    # below — which nests an ``aggs`` of its own — does not fit.
+    aggs: dict[str, Any] = {
+        # Sized 2x the type count, not 1x: the bucket key is the CONCRETE
+        # backing index, and mid-swap an alias can briefly resolve to two
+        # generations. At exactly len(ALL_TYPES) the extra bucket would push
+        # a real one out and silently zero that type's facet count.
+        "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
+        "entity_type": {"terms": {"field": "type", "size": 50}},
+        "case_type": {"terms": {"field": "case_type", "size": 50}},
+        "tags": {"terms": {"field": "keywords", "size": 50}},
+        "status": {"terms": {"field": "case_status", "size": 50}},
+    }
+
+    # बिगो extent: the smallest and largest recorded amount, how many documents
+    # carry one at all — the three numbers the SPA's slider ladder is cut from.
+    #
+    # ``global`` on purpose — the ONE aggregation here that must NOT reflect the
+    # query or the filters. Every other agg above is a refine facet, where
+    # narrowing along with the result set is the wanted behaviour. The extent is
+    # not: if it tracked the active range, dragging a thumb inward would pull the
+    # track in behind it and the reader could never widen back out. ``global``
+    # escapes the query context entirely, so the scale stays a fixed property of
+    # the corpus no matter what is typed or filtered.
+    #
+    # Requested ONLY for a case-only search — not merely when the case index is
+    # somewhere in scope.
+    #
+    # A ``global`` agg is not a cheap re-label of the result set: it escapes the
+    # query context by running a second collection over ``match_all`` across every
+    # index in the search context. On an unscoped search that is entities +
+    # materials + court cases too (~560k docs in production). Cost is therefore
+    # decoupled from selectivity: a query matching nothing walks the whole corpus
+    # anyway.
+    #
+    # Nothing consumes it outside a case view either — the SPA gates the control
+    # on ``selectedType === "case"`` — so the widest, most expensive scope was the
+    # one whose payload was always discarded. Narrowing to case-only puts the
+    # global bucket back on the case index, which is what makes it affordable.
+    if _index_for_types(types) == CASE_INDEX:
+        aggs["bigo_extent"] = {
+            "global": {},
+            "aggs": {
+                # The AXIS, and now the whole of it: smallest and largest recorded
+                # amount plus how many documents carry one. The SPA derives its
+                # slider ladder from these three numbers.
+                #
+                # A ``range`` sub-agg for a distribution histogram used to hang
+                # here too. The SPA no longer draws one — the control is a slider
+                # over a log ladder — and it was the expensive half: a 14-bucket
+                # range agg that re-ran the user's ``multi_match`` across the whole
+                # global bucket. ``stats`` on a single numeric field is cheap.
+                "stats": {"stats": {"field": "bigo"}},
+            },
         }
 
     body: dict[str, Any] = {
@@ -374,22 +501,7 @@ def build_query(
                 "body": {},
             }
         },
-        # Aggregations: per-type ``counts`` (by physical index) PLUS the exposed
-        # facets (entity_type via the schema.org ``type`` token, case_type, and
-        # tags via ``keywords``). Facet counts reflect the query but NOT the facet
-        # filters (OpenSearch aggregates over the post-filter result set; that's the
-        # accepted behaviour for these refine-style facets).
-        "aggs": {
-            # Sized 2x the type count, not 1x: the bucket key is the CONCRETE
-            # backing index, and mid-swap an alias can briefly resolve to two
-            # generations. At exactly len(ALL_TYPES) the extra bucket would push
-            # a real one out and silently zero that type's facet count.
-            "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
-            "entity_type": {"terms": {"field": "type", "size": 50}},
-            "case_type": {"terms": {"field": "case_type", "size": 50}},
-            "tags": {"terms": {"field": "keywords", "size": 50}},
-            "status": {"terms": {"field": "case_status", "size": 50}},
-        },
+        "aggs": aggs,
     }
 
     indices_boost = _indices_boost()
@@ -564,6 +676,33 @@ def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
+def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Range-filter EXTENT from the ``global`` extent agg, keyed by request param
+    prefix (``bigo`` covers ``bigo_min``/``bigo_max``).
+
+    ``{}`` when the agg was not requested (no case-only scope) — and the entry is
+    omitted when the corpus holds no recorded amount at all, in which case
+    ``stats`` reports ``count: 0`` with null bounds. A caller must treat an absent
+    extent as "no control to render" rather than as a zero-width range.
+
+    Bounds come back from ``stats`` as JSON doubles and are cast to ``int``: the
+    corpus already reaches the tens of अरब, and a float would lose precision past
+    2**53. The SPA derives its slider ladder from these three numbers, so there is
+    nothing here for a client to reinvent and nothing to keep in step.
+    """
+    extent = aggs.get("bigo_extent") or {}
+    stats = extent.get("stats") or {}
+    if not stats.get("count") or stats.get("min") is None or stats.get("max") is None:
+        return {}
+    return {
+        "bigo": {
+            "min": int(stats["min"]),
+            "max": int(stats["max"]),
+            "count": int(stats["count"]),
+        }
+    }
+
+
 def _named_facets_from_aggs(aggs: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """The exposed refine facets (entity_type/case_type/tags) as ``{name, count}``
     lists from their ``terms`` aggregations. Display names are derived client-side.
@@ -599,6 +738,7 @@ class SearchService:
         lang: str = "both",
         sort: str = SORT_RELEVANCE,
         filters: dict[str, list[str]] | None = None,
+        ranges: dict[str, Any] | None = None,
         page: int = 1,
         page_size: int = 10,
         cursor: str | None = None,
@@ -635,6 +775,7 @@ class SearchService:
             lang=lang,
             sort=sort,
             filters=filters,
+            ranges=ranges,
             page=page,
             page_size=page_size,
             search_after=search_after,
@@ -658,6 +799,7 @@ class SearchService:
         aggregations = response.get("aggregations") or {}
         counts = _facets_from_aggs(aggregations)
         facets = _named_facets_from_aggs(aggregations)
+        extents = _extents_from_aggs(aggregations)
 
         # next_cursor is the last hit's sort values — present only when the page
         # was full (a short page means there is nothing after it).
@@ -677,6 +819,9 @@ class SearchService:
             "count": count,
             "counts": counts,
             "facets": facets,
+            # Corpus extent for the range filters, distinct from ``facets``
+            # (which are term buckets). Empty unless the search is case-only.
+            "extents": extents,
             "results": results,
             "next_cursor": next_cursor,
         }

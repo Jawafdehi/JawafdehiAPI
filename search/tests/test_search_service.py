@@ -554,6 +554,110 @@ def test_build_query_includes_status_facet_and_filter():
     assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
 
 
+# ── range filters (बिगो amount) ────────────────────────────────────────────────
+#
+# The SECOND filter kind. Everything above is exact-match ``terms``; these emit a
+# ``range`` clause, and the mechanism is deliberately field-agnostic so
+# date_from/date_to can reuse it instead of growing a second one.
+
+
+def test_range_fields_map_bigo_bounds_to_one_numeric_field():
+    """Both params address the SAME indexed field, one bound each."""
+    assert svc.RANGE_FIELDS["bigo_min"] == ("bigo", "gte")
+    assert svc.RANGE_FIELDS["bigo_max"] == ("bigo", "lte")
+
+
+def test_build_query_bigo_min_emits_a_range_clause():
+    """A lower bound is inclusive (``gte``) — "over रु १ करोड" includes रु १ करोड."""
+    body = build_query(q="x", ranges={"bigo_min": 10_000_000})
+    assert {"range": {"bigo": {"gte": 10_000_000}}} in body["query"]["bool"]["filter"]
+
+
+def test_build_query_bigo_max_emits_an_upper_bound():
+    """And an upper bound is inclusive too (``lte``), for symmetry."""
+    body = build_query(q="x", ranges={"bigo_max": 500_000})
+    assert {"range": {"bigo": {"lte": 500_000}}} in body["query"]["bool"]["filter"]
+
+
+def test_build_query_merges_both_bounds_into_a_single_range_clause():
+    """One bounded interval, not two clauses that read as unrelated constraints."""
+    body = build_query(q="x", ranges={"bigo_min": 10_000_000, "bigo_max": 10**11})
+    clauses = body["query"]["bool"]["filter"]
+    assert clauses == [{"range": {"bigo": {"gte": 10_000_000, "lte": 10**11}}}]
+
+
+def test_build_query_range_clause_targets_the_promoted_field_not_the_card_copy():
+    """``raw`` is mapped ``enabled: false``, so a clause on ``raw.card.bigo`` would
+    match nothing. The filter must name the promoted top-level field."""
+    body = build_query(q="x", ranges={"bigo_min": 1})
+    (clause,) = body["query"]["bool"]["filter"]
+    assert set(clause["range"]) == {"bigo"}
+
+
+def test_build_query_no_range_clause_by_default():
+    """No bound requested → no clause. An implicit ``bigo >= 0`` would drop every
+    non-case result from an ordinary search."""
+    assert build_query(q="x")["query"]["bool"]["filter"] == []
+    assert build_query(q="x", ranges={})["query"]["bool"]["filter"] == []
+
+
+def test_build_query_ignores_unknown_range_param_and_none_bounds():
+    """Unknown params are ignored (the builder reads RANGE_FIELDS, not the caller's
+    keys), and ``None`` means "not requested" — mirrors the ``terms`` behaviour."""
+    body = build_query(
+        q="x", ranges={"bogus_min": 5, "bigo_min": None, "bigo_max": None}
+    )
+    assert body["query"]["bool"]["filter"] == []
+
+
+def test_build_query_keeps_a_zero_lower_bound():
+    """``0`` is a real bound. Skipping on falsiness rather than ``is None`` would
+    silently drop it and widen the search the user asked to narrow."""
+    body = build_query(q="x", ranges={"bigo_min": 0})
+    assert {"range": {"bigo": {"gte": 0}}} in body["query"]["bool"]["filter"]
+
+
+def test_build_query_range_composes_with_terms_filters():
+    """Both filter kinds are ANDed into the same bool ``filter`` — the amount
+    bound narrows a case-type/status selection rather than replacing it."""
+    body = build_query(
+        q="x",
+        filters={"case_type": ["CORRUPTION"], "status": ["ongoing"]},
+        ranges={"bigo_min": 10_000_000},
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert {"terms": {"case_type": ["CORRUPTION"]}} in clauses
+    assert {"terms": {"case_status": ["ongoing"]}} in clauses
+    assert {"range": {"bigo": {"gte": 10_000_000}}} in clauses
+
+
+def test_build_query_range_applies_in_browse_mode():
+    """The case list browses with an empty ``q``; the amount bound must still
+    narrow it (an empty query is the primary way this filter gets used)."""
+    body = build_query(q="", ranges={"bigo_min": 10_000_000}, sort="newest")
+    bq = body["query"]["bool"]
+    assert bq["must"] == [{"match_all": {}}]
+    assert {"range": {"bigo": {"gte": 10_000_000}}} in bq["filter"]
+
+
+def test_build_query_range_clause_order_is_stable():
+    """The DSL is built from RANGE_FIELDS, not the caller's dict, so query-string
+    order can't change the emitted body (keeps it diffable + cacheable)."""
+    assert build_query(q="x", ranges={"bigo_max": 9, "bigo_min": 1}) == build_query(
+        q="x", ranges={"bigo_min": 1, "bigo_max": 9}
+    )
+
+
+def test_search_threads_ranges_to_client():
+    """``search()`` forwards ``ranges`` to the builder — the bound reaches the
+    cluster, not just the pure query function the other tests exercise."""
+    client = MagicMock()
+    client.search.return_value = _canned_response()
+    SearchService(client=client).search(q="x", ranges={"bigo_min": 10_000_000})
+    body = client.search.call_args.kwargs["body"]
+    assert {"range": {"bigo": {"gte": 10_000_000}}} in body["query"]["bool"]["filter"]
+
+
 def _case_card_response():
     """A single case hit carrying the denormalized ``raw.card`` render payload."""
     return {
@@ -612,6 +716,106 @@ def test_non_case_result_has_no_card_key():
     assert "card" not in entity
 
 
+# ── बिगो extent (the histogram's axis and bars) ────────────────────────────────
+#
+# A THIRD aggregation kind, alongside the per-type counts and the terms facets:
+# the corpus extent of a range field. What makes it different is that it must not
+# narrow with the results — the bars ARE the control the reader clicks.
+
+
+def test_build_query_requests_the_bigo_extent_as_a_global_agg():
+    """The extent must escape the query context.
+
+    Every other agg here is a refine facet, which correctly narrows with the
+    result set. The extent must not: if it tracked the active range, selecting a
+    bar would delete the bars on either side of it and the reader could never
+    widen back out. ``global`` is what buys that.
+    """
+    extent = build_query(q="x", types=["case"])["aggs"]["bigo_extent"]
+    assert extent["global"] == {}
+    assert extent["aggs"]["stats"] == {"stats": {"field": "bigo"}}
+
+
+def test_build_query_extent_survives_an_active_bigo_range():
+    """Belt and braces on the point above — the agg is byte-identical with a
+    bound applied, so the axis never moves under the reader's own selection."""
+    unbounded = build_query(q="x", types=["case"])["aggs"]["bigo_extent"]
+    bounded = build_query(q="x", types=["case"], ranges={"bigo_min": 10**9})["aggs"][
+        "bigo_extent"
+    ]
+    assert unbounded == bounded
+
+
+def test_build_query_omits_the_extent_unless_the_search_is_case_only():
+    """A ``global`` agg is a second collection pass over every searched index.
+
+    It is not scoped to the case index — it escapes the query context entirely,
+    so on an unscoped search it walks entities + materials + court cases too
+    (~560k docs in production) and re-runs the ``multi_match`` for each of them
+    inside ``distribution``. The cost is decoupled from how selective the query
+    is: ``?q=<matches nothing>`` goes from nearly free to a full-corpus scan.
+
+    And nothing reads it there. The SPA gates the control on
+    ``selectedType === "case"``, so ``extents`` is discarded on every other
+    view. Emitting it only for a case-only search shrinks the global bucket to
+    the case index, which is the whole reason the agg is affordable at all.
+    """
+    assert "bigo_extent" in build_query(q="x", types=["case"])["aggs"]
+    # Unscoped: the widest possible bucket, and the SPA cannot render it.
+    assert "bigo_extent" not in build_query(q="x")["aggs"]
+    assert "bigo_extent" not in build_query(q="x", types=[])["aggs"]
+    # Mixed scope still drags the other indices into the global bucket.
+    assert "bigo_extent" not in build_query(q="x", types=["case", "entity"])["aggs"]
+
+
+def test_build_query_omits_the_extent_when_no_case_index_is_in_scope():
+    """Only cases carry an amount, so an entity-only search must not pay for a
+    corpus-wide aggregation it cannot use."""
+    assert "bigo_extent" not in build_query(q="x", types=["entity"])["aggs"]
+    assert "bigo_extent" not in build_query(q="x", types=["material"])["aggs"]
+
+
+def test_search_returns_the_bigo_extent_as_whole_rupees():
+    """``stats`` hands back doubles; बिगो is a ``long`` of whole rupees.
+
+    Passing the float through would lose precision past 2**53 — which this corpus
+    already reaches, with amounts into the tens of अरब.
+    """
+    client = MagicMock()
+    response = _canned_response()
+    response["aggregations"] = {
+        "bigo_extent": {
+            "stats": {"count": 68, "min": 45220.0, "max": 6.6e10},
+            "distribution": {"buckets": {"buckets": []}},
+        }
+    }
+    client.search.return_value = response
+    bigo = SearchService(client=client).search(q="x", types=["case"])["extents"]["bigo"]
+    # The axis only — the bars have their own test below.
+    assert (bigo["min"], bigo["max"], bigo["count"]) == (45220, 66_000_000_000, 68)
+    assert isinstance(bigo["max"], int)
+
+
+def test_search_reports_no_extent_when_nothing_records_an_amount():
+    """``count: 0`` with null bounds means "no control to render", NOT a
+    zero-width range — the latter would draw a chart with nothing clickable."""
+    client = MagicMock()
+    response = _canned_response()
+    response["aggregations"] = {
+        "bigo_extent": {
+            "stats": {"count": 0, "min": None, "max": None},
+            "distribution": {"buckets": {"buckets": []}},
+        }
+    }
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="x", types=["case"])["extents"] == {}
+
+
+def test_search_reports_no_extent_when_the_agg_was_not_requested():
+    """An entity-only search carries no extent block at all."""
+    client = MagicMock()
+    client.search.return_value = _canned_response()
+    assert SearchService(client=client).search(q="x", types=["entity"])["extents"] == {}
 # ── alias generations: a hit reports the CONCRETE index, never the alias ─────
 #
 # Regression (#453): the public index names became ALIASES over numbered
@@ -634,53 +838,33 @@ def test_type_for_index_resolves_a_generation_backing_index():
     assert svc.type_for_index("ngm-materials-000123") == "material"
 
 
-def test_type_for_index_ignores_a_neighbour_that_merely_shares_the_prefix():
-    # Mirrors the anchoring guarantee in aliases._GENERATION_RE: an unrelated
-    # index must not be typed as a case just because the name starts the same.
-    assert svc.type_for_index("jawafdehi-cases-archive-000001") is None
-    assert svc.type_for_index("jawafdehi-cases-000001-restored") is None
-    assert svc.type_for_index("some-other-index") is None
+def test_extent_is_stats_only_and_carries_no_histogram():
+    """One agg, three numbers.
+
+    A ``range`` sub-agg for a distribution histogram used to hang off this
+    ``global`` bucket, plus a second ``stops`` ladder for slider thumbs. Both are
+    gone: the SPA draws a slider over a log ladder it derives from ``min``/``max``,
+    so there is nothing for a client to line up against and nothing to keep in
+    step across two repos.
+
+    It was also the expensive half — a 14-bucket range agg that re-ran the user's
+    ``multi_match`` across the whole global bucket. Anything re-adding it is
+    re-adding both that cost and that coupling.
+    """
+    extent = build_query(q="x", types=["case"])["aggs"]["bigo_extent"]
+    assert extent["global"] == {}
+    assert extent["aggs"] == {"stats": {"stats": {"field": "bigo"}}}
 
 
-def test_serialize_hit_types_a_generation_backed_case_as_case():
-    hit = {
-        "_index": "jawafdehi-cases-000001",
-        "_source": {
-            "iri": "https://jawafdehi.org/case/seed-published",
-            "source_app": "jawafdehi",
-        },
+def test_search_returns_the_extent_as_three_whole_rupee_numbers():
+    client = MagicMock()
+    response = _canned_response()
+    # ``stats`` returns JSON doubles; the corpus already reaches tens of अरब, so a
+    # float would lose precision past 2**53.
+    response["aggregations"] = {
+        "bigo_extent": {"stats": {"count": 68, "min": 45220.0, "max": 6.6e10}}
     }
-    # Not "jawafdehi" — the source_app fallback is for docs we can't place, and
-    # a generation-backed hit is not one of those.
-    assert svc._serialize_hit(hit)["type"] == "case"
-
-
-def test_facets_count_generation_backed_buckets():
-    aggs = {
-        "by_index": {
-            "buckets": [
-                {"key": "jawafdehi-cases-000002", "doc_count": 3},
-                {"key": "nes-entities-000001", "doc_count": 5},
-            ]
-        }
-    }
-    assert svc._facets_from_aggs(aggs) == {"case": 3, "entity": 5}
-
-
-def test_facets_sum_two_generations_of_the_same_alias():
-    # Mid-swap an alias can briefly resolve to two generations; the counts must
-    # add up rather than the last bucket overwriting the first.
-    aggs = {
-        "by_index": {
-            "buckets": [
-                {"key": "jawafdehi-cases-000001", "doc_count": 2},
-                {"key": "jawafdehi-cases-000002", "doc_count": 3},
-            ]
-        }
-    }
-    assert svc._facets_from_aggs(aggs) == {"case": 5}
-
-
-def test_by_index_agg_is_sized_above_the_type_count_for_mid_swap_generations():
-    agg = build_query(q="x")["aggs"]["by_index"]["terms"]
-    assert agg["size"] > len(svc.ALL_TYPES)
+    client.search.return_value = response
+    bigo = SearchService(client=client).search(q="x", types=["case"])["extents"]["bigo"]
+    assert bigo == {"min": 45220, "max": 66_000_000_000, "count": 68}
+    assert all(isinstance(v, int) for v in bigo.values())

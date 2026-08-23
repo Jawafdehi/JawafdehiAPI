@@ -19,6 +19,9 @@ Field mapping:
 * ``case_status``    ← coarse ongoing/closed/others (mirrors the SPA rule); a
   dedicated keyword (NOT the generic ``status``, which NGM uses for its scraper
   enrichment flag) so the unified search can facet/filter cases without collision,
+* ``bigo``           ← ``Case.bigo`` (बिगो, whole NPR) promoted to a top-level
+  ``long`` so the unified search can RANGE-filter on it; the card copy under
+  ``raw`` is return-only (``raw`` is ``enabled: false``, hence unqueryable),
 * ``raw``            ← a light record PLUS a ``card`` payload (return-only): every
   field the SPA case list/card renders — ``short_description``, ``key_allegations``,
   ``tags``, dates, ``bigo``, thumbnail/banner, the ``timeline`` (major events), and
@@ -87,6 +90,50 @@ def _derive_status(case: Any) -> str:
     if has_start and has_end:
         return "closed"
     return "others"
+
+
+# Signed-64-bit bounds — the domain of the ``bigo`` field's ``long`` mapping (and
+# of the ``BigIntegerField`` it comes from). A value outside them is rejected by
+# OpenSearch, which fails the whole document, so ``_bigo`` screens for it.
+_LONG_MIN, _LONG_MAX = -(2**63), 2**63 - 1
+
+
+def _bigo(case: Any) -> int | None:
+    """बिगो as a whole-rupee ``int`` for the top-level numeric field (or ``None``).
+
+    The model column is a ``BigIntegerField``, so the live index paths hand this a
+    plain ``int``. The coercion is for the attribute-shaped stand-ins that also
+    reach ``build_doc`` (test doubles, records rehydrated from API JSON), where an
+    amount can arrive as a numeric string — ``enrich_tags._detect_amount_tier``
+    copes with the same thing. Like every other field here, the value is read with
+    ``getattr``; this indexer shapes objects, not mappings.
+
+    Anything the ``long`` mapping would refuse — non-numeric, a bool, or a
+    magnitude past the 64-bit bounds — yields ``None`` so the FIELD is dropped.
+    That containment is the whole point: OpenSearch rejects a bad value by
+    rejecting the entire document, which would take a published case out of search
+    altogether over one unusable number. Losing the amount is recoverable; losing
+    the case is not.
+
+    ``0`` is passed through as a real value, not treated as "unrecorded" — no
+    published case records a zero बिगो, and inventing that rule here would make
+    an honest zero silently unfilterable.
+    """
+    value = getattr(case, "bigo", None)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        # ``int`` FIRST, so a large amount keeps full precision: a float
+        # round-trip is lossy above 2**53 and can round a perfectly valid figure
+        # up over the ``long`` ceiling, dropping the field for no reason.
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            # A decimal string or float ("1.9") — truncate to whole rupees.
+            number = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return number if _LONG_MIN <= number <= _LONG_MAX else None
 
 
 def _safe_resolve_entities(case: Any) -> list[dict[str, Any]]:
@@ -287,6 +334,15 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
     # Also in ``raw`` so ``_serialize_hit`` surfaces it as ``extra.case_status``
     # (the SPA's non-card fallback for a hit's lifecycle).
     doc["raw"]["case_status"] = case_status
+
+    # बिगो promoted to a top-level ``long`` so the unified search can range-filter
+    # on it (?bigo_min/?bigo_max). The card keeps its own copy for rendering; that
+    # one lives under ``raw`` and is NOT indexed. Set only when recorded — an
+    # absent field is excluded by a range clause, which is exactly right for a case
+    # with no known amount, and avoids a null the ``long`` mapping would reject.
+    bigo = _bigo(case)
+    if bigo is not None:
+        doc["bigo"] = bigo
 
     doc["raw"]["card"] = _build_card(
         case,

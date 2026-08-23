@@ -139,6 +139,38 @@ def test_search_sort_enum_tracks_all_sorts():
     assert schema["properties"]["sort"]["enum"] == list(ALL_SORTS)
 
 
+def test_unified_search_schema_tracks_the_search_endpoint():
+    """The search tool is a passthrough, so its three surfaces must agree.
+
+    A param the endpoint accepts but the tool omits is invisible to MCP clients; a
+    param the tool advertises but does not forward is worse — it is accepted and
+    silently ignored. Both are drift this pins down, the same way the body schemas
+    above are pinned to their serializers.
+    """
+    from search.views import SearchQuerySerializer
+
+    tool = SearchControlPlaneTool()
+    endpoint_params = set(SearchQuerySerializer().fields)
+    assert set(tool.input_schema["properties"]) == endpoint_params
+    assert set(tool.PARAMS) == endpoint_params
+
+
+def test_unified_search_numeric_bounds_match_the_endpoints_validation():
+    """A schema-valid call must not be rejected by the API's own clamp.
+
+    The बिगो bounds are clamped to the signed-64-bit domain of the index's ``long``
+    mapping; advertising a wider range would let an MCP client build a request the
+    schema calls valid and the endpoint answers with a 400.
+    """
+    from search.views import SearchQuerySerializer
+
+    fields = SearchQuerySerializer().fields
+    properties = SearchControlPlaneTool().input_schema["properties"]
+    for name in ("bigo_min", "bigo_max"):
+        assert properties[name]["minimum"] == fields[name].min_value, name
+        assert properties[name]["maximum"] == fields[name].max_value, name
+
+
 @pytest.mark.parametrize(
     "tool",
     [
