@@ -28,7 +28,9 @@ from .service import (
     ALL_SORTS,
     ALL_TYPES,
     MAX_PAGE_SIZE,
+    MAX_TAGS_FACET_SIZE,
     SORT_RELEVANCE,
+    TAGS_FACET_SIZE,
     SearchError,
     SearchService,
     SearchUnavailable,
@@ -87,6 +89,16 @@ class SearchQuerySerializer(serializers.Serializer):
     page = serializers.IntegerField(required=False, min_value=1, default=1)
     page_size = serializers.IntegerField(
         required=False, min_value=1, max_value=MAX_PAGE_SIZE, default=10
+    )
+    # How many tag buckets the tags facet returns. The default is deliberately
+    # short (design.md §12: cap the initial list), and THIS is the other half of
+    # that rule — the client asking for the tail rather than it being unreachable.
+    # Bounds/default come from the service constants so the two cannot drift.
+    tags_limit = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=MAX_TAGS_FACET_SIZE,
+        default=TAGS_FACET_SIZE,
     )
     # Opaque deep-paging cursor (the ``next_cursor`` from a prior response). When
     # given, ``page`` is ignored and results resume after that point (search_after).
@@ -167,6 +179,21 @@ class SearchQuerySerializer(serializers.Serializer):
             "page_size", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
         ),
         OpenApiParameter(
+            "tags_limit",
+            # A raw schema rather than OpenApiTypes.INT so the bounds are
+            # MACHINE-readable: a generated client rejects 51 locally instead of
+            # learning about it from a 400.
+            {"type": "integer", "minimum": 1, "maximum": MAX_TAGS_FACET_SIZE},
+            OpenApiParameter.QUERY,
+            required=False,
+            description=(
+                "How many tag buckets the 'tags' facet returns "
+                f"(1-{MAX_TAGS_FACET_SIZE}, default {TAGS_FACET_SIZE}). Raise it to "
+                "reach the tail of the tag list; it does not affect results, only "
+                "the facet."
+            ),
+        ),
+        OpenApiParameter(
             "cursor",
             OpenApiTypes.STR,
             OpenApiParameter.QUERY,
@@ -210,6 +237,7 @@ class UnifiedSearchView(APIView):
                 filters=active_filters,
                 page=data["page"],
                 page_size=data["page_size"],
+                tags_limit=data["tags_limit"],
                 cursor=data.get("cursor"),
             )
         except SearchError as exc:

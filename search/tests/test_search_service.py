@@ -593,14 +593,41 @@ def test_tags_facet_exclusions_track_a_newly_added_case_type(monkeypatch):
         values = [*case_models.CaseType.values, "NEW_OFFENCE"]
 
     monkeypatch.setattr(case_models, "CaseType", _GrownCaseType)
-    excluded = svc._tags_agg()["aggs"][svc._TAGS_VALUES_AGG]["terms"]["exclude"]
-    assert "NEW_OFFENCE" in excluded
+    agg = svc._tags_agg(svc.TAGS_FACET_SIZE)
+    assert "NEW_OFFENCE" in agg["aggs"][svc._TAGS_VALUES_AGG]["terms"]["exclude"]
 
 
 def test_tags_facet_size_is_ten_not_fifty():
     """50 truncated the tail alphabetically at count 1 with no "show more", so ~94
     tags were unreachable. 10 is the initial page; T2 adds ``tags_limit``."""
     assert _tags_terms(build_query(q="x"))["size"] == svc.TAGS_FACET_SIZE == 10
+
+
+def test_build_query_tags_limit_widens_the_tags_facet():
+    """The client-requested half of design.md §12: a cap with no way past it just
+    moves the unreachable tail from 50 values to 10."""
+    assert _tags_terms(build_query(q="x", tags_limit=30))["size"] == 30
+    # None (and omitting it) mean the default, not "unbounded".
+    default = _tags_terms(build_query(q="x", tags_limit=None))["size"]
+    assert default == svc.TAGS_FACET_SIZE
+
+
+def test_build_query_clamps_tags_limit_into_range():
+    """Clamped here as well as at the serializer, because build_query is callable
+    without going through the API — mirrors how page_size is treated."""
+    assert _tags_terms(build_query(q="x", tags_limit=10_000))["size"] == (
+        svc.MAX_TAGS_FACET_SIZE
+    )
+    for degenerate in (0, -5):
+        assert _tags_terms(build_query(q="x", tags_limit=degenerate))["size"] == 1
+
+
+def test_search_threads_tags_limit_to_the_client():
+    client = MagicMock()
+    client.search.return_value = _canned_response()
+    SearchService(client=client).search(q="x", tags_limit=25)
+    body = client.search.call_args.kwargs["body"]
+    assert body["aggs"]["tags"]["aggs"][svc._TAGS_VALUES_AGG]["terms"]["size"] == 25
 
 
 def test_named_facets_read_the_nested_filtered_tag_buckets():

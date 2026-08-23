@@ -213,6 +213,14 @@ FACET_FIELDS: dict[str, str] = {
 # to is self-scoping and this whole aggregation wrapper goes away.
 TAGS_FACET_SIZE = 10
 
+# Ceiling for a client-requested ``tags_limit``. design.md §12 asks for BOTH halves
+# — cap the initial list AND let the client ask for more — because a cap alone just
+# moves the unreachable tail from 50 to 10. This is the "ask for more" bound: 50 was
+# the old fixed size, so it is a known-survivable aggregation width, and a facet
+# list longer than that is a browse of the vocabulary rather than a filter panel
+# (what the read endpoint is for once one exists).
+MAX_TAGS_FACET_SIZE = 50
+
 # A ``filter`` aggregation nests its terms buckets one level deeper, under this
 # sub-aggregation name — so parsing a facet listed here needs an extra hop that an
 # ordinary flat ``terms`` facet does not (see :func:`_named_facets_from_aggs`).
@@ -299,9 +307,13 @@ def _indices_boost() -> list[dict[str, float]]:
     return boosts
 
 
-def _tags_agg(size: int = TAGS_FACET_SIZE) -> dict[str, Any]:
+def _tags_agg(size: int) -> dict[str, Any]:
     """The tags facet aggregation, scoped to curated case tags (see
     :data:`TAGS_FACET_SIZE` for why it is scoped at all).
+
+    ``size`` is required rather than defaulted: its one caller resolves the default
+    against a client-supplied ``tags_limit``, and a second default here would be
+    unreachable in production and free to drift from the real one.
 
     Both halves of the scope are DERIVED, never spelled out here:
 
@@ -347,6 +359,7 @@ def build_query(
     filters: dict[str, list[str]] | None = None,
     page: int = 1,
     page_size: int = 10,
+    tags_limit: int | None = None,
     search_after: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Build the OpenSearch request body for query ``q`` (bilingual, tuned).
@@ -375,9 +388,19 @@ def build_query(
     Per-type facet counts come from a ``_index`` terms aggregation (one index per
     type — exact regardless of ``source_app``, which is not 1:1 with type since
     ngm owns both materials and courtcases).
+
+    ``tags_limit`` widens the tags facet past its default (see
+    :data:`TAGS_FACET_SIZE`) up to :data:`MAX_TAGS_FACET_SIZE`; ``None`` means the
+    default. Clamped here as well as at the serializer, for the same reason
+    ``page_size`` is: this is callable without going through the API.
     """
     page = max(1, page)
     page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+    tags_size = (
+        TAGS_FACET_SIZE
+        if tags_limit is None
+        else max(1, min(tags_limit, MAX_TAGS_FACET_SIZE))
+    )
 
     # Exact-match facet filters (entity_type/case_type/tags) compose with the text
     # query as bool ``filter`` clauses (no scoring impact, just narrowing).
@@ -461,7 +484,7 @@ def build_query(
             "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
             "entity_type": {"terms": {"field": "type", "size": 50}},
             "case_type": {"terms": {"field": "case_type", "size": 50}},
-            "tags": _tags_agg(),
+            "tags": _tags_agg(tags_size),
             "status": {"terms": {"field": "case_status", "size": 50}},
         },
     }
@@ -685,6 +708,7 @@ class SearchService:
         filters: dict[str, list[str]] | None = None,
         page: int = 1,
         page_size: int = 10,
+        tags_limit: int | None = None,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         """Execute the unified search and return the response envelope.
@@ -721,6 +745,7 @@ class SearchService:
             filters=filters,
             page=page,
             page_size=page_size,
+            tags_limit=tags_limit,
             search_after=search_after,
         )
         index = _index_for_types(types)

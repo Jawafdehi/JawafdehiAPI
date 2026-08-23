@@ -221,6 +221,120 @@ def test_search_api_400_on_invalid_type():
     assert resp.status_code == 400
 
 
+# ── tags_limit: the client-requested tags-facet width ──────────────────────────
+#
+# design.md §12 asks for BOTH halves of the tag-filter rule — cap the initial list
+# AND let the client request more. Capping alone just moves the unreachable tail
+# from 50 values to 10.
+
+
+def _tags_facet_size(client):
+    """The tags facet's requested bucket count, out of the DSL the view sent."""
+    body = client.search.call_args.kwargs["body"]
+    return body["aggs"]["tags"]["aggs"]["values"]["terms"]["size"]
+
+
+@pytest.mark.django_db
+def test_search_api_tags_limit_defaults_to_ten():
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "x", "type": "case"})
+    assert resp.status_code == 200
+    assert _tags_facet_size(client) == 10
+
+
+@pytest.mark.django_db
+def test_search_api_tags_limit_widens_the_tags_facet():
+    """The whole chain: query param → serializer → service → aggregation size."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "type": "case", "tags_limit": "30"}
+        )
+    assert resp.status_code == 200
+    assert _tags_facet_size(client) == 30
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_out_of_range_tags_limit():
+    """Bounded at both ends: 0 buckets is a pointless query and an unbounded width
+    turns a filter panel into a full vocabulary dump."""
+    for bad in ("0", "51", "-1"):
+        resp = APIClient().get("/api/search/", {"q": "x", "tags_limit": bad})
+        assert resp.status_code == 400, bad
+
+
+@pytest.mark.django_db
+def test_search_api_tags_limit_does_not_touch_the_result_page():
+    """It widens the FACET only — page_size still governs the result list, so a
+    client asking for more chips does not silently get more results."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "tags_limit": "40", "page_size": "5"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert body["size"] == 5
+    assert _tags_facet_size(client) == 40
+
+
+@pytest.mark.django_db
+def test_every_documented_query_param_is_declared_on_the_query_serializer():
+    """The ``@extend_schema`` parameter list and ``SearchQuerySerializer`` have to
+    grow together.
+
+    DRF discards any query param the serializer does not declare, so a param
+    documented in OpenAPI but never declared is accepted, advertised, and then
+    silently ignored — no effect, no 400, no log. A caller reading the schema has
+    no way to tell. This turns that silent no-op into a red test.
+
+    Read off the GENERATED schema rather than the decorator, which needs a bound
+    view instance to resolve its parameters.
+    """
+    import yaml
+    from django.test import Client
+    from django.urls import reverse
+
+    from search.views import SearchQuerySerializer
+
+    from search.service import MAX_TAGS_FACET_SIZE
+
+    schema = yaml.safe_load(Client().get(reverse("schema")).content)
+    params = schema["paths"]["/api/search/"]["get"]["parameters"]
+    documented = {p["name"] for p in params if p.get("in") == "query"}
+    # Discoverable, not just live — and with bounds a generated client can enforce
+    # locally rather than discovering them from a 400.
+    assert "tags_limit" in documented
+    tags_limit = next(p for p in params if p["name"] == "tags_limit")
+    assert tags_limit["schema"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": MAX_TAGS_FACET_SIZE,
+    }
+    undeclared = documented - set(SearchQuerySerializer().get_fields())
+    assert not undeclared, (
+        "these documented query params reach no serializer field, so the API will "
+        f"accept and silently ignore them: {sorted(undeclared)}"
+    )
+
+
+def test_tags_limit_is_bounded_by_the_service_constants():
+    """The serializer's bounds are the service's, not a second copy of 1/10/50 that
+    can drift from the aggregation it controls."""
+    from search.service import MAX_TAGS_FACET_SIZE, TAGS_FACET_SIZE
+    from search.views import SearchQuerySerializer
+
+    field = SearchQuerySerializer().get_fields()["tags_limit"]
+    assert field.required is False
+    assert field.default == TAGS_FACET_SIZE
+    assert field.max_value == MAX_TAGS_FACET_SIZE
+    assert field.min_value == 1
+
+
 # ── POST /api/search/click (the result-click beacon) ────────────────────────────
 
 
