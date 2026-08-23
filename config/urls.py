@@ -81,6 +81,7 @@ urlpatterns = [
     path("api/", include("newsletter.urls")),
     # Case-update proposals — before cases.urls (whose router is broad).
     path("api/", include("case_proposals.urls")),
+    path("api/", include("case_tags.urls")),
     # Filing a signal by hand — the one producer a human drives. Also before
     # cases.urls, for the same reason.
     path("api/", include("case_events.urls")),
