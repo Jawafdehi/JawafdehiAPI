@@ -174,16 +174,50 @@ def _sort_spec(sort: str) -> list[dict[str, Any]]:
 
 # Facet/filter fields: the request param name -> the keyword index field it filters
 # and aggregates over. ``entity_type`` reuses the schema.org ``type`` token; ``tags``
-# reuses the shared ``keywords`` field; the ``status`` param filters the coarse
-# case lifecycle, backed by the dedicated ``case_status`` field (NOT the generic
-# ``status``, which holds NGM's scraper enrichment flag). These are exact-match
-# (``terms``) facets, distinct from the per-type ``counts`` (from the ``_index`` agg).
+# reuses the shared ``keywords`` field (whose AGGREGATION is scoped — see
+# :data:`TAGS_FACET_SIZE` below — while the filter is not); the ``status`` param
+# filters the coarse case lifecycle, backed by the dedicated ``case_status`` field
+# (NOT the generic ``status``, which holds NGM's scraper enrichment flag). These
+# are exact-match (``terms``) facets, distinct from the per-type ``counts`` (from
+# the ``_index`` agg).
 FACET_FIELDS: dict[str, str] = {
     "entity_type": "type",
     "case_type": "case_type",
     "tags": "keywords",
     "status": "case_status",
 }
+
+# ``tags`` is the one facet whose AGGREGATION is scoped rather than raw, because
+# ``keywords`` is a shared recall field that four indexers write with unrelated
+# provenance: curated ``Case.tags``, court-case party names + charge text, and raw
+# JSON-LD keywords from materials/entities. Aggregated raw it offered a plaintiff
+# name (``नेपाल सरकार``) and statute citations as public filter chips while not one
+# curated case tag reached the panel — which design.md §12 forbids outright:
+# free-form keywords must not automatically become public filters.
+#
+# So the aggregation is wrapped in a ``filter`` on the cases index's ``source_app``
+# and drops the ``case_type`` values that cases/search_index.py also appends into
+# ``keywords`` (they already render as their own facet directly above, so they were
+# the same chips twice). See :func:`_tags_agg`.
+#
+# The FIELD ITSELF IS UNTOUCHED: ``ठगी`` stays fully searchable as free text, and
+# ``?tags=`` still filters ``keywords`` (:data:`FACET_FIELDS`). Only the automatic
+# promotion of a raw keyword to a filter chip is removed.
+#
+# That leaves the facet and the filter deliberately ASYMMETRIC for now: the chips
+# are cases-only, but applying one still matches ``keywords`` across every index,
+# so a chip's count can undercount its own filtered result set when a court case or
+# material happens to carry the same keyword. Scoping the filter too would change
+# documented ``?tags=`` behaviour, so it waits for the indexed ``tag_ids`` field
+# that a canonical-id facet needs anyway — at which point a field only cases write
+# to is self-scoping and this whole aggregation wrapper goes away.
+TAGS_FACET_SIZE = 10
+
+# A ``filter`` aggregation nests its terms buckets one level deeper, under this
+# sub-aggregation name — so parsing a facet listed here needs an extra hop that an
+# ordinary flat ``terms`` facet does not (see :func:`_named_facets_from_aggs`).
+_TAGS_VALUES_AGG = "values"
+FILTERED_FACET_AGGS: dict[str, str] = {"tags": _TAGS_VALUES_AGG}
 
 
 class SearchError(Exception):
@@ -263,6 +297,45 @@ def _indices_boost() -> list[dict[str, float]]:
         if weight != 1.0:
             boosts.append({TYPE_TO_INDEX[result_type]: weight})
     return boosts
+
+
+def _tags_agg(size: int = TAGS_FACET_SIZE) -> dict[str, Any]:
+    """The tags facet aggregation, scoped to curated case tags (see
+    :data:`TAGS_FACET_SIZE` for why it is scoped at all).
+
+    Both halves of the scope are DERIVED, never spelled out here:
+
+    * the discriminator is the very ``source_app`` the cases indexer writes, so a
+      rename cannot silently empty the facet;
+    * the excluded values are the ``CaseType`` enum itself, so a newly added case
+      type cannot silently leak back in as a duplicate tag chip.
+
+    ``source_app`` is deliberately preferred over ``_index``: an ``_index`` term
+    would have to name a CONCRETE backing generation (``by_index`` is sized twice
+    the type count precisely because mid-swap an alias resolves to two of them),
+    whereas a ``source_app`` term is generation-blind.
+
+    The two imports are function-local so importing this module still requires
+    nothing from Django — the app registry is touched only when a query is
+    actually built. Same reasoning as cases/search_index.py comparing ``CaseState``
+    by value rather than importing it at module load.
+    """
+    from cases.models import CaseType
+    from cases.search_index import SOURCE_APP as CASE_SOURCE_APP
+
+    return {
+        "filter": {"term": {"source_app": CASE_SOURCE_APP}},
+        "aggs": {
+            _TAGS_VALUES_AGG: {
+                "terms": {
+                    "field": FACET_FIELDS["tags"],
+                    "size": size,
+                    # Sorted for a deterministic DSL (asserted in tests).
+                    "exclude": sorted(CaseType.values),
+                }
+            }
+        },
+    }
 
 
 def build_query(
@@ -376,9 +449,10 @@ def build_query(
         },
         # Aggregations: per-type ``counts`` (by physical index) PLUS the exposed
         # facets (entity_type via the schema.org ``type`` token, case_type, and
-        # tags via ``keywords``). Facet counts reflect the query but NOT the facet
-        # filters (OpenSearch aggregates over the post-filter result set; that's the
-        # accepted behaviour for these refine-style facets).
+        # tags via a SCOPED ``keywords`` agg — see ``_tags_agg``). Facet counts
+        # reflect the query but NOT the facet filters (OpenSearch aggregates over
+        # the post-filter result set; that's the accepted behaviour for these
+        # refine-style facets).
         "aggs": {
             # Sized 2x the type count, not 1x: the bucket key is the CONCRETE
             # backing index, and mid-swap an alias can briefly resolve to two
@@ -387,7 +461,7 @@ def build_query(
             "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
             "entity_type": {"terms": {"field": "type", "size": 50}},
             "case_type": {"terms": {"field": "case_type", "size": 50}},
-            "tags": {"terms": {"field": "keywords", "size": 50}},
+            "tags": _tags_agg(),
             "status": {"terms": {"field": "case_status", "size": 50}},
         },
     }
@@ -565,12 +639,22 @@ def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
 
 
 def _named_facets_from_aggs(aggs: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """The exposed refine facets (entity_type/case_type/tags) as ``{name, count}``
-    lists from their ``terms`` aggregations. Display names are derived client-side.
+    """The exposed refine facets (entity_type/case_type/tags/status) as
+    ``{name, count}`` lists from their ``terms`` aggregations. Display names are
+    derived client-side.
+
+    A facet in :data:`FILTERED_FACET_AGGS` is wrapped in a ``filter`` agg, so its
+    buckets live one level deeper — under the sub-aggregation name, alongside the
+    filter's own ``doc_count``. A flat ``aggs[param]["buckets"]`` read would find
+    nothing there and report an empty facet rather than failing loudly.
     """
     facets: dict[str, list[dict[str, Any]]] = {}
     for param in FACET_FIELDS:
-        buckets = (aggs.get(param) or {}).get("buckets") or []
+        block = aggs.get(param) or {}
+        nested = FILTERED_FACET_AGGS.get(param)
+        if nested is not None:
+            block = block.get(nested) or {}
+        buckets = block.get("buckets") or []
         facets[param] = [
             {"name": b.get("key"), "count": b.get("doc_count", 0)}
             for b in buckets

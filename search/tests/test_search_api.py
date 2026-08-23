@@ -36,7 +36,9 @@ def _canned():
             "by_index": {"buckets": [{"key": "nes-entities", "doc_count": 1}]},
             "entity_type": {"buckets": [{"key": "Person", "doc_count": 1}]},
             "case_type": {"buckets": []},
-            "tags": {"buckets": []},
+            # tags is a filter agg (curated case tags only), so its buckets are
+            # nested — and an entity-only hit puts no case docs in its scope.
+            "tags": {"doc_count": 0, "values": {"buckets": []}},
         },
     }
 

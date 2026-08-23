@@ -188,7 +188,12 @@ def _canned_response():
                 ]
             },
             "case_type": {"buckets": [{"key": "CORRUPTION", "doc_count": 1}]},
-            "tags": {"buckets": [{"key": "procurement", "doc_count": 1}]},
+            # The tags facet is a FILTER agg (cases-only), so its terms buckets
+            # arrive nested under the sub-agg name beside the filter's doc_count.
+            "tags": {
+                "doc_count": 1,
+                "values": {"buckets": [{"key": "procurement", "doc_count": 1}]},
+            },
         },
     }
 
@@ -511,7 +516,14 @@ def test_build_query_includes_facet_aggregations():
     for agg in ("by_index", "entity_type", "case_type", "tags"):
         assert agg in body["aggs"], agg
     assert body["aggs"]["entity_type"]["terms"]["field"] == "type"
-    assert body["aggs"]["tags"]["terms"]["field"] == "keywords"
+    # tags still aggregates ``keywords`` — but one level down, inside the
+    # cases-only filter agg (see test_tags_facet_is_scoped_to_the_cases_index).
+    tags_terms = body["aggs"]["tags"]["aggs"][svc._TAGS_VALUES_AGG]["terms"]
+    assert tags_terms["field"] == "keywords"
+    # The other facets stay flat, unscoped terms aggs — unchanged by the tags fix.
+    for agg in ("entity_type", "case_type", "status"):
+        assert body["aggs"][agg]["terms"]["size"] == 50, agg
+        assert "filter" not in body["aggs"][agg], agg
 
 
 def test_search_envelope_carries_named_facets():
@@ -527,6 +539,124 @@ def test_search_envelope_carries_named_facets():
     ]
     assert facets["case_type"] == [{"name": "CORRUPTION", "count": 1}]
     assert facets["tags"] == [{"name": "procurement", "count": 1}]
+
+
+# ── tags facet: curated case tags only (T1) ────────────────────────────────────
+#
+# ``keywords`` is a shared recall field written by four indexers, so aggregating it
+# raw published court-case text as public filter chips: a plaintiff name
+# (``नेपाल सरकार``, 7,297) and statute citations outranked every curated case tag,
+# and the two ``case_type`` values appeared a second time as tag chips. design.md
+# §12: free-form keywords must not automatically become public filters. The FIELD
+# is untouched — only its automatic promotion to a chip.
+
+
+def _tags_terms(body):
+    """The tags facet's terms agg — nested inside its cases-only filter agg."""
+    return body["aggs"]["tags"]["aggs"][svc._TAGS_VALUES_AGG]["terms"]
+
+
+def test_tags_facet_is_scoped_to_the_cases_index():
+    """Scoped by ``source_app``, not ``_index``: an ``_index`` term would have to
+    name a concrete backing generation, and mid-swap an alias resolves to two."""
+    from cases.search_index import SOURCE_APP as CASE_SOURCE_APP
+
+    agg = build_query(q="x")["aggs"]["tags"]
+    # An exact match on the filter clause: any ``_index`` discriminator fails here.
+    assert agg["filter"] == {"term": {"source_app": CASE_SOURCE_APP}}
+    assert CASE_SOURCE_APP == "jawafdehi"  # courts/materials are "ngm", entities "nes"
+
+
+def test_tags_facet_excludes_every_case_type_value():
+    """``case_type`` is appended into ``keywords`` by cases/search_index.py, so
+    without this the Case-type facet rendered a second time as tag chips."""
+    from cases.models import CaseType
+
+    excluded = _tags_terms(build_query(q="x"))["exclude"]
+    assert set(excluded) == set(CaseType.values)
+    # The two that actually surfaced in production.
+    assert "CORRUPTION" in excluded
+    assert "TAX_EVASION" in excluded
+
+
+def test_tags_facet_exclusions_track_a_newly_added_case_type(monkeypatch):
+    """The exclude list is DERIVED from the enum, so a case type added tomorrow is
+    covered with no edit here. A hardcoded list would pass the test above and then
+    silently leak the new value back into the tags facet.
+
+    Patching the enum works because ``_tags_agg`` resolves it per call; hoisting the
+    derivation to an import-time constant is equally derived but would need this
+    test rewritten rather than deleted."""
+    import cases.models as case_models
+
+    class _GrownCaseType:
+        values = [*case_models.CaseType.values, "NEW_OFFENCE"]
+
+    monkeypatch.setattr(case_models, "CaseType", _GrownCaseType)
+    excluded = svc._tags_agg()["aggs"][svc._TAGS_VALUES_AGG]["terms"]["exclude"]
+    assert "NEW_OFFENCE" in excluded
+
+
+def test_tags_facet_size_is_ten_not_fifty():
+    """50 truncated the tail alphabetically at count 1 with no "show more", so ~94
+    tags were unreachable. 10 is the initial page; T2 adds ``tags_limit``."""
+    assert _tags_terms(build_query(q="x"))["size"] == svc.TAGS_FACET_SIZE == 10
+
+
+def test_named_facets_read_the_nested_filtered_tag_buckets():
+    """A filter agg nests its buckets one level deeper. A flat read would report an
+    empty tags facet instead of failing loudly, so parse the nesting explicitly."""
+    aggs = {
+        "tags": {
+            "doc_count": 12,
+            "values": {"buckets": [{"key": "procurement", "doc_count": 7}]},
+        }
+    }
+    assert svc._named_facets_from_aggs(aggs)["tags"] == [
+        {"name": "procurement", "count": 7}
+    ]
+
+
+def _courtcase_only_response():
+    """What OpenSearch returns for a court-case-only search: the scoped tags agg
+    matches no case documents, so the filter's doc_count is 0 and it has no
+    buckets."""
+    return {
+        "hits": {
+            "total": {"value": 1},
+            "hits": [
+                {
+                    "_index": "ngm-courtcases",
+                    "_id": "https://jawafdehi.org/courtcase/supreme/081-cr-0081",
+                    "_score": 3.0,
+                    "_source": {
+                        "iri": "https://jawafdehi.org/courtcase/supreme/081-cr-0081",
+                        "source_app": "ngm",
+                        "title_ne": "ठगी",
+                        "type": "jawafdehi:CourtCase",
+                        "raw": {"court": "supreme", "case_number": "081-CR-0081"},
+                    },
+                }
+            ],
+        },
+        "aggregations": {
+            "by_index": {"buckets": [{"key": "ngm-courtcases", "doc_count": 1}]},
+            "tags": {"doc_count": 0, "values": {"buckets": []}},
+        },
+    }
+
+
+def test_courtcase_only_search_returns_no_tag_buckets():
+    """``?type=courtcase`` yields an EMPTY tags facet, not party names and statute
+    citations. The SPA's FilterGroup returns null on an empty list, so the group
+    disappears — expected and temporary until the court-charge work (T9/T16)."""
+    client = MagicMock()
+    client.search.return_value = _courtcase_only_response()
+    out = SearchService(client=client).search(q="ठगी", types=["courtcase"])
+    assert out["facets"]["tags"] == []
+    # The court case itself is still found and counted — recall is untouched.
+    assert out["counts"] == {"courtcase": 1}
+    assert out["results"][0]["type"] == "courtcase"
 
 
 def test_search_threads_sort_and_filters_to_client():
