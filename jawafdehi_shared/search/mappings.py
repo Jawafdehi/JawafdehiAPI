@@ -207,6 +207,18 @@ def common_mappings() -> dict[str, Any]:
                 "verdict_date": {"type": "date"},
                 "verdict_type": {"type": "keyword"},
                 "status": {"type": "keyword"},
+                # Court-case charge, split out of the scraped ``case_subject``: the
+                # normalized head WITHOUT its descriptive parenthetical, so one
+                # charge is one bucket instead of four (``ठगी गरेको`` alone plus
+                # three parenthesised variants render as four chips today). Party
+                # names and case_type never reach it — those stay in ``keywords``
+                # for recall only.
+                "charge": {"type": "keyword"},
+                # The statute citation lifted out of that subject's ``(दफा …)``
+                # group, digits folded to one script so ``(दफा 24९(३)(ख))`` and
+                # ``(दफा 249 (3)(ख))`` are the same section. A better filter than
+                # the prose it was buried in.
+                "statute_section": {"type": "keyword"},
                 # Coarse Jawafdehi-case lifecycle (ongoing/closed/others). A dedicated
                 # keyword so the unified search can facet/filter cases WITHOUT
                 # colliding with the generic ``status`` above (which NGM uses for its

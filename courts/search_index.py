@@ -13,6 +13,9 @@ CONTRACT GAP / how the bilingual title is built (no language-map name exists):
   Devanagari) go into ``body`` and ``keywords`` so a party-name query matches.
 * ``identifiers`` ← the IRI, ``case_number``, ``court``, and any resolved party
   ``nes_id`` IRIs.
+* ``charge`` + ``statute_section`` ← the scraped ``case_subject``, split into its
+  normalized head and its ``(दफा …)`` citation (``courts.normalize``). Facetable;
+  the raw subject stays in ``keywords``/``body`` for recall.
 * Bikram Sambat registration date is carried verbatim into ``date_bs``.
 
 Best-effort: an OpenSearch error is logged and swallowed.
@@ -29,7 +32,7 @@ from jawafdehi_shared.search.indexing import (
     upsert_doc,
 )
 from jawafdehi_shared.search.opensearch import COURTCASE_INDEX, make_client
-from courts.normalize import is_verdict_sentinel
+from courts.normalize import is_verdict_sentinel, split_case_subject
 
 SOURCE_APP = "ngm"
 TYPE_TOKEN = "jawafdehi:CourtCase"
@@ -175,6 +178,21 @@ def build_doc(obj: Any) -> dict[str, Any]:
     if case_subject:
         keywords.append(case_subject)  # same list object as doc["keywords"]
         doc["body"] = f"{doc['body']} · {case_subject}" if doc.get("body") else case_subject
+        # Split the subject into a facetable charge + statute section. The RAW
+        # subject stays in ``keywords`` and ``body`` above: these two fields are
+        # additive, and narrowing the recall field would make a record that is
+        # findable today unfindable, which is never an acceptable trade here.
+        #
+        # Note what is deliberately absent from ``charge``: party names (already
+        # resolved to NES entities via ``_party_iris``, and ``नेपाल सरकार`` at 7,297
+        # is a plaintiff being offered as a topic filter) and ``case_type`` (it has
+        # its own facet, and appending it to a second facet renders the same values
+        # twice). Both remain in ``keywords`` for text recall.
+        charge, statute_section = split_case_subject(case_subject)
+        if charge:
+            doc["charge"] = charge
+        if statute_section:
+            doc["statute_section"] = statute_section
     status = getattr(obj, "status", None)
     if status:
         doc["status"] = status

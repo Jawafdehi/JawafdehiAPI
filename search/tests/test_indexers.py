@@ -155,6 +155,57 @@ def test_courtcase_build_doc_shape_and_title_from_case_number():
     assert doc["raw"]["case_type"] == "corruption"
 
 
+def test_courtcase_splits_case_subject_into_charge_and_statute():
+    """The scraped subject cell mixes a charge, a descriptive parenthetical and a
+    statute citation, so one charge rendered as four facet chips. The split gives a
+    facetable charge plus the citation, and leaves the raw value in place."""
+    obj = _courtcase_obj()
+    obj.case_subject = "ठगी गरेको (आफ्नो नाम, दर्जा, पदवी, योग्यता ढाँटी) (दफा 24९(३)(ख))"
+    doc = courtcase_index.build_doc(obj)
+
+    assert doc["charge"] == "ठगी गरेको"
+    assert doc["statute_section"] == "249(3)(ख)"
+    # RECALL IS UNTOUCHED: the verbatim subject still rides in keywords, body and
+    # raw, so anything findable by that text before is still findable.
+    assert obj.case_subject in doc["keywords"]
+    assert obj.case_subject in doc["body"]
+    assert doc["raw"]["case_subject"] == obj.case_subject
+
+
+def test_courtcase_charge_facet_carries_no_party_names_or_case_type():
+    """``नेपाल सरकार`` at 7,297 was a PLAINTIFF offered as a topic filter, and
+    ``case_type`` was rendering its own facet's values a second time. Neither may
+    reach the charge facet — while both stay in keywords for recall."""
+    obj = _courtcase_obj()
+    obj.case_subject = "ठगी गरेको (दफा 249(1)(क))"
+    doc = courtcase_index.build_doc(obj)
+
+    assert doc["charge"] == "ठगी गरेको"
+    assert "नेपाल सरकार" not in doc["charge"]
+    assert "राम बहादुर" not in doc["charge"]
+    assert doc["charge"].lower() != doc["case_type"].lower()
+    # ...and the recall field still holds all three.
+    assert "नेपाल सरकार" in doc["keywords"]
+    assert "corruption" in doc["keywords"]
+
+
+def test_courtcase_without_a_subject_omits_both_new_fields():
+    """Absent rather than empty-string, so the facet has no blank bucket."""
+    obj = _courtcase_obj()
+    obj.case_subject = None
+    doc = courtcase_index.build_doc(obj)
+    assert "charge" not in doc
+    assert "statute_section" not in doc
+
+
+def test_courtcase_subject_without_a_citation_omits_statute_section_only():
+    obj = _courtcase_obj()
+    obj.case_subject = "ठगी"
+    doc = courtcase_index.build_doc(obj)
+    assert doc["charge"] == "ठगी"
+    assert "statute_section" not in doc
+
+
 def test_courtcase_title_en_none_without_english_court_name():
     obj = _courtcase_obj()
     obj.court = SimpleNamespace(full_name_english=None)

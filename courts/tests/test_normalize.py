@@ -2,7 +2,11 @@
 
 import pytest
 
-from courts.normalize import normalize_case_type, parse_stated_defendant_count
+from courts.normalize import (
+    normalize_case_type,
+    parse_stated_defendant_count,
+    split_case_subject,
+)
 
 
 def test_parse_stated_count_ascii_and_devanagari():
@@ -125,3 +129,112 @@ def test_normalize_case_type_cosmetic_only_returns_input_verbatim(value):
 @pytest.mark.parametrize("value", ["", None])
 def test_normalize_case_type_empty(value):
     assert normalize_case_type(value) == value
+
+
+# ── case_subject → (charge, statute_section) ─────────────────────────────────
+#
+# Every input below is a real live value (or the documented truncation of one)
+# taken from the corpus measurement in the tag-crowding work, not invented shapes.
+# The four ``ठगी गरेको …`` variants are the point of the exercise: on production
+# they render as four separate filter chips (1,126 + 702 + 225 + 741) for one
+# charge that should be a single bucket at ~2,794.
+
+_THAGI = "ठगी गरेको"
+
+# 1,126 — mixed-script digits: 24९ is Latin 2, Latin 4, Devanagari ९.
+_VARIANT_NAME = "ठगी गरेको (आफ्नो नाम, दर्जा, पदवी, योग्यता ढाँटी) (दफा 24९(३)(ख))"
+# 225 — NESTED parens inside the descriptive group, all-Latin statute digits.
+_VARIANT_NESTED = (
+    "ठगी गरेको (खण्ड (क) वा (ख) मा लेखिएदेखि बाहेक अन्य कुनै किसिमले ठगी गरेमा) "
+    "(दफा 249 (3)(ग))"
+)
+# 702 — carries an internal TRIPLE space inside the group.
+_VARIANT_TRIPLE_SPACE = (
+    "ठगी गरेको (नेपाल सरकार वा नेपाल सरकारको पूर्ण वा   अधिकांश स्वामित्व भएको "
+    "संस्थाको सम्पत्ति ठगी गरेको) (दफा 249(1)(क))"
+)
+# 741 — the bare charge, no parenthetical at all.
+_VARIANT_BARE = "ठगी गरेको"
+
+
+def test_split_case_subject_lifts_the_statute_out_of_the_last_group():
+    charge, statute = split_case_subject(_VARIANT_NAME)
+    assert charge == _THAGI
+    # Mixed-script digits folded to one script; no space, no दफा marker.
+    assert statute == "249(3)(ख)"
+
+
+def test_split_case_subject_handles_nested_parentheses():
+    """A regex stripping to the first ``)`` cuts this value in half and leaves
+    ``वा (ख) मा … गरेमा)`` behind as prose, which is why this uses depth counting."""
+    charge, statute = split_case_subject(_VARIANT_NESTED)
+    assert charge == _THAGI
+    assert statute == "249(3)(ग)"
+
+
+def test_split_case_subject_survives_an_internal_triple_space():
+    charge, statute = split_case_subject(_VARIANT_TRIPLE_SPACE)
+    assert charge == _THAGI
+    assert statute == "249(1)(क)"
+
+
+def test_split_case_subject_with_no_statute_citation_at_all():
+    assert split_case_subject(_VARIANT_BARE) == (_THAGI, None)
+    # A trailing danda is hygiene, handled by the shared normalizer.
+    assert split_case_subject("ठगी ।") == ("ठगी", None)
+    assert split_case_subject("ठगी") == ("ठगी", None)
+
+
+def test_the_four_thagi_variants_collapse_to_one_charge():
+    """The headline outcome: four chips become one bucket."""
+    charges = {
+        split_case_subject(v)[0]
+        for v in (_VARIANT_NAME, _VARIANT_NESTED, _VARIANT_TRIPLE_SPACE, _VARIANT_BARE)
+    }
+    assert charges == {_THAGI}
+    # ...while their statutes stay distinct, which is the point of the new field.
+    statutes = {
+        split_case_subject(v)[1]
+        for v in (_VARIANT_NAME, _VARIANT_NESTED, _VARIANT_TRIPLE_SPACE)
+    }
+    assert statutes == {"249(3)(ख)", "249(3)(ग)", "249(1)(क)"}
+
+
+def test_the_same_citation_spelled_two_ways_lands_in_one_bucket():
+    """``(दफा 24९(३)(ख))`` and ``(दफा 249 (3)(ख))`` are the same section."""
+    a = split_case_subject("ठगी गरेको (दफा 24९(३)(ख))")[1]
+    b = split_case_subject("ठगी गरेको (दफा 249 (3)(ख))")[1]
+    assert a == b == "249(3)(ख)"
+
+
+def test_split_case_subject_on_a_truncated_unterminated_group():
+    """The corpus carries truncated subjects. An unclosed group must still yield
+    its charge head rather than swallowing the value."""
+    charge, statute = split_case_subject("ठगी गरेको (नेपाल सरकार वा नेपाल सरकारको पूर्ण वा")
+    assert charge == _THAGI
+    assert statute is None
+
+
+def test_split_case_subject_with_no_charge_head_returns_none_not_a_guess():
+    charge, statute = split_case_subject("(दफा 249(3)(ख))")
+    assert charge is None
+    assert statute == "249(3)(ख)"
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_split_case_subject_empty(value):
+    assert split_case_subject(value) == (None, None)
+
+
+def test_split_case_subject_is_idempotent_on_its_own_charge():
+    """The charge is re-normalized on every reindex, so it has to be a fixed point."""
+    for value in (_VARIANT_NAME, _VARIANT_NESTED, _VARIANT_TRIPLE_SPACE, _VARIANT_BARE):
+        charge = split_case_subject(value)[0]
+        assert split_case_subject(charge)[0] == charge
+
+
+def test_split_case_subject_keeps_a_non_statute_parenthetical_out_of_the_statute():
+    """Only a group carrying ``दफा`` is a citation; a descriptive tail is not."""
+    charge, statute = split_case_subject("कर छली गरेको (ठूला करदाता कार्यालय)")
+    assert charge == "कर छली गरेको"
+    assert statute is None

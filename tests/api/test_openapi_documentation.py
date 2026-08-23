@@ -95,10 +95,11 @@ class TestOpenAPIDocumentation:
         assert "search" in search["tags"]
         parameter_names = [parameter["name"] for parameter in search["parameters"]]
         # The unified-search params: q (optional → empty = browse), type/lang
-        # filters, sort mode, refine facets (entity_type/case_type/tags/status),
-        # offset paging (page/page_size), the tags-facet width (tags_limit), and
-        # the deep-paging cursor (search_after). ``status`` is the coarse
-        # case-lifecycle refine facet.
+        # filters, sort mode, refine facets (entity_type/case_type/tags/status,
+        # plus the court-side charge/statute_section), offset paging
+        # (page/page_size), the tags-facet width (tags_limit), and the deep-paging
+        # cursor (search_after). ``status`` is the coarse case-lifecycle refine
+        # facet.
         assert set(parameter_names) == {
             "q",
             "type",
@@ -108,6 +109,8 @@ class TestOpenAPIDocumentation:
             "case_type",
             "tags",
             "status",
+            "charge",
+            "statute_section",
             "page",
             "page_size",
             "tags_limit",

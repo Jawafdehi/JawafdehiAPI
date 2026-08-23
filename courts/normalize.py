@@ -1,13 +1,23 @@
-"""Case-number normalization for the API read plane.
+"""Normalization for scraped court-case values, on the API read plane.
 
-Ported verbatim from the FastAPI NGM (``ngm.api.normalize``) so the Django
-service accepts the same loose case-number forms (Devanagari digits, lowercase,
-missing zero-padding) and matches the stored canonical form.
+Three concerns, in the order they were added:
+
+1. **Case numbers** — ported verbatim from the FastAPI NGM (``ngm.api.normalize``)
+   so the Django service accepts the same loose forms (Devanagari digits,
+   lowercase, missing zero-padding) and matches the stored canonical form.
+2. **``case_type``** (``normalize_case_type``) — high-precision structural
+   cleanup that deliberately PRESERVES statute citations, because in that field
+   the citation is most of the value.
+3. **``case_subject``** (``split_case_subject``) — splits the charge from its
+   statute citation, because a FACET needs them as separate axes. Opposite
+   treatment to (2) on purpose; see the comment above that function.
 """
 
 from __future__ import annotations
 
 import re
+
+from jawafdehi_shared.tags.normalize import normalize_tag
 
 DEVANAGARI_TO_ASCII = {
     "०": "0",
@@ -219,3 +229,107 @@ def normalize_case_type(case_type: str | None) -> str | None:
     # Persist only a STRUCTURAL change; a whitespace/quote/Unicode-form-only diff
     # returns the raw input so the importer sees no change.
     return cleaned if cleaned != collapsed else case_type
+
+
+# ── case_subject → (charge, statute_section) ─────────────────────────────────
+# ``case_subject`` is the other scraped free-text cell, and on the live corpus it
+# is the single biggest source of facet noise: the SAME charge appears as
+# ``ठगी गरेको`` alone (741) and with three different descriptive parentheticals
+# (1126 + 702 + 225), so one charge renders as four filter chips instead of one
+# bucket at ~2,794. The statute citation buried in the last group is a BETTER
+# filter than the prose it is attached to, so it is lifted into its own field
+# rather than discarded.
+#
+# Unlike ``normalize_case_type`` above — which deliberately PRESERVES statute
+# citations because there they are the whole value of the label — this splits them
+# out, because a facet needs the charge and the citation as separate axes. Same
+# corpus, different field, opposite requirement; both are intentional.
+#
+# Mechanical only. There is deliberately NO curated charge vocabulary here: folding
+# ``कसूर``/``कसुर`` or ``ठगी``/``ठगी गरेको`` together is an editorial judgement with
+# no owner yet, and the residue is meant to be measured and handed over, not
+# guessed at.
+
+# The statute marker. It sits INSIDE the final group ("(दफा 249 (3)(ग))"), not
+# before it, so the group is identified by containing this rather than by position.
+_DAFA = "दफा"
+_OPEN_PARENS = "(（"
+_CLOSE_PARENS = ")）"
+
+
+def _split_head_and_groups(text: str) -> tuple[str, list[str]]:
+    """Split ``text`` into the head before its first TOP-LEVEL paren group, and
+    the contents of each top-level group.
+
+    A depth counter, not a regex: the live corpus nests parens inside the
+    descriptive group — ``ठगी गरेको (खण्ड (क) वा (ख) मा … गरेमा) (दफा 249 (3)(ग))``
+    — so a pattern stripping to the first ``)`` cuts that value in half and leaves
+    ``वा (ख) मा … गरेमा)`` behind as prose. An UNTERMINATED group (the corpus
+    carries truncated subjects) is closed at end-of-string rather than dropped, so
+    a truncated value still yields its charge head instead of nothing.
+    """
+    depth = 0
+    group_start: int | None = None
+    first_open: int | None = None
+    groups: list[str] = []
+    for i, ch in enumerate(text):
+        if ch in _OPEN_PARENS:
+            if depth == 0:
+                group_start = i
+                if first_open is None:
+                    first_open = i
+            depth += 1
+        elif ch in _CLOSE_PARENS and depth > 0:
+            depth -= 1
+            if depth == 0 and group_start is not None:
+                groups.append(text[group_start + 1 : i])
+                group_start = None
+    if depth > 0 and group_start is not None:
+        groups.append(text[group_start + 1 :])
+    head = text if first_open is None else text[:first_open]
+    return head, groups
+
+
+def _clean_statute(inner: str) -> str | None:
+    """``दफा 24९ (३)(ख)`` → ``249(3)(ख)``.
+
+    Digits fold to ASCII and ALL whitespace is removed, because the corpus spells
+    the same citation both ways — ``(दफा 24९(३)(ख))`` with mixed-script digits and
+    no space, and ``(दफा 249 (3)(ग))`` all-Latin with one — and those must land in
+    one bucket. The Devanagari clause letters (क/ख/ग) are NOT digits and stay.
+    """
+    value = inner.replace(_DAFA, "")
+    for devanagari, ascii_digit in DEVANAGARI_TO_ASCII.items():
+        value = value.replace(devanagari, ascii_digit)
+    value = _WHITESPACE.sub("", value).strip(",;:।-")
+    return value or None
+
+
+def split_case_subject(case_subject: str | None) -> tuple[str | None, str | None]:
+    """Split a scraped ``case_subject`` into ``(charge, statute_section)``.
+
+    The charge is the head before the first top-level parenthetical, run through
+    the shared tag normalizer (so trailing dandas, doubled spaces and the
+    Devanagari ा+े encoding fault are all handled in one place rather than
+    re-implemented here). The statute section is lifted out of the last group
+    carrying ``दफा``.
+
+    Either half may be ``None``: a subject with no citation has no statute, and a
+    subject that is nothing but a parenthetical has no charge. Neither is an error
+    and neither is guessed at — an absent value is left absent so the indexer omits
+    the field rather than writing a fabricated one.
+    """
+    if not case_subject or not case_subject.strip():
+        return None, None
+
+    collapsed = _WHITESPACE.sub(" ", case_subject).strip()
+    head, groups = _split_head_and_groups(collapsed)
+
+    statute: str | None = None
+    for inner in reversed(groups):
+        if _DAFA in inner:
+            statute = _clean_statute(inner)
+            break
+
+    charge = normalize_tag(head) or None
+    return charge, statute

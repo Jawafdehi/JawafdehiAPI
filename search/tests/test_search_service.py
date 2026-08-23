@@ -526,6 +526,33 @@ def test_build_query_includes_facet_aggregations():
         assert "filter" not in body["aggs"][agg], agg
 
 
+def test_every_facet_field_has_a_matching_aggregation():
+    """A facet needs BOTH halves, like a query param does.
+
+    ``FACET_FIELDS`` drives the filter clause and the response parsing; the
+    ``aggs`` block is written out separately. An entry with no aggregation is the
+    mirror image of the serializer trap — ``?charge=x`` filters correctly while
+    ``facets.charge`` comes back ``[]`` forever, with nothing failing to say so.
+    """
+    aggs = build_query(q="x")["aggs"]
+    missing = set(svc.FACET_FIELDS) - set(aggs)
+    assert not missing, (
+        "these facet params have no aggregation, so their facet will always be "
+        f"empty while their filter still works: {sorted(missing)}"
+    )
+
+
+def test_court_charge_and_statute_facets_are_declared():
+    """The court-side answer to the tags problem: the scraped ``case_subject``
+    mixed a charge, a descriptive parenthetical and a statute citation into one
+    value, so one charge rendered as four chips."""
+    assert svc.FACET_FIELDS["charge"] == "charge"
+    assert svc.FACET_FIELDS["statute_section"] == "statute_section"
+    body = build_query(q="x", filters={"charge": ["ठगी गरेको"]})
+    assert body["aggs"]["charge"]["terms"]["field"] == "charge"
+    assert {"terms": {"charge": ["ठगी गरेको"]}} in body["query"]["bool"]["filter"]
+
+
 def test_search_envelope_carries_named_facets():
     client = MagicMock()
     client.search.return_value = _canned_response()

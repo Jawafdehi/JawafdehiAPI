@@ -185,6 +185,14 @@ FACET_FIELDS: dict[str, str] = {
     "case_type": "case_type",
     "tags": "keywords",
     "status": "case_status",
+    # Court-case charge + statute section, split out of the scraped ``case_subject``
+    # by the indexer. These are the court-side answer to the same problem ``tags``
+    # has on the case side: the subject cell mixed a charge, a descriptive
+    # parenthetical and a statute citation into one free-text value, so one charge
+    # rendered as four chips. Only court cases write them, so — unlike ``tags`` over
+    # the shared ``keywords`` field — they need no scoping filter to stay clean.
+    "charge": "charge",
+    "statute_section": "statute_section",
 }
 
 # ``tags`` is the one facet whose AGGREGATION is scoped rather than raw, because
@@ -486,6 +494,13 @@ def build_query(
             "case_type": {"terms": {"field": "case_type", "size": 50}},
             "tags": _tags_agg(tags_size),
             "status": {"terms": {"field": "case_status", "size": 50}},
+            # A facet needs BOTH an entry in FACET_FIELDS (which drives the filter
+            # clause and the response parsing) and an aggregation here. An entry
+            # with no agg is the mirror image of the serializer trap: the filter
+            # works, and the facet silently returns []. Guarded by
+            # test_every_facet_field_has_a_matching_aggregation.
+            "charge": {"terms": {"field": "charge", "size": 50}},
+            "statute_section": {"terms": {"field": "statute_section", "size": 50}},
         },
     }
 

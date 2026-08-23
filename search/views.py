@@ -86,6 +86,15 @@ class SearchQuerySerializer(serializers.Serializer):
     status = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
+    # Court-case refine facets, split out of the scraped ``case_subject``:
+    # ``charge`` is the normalized head, ``statute_section`` the ``(दफा …)``
+    # citation with its digits folded to one script. Court-scoped in practice.
+    charge = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
+    statute_section = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
     page = serializers.IntegerField(required=False, min_value=1, default=1)
     page_size = serializers.IntegerField(
         required=False, min_value=1, max_value=MAX_PAGE_SIZE, default=10
@@ -174,6 +183,28 @@ class SearchQuerySerializer(serializers.Serializer):
                 "Case-scoped in practice."
             ),
         ),
+        OpenApiParameter(
+            "charge",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Refine facet: court-case charge, normalized from the case subject "
+                "with its descriptive parenthetical removed. Court-scoped in practice."
+            ),
+        ),
+        OpenApiParameter(
+            "statute_section",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Refine facet: statute section cited by a court case, e.g. "
+                "'249(3)(ख)'. Digits are normalized to one script."
+            ),
+        ),
         OpenApiParameter("page", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
         OpenApiParameter(
             "page_size", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
@@ -221,6 +252,8 @@ class UnifiedSearchView(APIView):
             "case_type": data["case_type"],
             "tags": data["tags"],
             "status": data["status"],
+            "charge": data["charge"],
+            "statute_section": data["statute_section"],
         }
         active_filters = {k: v for k, v in filters.items() if v}
         # Ephemeral per-response id: it join-keys the server-side analytics event to
