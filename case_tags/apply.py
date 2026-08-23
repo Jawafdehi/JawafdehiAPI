@@ -70,26 +70,34 @@ def _apply_alias_equivalence(payload: dict[str, Any], reviewer: str) -> TagAlias
             }
         )
 
-    existing = TagAlias.objects.filter(value=value).first()
-    if existing is not None:
-        if existing.tag_id == tag.id:
-            # Idempotent: approving twice must not 500 on a unique violation.
-            return existing
-        raise ValidationError(
-            {
-                "raw_value": (
-                    f"{value!r} already resolves to {existing.tag_id!r}. "
-                    "Re-point or remove that alias first."
-                )
-            }
-        )
-
-    return TagAlias.objects.create(
+    # ``get_or_create`` rather than filter-then-create. The read-then-write version had
+    # a genuine race: two proposals for the same raw string, approved concurrently, both
+    # pass the existence check and both insert, so one gets a unique-violation
+    # IntegrityError surfacing as a 500. The row lock in the view does not close it —
+    # that serialises approvals of ONE proposal, and this is two different proposals
+    # colliding on the same alias value. ``get_or_create`` catches the IntegrityError
+    # internally and re-reads, which turns the race into the same deterministic
+    # conflict the sequential path already handles.
+    alias, _created = TagAlias.objects.get_or_create(
         value=value,
-        tag=tag,
-        source=AliasSource.LLM,
-        approved_by=reviewer,
-        approved_at=timezone.now(),
+        defaults={
+            "tag": tag,
+            "source": AliasSource.LLM,
+            "approved_by": reviewer,
+            "approved_at": timezone.now(),
+        },
+    )
+    if alias.tag_id == tag.id:
+        # Idempotent: approving twice, or losing the race to an identical proposal, is
+        # a no-op rather than an error.
+        return alias
+    raise ValidationError(
+        {
+            "raw_value": (
+                f"{value!r} already resolves to {alias.tag_id!r}. "
+                "Re-point or remove that alias first."
+            )
+        }
     )
 
 

@@ -281,6 +281,15 @@ class TagProposalViewSet(
                     {"detail": "Only a pending proposal can be edited."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            proposal.payload = edit.validated_data["payload"]
+            # Re-run the kind-aware shape check. ``TagProposalPayloadEditSerializer``
+            # only asserts "is an object", so without this a reviewer could save a
+            # payload that is missing the fields its own kind requires — producing a row
+            # that looks reviewable, sits in the queue, and 400s the moment anyone tries
+            # to approve it. The point of the queue is decisions, not litter.
+            checked = TagProposalSerializer(
+                proposal, data={"payload": edit.validated_data["payload"]}, partial=True
+            )
+            checked.is_valid(raise_exception=True)
+            proposal.payload = checked.validated_data["payload"]
             proposal.save(update_fields=["payload", "updated_at"])
         return Response(self.get_serializer(proposal).data)

@@ -188,3 +188,49 @@ def test_resolver_snapshot_does_not_shift_mid_run():
     # Same resolver: still None. A new one picks it up.
     assert resolver.resolve("Assets Beyond Known Income") is None
     assert TagResolver().resolve("Assets Beyond Known Income") == "illicit-enrichment"
+
+
+# ── PR #463 review fixes ─────────────────────────────────────────────────────────
+
+
+def test_the_snapshot_normalizes_keys_so_a_bulk_written_alias_still_resolves():
+    """``bulk_create`` bypasses model ``save``, so a raw-cased row can exist.
+
+    Without read-side normalization it would sit in the table looking correct and never
+    resolve, because ``resolve`` looks up the normalized form.
+    """
+    TagAlias.objects.bulk_create(
+        [TagAlias(value="Assets Beyond KNOWN Income.", tag_id="illicit-enrichment")]
+    )
+    assert TagAlias.objects.get().value == "Assets Beyond KNOWN Income."  # unnormalized
+    assert resolve_tag("assets beyond known income") == "illicit-enrichment"
+    assert resolve_tag("Assets Beyond Known Income") == "illicit-enrichment"
+
+
+def test_two_rows_normalizing_to_one_key_but_different_terms_resolve_to_none():
+    """Refuse rather than guess — the same rule as the no-fuzzy-fallback one.
+
+    First-wins would depend on row order, so the identical query could answer
+    differently on two replicas. None is a result the callers already handle, and it
+    surfaces as a gap somebody investigates.
+    """
+    TagAlias.objects.bulk_create(
+        [
+            TagAlias(value="Illegal Wealth", tag_id="illicit-enrichment"),
+            TagAlias(value="illegal wealth", tag_id="embezzlement"),
+        ]
+    )
+    resolver = TagResolver()
+    assert resolver.resolve("Illegal Wealth") is None
+    assert "illegal wealth" in resolver.ambiguous_aliases
+
+
+def test_a_merge_chain_longer_than_the_old_hop_cap_resolves():
+    """12 links. A fixed cap of 10 used to drop this as if it were corrupt."""
+    previous = Tag.objects.get(id="illicit-enrichment")
+    for i in range(12):
+        previous = Tag.objects.create(
+            id=f"legacy-{i}", axis_id="offence", label_en=f"Legacy {i}",
+            status=TagStatus.MERGED, merged_into=previous,
+        )
+    assert TagResolver().resolve(previous.id) == "illicit-enrichment"

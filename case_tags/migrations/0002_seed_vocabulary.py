@@ -693,7 +693,10 @@ def unseed(apps: Any, schema_editor: Any) -> None:
     TagAxis = apps.get_model("case_tags", "TagAxis")
     Tag = apps.get_model("case_tags", "Tag")
     Tag.objects.filter(id__in=[r["id"] for r in TERMS]).delete()
-    TagAxis.objects.filter(id__in=[r["id"] for r in AXES]).delete()
+    # Only axes with no remaining tags. ``Tag.axis`` is PROTECT, so an operator-added
+    # term under a seeded axis — exactly what the review queue produces — would make
+    # this delete raise and the whole rollback fail partway through.
+    TagAxis.objects.filter(id__in=[r["id"] for r in AXES], tags__isnull=True).delete()
 
 
 class Migration(migrations.Migration):

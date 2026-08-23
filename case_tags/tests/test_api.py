@@ -370,3 +370,48 @@ def test_axes_are_ordered_for_display_with_highlighted_first():
     assert TagAxis.objects.get(id="status").sort_order < TagAxis.objects.get(
         id="offence"
     ).sort_order
+
+
+# ── PR #463 review fixes ─────────────────────────────────────────────────────────
+
+
+def test_editing_a_payload_into_an_unapprovable_shape_is_refused():
+    """The queue is for decisions, not litter.
+
+    ``TagProposalPayloadEditSerializer`` only asserts "is an object", so without a
+    kind-aware re-check a reviewer could save a payload missing the fields its own kind
+    requires — a row that looks reviewable and 400s the moment anyone approves it.
+    """
+    p = TagProposal.objects.create(**alias_payload())
+    r = client_for("Caseworker").patch(
+        f"{PROPOSALS_URL}{p.id}/payload/",
+        {"payload": {"raw_value": "something"}},  # no proposed_tag_id
+        format="json",
+    )
+    assert r.status_code == 400
+    p.refresh_from_db()
+    assert p.payload["proposed_tag_id"] == "illicit-enrichment"  # unchanged
+
+
+def test_approving_an_alias_that_already_exists_on_the_same_term_is_idempotent():
+    """Covers the get_or_create path: losing a race to an identical proposal is a no-op.
+
+    Two proposals for the same raw string approved concurrently both reach `apply`; the
+    read-then-write version let both insert and one got a unique-violation 500.
+    """
+    TagAlias.objects.create(
+        value="assets beyond known income", tag_id="illicit-enrichment"
+    )
+    p = TagProposal.objects.create(**alias_payload())
+    r = client_for("Caseworker").post(f"{PROPOSALS_URL}{p.id}/approve/", {}, format="json")
+    assert r.status_code == 200
+    assert TagAlias.objects.count() == 1
+
+
+def test_approving_an_alias_that_exists_on_a_different_term_is_a_deterministic_400():
+    TagAlias.objects.create(value="assets beyond known income", tag_id="embezzlement")
+    p = TagProposal.objects.create(**alias_payload())
+    r = client_for("Caseworker").post(f"{PROPOSALS_URL}{p.id}/approve/", {}, format="json")
+    assert r.status_code == 400
+    assert "already resolves to" in str(r.data)
+    assert TagAlias.objects.get().tag_id == "embezzlement"  # untouched

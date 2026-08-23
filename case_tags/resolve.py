@@ -52,9 +52,34 @@ class TagResolver:
             if tag.status == TagStatus.MERGED and tag.merged_into_id:
                 self._merged[tag.id] = tag.merged_into_id
 
-        self._by_alias: dict[str, str] = dict(
-            TagAlias.objects.values_list("value", "tag_id")
-        )
+        # Keys are NORMALIZED on the way into the snapshot, even though
+        # ``TagAlias.save`` normalizes on the way into the table. ``bulk_create``,
+        # ``QuerySet.update`` and data migrations all bypass model ``save``, so a
+        # raw-cased row can exist; without this it would sit in the table looking
+        # correct and never resolve, because ``resolve`` looks up the normalized form.
+        # ``normalize_tag`` is idempotent, so re-normalizing an already-clean value
+        # costs a function call and changes nothing.
+        #
+        # A collision — two stored rows normalizing to one key but pointing at
+        # different terms — is DROPPED rather than resolved first-wins. Which row won
+        # would depend on row order, so resolving would make the same query answer
+        # differently on two replicas. Dropping it means the value resolves to None,
+        # which the callers already handle and which surfaces as a gap somebody
+        # investigates. Same rule as the no-fuzzy-fallback one above: refuse rather
+        # than guess.
+        by_alias: dict[str, str] = {}
+        ambiguous: set[str] = set()
+        for value, tag_id in TagAlias.objects.values_list("value", "tag_id"):
+            key = normalize_tag(value)
+            if not key:
+                continue
+            if key in by_alias and by_alias[key] != tag_id:
+                ambiguous.add(key)
+            by_alias.setdefault(key, tag_id)
+        for key in ambiguous:
+            del by_alias[key]
+        self._by_alias = by_alias
+        self.ambiguous_aliases = ambiguous
 
     def _follow_merges(self, tag_id: str) -> str | None:
         """Resolve a merged id to its replacement, bounded against cycles.
@@ -62,10 +87,15 @@ class TagResolver:
         Mirrors ``Tag.canonical`` but over the snapshot, so it costs no queries. Returns
         ``None`` on a cycle rather than raising: a bad merge chain is a data problem for
         somebody to fix, and it should not abort an entire index rebuild over one tag.
+
+        Termination comes from ``seen``. A fixed hop cap used to sit here too and was
+        removed — it cannot catch anything ``seen`` does not already catch, and its only
+        distinct effect is to silently drop a *legitimate* chain longer than the cap,
+        turning a resolvable tag into an unresolved one for no reason.
         """
         seen = {tag_id}
         current = tag_id
-        for _ in range(10):
+        while True:
             nxt = self._merged.get(current)
             if nxt is None:
                 return current
@@ -73,7 +103,6 @@ class TagResolver:
                 return None
             seen.add(nxt)
             current = nxt
-        return None
 
     def resolve(self, raw: str) -> str | None:
         """The canonical tag id for ``raw``, or ``None`` if nothing matches exactly.

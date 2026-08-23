@@ -38,6 +38,7 @@ COPY lakehouse/ ./lakehouse/
 COPY cases/ ./cases/
 COPY review/ ./review/
 COPY case_proposals/ ./case_proposals/
+COPY case_tags/ ./case_tags/
 COPY newsletter/ ./newsletter/
 COPY jobs/ ./jobs/
 COPY case_events/ ./case_events/

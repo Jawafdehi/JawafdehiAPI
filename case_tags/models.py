@@ -28,9 +28,13 @@ routed: propose freely, and only a human tick makes a term public.
 
 from __future__ import annotations
 
+from typing import Any
+
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+
+from jawafdehi_shared.tags.normalize import normalize_tag
 
 
 class TagStatus(models.TextChoices):
@@ -91,12 +95,6 @@ class AliasSource(models.TextChoices):
     SEED = "seed", "Seeded from policy"
     LLM = "llm", "LLM proposal, human-approved"
     HUMAN = "human", "Entered by a human"
-
-
-# Following ``merged_into`` is a walk, not a hop, and the data is human-editable
-# through the admin, so a cycle is reachable by ordinary mistake. Bound the walk and
-# raise rather than spin.
-_MAX_MERGE_DEPTH = 10
 
 
 class TagAxis(models.Model):
@@ -217,15 +215,18 @@ class Tag(models.Model):
     def canonical(self) -> Tag:
         """Follow ``merged_into`` to the term that should actually be used.
 
-        Returns ``self`` for anything not merged. Raises on a cycle rather than
-        looping: the merge chain is human-editable through the admin, so a cycle is an
-        ordinary mistake, and a hang is a much worse symptom than an exception.
+        Returns ``self`` for anything not merged. Raises on a cycle rather than looping:
+        the merge chain is human-editable through the admin, so a cycle is an ordinary
+        mistake, and a hang is a much worse symptom than an exception.
+
+        Termination comes from ``seen``, not from a hop limit. A fixed cap was tried and
+        removed: it cannot prevent anything ``seen`` does not already prevent, and its
+        only distinct effect is to reject a *legitimate* chain longer than the cap as if
+        it were corrupt.
         """
         seen = {self.id}
         current = self
-        for _ in range(_MAX_MERGE_DEPTH):
-            if current.status != TagStatus.MERGED or current.merged_into_id is None:
-                return current
+        while current.status == TagStatus.MERGED and current.merged_into_id is not None:
             nxt = current.merged_into
             if nxt.id in seen:
                 raise ValidationError(
@@ -233,9 +234,7 @@ class Tag(models.Model):
                 )
             seen.add(nxt.id)
             current = nxt
-        raise ValidationError(
-            f"Merge chain from {self.id!r} exceeded {_MAX_MERGE_DEPTH} hops; likely a cycle."
-        )
+        return current
 
     def label(self, lang: str = "ne") -> str:
         """Display label, falling back rather than ever returning blank.
@@ -283,6 +282,26 @@ class TagAlias(models.Model):
     class Meta:
         ordering = ["value"]
         verbose_name_plural = "tag aliases"
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        """Normalize ``value`` on the way in, wherever the write came from.
+
+        :mod:`case_tags.apply` already normalizes, but it is not the only writer: the
+        Django admin, a shell session and a data migration all reach the model directly.
+        A raw-cased row written that way satisfies the unique constraint and then never
+        resolves, because :meth:`TagResolver.resolve` looks up the normalized form — the
+        alias would sit in the table looking correct and doing nothing.
+
+        Enforcing it here also makes the unique constraint mean what it should: two rows
+        differing only in casing or trailing punctuation are now a collision rather than
+        two separate aliases for one string.
+
+        ``bulk_create`` and ``QuerySet.update`` still bypass this, as they bypass every
+        model ``save``. The resolver normalizes its lookup keys too, which covers that
+        gap on the read side.
+        """
+        self.value = normalize_tag(self.value)
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.value} -> {self.tag_id}"

@@ -134,6 +134,7 @@ build-backend = "hatchling.build"
 packages = [
     "config",
     "case_proposals",
+    "case_tags",
     "jawafdehi_shared",
     "entities",
     "courts",

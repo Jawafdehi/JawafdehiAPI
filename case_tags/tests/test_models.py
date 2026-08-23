@@ -251,3 +251,62 @@ def test_proposals_sort_most_confident_first():
     _proposal(dedup_key="b", confidence=0.95)
     _proposal(dedup_key="c", confidence=0.7)
     assert [p.dedup_key for p in TagProposal.objects.all()] == ["b", "c", "a"]
+
+
+# ── PR #463 review fixes ─────────────────────────────────────────────────────────
+
+
+def test_alias_value_is_normalized_on_save_whatever_the_writer():
+    """``apply`` is not the only writer — admin, shell and migrations reach the model.
+
+    A raw-cased row written that way satisfies the unique constraint and then never
+    resolves, because the resolver looks up the normalized form. It would sit in the
+    table looking correct and doing nothing.
+    """
+    alias = TagAlias.objects.create(value="  Assets Beyond KNOWN Income.  ", tag_id="illicit-enrichment")
+    alias.refresh_from_db()
+    assert alias.value == "assets beyond known income"
+
+
+def test_normalization_on_save_makes_casing_variants_collide():
+    """Two rows differing only in casing are now one alias, not two."""
+    TagAlias.objects.create(value="Ncell", tag_id="tax-evasion")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        TagAlias.objects.create(value="ncell", tag_id="tax-evasion")
+
+
+def test_canonical_resolves_a_chain_longer_than_the_old_hop_cap():
+    """A 12-link merge chain must resolve, not be dropped as if corrupt.
+
+    A fixed depth cap of 10 used to sit here. Cycle detection already guarantees
+    termination, so the cap's only distinct effect was to reject legitimate chains.
+    """
+    target = Tag.objects.get(id="illicit-enrichment")
+    previous = target
+    for i in range(12):
+        previous = Tag.objects.create(
+            id=f"legacy-{i}", axis_id="offence", label_en=f"Legacy {i}",
+            status=TagStatus.MERGED, merged_into=previous,
+        )
+    assert previous.canonical().id == "illicit-enrichment"
+
+
+def test_unseed_survives_an_operator_added_term_under_a_seeded_axis():
+    """``Tag.axis`` is PROTECT, so a term the review queue created would block rollback.
+
+    Reverse migrations are exactly what gets run under pressure; one that raises
+    partway through is worse than useless.
+    """
+    import importlib
+
+    from django.apps import apps as global_apps
+
+    migration = importlib.import_module("case_tags.migrations.0002_seed_vocabulary")
+    Tag.objects.create(id="operator-added", axis_id="offence", label_en="Operator Added")
+
+    migration.unseed(global_apps, None)  # must not raise
+
+    # The seeded terms are gone; the operator's term and its axis survive.
+    assert not Tag.objects.filter(id="bribery").exists()
+    assert Tag.objects.filter(id="operator-added").exists()
+    assert TagAxis.objects.filter(id="offence").exists()
