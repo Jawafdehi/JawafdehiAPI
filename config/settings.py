@@ -318,6 +318,7 @@ INSTALLED_APPS = [
     "cases",
     "review",
     "case_proposals",
+    "case_tags",
     # ── Newsletter (model-less proxy to the SendPulse ESP; no DB tables) ──────
     "newsletter",
     # ── Central job queue (platform-wide; Postgres-backed, no broker) ─────────
