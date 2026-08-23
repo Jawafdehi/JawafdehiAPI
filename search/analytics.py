@@ -52,6 +52,15 @@ def normalize_query(q: str | None) -> str:
     NFC so a Devanagari term typed composed vs decomposed aggregates as one; lower
     + whitespace-collapse so ``"  Sher   Deuba "`` and ``"sher deuba"`` are the
     same demand bucket. Not hashed — the query text is the signal we collect.
+
+    Deliberately NOT shared with ``jawafdehi_shared.tags.normalize.normalize_tag``,
+    which starts from the same NFC + trim + lower + collapse core: that one
+    normalizes STORED tag values, so it also repairs the Devanagari ा+े encoding
+    fault, strips trailing punctuation, and preserves an acronym allow-list (the
+    sector tag ``IT`` must not become the word "it"). Folding every acronym is
+    correct HERE — analytics wants one bucket per demand regardless of case — so
+    merging the two would either break these buckets or lose that allow-list. The
+    reciprocal note is in that module's docstring.
     """
     if not q:
         return ""
