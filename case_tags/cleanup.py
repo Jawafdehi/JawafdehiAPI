@@ -33,13 +33,21 @@ from jawafdehi_shared.tags.normalize import normalize_tag
 
 # A court/charge number: 081-CR-0098. Already the case's own identifier and its slug, so
 # as a tag it is pure duplication — 21 such tags, 21 applications, zero shared values.
-_CASE_NUMBER = re.compile(r"\b\d{3}\s*-\s*[A-Za-z]{2}\s*-\s*\d{3,4}\b")
+#
+# The separator is hyphen OR whitespace, not hyphen only. The corpus spells these with
+# hyphens, but the tagger reads case text where the same number appears as "081 CR 0098",
+# and a guard that only catches the corpus spelling would let the model reintroduce the
+# defect in the spelling it is most likely to produce.
+CASE_NUMBER_RE = re.compile(r"\b\d{3}\s*[-\s]\s*[A-Za-z]{2}\s*[-\s]\s*\d{3,4}\b")
 
 # A bigo amount: "~1 Crore 25 Lakh", "Rs 3.5 Crore", "रु ५० लाख". The `bigo` field holds
 # the number and a range filter already ships, so these are a query concern. Every one is
 # unique by construction and can never be shared between two cases.
-_AMOUNT = re.compile(
-    r"(\d|[०-९])" r"[\s\d०-९.,]*" r"\s*(crore|lakh|karod|lakh?|arab|रु|करोड|लाख|अरब)",
+# Hyphens are in the middle class deliberately: a slug-shaped amount ("1-crore-25-lakh")
+# is exactly what a model asked for lowercase-kebab ids would emit, and the corpus spelling
+# ("~1 Crore 25 Lakh") is what a caseworker typed. Both are the same defect.
+AMOUNT_RE = re.compile(
+    r"(\d|[०-९])" r"[-\s\d०-९.,]*" r"\s*(crore|lakh|karod|arab|रु|करोड|लाख|अरब)",
     re.IGNORECASE,
 )
 
@@ -162,9 +170,9 @@ def classify(raw: str) -> tuple[str, str]:
     value = normalize_tag(raw)
     if not value:
         return "delete", "empty after normalization"
-    if _CASE_NUMBER.search(raw):
+    if CASE_NUMBER_RE.search(raw):
         return "delete", "court case number — already the case's identifier and slug"
-    if _AMOUNT.search(raw):
+    if AMOUNT_RE.search(raw):
         return "delete", "bigo amount — the `bigo` field holds it; unique per case"
     if value in BANNED_TERMS:
         return "delete", "banned by policy §9"
