@@ -1,29 +1,24 @@
-"""The case tag controlled vocabulary, and the review queue that changes it.
+"""The case tag controlled vocabulary: axes, canonical terms, and their aliases.
 
-Four models, two jobs.
-
-**The vocabulary** — :class:`TagAxis`, :class:`Tag`, :class:`TagAlias`. These replace
-the markdown tables in ``management/policies/case-tagging/policy.md`` §4.1/§5.1/§5.3/
-§8.1–8.3 as the operative source of truth. The policy document remains the *rationale*;
-this is what the code reads.
+Three models. They replace the markdown tables in
+``management/policies/case-tagging/policy.md`` §4.1/§5.1/§5.3/§8.1–8.3 as the operative
+source of truth — the policy document remains the *rationale*, this is what code reads.
 
 Why the database rather than a file vendored from the meta repo: a label change through
 a file would be a PR to meta, a PR here, a content-hash bump and a deploy — which
 guarantees nobody does it, and the quarterly review policy §12 asks for never happens.
 
-**The review queue** — :class:`TagProposal`. Every vocabulary change an automation wants
-lands here first and waits for a human tick. Deliberately shaped like
-``case_proposals.CaseUpdateProposal`` (same three statuses, same ``dedup_key``
-idempotency spine, same ``reviewer``/``reviewed_at``/``review_notes`` triple) because it
-is the same pattern and a second, differently-shaped review pipeline would be one more
-thing to learn.
-
-WHY THE VOCABULARY IS NOT SELF-SERVICE. The live corpus carries 144 distinct tags over
-82 published cases and **97 of them are used exactly once** — because
+WHAT THIS IS FOR. The live corpus carries 144 distinct tags over 82 published cases and
+**97 of them are used exactly once** — because
 ``.agents/caseworker/instructions/case-template.md:106`` tells caseworkers to "pick from
 existing tags where possible… or add a new one if needed", against a list nothing ever
-exposed. A tag used once filters nothing. So invention is still allowed here, but it is
-routed: propose freely, and only a human tick makes a term public.
+exposed. Told to reuse and given no way to discover, people invent, and a tag used once
+filters nothing.
+
+So the vocabulary is a real, readable list (``case_tags.views.VocabularyView``) that the
+tagger picks from, and :mod:`case_tags.tagger` is what writes to it. There is no review
+queue here: the tagger applies its own output, so every guard the vocabulary needs is
+enforced in code on the write path — see :mod:`case_tags.write`.
 """
 
 from __future__ import annotations
@@ -66,35 +61,18 @@ class AxisMembers(models.TextChoices):
     EXTERNAL = "external", "From a fixed external list"
 
 
-class ProposalKind(models.TextChoices):
-    """The two decisions, kept apart because their gates differ.
+class AliasSource(models.TextChoices):
+    """Who put an alias in the table.
 
-    An ``ALIAS_EQUIVALENCE`` maps a string the corpus already contains onto a term that
-    already exists, so the only question is whether it is *correct* — one informed tick
-    settles it. A ``NEW_TERM`` adds to the public filter set, so correctness is not
-    enough and recurrence has to carry it (policy §12: at least three existing cases,
-    and "a term justified by a single case is a nickname, not a controlled term").
-
-    Collapsing the two would lose exactly that distinction and hand back the failure
-    mode this app exists to close.
+    Worth recording rather than inferring: ``SEED`` rows come from the policy
+    transcription and are as trustworthy as the document, ``LLM`` rows are the tagger's
+    own work applied without review, and ``HUMAN`` rows were typed in the admin. When a
+    mapping later turns out wrong, the first question is which of those three it was.
     """
 
-    ALIAS_EQUIVALENCE = "alias_equivalence", "Alias equivalence"
-    NEW_TERM = "new_term", "New term"
-
-
-class ProposalStatus(models.TextChoices):
-    """Mirrors ``case_proposals.ProposalStatus`` verbatim, on purpose."""
-
-    PENDING = "pending", "Pending"
-    APPROVED = "approved", "Approved"
-    REJECTED = "rejected", "Rejected"
-
-
-class AliasSource(models.TextChoices):
     SEED = "seed", "Seeded from policy"
-    LLM = "llm", "LLM proposal, human-approved"
-    HUMAN = "human", "Entered by a human"
+    LLM = "llm", "Written by the tagger"
+    HUMAN = "human", "Entered by a human in the admin"
 
 
 class TagAxis(models.Model):
@@ -262,7 +240,7 @@ class TagAlias(models.Model):
     No mechanical rule produces these. Nothing derives ``एनसेल`` → ``ncell``, and
     deciding that ``Assets Beyond Known Income`` is the same concept as ``Illegal
     Property Acquisition`` is a judgement about our own published cases. So rows here
-    are created by an approved :class:`TagProposal` (or the seed), never inferred.
+    are created by the tagger (or the seed) and never inferred by rule.
 
     ``value`` stores the NORMALIZED form (``jawafdehi_shared.tags.normalize``), so the
     resolver normalizes once and looks up once, and casing collisions cannot produce
@@ -305,74 +283,3 @@ class TagAlias(models.Model):
 
     def __str__(self) -> str:
         return f"{self.value} -> {self.tag_id}"
-
-
-class TagProposal(models.Model):
-    """A vocabulary change awaiting a human tick.
-
-    Nothing here writes a :class:`Tag` or a :class:`TagAlias` until it is approved, at
-    which point :mod:`case_tags.apply` performs the write. That ordering is the entire
-    safety property: an automation may propose anything, and only a human makes it
-    public.
-
-    It also makes an approval REVERSIBLE, which is why aliases are applied at index
-    time rather than by rewriting ``Case.tags``. Un-approve, reindex, and the facet
-    reverts — no data migration, no snapshot, nothing irreversible. That property is
-    what took the two riskiest steps out of this programme.
-    """
-
-    kind = models.CharField(max_length=20, choices=ProposalKind.choices, db_index=True)
-
-    # Tagged union keyed on ``kind``; shape-validated by the serializer on create and
-    # again in ``apply``:
-    #   alias_equivalence -> {raw_value, proposed_tag_id, case_count, example_case_slugs}
-    #   new_term          -> {axis, proposed_slug, label_ne, label_en, rationale,
-    #                         quoted_span, case_slug}
-    payload = models.JSONField()
-
-    confidence = models.FloatField()
-    status = models.CharField(
-        max_length=12,
-        choices=ProposalStatus.choices,
-        default=ProposalStatus.PENDING,
-        db_index=True,
-    )
-
-    # ── provenance ────────────────────────────────────────────────────────────────
-    # "consumer:<name>" for automation, "caseworker:<id>" for a hand-filed one, as in
-    # case_proposals.
-    detected_by = models.CharField(max_length=100)
-    # Idempotency spine, same role as on CaseUpdateProposal: the same fact never
-    # re-proposes and a REJECTION STAYS STICKY. Without this the alias proposer refills
-    # the queue every run with rows a human already refused, which is how a review
-    # queue becomes something people stop opening. Producers build it deterministically
-    # (e.g. "alias:<normalized raw value>").
-    dedup_key = models.CharField(max_length=300, unique=True, db_index=True)
-
-    # ── review ────────────────────────────────────────────────────────────────────
-    reviewer = models.CharField(max_length=100, blank=True, default="")
-    reviewed_at = models.DateTimeField(null=True, blank=True)
-    review_notes = models.TextField(blank=True, default="")
-
-    created_at = models.DateTimeField(default=timezone.now, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-confidence", "-created_at"]
-        constraints = [
-            # Same reasoning as case_proposals: the serializer rejects out-of-range
-            # confidence, but the queue is sorted by it and the admin/shell bypass the
-            # serializer entirely.
-            models.CheckConstraint(
-                condition=models.Q(confidence__gte=0.0, confidence__lte=1.0),
-                name="tag_proposal_confidence_between_0_and_1",
-            ),
-        ]
-        indexes = [models.Index(fields=["kind", "status"])]
-
-    def __str__(self) -> str:
-        return f"{self.kind}:{self.dedup_key} [{self.status}]"
-
-    @property
-    def is_decided(self) -> bool:
-        return self.status != ProposalStatus.PENDING

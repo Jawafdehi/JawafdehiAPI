@@ -1,48 +1,29 @@
-"""T15 — the vocabulary read endpoint. T25 — the review queue API.
+"""The vocabulary read endpoint.
 
-The read endpoint exists because of one line in
+It exists because of one line in
 ``.agents/caseworker/instructions/case-template.md:106``, which tells caseworkers to
 "pick from existing tags where possible… or add a new one if needed" — **against a list
 nothing has ever exposed**. Told to reuse and given no way to discover, people invent:
 144 distinct tags over 82 cases, 97 of them used exactly once.
 
 So this is not a convenience endpoint. It is the missing half of an instruction that has
-been in force for months, and T14's pickers, T18's classifier and T21's rewritten template
-all read from it rather than hardcoding a term list that would drift the moment somebody
-approves a proposal.
+been in force for months. The tagger reads its enum from here rather than carrying a term
+list in a prompt, which would go stale the moment the tagger itself adds a term.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import structlog
-from django.db import transaction
-from django.utils import timezone
-from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
-from rest_framework import mixins, status, viewsets
-from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
-from review.permissions import CanReadReview, HasContributorRole, IsContentStaff
-
-from case_tags.apply import apply_proposal
-from case_tags.models import ProposalStatus, TagAxis, TagProposal
+from case_tags.models import TagAxis
 from case_tags.resolve import TagResolver
-from case_tags.serializers import (
-    TagAxisSerializer,
-    TagProposalDecisionSerializer,
-    TagProposalPayloadEditSerializer,
-    TagProposalSerializer,
-    active_terms_by_axis,
-)
-
-logger = structlog.get_logger(__name__)
+from case_tags.serializers import TagAxisSerializer, active_terms_by_axis
 
 
 def _case_counts() -> dict[str, int]:
@@ -136,160 +117,3 @@ class VocabularyView(APIView):
             "case_counts": _case_counts() if wants_counts else {},
         }
         return Response(TagAxisSerializer(axes, many=True, context=context).data)
-
-
-class TagProposalViewSet(
-    AuditlogActorMixin,
-    mixins.CreateModelMixin,
-    viewsets.ReadOnlyModelViewSet,
-):
-    """List / retrieve / create tag proposals, plus edit, approve and reject.
-
-    Permissions mirror :class:`case_proposals.views.CaseUpdateProposalViewSet`, and for
-    the same reason: creating is open to any contributor **including the machine role**,
-    because automation is the primary producer — but editing and deciding are gated to
-    ``IsContentStaff`` (superuser or Caseworker, **not** JobPoller).
-
-    That split is the safety property of this whole app. The alias proposer (T27) files
-    hundreds of rows and cannot approve one of them, so no automation can put a term or
-    an alias in front of the public on its own authority.
-    """
-
-    queryset = TagProposal.objects.all()
-    serializer_class = TagProposalSerializer
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["status", "kind"]
-
-    def get_permissions(self) -> list[Any]:
-        if self.action == "create":
-            return [HasContributorRole()]
-        if self.action in ("approve", "reject", "edit_payload"):
-            return [IsContentStaff()]
-        return [CanReadReview()]
-
-    def _reviewer_label(self, request: Any) -> str:
-        u = request.user
-        handle = getattr(u, "username", "") or getattr(u, "email", "") or str(u.pk)
-        return f"caseworker:{handle}"
-
-    def _decide(
-        self, request: Any, proposal: TagProposal, new_status: str, apply_first: bool
-    ) -> Response:
-        decision = TagProposalDecisionSerializer(data=request.data)
-        decision.is_valid(raise_exception=True)
-        with transaction.atomic():
-            # Re-read UNDER A ROW LOCK and check PENDING inside it. Checking the
-            # instance get_object() loaded is a time-of-check/time-of-use gap: two
-            # concurrent approvals would both pass it and both apply, which for an
-            # alias means a unique-violation 500 and for a new term means a duplicate.
-            # Whichever request takes the lock second now sees a decided row and 409s.
-            proposal = TagProposal.objects.select_for_update().get(pk=proposal.pk)
-            if proposal.status != ProposalStatus.PENDING:
-                return Response(
-                    {
-                        "detail": (
-                            "Only pending proposals can be decided "
-                            f"(is '{proposal.status}')."
-                        )
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-            reviewer = self._reviewer_label(request)
-            if apply_first:
-                apply_proposal(proposal.kind, proposal.payload, reviewer)  # 400 on problems
-            proposal.status = new_status
-            proposal.reviewer = reviewer
-            proposal.reviewed_at = timezone.now()
-            proposal.review_notes = decision.validated_data.get("notes", "")
-            proposal.save(
-                update_fields=[
-                    "status",
-                    "reviewer",
-                    "reviewed_at",
-                    "review_notes",
-                    "updated_at",
-                ]
-            )
-        logger.info(
-            "case_tag_proposal.decided",
-            decision=new_status,
-            proposal_id=proposal.pk,
-            kind=proposal.kind,
-            dedup_key=proposal.dedup_key,
-            acceptor=proposal.reviewer,
-            actor_id=getattr(request.user, "pk", None),
-            payload=proposal.payload,
-        )
-        return Response(self.get_serializer(proposal).data)
-
-    @extend_schema(
-        request=TagProposalDecisionSerializer,
-        responses={200: TagProposalSerializer},
-        summary="Approve a tag proposal and apply it to the vocabulary",
-        description=(
-            "Approving an `alias_equivalence` creates a `TagAlias`; approving a "
-            "`new_term` creates an active `Tag`. Neither touches stored `Case.tags` — "
-            "aliases are applied when the search document is built, so un-approving "
-            "and reindexing fully reverts an approval."
-        ),
-        tags=["case-tags"],
-    )
-    @action(detail=True, methods=["post"])
-    def approve(self, request: Any, *args: Any, **kwargs: Any) -> Response:
-        return self._decide(
-            request, self.get_object(), ProposalStatus.APPROVED, apply_first=True
-        )
-
-    @extend_schema(
-        request=TagProposalDecisionSerializer,
-        responses={200: TagProposalSerializer},
-        summary="Reject a tag proposal (no change to the vocabulary)",
-        description=(
-            "The rejection is sticky: `dedup_key` is unique, so the proposer cannot "
-            "re-file the same row on its next run. Without that a review queue refills "
-            "with refused rows and people stop opening it."
-        ),
-        tags=["case-tags"],
-    )
-    @action(detail=True, methods=["post"])
-    def reject(self, request: Any, *args: Any, **kwargs: Any) -> Response:
-        return self._decide(
-            request, self.get_object(), ProposalStatus.REJECTED, apply_first=False
-        )
-
-    @extend_schema(
-        request=TagProposalPayloadEditSerializer,
-        responses={200: TagProposalSerializer},
-        summary="Correct a pending proposal's payload before approving it",
-        tags=["case-tags"],
-    )
-    @action(detail=True, methods=["patch"], url_path="payload")
-    def edit_payload(self, request: Any, *args: Any, **kwargs: Any) -> Response:
-        """Retarget a pending proposal.
-
-        The common case is an alias proposed against a plausible-but-wrong term. Without
-        this the reviewer chooses between approving the wrong thing and rejecting it —
-        and rejecting is sticky, so the value would silently stay unresolved forever.
-        """
-        proposal = self.get_object()
-        edit = TagProposalPayloadEditSerializer(data=request.data)
-        edit.is_valid(raise_exception=True)
-        with transaction.atomic():
-            proposal = TagProposal.objects.select_for_update().get(pk=proposal.pk)
-            if proposal.status != ProposalStatus.PENDING:
-                return Response(
-                    {"detail": "Only a pending proposal can be edited."},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            # Re-run the kind-aware shape check. ``TagProposalPayloadEditSerializer``
-            # only asserts "is an object", so without this a reviewer could save a
-            # payload that is missing the fields its own kind requires — producing a row
-            # that looks reviewable, sits in the queue, and 400s the moment anyone tries
-            # to approve it. The point of the queue is decisions, not litter.
-            checked = TagProposalSerializer(
-                proposal, data={"payload": edit.validated_data["payload"]}, partial=True
-            )
-            checked.is_valid(raise_exception=True)
-            proposal.payload = checked.validated_data["payload"]
-            proposal.save(update_fields=["payload", "updated_at"])
-        return Response(self.get_serializer(proposal).data)

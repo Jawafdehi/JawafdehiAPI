@@ -18,7 +18,8 @@ something different and sensible with it:
 * the indexer (T24) omits the value from ``tag_ids`` but leaves it in ``keywords``, so
   nothing becomes unsearchable;
 * write validation (T13) turns it into a ``400`` naming the offending value;
-* the alias proposer (T27) turns it into a ``TagProposal`` for a human to tick.
+* the tagger treats it as "no existing term matched", and either picks a different
+  one or creates a term (:mod:`case_tags.write`).
 """
 
 from __future__ import annotations

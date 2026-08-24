@@ -1,4 +1,4 @@
-"""T6 — the alias resolver.
+"""The alias resolver.
 
 The interesting assertions here are the negative ones. Most of what makes this resolver
 correct is what it refuses to do: no fuzzy match, no slugification, no guessing at a
@@ -71,8 +71,8 @@ def test_the_seven_way_illicit_enrichment_split_collapses():
 
 def test_cross_script_duplicates_resolve_to_one_term():
     # Ncell/एनसेल and Tax Evasion/कर छली. No algorithm relates these — they resolve
-    # only because a human approved both aliases, which is the whole argument for the
-    # review queue.
+    # only because both aliases exist in the table — which is why the cleanup pass
+    # seeds them from the measured corpus rather than leaving them to a rule.
     _alias("ncell", "tax-evasion")
     _alias("एनसेल", "tax-evasion")
     resolver = TagResolver()
@@ -190,7 +190,7 @@ def test_resolver_snapshot_does_not_shift_mid_run():
     assert TagResolver().resolve("Assets Beyond Known Income") == "illicit-enrichment"
 
 
-# ── PR #463 review fixes ─────────────────────────────────────────────────────────
+# ── hardening ─────────────────────────────────────────────────────────
 
 
 def test_the_snapshot_normalizes_keys_so_a_bulk_written_alias_still_resolves():

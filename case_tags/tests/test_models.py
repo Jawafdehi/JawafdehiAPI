@@ -1,4 +1,4 @@
-"""T22/T23 — the vocabulary models and the seed.
+"""The vocabulary models and the seed.
 
 The seed assertions are deliberately specific (56 terms, 18 offence, offence min 0, no
 nickname axis) rather than "some rows exist": the whole value of a transcribed vocabulary
@@ -10,21 +10,12 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 
-from case_tags.models import (
-    AxisMembers,
-    ProposalKind,
-    ProposalStatus,
-    Tag,
-    TagAlias,
-    TagAxis,
-    TagProposal,
-    TagStatus,
-)
+from case_tags.models import AxisMembers, Tag, TagAlias, TagAxis, TagStatus
 
 pytestmark = pytest.mark.django_db
 
 
-# ── T23: the seed ────────────────────────────────────────────────────────────────
+# ── the seed ────────────────────────────────────────────────────────────────
 
 
 def test_seed_loads_every_axis_and_term():
@@ -84,8 +75,8 @@ def test_no_nickname_axis():
 
 
 def test_seed_creates_no_aliases():
-    # The T3a/T23 invariant: policy.md contains no alias lists, so seeding any would be
-    # authorship rather than transcription. They arrive via the review queue.
+    # policy.md contains no alias lists, so seeding any would be authorship rather than
+    # transcription. They are written by the cleanup pass and by the tagger.
     assert TagAlias.objects.count() == 0
 
 
@@ -127,7 +118,7 @@ def test_seed_is_idempotent():
     assert (TagAxis.objects.count(), Tag.objects.count()) == before
 
 
-# ── T22: model behaviour ─────────────────────────────────────────────────────────
+# ── model behaviour ─────────────────────────────────────────────────────────
 
 
 def test_canonical_returns_self_for_an_ordinary_tag():
@@ -208,52 +199,7 @@ def test_axis_max_cannot_be_below_min():
         )
 
 
-# ── T22: the proposal queue ──────────────────────────────────────────────────────
-
-
-def _proposal(**kw):
-    defaults = {
-        "kind": ProposalKind.ALIAS_EQUIVALENCE,
-        "payload": {"raw_value": "ncell", "proposed_tag_id": "tax-evasion"},
-        "confidence": 0.9,
-        "detected_by": "consumer:test",
-        "dedup_key": "alias:ncell",
-    }
-    return TagProposal.objects.create(**{**defaults, **kw})
-
-
-def test_dedup_key_is_unique_so_a_rejection_stays_sticky():
-    """Without this the proposer refills the queue every run with refused rows.
-
-    That is how a review queue becomes something people stop opening, which closes the
-    escape hatch in practice and pushes everyone back to free text.
-    """
-    _proposal()
-    with pytest.raises(IntegrityError), transaction.atomic():
-        _proposal(confidence=0.1)
-
-
-def test_proposal_defaults_to_pending_and_is_not_decided():
-    p = _proposal()
-    assert p.status == ProposalStatus.PENDING
-    assert p.is_decided is False
-
-
-def test_confidence_is_bounded_in_the_database():
-    # The queue is ORDERED by confidence, and the admin and shell both bypass the
-    # serializer, so the range is enforced where nothing can route around it.
-    with pytest.raises(IntegrityError), transaction.atomic():
-        _proposal(dedup_key="alias:bad", confidence=1.4)
-
-
-def test_proposals_sort_most_confident_first():
-    _proposal(dedup_key="a", confidence=0.4)
-    _proposal(dedup_key="b", confidence=0.95)
-    _proposal(dedup_key="c", confidence=0.7)
-    assert [p.dedup_key for p in TagProposal.objects.all()] == ["b", "c", "a"]
-
-
-# ── PR #463 review fixes ─────────────────────────────────────────────────────────
+# ── hardening ─────────────────────────────────────────────────────────
 
 
 def test_alias_value_is_normalized_on_save_whatever_the_writer():

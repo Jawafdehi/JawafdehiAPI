@@ -16,9 +16,10 @@ infer.
 
 **ALIASES ARE DELIBERATELY EMPTY.** ``policy.md`` contains none, and no mechanical rule
 produces them — nothing derives ``एनसेल`` → ``ncell``. They arrive as reviewable
-``TagProposal`` rows and become ``TagAlias`` rows only when a human ticks them. Until
-then the resolver canonicalises nothing and returns ``None``, which is correct: an
-unresolved value is better than a silently wrong mapping.
+``TagAlias`` rows written by the cleanup pass (``clean_case_tags``), which maps the
+fragmentation ``research/corpus-analysis.md`` §6–§7 enumerates. Until then the resolver
+canonicalises nothing and returns ``None``, which is correct: an unresolved value is
+better than a silently wrong mapping.
 
 TWO DIVERGENCES FROM policy.md AS WRITTEN, both decided 2026-08-23 (Ashwini, who holds
 this — there is no separate editorial board to wait on). Recorded here because a reader
