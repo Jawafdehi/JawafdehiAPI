@@ -961,6 +961,31 @@ class Case(models.Model):
 
     # Content fields
     tags = TextListField(blank=True, help_text="List of tags for categorization")
+    # The pre-cleanup snapshot of ``tags``, written ONCE by ``rebuild_case_tags``
+    # before it rewrites ``tags`` into canonical vocabulary ids.
+    #
+    # ``tags`` currently holds whatever a caseworker or the enricher typed -- 144
+    # distinct values across 82 cases, including seven spellings of "illicit
+    # enrichment", 21 money amounts and a handful of people's names. Canonicalising
+    # it is lossy on purpose, so the original is kept here rather than discarded:
+    # it is the rollback path (``tags`` recomputes from this plus the alias table,
+    # so the migration is re-runnable and reversible) and the audit trail for what
+    # a value USED to be. This is design.md §12 step 7 -- "preserve the original
+    # value only when needed for source display".
+    #
+    # NULL means "never snapshotted": either the case predates the rebuild, or it
+    # was created after it and never had free-text tags. Both are correct; do not
+    # read NULL as "not yet migrated".
+    #
+    # NOT part of any public serializer -- it holds the person and organisation
+    # names deliberately removed from ``tags``. The serializers list their fields
+    # explicitly, so it stays out by default; keep it that way.
+    tags_source = models.JSONField(
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Pre-canonicalisation snapshot of tags. Audit trail, not public.",
+    )
     description = models.TextField(
         blank=True, help_text="Markdown description of the case"
     )
