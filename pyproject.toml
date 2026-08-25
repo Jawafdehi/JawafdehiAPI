@@ -140,6 +140,7 @@ packages = [
     "materials",
     "lakehouse",
     "cases",
+    "case_tags",
     "review",
     "newsletter",
     "jobs",
