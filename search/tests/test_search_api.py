@@ -158,7 +158,10 @@ def test_search_api_passes_sort_and_filters_through():
     assert body["sort"][0] == {"date": {"order": "desc", "missing": "_last"}}
     filters = body["query"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in filters
-    assert {"terms": {"keywords": ["a", "b"]}} in filters
+    # Repeatable ?tags=a&tags=b arrives as a list and is ANDed — one ``term`` clause
+    # each, so selecting a second tag narrows. case_type stays a single OR ``terms``.
+    assert {"term": {"keywords": "a"}} in filters
+    assert {"term": {"keywords": "b"}} in filters
 
 
 @pytest.mark.django_db

@@ -362,10 +362,34 @@ def build_query(
     # The two clause KINDS are built apart because they merge differently: bounds
     # sharing a field collapse into ONE ``range`` clause, so ?bigo_min=X&bigo_max=Y
     # is a single bounded interval rather than two unrelated constraints.
+    #
+    # WITHIN one facet the values merge differently too, and it turns on whether the
+    # facet is single- or multi-valued PER DOCUMENT:
+    #
+    #   entity_type/case_type/status -- one value per document. A case IS one
+    #     case_type, so ?case_type=CORRUPTION&case_type=TAX_EVASION can only mean
+    #     "either" -- ANDing them matches nothing. One ``terms`` clause = OR.
+    #
+    #   tags -- MANY values per document (3.4 on the live corpus). Here OR is wrong,
+    #     and provably so: the tag facet counts are co-occurrence counts over the
+    #     current result set, so with ``land`` selected the panel offers
+    #     ``forged-documents 5`` meaning "5 of these 17 also have it". Under a single
+    #     ``terms`` clause, clicking it returns 22 -- MORE than before, and not the
+    #     number the user was shown. One ``term`` clause per value = AND, so each
+    #     click narrows and the count shown is the count you get.
+    #
+    # This cannot strand a user on an empty page: the facet buckets come from an
+    # aggregation over the already-filtered result set, so every value offered has at
+    # least one case behind it. Verified over the live corpus -- of the 1330
+    # refinements the facets can currently offer, zero would return empty under AND.
     terms_clauses: list[dict[str, Any]] = []
     for param, values in (filters or {}).items():
         field = FACET_FIELDS.get(param)
-        if field and values:
+        if not (field and values):
+            continue
+        if param == "tags":
+            terms_clauses.extend({"term": {field: value}} for value in values)
+        else:
             terms_clauses.append({"terms": {field: list(values)}})
     # Range filters (bigo_min/bigo_max) narrow the same way — ANDed alongside the
     # exact-match ones, and equally inert for scoring.

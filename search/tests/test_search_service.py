@@ -473,8 +473,42 @@ def test_build_query_case_type_and_tags_filters():
     )
     clauses = body["query"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in clauses
-    # tags filter the shared keywords field.
-    assert {"terms": {"keywords": ["procurement"]}} in clauses
+    # tags filter the shared keywords field. A single value is one ``term`` clause,
+    # not a one-element ``terms`` — see test_build_query_multiple_tags_are_anded.
+    assert {"term": {"keywords": "procurement"}} in clauses
+
+
+def test_build_query_multiple_tags_are_anded():
+    """Tags are multi-valued per document, so selecting two means BOTH.
+
+    One ``term`` clause per value, since ``bool.filter`` ANDs its clauses. A single
+    ``terms`` clause would be OR, which contradicts the facet counts: those are
+    co-occurrence counts over the current result set, so a panel offering
+    ``forged-documents 5`` under ``land`` must return 5 when clicked, not a superset.
+    """
+    body = build_query(q="x", filters={"tags": ["land", "forged-documents"]})
+    clauses = body["query"]["bool"]["filter"]
+    assert {"term": {"keywords": "land"}} in clauses
+    assert {"term": {"keywords": "forged-documents"}} in clauses
+    # The OR form must NOT appear — that is the bug this guards.
+    assert {"terms": {"keywords": ["land", "forged-documents"]}} not in clauses
+
+
+def test_build_query_single_valued_facets_stay_ored():
+    """entity_type/case_type/status hold ONE value per document, so ANDing two
+    would match nothing. They keep the single ``terms`` (OR) clause."""
+    body = build_query(
+        q="x",
+        filters={
+            "case_type": ["CORRUPTION", "TAX_EVASION"],
+            "entity_type": ["Person", "Organization"],
+            "status": ["ongoing", "concluded"],
+        },
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert {"terms": {"case_type": ["CORRUPTION", "TAX_EVASION"]}} in clauses
+    assert {"terms": {"type": ["Person", "Organization"]}} in clauses
+    assert {"terms": {"case_status": ["ongoing", "concluded"]}} in clauses
 
 
 def test_build_query_ignores_unknown_filter_and_empty_values():
