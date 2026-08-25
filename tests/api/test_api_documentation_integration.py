@@ -29,7 +29,7 @@ class TestAPIDocumentationIntegration:
             alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
             related_entities=["https://jawafdehi.org/entity/organization/test-ministry"],
             locations=["https://jawafdehi.org/entity/location/kathmandu"],
-            tags=["corruption", "test"],
+            tags=["abuse-of-public-office", "embezzlement"],
             description="Test case description",
             key_allegations=["Test allegation 1", "Test allegation 2"],
             timeline=[

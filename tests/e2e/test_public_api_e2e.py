@@ -43,7 +43,7 @@ class TestPublicAPIWorkflows:
             ],
             case_type=CaseType.CORRUPTION,
             description="A detailed description of the corruption case involving land encroachment.",
-            tags=["land-encroachment", "public-land"],
+            tags=["land-grab", "lalitpur"],
             timeline=[
                 {
                     "date": "2024-01-15",
@@ -74,7 +74,7 @@ class TestPublicAPIWorkflows:
             key_allegations=["Failed to deliver promised infrastructure"],
             case_type=CaseType.CORRUPTION,
             description="Election promise to build hospital was not fulfilled.",
-            tags=["infrastructure", "healthcare"],
+            tags=["infrastructure", "health"],
             state=CaseState.PUBLISHED,
         )
 
@@ -320,17 +320,17 @@ class TestPublicAPIWorkflows:
         initial_count = len(response.data.get("results", []))
         assert initial_count == 2, "Should have 2 published cases"
 
-        # Step 2: Filter by tag "land-encroachment"
-        response = self.client.get("/api/cases/?tags=land-encroachment")
+        # Step 2: Filter by tag "land-grab"
+        response = self.client.get("/api/cases/?tags=land-grab")
         assert response.status_code == 200
 
         results = response.data.get("results", [])
-        assert len(results) == 1, "Should return 1 case with 'land-encroachment' tag"
+        assert len(results) == 1, "Should return 1 case with 'land-grab' tag"
 
         # Step 3: Verify the correct case is returned
         case = results[0]
         assert case["title"] == "Corruption Case - Land Encroachment"
-        assert "land-encroachment" in case["tags"]
+        assert "land-grab" in case["tags"]
 
         # Test filtering by another tag
         response = self.client.get("/api/cases/?tags=infrastructure")

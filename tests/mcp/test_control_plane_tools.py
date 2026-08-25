@@ -793,7 +793,7 @@ async def test_unified_search_maps_repeatable_filters():
         {
             "q": "court",
             "type": ["case", "courtcase"],
-            "tags": ["procurement", "appeal"],
+            "tags": ["procurement", "procurement-irregularity"],
             "page_size": 25,
         },
     )
@@ -804,7 +804,7 @@ async def test_unified_search_maps_repeatable_filters():
         params={
             "q": "court",
             "type": ["case", "courtcase"],
-            "tags": ["procurement", "appeal"],
+            "tags": ["procurement", "procurement-irregularity"],
             "page_size": 25,
         },
         json_body=None,

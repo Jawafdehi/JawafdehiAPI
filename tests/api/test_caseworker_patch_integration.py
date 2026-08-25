@@ -61,7 +61,7 @@ def test_patch_multi_operation_end_to_end_persists_all_changes():
 
     patch_ops = [
         {"op": "replace", "path": "/title", "value": "Updated accountability case"},
-        {"op": "replace", "path": "/tags", "value": ["public-fund", "audit"]},
+        {"op": "replace", "path": "/tags", "value": ["budget-misuse", "finance"]},
         {
             "op": "add",
             "path": "/timeline/-",
@@ -107,12 +107,12 @@ def test_patch_multi_operation_end_to_end_persists_all_changes():
 
     assert response.status_code == 200
     assert response.data["title"] == "Updated accountability case"
-    assert response.data["tags"] == ["public-fund", "audit"]
+    assert response.data["tags"] == ["budget-misuse", "finance"]
     assert response.data["timeline"][-1]["title"] == "Hearing scheduled"
 
     case.refresh_from_db()
     assert case.title == "Updated accountability case"
-    assert case.tags == ["public-fund", "audit"]
+    assert case.tags == ["budget-misuse", "finance"]
     assert case.timeline[-1]["title"] == "Hearing scheduled"
     assert set(
         CaseEntityRelationship.objects.filter(
