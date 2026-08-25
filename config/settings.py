@@ -316,6 +316,7 @@ INSTALLED_APPS = [
     "materials",
     # ── Jawafdehi apps (route to the `default` DB) ───────────────────────────
     "cases",
+    "case_tags",
     "review",
     "case_proposals",
     # ── Newsletter (model-less proxy to the SendPulse ESP; no DB tables) ──────
