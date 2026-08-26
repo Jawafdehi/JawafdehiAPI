@@ -185,6 +185,64 @@ def _build_body(case: Any, short: str | None) -> str | None:
     return "\n".join(body_parts) or None
 
 
+def _expand_tags(tags: list[str]) -> tuple[list[str], list[str]]:
+    """Canonical tag ids -> (ids + broader roll-up, display labels).
+
+    The roll-up is applied at INDEX time, so ``?tags=land`` is a plain term query
+    against a field that already contains ``land`` on every land-grab case. Doing it
+    at query time instead would mean rewriting each incoming tag into a bool-should
+    over its narrower tags, on every request, against a vocabulary the query layer
+    would have to load.
+
+    Labels come back separately because they feed ``keywords`` (analyzed text) while
+    the ids feed ``tags`` (exact keyword). Both scripts are emitted: someone typing
+    "भूमि प्रशासन" and someone typing "land administration" must both hit the case.
+
+    Unknown ids pass through unchanged in BOTH lists. A tag can only be unknown here
+    if the vocabulary lost a term the cases still carry, and silently dropping it
+    would make that invisible; keeping it means the case stays findable by the one
+    string it has.
+
+    One query, not one per tag: reindexing walks every case, and a per-tag lookup
+    would be an N+1 across the whole corpus.
+    """
+    if not tags:
+        return [], []
+
+    from case_tags.models import Tag
+
+    rows = {
+        t.id: t
+        for t in Tag.objects.filter(pk__in=tags).select_related("broader")
+    }
+
+    expanded: list[str] = []
+    labels: list[str] = []
+
+    def add(tag_id: str) -> None:
+        if tag_id not in expanded:
+            expanded.append(tag_id)
+
+    for tag_id in tags:
+        add(tag_id)
+        row = rows.get(tag_id)
+        if row is None:
+            # Not in the vocabulary — keep the raw string as its own label.
+            if tag_id not in labels:
+                labels.append(tag_id)
+            continue
+        for label in (row.label_ne, row.label_en):
+            if label and label not in labels:
+                labels.append(label)
+        # ``broader`` is capped at one level by Tag.clean(), so this is a single hop,
+        # not a walk. The parent's labels are NOT added: a land-grab case should not
+        # become a text hit for "भूमि प्रशासन" just because both roll up to land.
+        if row.broader_id:
+            add(row.broader_id)
+
+    return expanded, labels
+
+
 def _build_identifiers(case: Any, iri: str | None, slug: str | None) -> list[str]:
     """Exact-match identifiers: the IRI, the slug, and every court-case ref.
 
@@ -267,14 +325,24 @@ def _build_card(
     }
 
 
-def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Map a published ``Case`` to the common index doc. Pure: no OpenSearch.
+def build_doc(
+    case: Any,
+    *,
+    entities: list[dict[str, Any]] | None = None,
+    tags: tuple[list[str], list[str]] | None = None,
+) -> dict[str, Any]:
+    """Map a published ``Case`` to the common index doc. Pure: no OpenSearch, no DB.
 
     The caller is responsible for the published gate; this shapes whatever it is
     given (used directly by tests for the doc shape). ``entities`` is the resolved
     entity-bind list for the ``card`` payload — ``index()`` resolves it via
     :func:`_safe_resolve_entities`; passing ``None`` (the default) omits names so
-    the doc-shape tests stay pure/DB-free."""
+    the doc-shape tests stay pure/DB-free.
+
+    ``tags`` is the same arrangement for the tag roll-up: ``(ids, labels)`` from
+    :func:`_expand_tags`, which reads the vocabulary table. Injected rather than
+    looked up here so this stays DB-free; ``None`` falls back to the case's own tags
+    with no roll-up and the ids doubling as labels."""
     iri = _case_iri(case)
     title = getattr(case, "title", "") or ""
     title_ne, title_en = name_to_titles(title)
@@ -282,8 +350,20 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
     short = getattr(case, "short_description", None)
     body = _build_body(case, short)
 
-    tags = [t for t in (getattr(case, "tags", None) or []) if isinstance(t, str)]
-    keywords = list(tags)
+    case_tags_raw = [t for t in (getattr(case, "tags", None) or []) if isinstance(t, str)]
+    # Two DIFFERENT jobs, so two different values.
+    #
+    # ``tags`` (top-level keyword, added below) carries canonical IDS plus every
+    # broader tag, and is what ``?tags=`` filters and facets on. The roll-up happens
+    # HERE rather than at query time so ``?tags=land`` matches a case tagged only
+    # ``land-grab`` with a plain term query and no query rewriting.
+    #
+    # ``keywords`` (analyzed text) carries the LABELS. Putting the slug
+    # `land-administration` into a text field helps nobody -- a reader types
+    # "भूमि प्रशासन" or "land administration". Before the vocabulary, tags WERE their
+    # own display text so the raw string served both jobs; canonical ids do not.
+    expanded, labels = tags if tags is not None else (list(case_tags_raw), list(case_tags_raw))
+    keywords = list(labels)
     case_type = getattr(case, "case_type", None)
     if case_type:
         keywords.append(case_type)
@@ -300,13 +380,14 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
         "title_translit": title_translit(title_ne, title_en),
         "body": body,
         "keywords": keywords,
+        "tags": expanded,
         "identifiers": identifiers,
         "raw": {
             "@id": iri,
             "slug": slug,
             "case_type": case_type,
             "title": title,
-            "tags": tags,
+            "tags": case_tags_raw,
         },
     }
     # Promote case_type to a top-level keyword so the unified search can filter and
@@ -349,12 +430,28 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
         slug=slug,
         title=title,
         short=short,
-        tags=tags,
+        tags=case_tags_raw,
         case_type=case_type,
         case_status=case_status,
         entities=entities,
     )
     return doc
+
+
+def _safe_expand_tags(case: Any) -> tuple[list[str], list[str]]:
+    """:func:`_expand_tags` for the real index paths, best-effort.
+
+    Same contract as :func:`_safe_resolve_entities`: any failure — a bare test
+    object with no vocabulary behind it, or the table unreachable — falls back to
+    the case's own tags with no roll-up, so the case is still INDEXED and a later
+    ``reindex_cases`` reconciles the expansion. Losing the roll-up costs one facet
+    match; losing the document takes a published case out of search entirely.
+    """
+    raw = [t for t in (getattr(case, "tags", None) or []) if isinstance(t, str)]
+    try:
+        return _expand_tags(raw)
+    except Exception:  # noqa: BLE001 — best-effort, same as the entity resolver.
+        return list(raw), list(raw)
 
 
 def build_indexed_doc(case: Any) -> dict[str, Any]:
@@ -366,7 +463,11 @@ def build_indexed_doc(case: Any) -> dict[str, Any]:
     entity names rather than blanking them (the driver calls ``build_doc``
     positionally with no ``entities`` kwarg — see ``jawafdehi_shared/search/
     reindex.py``)."""
-    return build_doc(case, entities=_safe_resolve_entities(case))
+    return build_doc(
+        case,
+        entities=_safe_resolve_entities(case),
+        tags=_safe_expand_tags(case),
+    )
 
 
 def index_now(case: Any, *, client=None) -> None:

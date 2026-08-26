@@ -187,6 +187,16 @@ def common_mappings() -> dict[str, Any]:
                     "type": "keyword",
                     "fields": {"text": {"type": "text", "analyzer": "mixed_script"}},
                 },
+                # Canonical case-tag ids (``land-grab``), PLUS the broader tags each
+                # rolls up into, so ``?tags=land`` is one term query. Deliberately
+                # separate from ``keywords``:
+                #
+                #  * ``keywords`` also holds ``case_type``, so faceting tags off it
+                #    returned CORRUPTION as if it were a tag.
+                #  * these are slugs, not prose. No analyzer, no text subfield — an
+                #    id is either matched exactly or not at all. The human-readable
+                #    labels go into ``keywords`` for recall.
+                "tags": {"type": "keyword"},
                 # Court case_number, material ident, nes_id links, IRI fragments.
                 "identifiers": {"type": "keyword"},
                 # ISO/Gregorian dates.
