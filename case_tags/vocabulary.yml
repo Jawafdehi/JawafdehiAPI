@@ -1,0 +1,956 @@
+# Jawafdehi case tag vocabulary — seed candidate
+#
+# Derived entirely from the 144 distinct raw values currently in `Case.tags`
+# across the 82 published cases (462 assignments), read 2026-08-24.
+# Implements docs/jawafdehi-search/design.md §12: a single flat vocabulary.
+# No axes — a tag is a tag.
+#
+# The one structural relationship is `broader`. A tag may name a broader tag it
+# rolls up into. The case record stores only the specific tag; the indexer also
+# writes every broader tag, so filtering by `land` returns all land cases while
+# filtering by `land-grab` returns only the ones where land was actually seized.
+# Three groups use it: land, procurement, revenue.
+#
+# Alias keys are stored ALREADY NORMALIZED. A raw value is matched by running
+# it through the normalizer in normalize.py and looking the result up here:
+#
+#   1. Unicode NFC
+#   2. Devanagari repair: ा+े (U+093E U+0947) -> ो (U+094B), ा+ै -> ौ
+#      (Preeti-conversion artefact; 2 live tags carry it and can never match
+#      a correctly typed query)
+#   3. collapse internal whitespace, trim
+#   4. strip leading/trailing punctuation
+#   5. map '-' and '_' to space
+#   6. casefold
+#
+# Nothing outside this file becomes a public filter. Raw values that match no
+# alias are listed under `dropped:` with a reason.
+#
+# The `# ---` section headers below are file organisation only, to keep 51 terms
+# readable. They are not a schema and are not loaded.
+
+version: 1
+source: 82 published cases / 144 distinct raw values / 462 assignments (2026-08-24)
+# Geography is the OFFICIAL list, not corpus-derived: 7 provinces + 73 districts +
+# Nawalparasi and Rukum kept whole. Unused terms cost nothing — zero-count buckets
+# never reach a facet, since the list comes from the aggregation, not this table.
+
+tags:
+
+  # --- what is alleged ----------------------------------------------------
+  - id: procurement
+    label_ne: सार्वजनिक खरिद
+    label_en: Public Procurement
+    status: active
+    aliases: [procurement, public procurement]
+    note: >-
+      The domain, asserting no wrongdoing on its own — the raw values `Procurement`
+      and `Public Procurement` say only that a case concerns purchasing. Cases where
+      irregularity IS alleged carry `procurement-irregularity` and roll up to here.
+
+  - id: procurement-irregularity
+    label_ne: सार्वजनिक खरिद अनियमितता
+    label_en: Procurement Irregularity
+    status: active
+    broader: procurement
+    aliases: [procurement irregularities, procurement splitting, high specification]
+    note: >-
+      `procurement splitting` (टुक्रा पारी खरिद) and `high specification` are specific
+      malpractices with 1 use each; folded in to keep the list tight. Promote to their
+      own tags if they recur.
+
+  - id: bid-rigging
+    label_ne: बोलपत्रमा मिलेमतो
+    label_en: Bid Rigging
+    status: active
+    broader: procurement
+    aliases: [bid rigging]
+    note: Kept separate from procurement-irregularity — use where collusion is specifically alleged.
+
+  - id: illicit-enrichment
+    label_ne: स्रोत नखुलेको सम्पत्ति आर्जन
+    label_en: Illicit Enrichment
+    status: active
+    aliases: [illegal property acquisition, assets beyond known income, illegal enrichment, illicit enrichment, illegal property, illegal wealth]
+    note: Seven spellings of one concept in live data — the single worst duplicate cluster.
+
+  - id: abuse-of-public-office
+    label_ne: पदको दुरुपयोग
+    label_en: Abuse of Public Office
+    status: active
+    aliases: [public office abuse, abuse of authority, abuse of power]
+
+  - id: embezzlement
+    label_ne: हिनामिना तथा अपचलन
+    label_en: Embezzlement
+    status: active
+    aliases: [embezzlement, embezzled, misappropriation]
+
+  - id: forged-documents
+    label_ne: कीर्ते कागजात
+    label_en: Forged Documents
+    status: active
+    aliases: [forged documents]
+
+  - id: revenue
+    label_ne: राजस्व
+    label_en: Revenue
+    status: active
+    aliases: [revenue]
+    note: >-
+      The domain. 4 of its 5 live cases also carry `revenue-leakage`; the fifth is a
+      revenue-office case with no leakage alleged, which is exactly why the two are
+      separate tags.
+
+  - id: revenue-leakage
+    label_ne: राजस्व चुहावट
+    label_en: Revenue Leakage
+    status: active
+    broader: revenue
+    aliases: [revenue leakage]
+
+  - id: tax-evasion
+    label_ne: कर छली
+    label_en: Tax Evasion
+    status: active
+    aliases: [tax evasion, कर छली]
+
+  - id: money-laundering
+    label_ne: सम्पत्ति शुद्धीकरण
+    label_en: Money Laundering
+    status: active
+    aliases: [money laundering]
+    note: Catches `Money-laundering` via the hyphen rule in the normalizer.
+
+  - id: bribery
+    label_ne: घुस रिसवत
+    label_en: Bribery
+    status: active
+    aliases: [bribery, kickbacks]
+
+  - id: conflict-of-interest
+    label_ne: स्वार्थ बाझिने अवस्था
+    label_en: Conflict of Interest
+    status: active
+    aliases: [conflict of interest]
+    note: Catches `Conflict of Interest.` via the trailing-punctuation rule.
+
+  - id: budget-misuse
+    label_ne: बजेट दुरुपयोग
+    label_en: Budget Misuse
+    status: active
+    aliases: [budget misuse]
+
+  - id: cooperative-fraud
+    label_ne: सहकारी ठगी
+    label_en: Cooperative Fraud
+    status: active
+    aliases: [cooperative fraud]
+
+  - id: fake-employees
+    label_ne: नक्कली कर्मचारी
+    label_en: Fake Employees
+    status: active
+    aliases: [ghost employees]
+
+  - id: policy-corruption
+    label_ne: नीतिगत भ्रष्टाचार
+    label_en: Policy Corruption
+    status: active
+    aliases: [policy corruption]
+
+  - id: public-asset-damage
+    label_ne: सार्वजनिक सम्पत्ति हानि नोक्सानी
+    label_en: Public Asset Damage
+    status: active
+    aliases: [सार्वजनिक सम्पत्ति हानी नोकसानी, सार्वजनिक सम्पत्ति हानि नोक्सानी]
+    note: The live raw value carries the ा+े artefact; the first alias is its repaired form.
+
+  - id: witness-tampering
+    label_ne: साक्षी प्रभावित पार्ने
+    label_en: Witness Tampering
+    status: active
+    aliases: [witness tampering]
+
+  # --- land ---------------------------------------------------------------
+  - id: land
+    label_ne: भूमि
+    label_en: Land
+    status: active
+    aliases: [land, land deal]
+    note: >-
+      Umbrella for every land case, as §12's own example list suggests (`LAND`).
+      Bare `Land` and `land-deal` assert only that a case concerns land, so they map
+      here rather than to the narrower tags.
+
+  - id: land-administration
+    label_ne: भूमि प्रशासन
+    label_en: Land Administration
+    status: active
+    broader: land
+    aliases: [land management]
+
+  - id: land-grab
+    label_ne: सरकारी जग्गा हडप
+    label_en: Land Grab
+    status: active
+    broader: land
+    aliases: [land grab, land scandel]
+
+  # --- domain / sector ----------------------------------------------------
+  - id: telecommunications
+    label_ne: दूरसञ्चार
+    label_en: Telecommunications
+    status: active
+    aliases: [telecommunications, ncell, एनसेल, एनसेल प्रकरण, axiata, asia info, ntc, नेपाल दूरसञ्चार प्राधिकरण, teramocs case]
+    note: Company and system names aliased into the domain rather than dropped — preserves the signal without putting vendor names in a public facet.
+
+  - id: infrastructure
+    label_ne: पूर्वाधार
+    label_en: Infrastructure
+    status: active
+    aliases: [infrastructure, construction, public works]
+
+  - id: health
+    label_ne: स्वास्थ्य
+    label_en: Health
+    status: active
+    aliases: [health, hospital scandal, hospital related, nphl, "health supply management center, bagmati province"]
+    note: nphl = National Public Health Laboratory; all 4 uses are Madhesh health-equipment procurement.
+
+  - id: finance
+    label_ne: वित्त
+    label_en: Finance
+    status: active
+    aliases: [finance]
+
+  - id: forestry
+    label_ne: वन
+    label_en: Forestry
+    status: active
+    aliases: [forestry]
+
+  - id: information-technology
+    label_ne: सूचना प्रविधि
+    label_en: Information Technology
+    status: active
+    aliases: [it, nitc]
+    note: NITC = National Information Technology Centre.
+
+  - id: water-supply
+    label_ne: खानेपानी
+    label_en: Water Supply
+    status: active
+    aliases: [water supply]
+
+  - id: education
+    label_ne: शिक्षा
+    label_en: Education
+    status: active
+    aliases: [education]
+
+  - id: transport
+    label_ne: यातायात
+    label_en: Transport
+    status: active
+    aliases: [transport, transportation]
+
+  - id: agriculture
+    label_ne: कृषि
+    label_en: Agriculture
+    status: active
+    aliases: [agriculture, agriculture subsidy]
+
+  - id: energy
+    label_ne: ऊर्जा
+    label_en: Energy
+    status: active
+    aliases: [hydropower, budhigandaki hydropower project]
+
+  - id: postal-services
+    label_ne: हुलाक सेवा
+    label_en: Postal Services
+    status: active
+    aliases: [hulak saving bank case]
+    note: Catches the double space in the raw value via the whitespace rule.
+
+  # --- level of government ------------------------------------------------
+  - id: local-government
+    label_ne: स्थानीय तह
+    label_en: Local Government
+    status: active
+    aliases: [local government]
+
+  - id: province-government
+    label_ne: प्रदेश सरकार
+    label_en: Province Government
+    status: active
+    aliases: []
+
+  - id: federal-government
+    label_ne: संघीय सरकार
+    label_en: Federal Government
+    status: active
+    aliases: []
+
+  - id: state-owned-entity
+    label_ne: सरकारी संस्थान
+    label_en: State-Owned Entity
+    status: active
+    aliases: []
+
+  # --- geography: provinces (all 7) ---------------------------------------
+  - id: koshi
+    label_ne: कोशी प्रदेश
+    label_en: Koshi Province
+    status: active
+    aliases: [koshi, province 1, प्रदेश नं. १]
+
+  - id: madhesh
+    label_ne: मधेश प्रदेश
+    label_en: Madhesh Province
+    status: active
+    aliases: [madhesh, madesh province, madhes]
+
+  - id: bagmati
+    label_ne: बागमती प्रदेश
+    label_en: Bagmati Province
+    status: active
+    aliases: [bagmati]
+    note: >-
+      HAZARD: बागमती नगरपालिका is a MUNICIPALITY in Sarlahi, Madhesh — not this
+      province. It is aliased to `sarlahi`. Never map the bare string by guesswork.
+
+  - id: gandaki
+    label_ne: गण्डकी प्रदेश
+    label_en: Gandaki Province
+    status: active
+    aliases: [gandaki, गण्डकी प्रदेश]
+
+  - id: lumbini
+    label_ne: लुम्बिनी प्रदेश
+    label_en: Lumbini Province
+    status: active
+    aliases: [lumbini]
+
+  - id: karnali
+    label_ne: कर्णाली प्रदेश
+    label_en: Karnali Province
+    status: active
+    aliases: [karnali]
+
+  - id: sudurpashchim
+    label_ne: सुदूरपश्चिम प्रदेश
+    label_en: Sudurpashchim Province
+    status: active
+    aliases: [sudurpashchim, sudurpashchim province, sudurpaschim]
+
+  # --- geography: districts, each rolling up to its province ---------------
+  # `broader` means a case tagged `lalitpur` also answers a `bagmati` filter, so
+  # the province facet works without tagging every case twice.
+
+  - id: bhojpur
+    label_ne: भोजपुर
+    label_en: Bhojpur
+    status: active
+    broader: koshi
+    aliases: [bhojpur]
+
+  - id: dhankuta
+    label_ne: धनकुटा
+    label_en: Dhankuta
+    status: active
+    broader: koshi
+    aliases: [dhankuta]
+
+  - id: ilam
+    label_ne: इलाम
+    label_en: Ilam
+    status: active
+    broader: koshi
+    aliases: [ilam]
+
+  - id: jhapa
+    label_ne: झापा
+    label_en: Jhapa
+    status: active
+    broader: koshi
+    aliases: [jhapa, damak]
+
+  - id: khotang
+    label_ne: खोटाङ
+    label_en: Khotang
+    status: active
+    broader: koshi
+    aliases: [khotang]
+
+  - id: morang
+    label_ne: मोरङ
+    label_en: Morang
+    status: active
+    broader: koshi
+    aliases: [morang]
+
+  - id: okhaldhunga
+    label_ne: ओखलढुङ्गा
+    label_en: Okhaldhunga
+    status: active
+    broader: koshi
+    aliases: [okhaldhunga]
+
+  - id: panchthar
+    label_ne: पाँचथर
+    label_en: Panchthar
+    status: active
+    broader: koshi
+    aliases: [panchthar]
+
+  - id: sankhuwasabha
+    label_ne: संखुवासभा
+    label_en: Sankhuwasabha
+    status: active
+    broader: koshi
+    aliases: [sankhuwasabha]
+
+  - id: solukhumbu
+    label_ne: सोलुखुम्बु
+    label_en: Solukhumbu
+    status: active
+    broader: koshi
+    aliases: [solukhumbu]
+
+  - id: sunsari
+    label_ne: सुनसरी
+    label_en: Sunsari
+    status: active
+    broader: koshi
+    aliases: [sunsari]
+
+  - id: taplejung
+    label_ne: ताप्लेजुङ
+    label_en: Taplejung
+    status: active
+    broader: koshi
+    aliases: [taplejung]
+
+  - id: terhathum
+    label_ne: तेह्रथुम
+    label_en: Terhathum
+    status: active
+    broader: koshi
+    aliases: [terhathum]
+
+  - id: udayapur
+    label_ne: उदयपुर
+    label_en: Udayapur
+    status: active
+    broader: koshi
+    aliases: [udayapur]
+
+  - id: bara
+    label_ne: बारा
+    label_en: Bara
+    status: active
+    broader: madhesh
+    aliases: [bara]
+
+  - id: dhanusha
+    label_ne: धनुषा
+    label_en: Dhanusha
+    status: active
+    broader: madhesh
+    aliases: [dhanusha, danusha, dhanukha]
+
+  - id: mahottari
+    label_ne: महोत्तरी
+    label_en: Mahottari
+    status: active
+    broader: madhesh
+    aliases: [mahottari]
+
+  - id: parsa
+    label_ne: पर्सा
+    label_en: Parsa
+    status: active
+    broader: madhesh
+    aliases: [parsa]
+
+  - id: rautahat
+    label_ne: रौतहट
+    label_en: Rautahat
+    status: active
+    broader: madhesh
+    aliases: [rautahat]
+
+  - id: saptari
+    label_ne: सप्तरी
+    label_en: Saptari
+    status: active
+    broader: madhesh
+    aliases: [saptari]
+
+  - id: sarlahi
+    label_ne: सर्लाही
+    label_en: Sarlahi
+    status: active
+    broader: madhesh
+    aliases: [sarlahi, बागमती नगरपालिका]
+
+  - id: siraha
+    label_ne: सिराहा
+    label_en: Siraha
+    status: active
+    broader: madhesh
+    aliases: [siraha]
+
+  - id: bhaktapur
+    label_ne: भक्तपुर
+    label_en: Bhaktapur
+    status: active
+    broader: bagmati
+    aliases: [bhaktapur]
+
+  - id: chitwan
+    label_ne: चितवन
+    label_en: Chitwan
+    status: active
+    broader: bagmati
+    aliases: [chitwan, chitawan]
+
+  - id: dhading
+    label_ne: धादिङ
+    label_en: Dhading
+    status: active
+    broader: bagmati
+    aliases: [dhading]
+
+  - id: dolakha
+    label_ne: दोलखा
+    label_en: Dolakha
+    status: active
+    broader: bagmati
+    aliases: [dolakha]
+
+  - id: kathmandu
+    label_ne: काठमाडौं
+    label_en: Kathmandu
+    status: active
+    broader: bagmati
+    aliases: [kathmandu, काठमाडौँ, nagarjun municipality, pashupati development area]
+
+  - id: kavrepalanchok
+    label_ne: काभ्रेपलाञ्चोक
+    label_en: Kavrepalanchok
+    status: active
+    broader: bagmati
+    aliases: [kavrepalanchok, kavre, kabhrepalanchok]
+
+  - id: lalitpur
+    label_ne: ललितपुर
+    label_en: Lalitpur
+    status: active
+    broader: bagmati
+    aliases: [lalitpur]
+
+  - id: makwanpur
+    label_ne: मकवानपुर
+    label_en: Makwanpur
+    status: active
+    broader: bagmati
+    aliases: [makwanpur, makawanpur, थाहा नगरपालिका]
+
+  - id: nuwakot
+    label_ne: नुवाकोट
+    label_en: Nuwakot
+    status: active
+    broader: bagmati
+    aliases: [nuwakot]
+
+  - id: ramechhap
+    label_ne: रामेछाप
+    label_en: Ramechhap
+    status: active
+    broader: bagmati
+    aliases: [ramechhap]
+
+  - id: rasuwa
+    label_ne: रसुवा
+    label_en: Rasuwa
+    status: active
+    broader: bagmati
+    aliases: [rasuwa]
+
+  - id: sindhuli
+    label_ne: सिन्धुली
+    label_en: Sindhuli
+    status: active
+    broader: bagmati
+    aliases: [sindhuli]
+
+  - id: sindhupalchok
+    label_ne: सिन्धुपाल्चोक
+    label_en: Sindhupalchok
+    status: active
+    broader: bagmati
+    aliases: [sindhupalchok, sindhupalchowk]
+
+  - id: baglung
+    label_ne: बागलुङ
+    label_en: Baglung
+    status: active
+    broader: gandaki
+    aliases: [baglung]
+
+  - id: gorkha
+    label_ne: गोरखा
+    label_en: Gorkha
+    status: active
+    broader: gandaki
+    aliases: [gorkha]
+
+  - id: kaski
+    label_ne: कास्की
+    label_en: Kaski
+    status: active
+    broader: gandaki
+    aliases: [kaski]
+
+  - id: lamjung
+    label_ne: लमजुङ
+    label_en: Lamjung
+    status: active
+    broader: gandaki
+    aliases: [lamjung]
+
+  - id: manang
+    label_ne: मनाङ
+    label_en: Manang
+    status: active
+    broader: gandaki
+    aliases: [manang]
+
+  - id: mustang
+    label_ne: मुस्ताङ
+    label_en: Mustang
+    status: active
+    broader: gandaki
+    aliases: [mustang]
+
+  - id: myagdi
+    label_ne: म्याग्दी
+    label_en: Myagdi
+    status: active
+    broader: gandaki
+    aliases: [myagdi]
+
+  - id: parbat
+    label_ne: पर्वत
+    label_en: Parbat
+    status: active
+    broader: gandaki
+    aliases: [parbat]
+
+  - id: syangja
+    label_ne: स्याङ्जा
+    label_en: Syangja
+    status: active
+    broader: gandaki
+    aliases: [syangja]
+
+  - id: tanahun
+    label_ne: तनहुँ
+    label_en: Tanahun
+    status: active
+    broader: gandaki
+    aliases: [tanahun]
+
+  - id: arghakhanchi
+    label_ne: अर्घाखाँची
+    label_en: Arghakhanchi
+    status: active
+    broader: lumbini
+    aliases: [arghakhanchi]
+
+  - id: banke
+    label_ne: बाँके
+    label_en: Banke
+    status: active
+    broader: lumbini
+    aliases: [banke]
+
+  - id: bardiya
+    label_ne: बर्दिया
+    label_en: Bardiya
+    status: active
+    broader: lumbini
+    aliases: [bardiya]
+
+  - id: dang
+    label_ne: दाङ
+    label_en: Dang
+    status: active
+    broader: lumbini
+    aliases: [dang]
+
+  - id: gulmi
+    label_ne: गुल्मी
+    label_en: Gulmi
+    status: active
+    broader: lumbini
+    aliases: [gulmi]
+
+  - id: kapilvastu
+    label_ne: कपिलवस्तु
+    label_en: Kapilvastu
+    status: active
+    broader: lumbini
+    aliases: [kapilvastu]
+
+  - id: palpa
+    label_ne: पाल्पा
+    label_en: Palpa
+    status: active
+    broader: lumbini
+    aliases: [palpa]
+
+  - id: pyuthan
+    label_ne: प्युठान
+    label_en: Pyuthan
+    status: active
+    broader: lumbini
+    aliases: [pyuthan]
+
+  - id: rolpa
+    label_ne: रोल्पा
+    label_en: Rolpa
+    status: active
+    broader: lumbini
+    aliases: [rolpa]
+
+  - id: rupandehi
+    label_ne: रुपन्देही
+    label_en: Rupandehi
+    status: active
+    broader: lumbini
+    aliases: [rupandehi]
+
+  - id: dailekh
+    label_ne: दैलेख
+    label_en: Dailekh
+    status: active
+    broader: karnali
+    aliases: [dailekh]
+
+  - id: dolpa
+    label_ne: डोल्पा
+    label_en: Dolpa
+    status: active
+    broader: karnali
+    aliases: [dolpa]
+
+  - id: humla
+    label_ne: हुम्ला
+    label_en: Humla
+    status: active
+    broader: karnali
+    aliases: [humla]
+
+  - id: jajarkot
+    label_ne: जाजरकोट
+    label_en: Jajarkot
+    status: active
+    broader: karnali
+    aliases: [jajarkot]
+
+  - id: jumla
+    label_ne: जुम्ला
+    label_en: Jumla
+    status: active
+    broader: karnali
+    aliases: [jumla]
+
+  - id: kalikot
+    label_ne: कालिकोट
+    label_en: Kalikot
+    status: active
+    broader: karnali
+    aliases: [kalikot]
+
+  - id: mugu
+    label_ne: मुगु
+    label_en: Mugu
+    status: active
+    broader: karnali
+    aliases: [mugu]
+
+  - id: salyan
+    label_ne: सल्यान
+    label_en: Salyan
+    status: active
+    broader: karnali
+    aliases: [salyan]
+
+  - id: surkhet
+    label_ne: सुर्खेत
+    label_en: Surkhet
+    status: active
+    broader: karnali
+    aliases: [surkhet]
+
+  - id: achham
+    label_ne: अछाम
+    label_en: Achham
+    status: active
+    broader: sudurpashchim
+    aliases: [achham]
+
+  - id: baitadi
+    label_ne: बैतडी
+    label_en: Baitadi
+    status: active
+    broader: sudurpashchim
+    aliases: [baitadi]
+
+  - id: bajhang
+    label_ne: बझाङ
+    label_en: Bajhang
+    status: active
+    broader: sudurpashchim
+    aliases: [bajhang]
+
+  - id: bajura
+    label_ne: बाजुरा
+    label_en: Bajura
+    status: active
+    broader: sudurpashchim
+    aliases: [bajura]
+
+  - id: dadeldhura
+    label_ne: डडेल्धुरा
+    label_en: Dadeldhura
+    status: active
+    broader: sudurpashchim
+    aliases: [dadeldhura]
+
+  - id: darchula
+    label_ne: दार्चुला
+    label_en: Darchula
+    status: active
+    broader: sudurpashchim
+    aliases: [darchula]
+
+  - id: doti
+    label_ne: डोटी
+    label_en: Doti
+    status: active
+    broader: sudurpashchim
+    aliases: [doti]
+
+  - id: kailali
+    label_ne: कैलाली
+    label_en: Kailali
+    status: active
+    broader: sudurpashchim
+    aliases: [kailali]
+
+  - id: kanchanpur
+    label_ne: कञ्चनपुर
+    label_en: Kanchanpur
+    status: active
+    broader: sudurpashchim
+    aliases: [kanchanpur]
+
+  # --- geography: districts that span two provinces ------------------------
+  # No `broader`. Both were split in 2017 and the halves landed in DIFFERENT
+  # provinces, so rolling either up to one province would put a live case in the
+  # wrong one. Kept as single tags per the corpus's own usage, with the post-split
+  # names aliased in so nothing typed either way is unreachable.
+
+  - id: nawalparasi
+    label_ne: नवलपरासी
+    label_en: Nawalparasi
+    status: active
+    aliases: [nawalparasi, nawalpur, parasi, nawalparasi east, nawalparasi west, नवलपरासी]
+    note: >-
+      Split 2017 into Nawalpur (Gandaki) and Parasi (Lumbini). The live case
+      `anup-mehra-nawalparasi-land` says only नवलपरासी, so the half is not
+      recoverable from the record — which is exactly why this stays one tag.
+
+  - id: rukum
+    label_ne: रुकुम
+    label_en: Rukum
+    status: active
+    aliases: [rukum, rukum east, rukum west, eastern rukum, western rukum, पूर्वी रुकुम, पश्चिमी रुकुम]
+    note: Split 2017 into Rukum East (Lumbini) and Rukum West (Karnali).
+
+  # --- geography: deprecated ------------------------------------------------
+  - id: kathmandu-valley
+    label_ne: काठमाडौं उपत्यका
+    label_en: Kathmandu Valley
+    status: deprecated
+    aliases: [kathmandu valley]
+    note: >-
+      Not an official unit, and already wrong: one of its 9 live cases is the
+      Nawalparasi land case, which is in Lumbini. Kept so existing filter links
+      still resolve, excluded from facets, and cannot be fixed by an alias — one
+      value, three districts. Needs a per-case decision (curation).
+
+# ---------------------------------------------------------------------------
+# Dropped — raw values that become no canonical tag.
+#
+# These are seeded as alias rows with a NULL tag, so `?tags=CIAA` can answer
+# "that filter was retired" instead of "unknown tag". A stale bookmark getting a
+# flat error reads as a bug; this is the difference.
+# ---------------------------------------------------------------------------
+dropped:
+
+  - reason: not-a-tag-money-amount
+    note: One per case, never repeats. Belongs in the existing bigo/amount field.
+    values:
+      ["~1 Crore 25 Lakh", "~1 Crore 31 Lakh", "~1 Crore 55 Lakh", "~1 Crore 61 Lakh",
+       "~1 Crore 8 Lakh", "~17 Crore 98 Lakh", "~2 Crore 89 Lakh", "~21 Crore 21 Lakh",
+       "~26 Lakh 82 Hazar", "~3 Crore 15 Lakh", "~3 Crore 21 Lakh", "~3 Crore 29 Lakh",
+       "~3 Lakh 20 Hazar", "~34 Crore 66 Lakh", "~4 Crore 67 Lakh", "~45 Hazar",
+       "~5 Crore 33 Lakh", "~5 Crore 5 Lakh", "~6 Arab 21 Crore", "~85 Lakh 18 Hazar",
+       "~9 Lakh 13 Hazar"]
+
+  - reason: not-a-tag-case-number
+    note: Already carried by the court-case reference, and normalized there (§6.3).
+    values: ["081-CR-0098", "081-CR-0111"]
+
+  - reason: duplicates-an-existing-structured-field
+    note: >-
+      `Corruption` restates case_type, which is already its own facet. `CIAA` is the
+      filer in 53 of 82 cases and `Special Court`/`Supreme Court` are the venue — all
+      three come from the court-case reference and discriminate almost nothing as
+      facets. 110 of the 462 live assignments, removed with no loss.
+    values: ["Corruption", "Corruption Allegation", "CIAA", "Special Court", "Supreme Court"]
+
+  - reason: named-person-or-organisation
+    note: >-
+      Named bodies and people already exist as entity relations (§6.4); duplicating
+      them as free text is how NITC/nphl/sashikanta jha ended up in the tag field.
+      Naming an individual in a tag also implies a finding of guilt the tag field has
+      no business asserting. Where an institution name implied a domain unambiguously
+      it was aliased there instead (nphl -> health, NTC -> telecommunications); these
+      carry no such signal.
+    values: ["K.P. Sharma Oli", "Prime Minister of Nepal", "sashikanta jha", "झलक शर्मा पौडेल",
+             "RSP", "Giribandhu", "Pashupati Jalahari", "Kathmandu Valley Development Authority",
+             "महालेखा परीक्षक", "ICISD"]
+
+  - reason: editorial-or-too-vague
+    note: >-
+      `Unsubstantiated Claim` and `Stalled Investigation` are judgements, not
+      classifications — the latter wants a case-status field, which this vocabulary
+      does not model. `Civil Servant(s)` describes the accused's role and is carried
+      by entity relations.
+    values: ["Unsubstantiated Claim", "Stalled Investigation", "Political Corruption",
+             "national issue", "Irregular Amount", "Bagmati Mayor Involvement",
+             "Maoist Combatants", "Peace Process", "Civil Servant", "Civil Servants"]
+
+  - reason: below-district-granularity-or-ambiguous
+    note: >-
+      `baluwatar` is genuinely ambiguous — the Kathmandu locality of the Lalita Niwas
+      case, or a locality inside Damak; its case is the Damak land case, so neither
+      reading is safe. `माछापाेखरी` is an unresolvable pond/locality name.
+    values: ["baluwatar", "माछापाेखरी"]
