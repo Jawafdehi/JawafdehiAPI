@@ -15,9 +15,11 @@ What each event captures:
   (consent-gated to ~a quarter of humans) which only sees a fraction of traffic.
 * **result quality** — the total hit count, a ``zero_result`` flag (the single
   most actionable gap signal — a real query the corpus/analyzers could not
-  answer), the per-type counts (which index satisfied the demand), and the top
-  hit's type/score on the first page (a coarse "was the best answer strong"
-  signal, and the join target for click-through analysis).
+  answer), a ``did_you_mean`` flag saying whether that miss was recoverable by a
+  spelling suggestion (the two together give design §18's did-you-mean RATE), the
+  per-type counts (which index satisfied the demand), and the top hit's type/score
+  on the first page (a coarse "was the best answer strong" signal, and the join
+  target for click-through analysis).
 * **latency** — wall-clock time of the OpenSearch call, so slow queries surface.
 
 Privacy: NO user identity is recorded — no id, IP, user-agent, session, or
@@ -114,6 +116,11 @@ def build_search_event(
         # The key gap signal: a real query the corpus/analyzers could not answer.
         # A browse (no query term) that returns nothing is NOT a zero-result miss.
         "zero_result": has_query and count == 0,
+        # Whether that miss was recoverable: did the suggester offer a correction
+        # for the empty state (design §18 wants the did-you-mean RATE, i.e. this
+        # over ``zero_result``). A flag, not the text — the suggestion is derived
+        # from ``q_normalized``, which is already captured above.
+        "did_you_mean": bool(response.get("did_you_mean")),
         "counts_by_type": response.get("counts") or {},
         "returned": len(results),
         "took_ms": round(took_ms, 1),

@@ -134,6 +134,70 @@ def test_search_api_envelope_carries_next_cursor_key():
 
 
 @pytest.mark.django_db
+def test_search_api_envelope_carries_did_you_mean_key():
+    """Always present (same contract as ``next_cursor``), null when there is
+    nothing to suggest — so the SPA reads it without probing the shape."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "x"})
+    body = resp.json()
+    assert "did_you_mean" in body
+    assert body["did_you_mean"] is None
+
+
+@pytest.mark.django_db
+def test_search_api_suggests_a_spelling_for_a_zero_result_query():
+    """The end of the audit's dead end: a misspelled romanization used to return
+    "No archive records found" with nowhere to go."""
+    client = MagicMock()
+    client.search.return_value = {
+        "hits": {"total": {"value": 0}, "hits": []},
+        "aggregations": {},
+        "suggest": {
+            "title_translit": [
+                {
+                    "text": "coruption",
+                    "offset": 0,
+                    "length": 9,
+                    "options": [{"text": "corruption", "score": 0.9, "freq": 12}],
+                }
+            ],
+            "keywords.text": [
+                {"text": "coruption", "offset": 0, "length": 9, "options": []}
+            ],
+        },
+    }
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "coruption"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 0
+    assert body["did_you_mean"] == "corruption"
+    # Requested on the SAME OpenSearch call — one round trip, not two.
+    assert "suggest" in client.search.call_args.kwargs["body"]
+
+
+@pytest.mark.django_db
+def test_search_api_fuzzes_a_roman_query_but_leaves_a_case_number_exact():
+    """The mechanism reaches the wire for an eligible query and is invisible for
+    an identifier, where an edit would change WHICH record is meant."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        APIClient().get("/api/search/", {"q": "coruption"})
+        fuzzy_body = client.search.call_args.kwargs["body"]
+        APIClient().get("/api/search/", {"q": "082-CR-0154"})
+        exact_body = client.search.call_args.kwargs["body"]
+    routes = fuzzy_body["query"]["bool"]["must"][0]["bool"]["should"]
+    assert routes[1]["multi_match"]["fuzziness"] == "AUTO:4,8"
+    assert "suggest" in fuzzy_body
+    # The case-number search keeps the pre-fuzzy shape exactly.
+    assert "multi_match" in exact_body["query"]["bool"]["must"][0]
+    assert "suggest" not in exact_body
+
+
+@pytest.mark.django_db
 def test_search_api_400_on_bad_cursor():
     client = MagicMock()
     client.search.return_value = _canned()

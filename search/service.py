@@ -95,6 +95,77 @@ QUERY_FIELDS: list[str] = [
 PHRASE_FIELDS: list[str] = ["title_ne", "title_en", "title_translit"]
 PHRASE_BOOST = 5.0
 
+# ── Bounded fuzzy matching (design §10) ─────────────────────────────────────────
+#
+# Romanized Nepali has no fixed spelling, so a near-miss query (``coruption``,
+# ``baluwatar``) matched nothing at all and dead-ended on the empty state. This is
+# a DAMPED LAST-RESORT recall route for exactly that, never a general matching
+# strategy: it rides as a second ``should`` beside the exact recall clause, and
+# ``FUZZY_BOOST`` keeps whatever it drags in below every correctly-spelled match.
+#
+# Fields mirror the exact route's relative weighting (title > keywords > body) by
+# reusing the SAME boost constants, so re-tuning one route cannot silently desync
+# the other. Two deliberate differences from ``_weighted_query_fields``:
+#
+#   * ``title_ne`` is EXCLUDED. Fuzziness is Levenshtein over analyzed terms, and
+#     a Roman token is never within two edits of a Devanagari one — the clause
+#     would cost expansions and match nothing. (Devanagari fuzziness is out of
+#     scope per design §10; it keeps normalization + the translit bridge.)
+#   * no ``lang`` re-weighting. Re-ranking WITHIN a route that is already damped
+#     below every exact match buys nothing.
+FUZZY_FIELDS: list[str] = [
+    f"title_en^{_TITLE_EN_BOOST:g}",
+    f"title_translit^{_TITLE_TRANSLIT_BOOST:g}",
+    f"keywords.text^{_KEYWORDS_BOOST:g}",
+    f"body^{_BODY_BOOST:g}",
+]
+
+# Below ``_BODY_BOOST`` (the weakest exact field) and far below ``PHRASE_BOOST``,
+# so design §10's "a fuzzy match must never outrank an exact one" holds by
+# construction rather than by hope. BM25 cannot make that a HARD guarantee — this
+# is the knob, and ``test_fuzzy_boost_stays_below_every_exact_weight`` is the
+# watchdog.
+FUZZY_BOOST = 0.3
+
+# ``AUTO:4,8`` — under 4 chars exact, 4–7 one edit, 8+ two edits. Two is the
+# ceiling design §10 allows; raising it makes results junky (at 3 edits
+# ``deuba``/``duba``-class collisions arrive faster than real corrections).
+FUZZINESS = "AUTO:4,8"
+
+# The first character must match. Cheaper (it prunes the term-dictionary walk) and
+# markedly less noisy — most genuine romanization slips are interior.
+FUZZY_PREFIX_LENGTH = 1
+
+# Eligibility (design §10): Roman script, at least four characters, no
+# identifiers/case numbers/numerics, nothing denylisted. The denylist ships EMPTY
+# on purpose — it is meant to be populated from the zero-result analytics stream
+# (``search/analytics.py``), measured rather than guessed.
+FUZZY_MIN_TOKEN_LENGTH = 4
+FUZZY_DENYLIST: frozenset[str] = frozenset()
+
+# ── Did-you-mean suggestions (design §11) ───────────────────────────────────────
+#
+# A ``term`` suggester riding on the SAME request as the search — no second round
+# trip — over the two fields whose vocabulary is worth suggesting from:
+#
+#   * ``title_translit`` — unstemmed ASCII romanizations of every indexed title.
+#   * ``keywords.text``  — curated tags, i.e. design §11's "approved aliases"
+#     (and improving as the ``case_tags`` vocabulary lands).
+#
+# NOT ``title_en``: it is Porter-stemmed, so its term dictionary holds ``corrupt``
+# and it would suggest that for ``coruption``. NOT ``body``: OCR garbage is exactly
+# the vocabulary a suggestion must not come from.
+SUGGEST_FIELDS: tuple[str, ...] = ("title_translit", "keywords.text")
+
+# ``missing`` mode only suggests for terms absent from the index, which makes the
+# suggester near-free for a well-spelled query. ``size: 1`` because design §11
+# asks for at most one primary suggestion; the rest mirror the fuzzy bounds above.
+SUGGEST_MODE = "missing"
+SUGGEST_MAX_EDITS = 2
+SUGGEST_PREFIX_LENGTH = 1
+SUGGEST_MIN_WORD_LENGTH = 4
+SUGGEST_SIZE = 1
+
 # When ``lang`` narrows to one script, multiply that script's title boost so
 # same-language matches rank first WITHOUT excluding the other (cross-script
 # recall via the translit bridge is preserved — this is a re-rank, not a filter).
@@ -402,6 +473,85 @@ def _weighted_query_fields(lang: str) -> list[str]:
     ]
 
 
+def fuzzy_eligible_tokens(q: str | None) -> list[str]:
+    """The query tokens bounded fuzzy matching may be applied to (design §10).
+
+    Splits the SAME :func:`normalize_query` the analytics stream aggregates on (NFC
+    + trim + lowercase + whitespace-collapse), then keeps a token only when every
+    character is an ASCII letter, it is at least :data:`FUZZY_MIN_TOKEN_LENGTH`
+    long, and it is not denylisted.
+
+    That one ASCII-letters test delivers four of design §10's five exclusions at
+    once, which is why there is no separate identifier/numeric detector here:
+    Devanagari fails ``isascii``, and a case number (``082-CR-0154``), a bare year
+    (``2024``) and any other identifier all fail ``isalpha`` on their digits and
+    separators. A mixed query keeps only its eligible tokens — the ineligible ones
+    are still matched exactly by the recall clause, they just never get fuzzed.
+
+    Returns ``[]`` for a browse, a pure-Devanagari query or a bare identifier,
+    which is the signal ``build_query`` uses to emit today's DSL untouched.
+    """
+    tokens: list[str] = []
+    for token in normalize_query(q).split():
+        if len(token) < FUZZY_MIN_TOKEN_LENGTH:
+            continue
+        if not (token.isascii() and token.isalpha()):
+            continue
+        if token in FUZZY_DENYLIST:
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _fuzzy_clause(tokens: list[str]) -> dict[str, Any]:
+    """The damped fuzzy recall ``multi_match`` for the eligible tokens.
+
+    Only the ELIGIBLE tokens are queried, not the raw ``q``: passing the whole
+    string back would re-admit the Devanagari/identifier terms that eligibility
+    just excluded, and ``fuzziness`` applies per term.
+
+    ``most_fields`` (not ``cross_fields``) because cross_fields silently DROPS
+    fuzziness — see ``docs/shared/research/opensearch-bilingual-nepali.md`` §5.
+    """
+    return {
+        "multi_match": {
+            "query": " ".join(tokens),
+            "fields": FUZZY_FIELDS,
+            "type": "most_fields",
+            "operator": "or",
+            "fuzziness": FUZZINESS,
+            "prefix_length": FUZZY_PREFIX_LENGTH,
+            "boost": FUZZY_BOOST,
+        }
+    }
+
+
+def _suggest_block(tokens: list[str]) -> dict[str, Any]:
+    """The ``suggest`` request block feeding ``did_you_mean`` (design §11).
+
+    One ``term`` entry per :data:`SUGGEST_FIELDS`, both over the same ``text`` (the
+    eligible tokens). Entries are keyed by their field name so the response parser
+    needs no separate name→field map.
+
+    No ``collate`` in v1: the suggestion vocabulary comes from fields the query
+    already searches, so a suggested query is guaranteed at least one hit and there
+    is nothing to verify a candidate against.
+    """
+    block: dict[str, Any] = {"text": " ".join(tokens)}
+    for field in SUGGEST_FIELDS:
+        block[field] = {
+            "term": {
+                "field": field,
+                "suggest_mode": SUGGEST_MODE,
+                "max_edits": SUGGEST_MAX_EDITS,
+                "prefix_length": SUGGEST_PREFIX_LENGTH,
+                "min_word_length": SUGGEST_MIN_WORD_LENGTH,
+                "size": SUGGEST_SIZE,
+            }
+        }
+    return block
+
+
 def _indices_boost() -> list[dict[str, float]]:
     """Per-index weight list (``indices_boost``) from :data:`TYPE_BOOSTS`.
 
@@ -441,7 +591,13 @@ def build_query(
        :data:`PHRASE_BOOST` when the query terms appear adjacently in a title, so
        exact/near-exact name matches float above scattered-term body matches;
     3. ``indices_boost`` (:data:`TYPE_BOOSTS`) nudging primary editorial records
-       (cases/entities) above raw materials at near-equal textual score.
+       (cases/entities) above raw materials at near-equal textual score;
+    4. for a query carrying at least one fuzzy-ELIGIBLE token (design §10 — see
+       :func:`fuzzy_eligible_tokens`), a second, :data:`FUZZY_BOOST`-damped recall
+       route beside (1) inside a satisfied-by-either nested bool, so a misspelled
+       romanization still matches. A ``suggest`` block rides along on the same
+       request to populate ``did_you_mean`` (design §11). Both are omitted
+       entirely when no token is eligible.
 
     Paging: a deterministic :data:`SORT_SPEC` (score desc, ``iri`` asc tiebreaker)
     is ALWAYS applied so results are stable and cursorable. When ``search_after``
@@ -487,21 +643,43 @@ def build_query(
     # type selection, sort and paging still apply (list/page the corpus with no
     # search term). An empty multi_match would match nothing, so we must branch.
     has_query = bool(q and q.strip())
-    # Hoisted out of the branch below so browse and query modes share one shape.
-    must_clauses: list[dict[str, Any]] = (
-        [
+    # Which of the query's tokens bounded fuzziness may touch (design §10).
+    # Computed ONCE — the fuzzy recall clause and the did-you-mean suggester below
+    # are gated on the same list, so they can never disagree about eligibility.
+    fuzzy_tokens = fuzzy_eligible_tokens(q) if has_query else []
+    exact_recall_clause: dict[str, Any] = {
+        "multi_match": {
+            "query": q,
+            "fields": _weighted_query_fields(lang),
+            "type": "most_fields",
+            "operator": "or",
+        }
+    }
+    # Resolved here rather than inside ``bool_query`` below so all three modes —
+    # browse, plain query, fuzzy-eligible query — share ONE bool shape.
+    must_clauses: list[dict[str, Any]]
+    if not has_query:
+        must_clauses = [{"match_all": {}}]
+    elif fuzzy_tokens:
+        # A nested bool INSIDE ``must``, not a top-level ``should``: a pure
+        # misspelling matches neither the exact recall clause nor the phrase
+        # clause, and a top-level should cannot rescue an unsatisfied must — the
+        # query would still return nothing, which is the whole bug. Wrapping the
+        # two routes in one satisfied-by-either clause is what makes ``coruption``
+        # reach ``corruption`` at all.
+        must_clauses = [
             {
-                "multi_match": {
-                    "query": q,
-                    "fields": _weighted_query_fields(lang),
-                    "type": "most_fields",
-                    "operator": "or",
+                "bool": {
+                    "should": [exact_recall_clause, _fuzzy_clause(fuzzy_tokens)],
+                    "minimum_should_match": 1,
                 }
             }
         ]
-        if has_query
-        else [{"match_all": {}}]
-    )
+    else:
+        # No eligible token — Devanagari, a case number, a browse. The emitted DSL
+        # is byte-identical to the pre-fuzzy one, deliberately: the mechanism must
+        # be invisible on every query it cannot help.
+        must_clauses = [exact_recall_clause]
     # ONE query shape for both modes. Hoisting ``must_clauses`` above already
     # absorbed the difference that used to justify a branch — ``match_all`` in
     # browse mode, ``multi_match`` with a term — so ``must`` and ``filter`` are now
@@ -644,6 +822,17 @@ def build_query(
         },
         "aggs": aggs,
     }
+
+    # Did-you-mean vocabulary lookup (design §11), on the SAME request — no extra
+    # round trip, and ``suggest_mode: missing`` makes it near-free when the query is
+    # spelled correctly. Gated on the same eligibility as the fuzzy route above, so
+    # a Devanagari or identifier query carries no ``suggest`` key at all.
+    #
+    # It is requested unconditionally for an eligible query rather than only for a
+    # zero-hit one — whether the response USES it is decided in
+    # ``SearchService.search``, which is the only place the hit count is known.
+    if fuzzy_tokens:
+        body["suggest"] = _suggest_block(fuzzy_tokens)
 
     indices_boost = _indices_boost()
     if indices_boost:
@@ -830,6 +1019,60 @@ def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
+def _did_you_mean_from_suggest(q: str, suggest: Any) -> str | None:
+    """A single corrected query string from the ``term`` suggester, or ``None``.
+
+    Per misspelled token, take the best-scoring option across BOTH
+    :data:`SUGGEST_FIELDS` entries (a curated tag and a title romanization compete
+    on merit rather than on which entry was declared first), then rebuild the
+    query with those substitutions applied.
+
+    Rebuilt from ``normalize_query(q).split()``, NOT from the eligible tokens: a
+    mixed query must keep the terms the suggester never looked at. ``bhrastachar
+    2081`` suggesting ``bhrashtacar`` becomes ``bhrashtacar 2081``, not a bare
+    ``bhrashtacar`` that quietly widens what the reader asked for.
+
+    ``None`` when nothing was suggested, when the rebuilt string equals the input
+    (a suggestion identical to the query is not a suggestion), or when the block is
+    absent/malformed — parsing is defensive at every level because this rides on
+    the happy path of a successful search and must never turn one into a 500.
+    """
+    if not isinstance(suggest, dict):
+        return None
+    # token -> (score, replacement). Only the best-scoring option per token wins.
+    best: dict[str, tuple[float, str]] = {}
+    for entries in suggest.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            token = entry.get("text")
+            options = entry.get("options")
+            if not isinstance(token, str) or not isinstance(options, list):
+                continue
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                replacement = option.get("text")
+                if not isinstance(replacement, str) or not replacement:
+                    continue
+                raw_score = option.get("score")
+                score = float(raw_score) if isinstance(raw_score, (int, float)) else 0.0
+                current = best.get(token)
+                if current is None or score > current[0]:
+                    best[token] = (score, replacement)
+    if not best:
+        return None
+    normalized = normalize_query(q)
+    suggestion = " ".join(
+        best[token][1] if token in best else token for token in normalized.split()
+    )
+    if not suggestion or suggestion == normalized:
+        return None
+    return suggestion
+
+
 def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Range-filter EXTENT from the ``global`` extent agg, keyed by request param
     prefix (``bigo`` covers ``bigo_min``/``bigo_max``).
@@ -910,6 +1153,11 @@ class SearchService:
           ``page`` is ignored; the response carries a ``next_cursor`` (null on the
           last page) to fetch the following page.
 
+        The envelope also carries ``did_you_mean``: a spelling suggestion for the
+        empty state, non-null only when a real query returned zero hits and the
+        suggester (requested on the same OpenSearch call by :func:`build_query`)
+        offered a correction. Always present, never applied automatically.
+
         Raises :class:`SearchUnavailable` if the cluster can't be reached (→ 503)
         and :class:`SearchError` on a bad cursor / over-deep offset (→ 400).
         """
@@ -965,6 +1213,18 @@ class SearchService:
             if last_sort:
                 next_cursor = encode_cursor(last_sort)
 
+        # Did-you-mean (design §11): offered ONLY when a real query returned
+        # nothing, so a suggestion never argues with results the reader can already
+        # see, and never rewrites the search on its own. The KEY is always present
+        # (like ``next_cursor``) so a client can read it without probing the shape.
+        #
+        # Design §11 also allows triggering on "only weak matches"; that half is
+        # deferred — there is no agreed weakness threshold yet, and the zero-result
+        # case is the whole of the measured gap.
+        did_you_mean: str | None = None
+        if q and q.strip() and count == 0:
+            did_you_mean = _did_you_mean_from_suggest(q, response.get("suggest"))
+
         return {
             "query": q,
             "normalized_query": normalize_query(q),
@@ -980,4 +1240,8 @@ class SearchService:
             "extents": extents,
             "results": results,
             "next_cursor": next_cursor,
+            # Null unless a real query returned zero hits AND the suggester found a
+            # correction. Never applied automatically — the client re-searches only
+            # if the reader picks it.
+            "did_you_mean": did_you_mean,
         }
