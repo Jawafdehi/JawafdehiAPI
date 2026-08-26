@@ -20,6 +20,11 @@ from cases.models import Case, CaseState, CaseType
 
 pytestmark = pytest.mark.django_db
 
+# The shipped case_tags/curation.yml names 34 real corpus slugs. These tests build
+# their own two-case worlds, so the default path would (correctly) fail the slug
+# check on every one of them — point it somewhere that does not exist instead.
+NO_CURATION = "case_tags/tests/__no_such_curation__.yml"
+
 
 @pytest.fixture(autouse=True)
 def vocabulary() -> None:
@@ -75,14 +80,14 @@ def _curation(tmp_path: pathlib.Path, cases: list[dict[str, object]]) -> str:
 class TestRebuild:
     def test_maps_raw_values_and_drops_retired_and_unknown(self) -> None:
         case = _case("c1", ["Land Management", "CIAA", "Some Nonsense"])
-        call_command("rebuild_case_tags", apply=True)
+        call_command("rebuild_case_tags", apply=True, curation=NO_CURATION)
         case.refresh_from_db()
         assert case.tags == ["land"]
 
     def test_snapshots_the_original(self) -> None:
         original = ["Land Management", "CIAA"]
         case = _case("c1", list(original))
-        call_command("rebuild_case_tags", apply=True)
+        call_command("rebuild_case_tags", apply=True, curation=NO_CURATION)
         case.refresh_from_db()
         assert case.tags_source == original
 
@@ -90,7 +95,7 @@ class TestRebuild:
         """Two raw values collapsing to one tag must not produce a duplicate, and the
         order has to be deterministic — a caseworker PATCH asserts exact equality."""
         case = _case("c1", ["Land Grab", "Local Government", "Land Scandel"])
-        call_command("rebuild_case_tags", apply=True)
+        call_command("rebuild_case_tags", apply=True, curation=NO_CURATION)
         case.refresh_from_db()
         assert case.tags == ["land-grab", "local-government"]
 
@@ -98,11 +103,11 @@ class TestRebuild:
         """Re-running is how it is deployed. The second run reads ``tags_source``,
         not the ids the first run wrote, so the answer cannot drift."""
         case = _case("c1", ["Land Management", "CIAA"])
-        call_command("rebuild_case_tags", apply=True)
+        call_command("rebuild_case_tags", apply=True, curation=NO_CURATION)
         case.refresh_from_db()
         first_tags, first_source = case.tags, case.tags_source
 
-        call_command("rebuild_case_tags", apply=True)
+        call_command("rebuild_case_tags", apply=True, curation=NO_CURATION)
         case.refresh_from_db()
         assert case.tags == first_tags
         assert case.tags_source == first_source
@@ -111,15 +116,15 @@ class TestRebuild:
         """If the second run snapshotted the canonical ids over the original free
         text, the rollback path would be gone and the change irreversible."""
         case = _case("c1", ["Land Management"])
-        call_command("rebuild_case_tags", apply=True)
-        call_command("rebuild_case_tags", apply=True)
+        call_command("rebuild_case_tags", apply=True, curation=NO_CURATION)
+        call_command("rebuild_case_tags", apply=True, curation=NO_CURATION)
         case.refresh_from_db()
         assert case.tags_source == ["Land Management"]
         assert case.tags == ["land"]
 
     def test_dry_run_writes_nothing(self) -> None:
         case = _case("c1", ["Land Management"])
-        call_command("rebuild_case_tags")
+        call_command("rebuild_case_tags", curation=NO_CURATION)
         case.refresh_from_db()
         assert case.tags == ["Land Management"]
         assert case.tags_source is None
@@ -128,7 +133,7 @@ class TestRebuild:
         """Roll-up belongs at index time. Writing `land` onto the case record would
         make a land-grab case display a tag nobody chose."""
         case = _case("c1", ["Land Grab"])
-        call_command("rebuild_case_tags", apply=True)
+        call_command("rebuild_case_tags", apply=True, curation=NO_CURATION)
         case.refresh_from_db()
         assert case.tags == ["land-grab"]
 
@@ -182,10 +187,53 @@ class TestCuration:
         with pytest.raises(CommandError, match="no `why`"):
             call_command("rebuild_case_tags", apply=True, curation=path)
 
+    def test_remove_accepts_a_deprecated_tag(self, tmp_path: pathlib.Path) -> None:
+        """Clearing a retired tag off a case is the main thing `remove` is FOR —
+        `kathmandu-valley` is deprecated and sits on nine live cases. Requiring an
+        active tag here would make the deprecation unfixable."""
+        Tag.objects.create(
+            id="kathmandu-valley",
+            label_ne="काठमाडौं उपत्यका",
+            label_en="Kathmandu Valley",
+            status=TagStatus.DEPRECATED,
+        )
+        TagAlias.objects.create(key="kathmandu valley", tag_id="kathmandu-valley")
+        case = _case("c1", ["Kathmandu Valley", "Local Government"])
+        path = _curation(
+            tmp_path,
+            [
+                {
+                    "slug": "c1",
+                    "add": ["lalitpur"],
+                    "remove": ["kathmandu-valley"],
+                    "why": "not an official unit; the title names ललितपुर",
+                }
+            ],
+        )
+        call_command("rebuild_case_tags", apply=True, curation=path)
+        case.refresh_from_db()
+        assert case.tags == ["local-government", "lalitpur"]
+
+    def test_add_rejects_a_deprecated_tag(self, tmp_path: pathlib.Path) -> None:
+        """The reverse asymmetry: assigning a tag that is being retired puts the case
+        on a filter that is going away."""
+        Tag.objects.create(
+            id="kathmandu-valley",
+            label_ne="काठमाडौं उपत्यका",
+            label_en="Kathmandu Valley",
+            status=TagStatus.DEPRECATED,
+        )
+        _case("c1", [])
+        path = _curation(
+            tmp_path, [{"slug": "c1", "add": ["kathmandu-valley"], "why": "x"}]
+        )
+        with pytest.raises(CommandError, match="not an active tag"):
+            call_command("rebuild_case_tags", apply=True, curation=path)
+
     def test_unknown_tag_is_an_error(self, tmp_path: pathlib.Path) -> None:
         _case("c1", [])
         path = _curation(tmp_path, [{"slug": "c1", "add": ["not-a-tag"], "why": "x"}])
-        with pytest.raises(CommandError, match="not an active tag"):
+        with pytest.raises(CommandError, match="not a tag at all|not an active tag"):
             call_command("rebuild_case_tags", apply=True, curation=path)
 
     def test_unresolvable_slug_fails_loudly(self, tmp_path: pathlib.Path) -> None:
