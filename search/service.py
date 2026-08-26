@@ -148,14 +148,23 @@ FUZZY_DENYLIST: frozenset[str] = frozenset()
 # A ``term`` suggester riding on the SAME request as the search — no second round
 # trip — over the two fields whose vocabulary is worth suggesting from:
 #
-#   * ``title_translit`` — unstemmed ASCII romanizations of every indexed title.
 #   * ``keywords.text``  — curated tags, i.e. design §11's "approved aliases"
 #     (and improving as the ``case_tags`` vocabulary lands).
+#   * ``title_translit`` — unstemmed ASCII romanizations of every indexed title.
 #
 # NOT ``title_en``: it is Porter-stemmed, so its term dictionary holds ``corrupt``
 # and it would suggest that for ``coruption``. NOT ``body``: OCR garbage is exactly
 # the vocabulary a suggestion must not come from.
-SUGGEST_FIELDS: tuple[str, ...] = ("title_translit", "keywords.text")
+#
+# ORDER IS AUTHORITY, most-trusted first — ``_suggested_replacements`` breaks ties
+# by position here before it looks at score. Measured against the live corpus:
+# ``melamchee`` draws ``melamchi`` (score 0.75) from the curated tags and
+# ``maramchee`` (0.78) from the romanizations, so ranking on score alone surfaces
+# the junk. ``title_translit`` holds ONE machine transliteration per title, which
+# makes its near-neighbours mostly noise (``maramchee``, ``melamchhi``,
+# ``melamchil`` — all ``freq: 1``); a human-curated tag is the better answer
+# whenever the two disagree.
+SUGGEST_FIELDS: tuple[str, ...] = ("keywords.text", "title_translit")
 
 # ``missing`` mode only suggests for terms absent from the index, which makes the
 # suggester near-free for a well-spelled query. ``size: 1`` because design §11
@@ -1019,31 +1028,41 @@ def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
-def _did_you_mean_from_suggest(q: str, suggest: Any) -> str | None:
-    """A single corrected query string from the ``term`` suggester, or ``None``.
+def _suggested_replacements(suggest: Any) -> dict[str, str]:
+    """Best correction per misspelled token: ``{typed_token: replacement}``.
 
-    Per misspelled token, take the best-scoring option across BOTH
-    :data:`SUGGEST_FIELDS` entries (a curated tag and a title romanization compete
-    on merit rather than on which entry was declared first), then rebuild the
-    query with those substitutions applied.
+    Candidates are ranked by **(field authority, score, freq)** — authority FIRST,
+    which is the whole point. Authority is position in :data:`SUGGEST_FIELDS`, and
+    ranking on score alone measurably surfaces junk: for ``melamchee`` the
+    machine-romanized ``title_translit`` offers ``maramchee`` at 0.78 while the
+    curated ``keywords.text`` offers ``melamchi`` at 0.75. Frequency cannot rescue
+    that either — every candidate there comes back ``freq: 1`` — so a
+    noisy-channel ``score x log(freq)`` prior still picks the wrong one. Design
+    §11 says to suggest from indexed titles AND "approved aliases"; when the two
+    disagree, the human-curated vocabulary is the one to trust.
 
-    Rebuilt from ``normalize_query(q).split()``, NOT from the eligible tokens: a
-    mixed query must keep the terms the suggester never looked at. ``bhrastachar
-    2081`` suggesting ``bhrashtacar`` becomes ``bhrashtacar 2081``, not a bare
-    ``bhrashtacar`` that quietly widens what the reader asked for.
+    ``freq`` stays in the key as a last tiebreak: within one field it is a genuine
+    ``P(correction)`` prior, so the commoner of two equally-close candidates wins.
 
-    ``None`` when nothing was suggested, when the rebuilt string equals the input
-    (a suggestion identical to the query is not a suggestion), or when the block is
-    absent/malformed — parsing is defensive at every level because this rides on
-    the happy path of a successful search and must never turn one into a 500.
+    Empty dict when nothing was suggested or the block is absent/malformed —
+    parsing is defensive at every level because this rides on the happy path of a
+    successful search and must never turn one into a 500.
     """
     if not isinstance(suggest, dict):
-        return None
-    # token -> (score, replacement). Only the best-scoring option per token wins.
-    best: dict[str, tuple[float, str]] = {}
-    for entries in suggest.values():
+        return {}
+    # token -> (rank_key, replacement); the highest rank_key per token wins.
+    best: dict[str, tuple[tuple[float, float, float], str]] = {}
+    for name, entries in suggest.items():
         if not isinstance(entries, list):
             continue
+        # Negated so that position 0 (most authoritative) sorts HIGHEST. An entry
+        # under an unknown key ranks below every declared field rather than
+        # winning by accident.
+        authority = (
+            -float(SUGGEST_FIELDS.index(name))
+            if name in SUGGEST_FIELDS
+            else -float(len(SUGGEST_FIELDS))
+        )
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -1059,18 +1078,46 @@ def _did_you_mean_from_suggest(q: str, suggest: Any) -> str | None:
                     continue
                 raw_score = option.get("score")
                 score = float(raw_score) if isinstance(raw_score, (int, float)) else 0.0
+                raw_freq = option.get("freq")
+                freq = float(raw_freq) if isinstance(raw_freq, (int, float)) else 0.0
+                rank = (authority, score, freq)
                 current = best.get(token)
-                if current is None or score > current[0]:
-                    best[token] = (score, replacement)
-    if not best:
+                if current is None or rank > current[0]:
+                    best[token] = (rank, replacement)
+    return {token: replacement for token, (_rank, replacement) in best.items()}
+
+
+def _apply_replacements(q: str, replacements: dict[str, str]) -> str | None:
+    """The corrected query string, or ``None`` if there is nothing to offer.
+
+    Rebuilt from ``normalize_query(q).split()``, NOT from the eligible tokens: a
+    mixed query must keep the terms the suggester never looked at. ``bhrastachar
+    2081`` suggesting ``bhrashtacar`` becomes ``bhrashtacar 2081``, not a bare
+    ``bhrashtacar`` that quietly widens what the reader asked for.
+
+    ``None`` when nothing was suggested or when the rebuilt string equals the
+    input — a suggestion identical to the query is not a suggestion.
+    """
+    if not replacements:
         return None
     normalized = normalize_query(q)
     suggestion = " ".join(
-        best[token][1] if token in best else token for token in normalized.split()
+        replacements.get(token, token) for token in normalized.split()
     )
     if not suggestion or suggestion == normalized:
         return None
     return suggestion
+
+
+def _did_you_mean_from_suggest(q: str, suggest: Any) -> str | None:
+    """A single corrected query string from a raw ``suggest`` block, or ``None``.
+
+    The two halves composed: rank the candidates, then substitute. Kept as one
+    entry point because ``SearchService.search`` needs the ranked replacements on
+    their own — the weak-match gate is a question about WHICH tokens were
+    corrected, not about the final string.
+    """
+    return _apply_replacements(q, _suggested_replacements(suggest))
 
 
 def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1153,10 +1200,12 @@ class SearchService:
           ``page`` is ignored; the response carries a ``next_cursor`` (null on the
           last page) to fetch the following page.
 
-        The envelope also carries ``did_you_mean``: a spelling suggestion for the
-        empty state, non-null only when a real query returned zero hits and the
-        suggester (requested on the same OpenSearch call by :func:`build_query`)
-        offered a correction. Always present, never applied automatically.
+        The envelope also carries ``did_you_mean``: a spelling suggestion from the
+        suggester requested on the same OpenSearch call by :func:`build_query`.
+        Non-null when that suggester offered a correction AND either the search
+        returned nothing or every fuzzy-eligible token was corrected (design §11's
+        two triggers — see the gate below). Always present, never applied
+        automatically.
 
         Raises :class:`SearchUnavailable` if the cluster can't be reached (→ 503)
         and :class:`SearchError` on a bad cursor / over-deep offset (→ 400).
@@ -1213,17 +1262,43 @@ class SearchService:
             if last_sort:
                 next_cursor = encode_cursor(last_sort)
 
-        # Did-you-mean (design §11): offered ONLY when a real query returned
-        # nothing, so a suggestion never argues with results the reader can already
-        # see, and never rewrites the search on its own. The KEY is always present
-        # (like ``next_cursor``) so a client can read it without probing the shape.
+        # Did-you-mean (design §11): offered on EITHER of the spec's two triggers —
+        # ``result_count == 0``, or a result set holding "only weak matches". The
+        # key is always present (like ``next_cursor``) so a client can read it
+        # without probing the shape, and the suggestion is never applied for the
+        # reader: it is an offer, not a rewrite.
         #
-        # Design §11 also allows triggering on "only weak matches"; that half is
-        # deferred — there is no agreed weakness threshold yet, and the zero-result
-        # case is the whole of the measured gap.
+        # The weak-match half is not a score threshold (BM25 scores are not
+        # comparable across queries, so any cutoff would be a magic number). It
+        # falls out of ``suggest_mode: "missing"`` for free: the suggester only
+        # returns options for terms ABSENT from the index, so a corrected token is
+        # provably not matched exactly by anything in the result set. When EVERY
+        # eligible token was corrected, the whole result set is fuzzy — there is no
+        # exact anchor — and that is precisely "only weak matches".
+        #
+        # This half matters more than the zero-result half, and gating on
+        # ``count == 0`` alone made the feature nearly unreachable: bounded fuzzy
+        # matching now rescues most misspellings, so the queries that most need a
+        # spelling hint (``coruption`` -> 199 hits, ``bhrastachar`` -> 1507) stopped
+        # qualifying the moment §10 landed. The two features would have
+        # cannibalized each other.
+        #
+        # Requiring ALL eligible tokens to be corrected is what keeps it quiet on a
+        # healthy search: in ``corruption coruption`` the first token IS indexed, so
+        # the results have a real anchor and no suggestion is offered. The known
+        # rough edge is a mixed-script query — an ineligible Devanagari token can
+        # anchor strong results while the lone Roman token still triggers the offer.
+        # That reads as OpenSearch's own "including results for" behaviour rather
+        # than as a wrong answer, so v1 accepts it.
         did_you_mean: str | None = None
-        if q and q.strip() and count == 0:
-            did_you_mean = _did_you_mean_from_suggest(q, response.get("suggest"))
+        if q and q.strip():
+            replacements = _suggested_replacements(response.get("suggest"))
+            eligible = fuzzy_eligible_tokens(q)
+            only_weak_matches = bool(eligible) and all(
+                token in replacements for token in eligible
+            )
+            if count == 0 or only_weak_matches:
+                did_you_mean = _apply_replacements(q, replacements)
 
         return {
             "query": q,
@@ -1240,8 +1315,8 @@ class SearchService:
             "extents": extents,
             "results": results,
             "next_cursor": next_cursor,
-            # Null unless a real query returned zero hits AND the suggester found a
-            # correction. Never applied automatically — the client re-searches only
-            # if the reader picks it.
+            # Null unless the suggester found a correction AND the result set is
+            # empty or wholly fuzzy. Never applied automatically — the client
+            # re-searches only if the reader picks it.
             "did_you_mean": did_you_mean,
         }

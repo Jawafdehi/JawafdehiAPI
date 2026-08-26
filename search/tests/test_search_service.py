@@ -1320,10 +1320,10 @@ def test_build_query_requests_a_term_suggester_for_an_eligible_query():
 def test_suggester_avoids_the_stemmed_title_and_the_ocr_body():
     """``title_en`` is Porter-stemmed, so its term dictionary holds ``corrupt`` —
     it would suggest THAT for ``coruption``. ``body`` is OCR text, which is exactly
-    the vocabulary a suggestion must not be drawn from. What is left is the
-    unstemmed romanizations of every title plus the curated tags (design §11's
-    "approved aliases")."""
-    assert svc.SUGGEST_FIELDS == ("title_translit", "keywords.text")
+    the vocabulary a suggestion must not be drawn from. What is left is the curated
+    tags (design §11's "approved aliases") plus the unstemmed title romanizations,
+    in that order — see the authority test below."""
+    assert svc.SUGGEST_FIELDS == ("keywords.text", "title_translit")
 
 
 def test_suggester_text_is_the_eligible_tokens_only():
@@ -1362,22 +1362,67 @@ def test_did_you_mean_substitutes_the_suggested_token():
     assert out["query"] == "coruption"
 
 
-def test_did_you_mean_takes_the_best_scoring_option_across_both_fields():
-    """A curated tag and a title romanization compete on merit, not on which entry
-    OpenSearch happened to return first."""
-    client = MagicMock()
-    client.search.return_value = _zero_hit_response(
-        {
-            "title_translit": _term_suggestion(
-                "bhrastachar", options=[{"text": "bhrashtacar", "score": 0.61}]
-            ),
-            "keywords.text": _term_suggestion(
-                "bhrastachar", options=[{"text": "bhrastaachar", "score": 0.95}]
-            ),
-        }
-    )
-    out = SearchService(client=client).search(q="bhrastachar")
-    assert out["did_you_mean"] == "bhrastaachar"
+def test_did_you_mean_prefers_the_curated_field_over_a_higher_SCORING_romanization():
+    """The regression that only live data exposed.
+
+    Ranking candidates on score alone picks junk. Measured against the production
+    corpus, ``melamchee`` draws ``melamchi`` (0.75) from the curated
+    ``keywords.text`` and ``maramchee`` (0.78) from the machine-romanized
+    ``title_translit`` — and EVERY candidate comes back ``freq: 1``, so a
+    noisy-channel ``score x log(freq)`` prior still picks the wrong one.
+    ``title_translit`` holds one machine transliteration per title, so its
+    near-neighbours are mostly noise; design §11's "approved aliases" is the
+    tiebreak, and :data:`SUGGEST_FIELDS` order encodes it.
+    """
+    suggest = {
+        "title_translit": _term_suggestion(
+            "melamchee", options=[{"text": "maramchee", "score": 0.78, "freq": 1}]
+        ),
+        "keywords.text": _term_suggestion(
+            "melamchee", options=[{"text": "melamchi", "score": 0.75, "freq": 1}]
+        ),
+    }
+    assert svc._did_you_mean_from_suggest("melamchee", suggest) == "melamchi"
+
+
+def test_did_you_mean_falls_back_to_the_romanization_when_no_tag_matches():
+    """Authority is a tiebreak, not a filter. ``bhrastachar`` has no curated tag
+    within two edits, so the title romanization is the whole of the answer."""
+    suggest = {
+        "keywords.text": _term_suggestion("bhrastachar", options=[]),
+        "title_translit": _term_suggestion(
+            "bhrastachar", options=[{"text": "bhrashtacar", "score": 0.82, "freq": 2771}]
+        ),
+    }
+    assert svc._did_you_mean_from_suggest("bhrastachar", suggest) == "bhrashtacar"
+
+
+def test_did_you_mean_uses_freq_as_the_last_tiebreak_within_one_field():
+    """Within a single field, ``freq`` IS a genuine ``P(correction)`` prior — the
+    commoner of two equally-close candidates is the better guess."""
+    suggest = {
+        "keywords.text": _term_suggestion(
+            "corupt",
+            options=[
+                {"text": "corrupz", "score": 0.8, "freq": 2},
+                {"text": "corrupt", "score": 0.8, "freq": 900},
+            ],
+        )
+    }
+    assert svc._did_you_mean_from_suggest("corupt", suggest) == "corrupt"
+
+
+def test_did_you_mean_ranks_an_unknown_entry_key_below_every_declared_field():
+    """A suggest entry we did not ask for must not win by accident."""
+    suggest = {
+        "mystery_field": _term_suggestion(
+            "melamchee", options=[{"text": "nonsense", "score": 0.99, "freq": 9999}]
+        ),
+        "keywords.text": _term_suggestion(
+            "melamchee", options=[{"text": "melamchi", "score": 0.1, "freq": 1}]
+        ),
+    }
+    assert svc._did_you_mean_from_suggest("melamchee", suggest) == "melamchi"
 
 
 def test_did_you_mean_keeps_the_tokens_the_suggester_never_looked_at():
@@ -1394,20 +1439,57 @@ def test_did_you_mean_keeps_the_tokens_the_suggester_never_looked_at():
     assert out["did_you_mean"] == "corruption 2081"
 
 
-def test_no_did_you_mean_while_the_search_still_has_hits():
-    """Design §11 gates on ``result_count == 0``: a suggestion must never argue
-    with results the reader can already see."""
+def test_did_you_mean_fires_on_a_wholly_fuzzy_result_set():
+    """Design §11's SECOND trigger — "only weak matches" — and the one that makes
+    the feature reachable at all.
+
+    Gating on ``count == 0`` alone made it nearly dead once §10 landed: bounded
+    fuzzy matching rescues most misspellings, so the queries that most need a
+    spelling hint (``coruption`` finds 199 real records) stopped qualifying. The
+    signal is free — ``suggest_mode: "missing"`` only returns options for terms
+    ABSENT from the index, so a corrected token cannot be matched exactly by
+    anything in the result set.
+    """
     client = MagicMock()
-    response = _canned_response()  # 3 hits
+    response = _canned_response()  # 3 hits — a NON-empty result set
     response["suggest"] = {
-        "title_translit": _term_suggestion(
-            "deuba", options=[{"text": "deuva", "score": 0.9}]
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
         )
     }
     client.search.return_value = response
-    out = SearchService(client=client).search(q="deuba")
+    out = SearchService(client=client).search(q="coruption")
+    assert out["count"] == 3
+    # Results AND a suggestion — the reader keeps the hits and learns the spelling.
+    assert out["did_you_mean"] == "corruption"
+    assert len(out["results"]) == 3
+
+
+def test_no_did_you_mean_when_an_eligible_token_is_really_indexed():
+    """The quiet-on-a-healthy-search guarantee: ALL eligible tokens must have been
+    corrected. Here ``corruption`` is a real indexed term (``missing`` mode returns
+    nothing for it), so the result set has an exact anchor and the suggestion for
+    the neighbouring typo is withheld rather than second-guessing good results."""
+    client = MagicMock()
+    response = _canned_response()  # 3 hits
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        ),
+        # No entry/options for "corruption" — it IS in the index.
+    }
+    client.search.return_value = response
+    out = SearchService(client=client).search(q="corruption coruption")
     assert out["count"] == 3
     assert out["did_you_mean"] is None
+
+
+def test_no_did_you_mean_for_a_correctly_spelled_query_with_hits():
+    """The common case: nothing was missing, so nothing is suggested."""
+    client = MagicMock()
+    response = _canned_response()  # 3 hits, no suggest block at all
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="deuba")["did_you_mean"] is None
 
 
 def test_did_you_mean_is_none_when_nothing_was_suggested():
