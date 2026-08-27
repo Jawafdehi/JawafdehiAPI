@@ -584,6 +584,49 @@ def test_district_facet_agg_holds_every_district_at_once():
     assert body["aggs"]["district"]["terms"]["size"] >= 78
 
 
+# ── facet-value search (facet_q) ────────────────────────────────────────────────
+
+
+def test_facet_include_regex_case_folds_and_escapes():
+    """Cased letters become ``[xX]`` classes (Lucene RegExp has no ``(?i)``);
+    regex operators in user text are escaped to literals."""
+    assert svc._facet_include_regex("ab") == ".*[aA][bB].*"
+    assert svc._facet_include_regex("c++") == ".*[cC]\\+\\+.*"
+    assert svc._facet_include_regex("a|b.c") == ".*[aA]\\|[bB]\\.[cC].*"
+    # Non-operator characters — Devanagari letters, combining vowel signs,
+    # digits, spaces — pass through verbatim.
+    assert svc._facet_include_regex("घुस 1") == ".*घुस 1.*"
+
+
+def test_build_query_facet_q_narrows_only_the_named_facets_buckets():
+    """The include regex lands on the named agg alone — the query, filters, and
+    every other facet's agg are byte-identical to a facet_q-less build."""
+    plain = build_query(q="x")
+    body = build_query(q="x", facet_queries={"tags": "घुस"})
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*घुस.*"
+    assert body["query"] == plain["query"]
+    for param in svc.FACET_FIELDS:
+        if param == "tags":
+            continue
+        assert body["aggs"][param] == plain["aggs"][param], param
+    # Still ordered by count (the terms-agg default): no order override emitted.
+    assert "order" not in body["aggs"]["tags"]["terms"]
+    # And the size cap is unchanged — include filters BEFORE the size cut, so
+    # the match runs over the full term set, not the default top-N slice.
+    assert body["aggs"]["tags"]["terms"]["size"] == svc.DEFAULT_FACET_AGG_SIZE
+
+
+def test_build_query_facet_q_is_repeatable_across_facets():
+    body = build_query(
+        q="x", facet_queries={"tags": "कर", "case_type": "corr"}
+    )
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*कर.*"
+    assert (
+        body["aggs"]["case_type"]["terms"]["include"]
+        == ".*[cC][oO][rR][rR].*"
+    )
+
+
 def test_every_facet_field_has_an_aggregation():
     """The aggs are GENERATED from FACET_FIELDS, so a registry entry can never
     exist without its aggregation — this pins that refactor (the aggs used to be

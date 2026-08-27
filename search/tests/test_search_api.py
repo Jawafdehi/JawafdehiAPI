@@ -377,6 +377,55 @@ def test_search_api_threads_district_and_province_through():
     assert {"terms": {"court_province": ["Bagmati"]}} in clauses
 
 
+@pytest.mark.django_db
+def test_search_api_threads_facet_q_through():
+    """?facet_q=<facet>:<text> adds an include regex to that facet's agg only,
+    leaving the query itself untouched."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "facet_q": "tags:घुस"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*घुस.*"
+    assert "include" not in body["aggs"]["case_type"]["terms"]
+    assert body["query"]["bool"]["filter"] == []
+
+
+@pytest.mark.django_db
+def test_search_api_facet_q_text_may_contain_colons():
+    """Only the FIRST colon separates facet from text."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "facet_q": "tags:a:b"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*[aA]:[bB].*"
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_malformed_facet_q():
+    """Bad input is a client error, never a query sent on to OpenSearch."""
+    for value in ("tagsx", "tags:", ":घुस", "bogus:x"):
+        resp = APIClient().get("/api/search/", {"q": "x", "facet_q": value})
+        assert resp.status_code == 400, value
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_duplicate_facet_q_facet():
+    """Two facet_q for one facet is ambiguous — refuse rather than pick one."""
+    resp = APIClient().get(
+        "/api/search/",
+        [("q", "x"), ("facet_q", "tags:a"), ("facet_q", "tags:b")],
+    )
+    assert resp.status_code == 400
+
+
 def test_every_facet_field_has_an_agg_and_a_serializer_field():
     """``FACET_FIELDS`` and the serializer have to grow together — the view's
     ``active_filters`` comprehension reads ``validated_data``, and DRF discards

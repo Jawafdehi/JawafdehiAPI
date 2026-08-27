@@ -106,6 +106,32 @@ class SearchQuerySerializer(serializers.Serializer):
     province = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
+    # Facet-VALUE search: ``facet_q=<facet>:<text>`` recomputes only the named
+    # facet's bucket list to the buckets whose key contains <text> (matched over
+    # the full aggregation), without affecting results, count, or any other
+    # facet. Repeatable — once per facet. Parsed to {facet: text} below.
+    facet_q = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
+
+    def validate_facet_q(self, value):
+        queries: dict[str, str] = {}
+        for item in value:
+            facet, sep, text = item.partition(":")
+            if not sep or not facet or not text:
+                raise serializers.ValidationError(
+                    f"facet_q must be '<facet>:<text>', got {item!r}."
+                )
+            if facet not in FACET_FIELDS:
+                raise serializers.ValidationError(
+                    f"unknown facet {facet!r}; one of {sorted(FACET_FIELDS)}."
+                )
+            if facet in queries:
+                raise serializers.ValidationError(
+                    f"facet_q given twice for {facet!r}."
+                )
+            queries[facet] = text
+        return queries
     # बिगो (alleged embezzled amount, whole NPR) range bounds — the first NON
     # exact-match refine control. Inclusive on both sides (gte/lte).
     #
@@ -320,6 +346,22 @@ class SearchQuerySerializer(serializers.Serializer):
                 "returning nothing."
             ),
         ),
+        OpenApiParameter(
+            "facet_q",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Facet-value search: '<facet>:<text>' (e.g. 'tags:\u0918\u0941\u0938') "
+                "recomputes ONLY the named facet's bucket list to the top "
+                "buckets whose key contains <text>, case-insensitively, matched "
+                "over the full aggregation rather than the default top-50 "
+                "slice. Results, count, and every other facet are unaffected. "
+                "Repeatable, once per facet; <text> is treated literally "
+                "(regex-escaped server-side)."
+            ),
+        ),
         OpenApiParameter("page", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
         OpenApiParameter(
             "page_size", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
@@ -383,6 +425,7 @@ class UnifiedSearchView(APIView):
                 sort=data["sort"],
                 filters=active_filters,
                 ranges=active_ranges,
+                facet_queries=data["facet_q"] or None,
                 page=data["page"],
                 page_size=data["page_size"],
                 cursor=data.get("cursor"),

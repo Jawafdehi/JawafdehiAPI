@@ -201,6 +201,34 @@ FACET_AGG_SIZES: dict[str, int] = {
     "province": 10,
 }
 
+
+# Lucene RegExp operator characters (the core set plus every optional-operator
+# character, which OpenSearch may enable via flags) — escaped in facet_q text.
+_LUCENE_REGEXP_SPECIAL = frozenset('.?+*|{}[]()"\\#@&<>~')
+
+
+def _facet_include_regex(text: str) -> str:
+    """A Lucene-RegExp ``include`` pattern matching bucket keys that CONTAIN
+    ``text``, case-insensitively — for the ``facet_q`` facet-value search.
+
+    Lucene RegExp (what a ``terms`` agg's ``include`` speaks) has no ``(?i)``
+    flag, so case-insensitivity is spelled out as a ``[xX]`` class per cased
+    letter. Only the Lucene operator characters are backslash-escaped — so user
+    text can never smuggle ``.*``/``|``/``{}`` into the aggregation — and every
+    other character (Devanagari letters AND combining vowel signs included)
+    passes through verbatim.
+    """
+    parts: list[str] = []
+    for ch in text:
+        lower, upper = ch.lower(), ch.upper()
+        if lower != upper and len(lower) == 1 and len(upper) == 1:
+            parts.append(f"[{lower}{upper}]")
+        elif ch in _LUCENE_REGEXP_SPECIAL:
+            parts.append("\\" + ch)
+        else:
+            parts.append(ch)
+    return ".*" + "".join(parts) + ".*"
+
 # RANGE filters: the request param name -> (indexed field, the ``range`` bound it
 # sets). The second filter KIND, alongside the exact-match ``terms`` facets above
 # — every filter before this one was exact-match, and there was no range path in
@@ -341,6 +369,7 @@ def build_query(
     sort: str = SORT_RELEVANCE,
     filters: dict[str, list[str]] | None = None,
     ranges: dict[str, Any] | None = None,
+    facet_queries: dict[str, str] | None = None,
     page: int = 1,
     page_size: int = 10,
     search_after: list[Any] | None = None,
@@ -375,6 +404,11 @@ def build_query(
     Per-type facet counts come from a ``_index`` terms aggregation (one index per
     type — exact regardless of ``source_app``, which is not 1:1 with type since
     ngm owns both materials and courtcases).
+
+    ``facet_queries`` ({facet param: text}) is a facet-VALUE search: it adds a
+    case-insensitive ``include`` regex to the named facet's terms agg so only
+    buckets whose key contains the text come back — the query, hits, count and
+    every other facet are untouched.
     """
     page = max(1, page)
     page_size = max(1, min(page_size, MAX_PAGE_SIZE))
@@ -470,6 +504,15 @@ def build_query(
         aggs[param] = {
             "terms": {"field": field, "size": FACET_AGG_SIZES.get(param, DEFAULT_FACET_AGG_SIZE)}
         }
+        # ``facet_q``: recompute ONLY this facet's bucket list to the top buckets
+        # whose key contains the text. ``include`` filters the term set BEFORE
+        # the size cut, so the match runs over the full aggregation, not the
+        # default top-N slice — and it touches nothing but this one agg: the
+        # query, count, hits and every other facet are computed exactly as
+        # without it. Ordering stays the terms-agg default (count desc).
+        text = (facet_queries or {}).get(param)
+        if text:
+            aggs[param]["terms"]["include"] = _facet_include_regex(text)
 
     # बिगो extent: the smallest and largest recorded amount, how many documents
     # carry one at all — the three numbers the SPA's slider ladder is cut from.
@@ -777,6 +820,7 @@ class SearchService:
         sort: str = SORT_RELEVANCE,
         filters: dict[str, list[str]] | None = None,
         ranges: dict[str, Any] | None = None,
+        facet_queries: dict[str, str] | None = None,
         page: int = 1,
         page_size: int = 10,
         cursor: str | None = None,
@@ -814,6 +858,7 @@ class SearchService:
             sort=sort,
             filters=filters,
             ranges=ranges,
+            facet_queries=facet_queries,
             page=page,
             page_size=page_size,
             search_after=search_after,
