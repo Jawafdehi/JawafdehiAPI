@@ -95,11 +95,12 @@ class TestOpenAPIDocumentation:
         assert "search" in search["tags"]
         parameter_names = [parameter["name"] for parameter in search["parameters"]]
         # The unified-search params: q (optional → empty = browse), type/lang
-        # filters, sort mode, exact-match refine facets
-        # (entity_type/case_type/tags/status), the बिगो amount RANGE bounds
-        # (bigo_min/bigo_max — the one non-exact-match refine control), offset
-        # paging (page/page_size), and the deep-paging cursor (search_after).
-        # ``status`` is the coarse case-lifecycle refine facet.
+        # filters, sort mode, exact-match refine facets (entity_type/case_type/
+        # tags/status, plus the court-case-scoped court_level/district/province),
+        # the RANGE bounds (bigo_min/bigo_max and date_from/date_to), the
+        # facet-value search (facet_q), offset paging (page/page_size), and the
+        # deep-paging cursor (search_after). ``status`` is the coarse
+        # case-lifecycle refine facet.
         assert set(parameter_names) == {
             "q",
             "type",
@@ -109,8 +110,14 @@ class TestOpenAPIDocumentation:
             "case_type",
             "tags",
             "status",
+            "court_level",
+            "district",
+            "province",
             "bigo_min",
             "bigo_max",
+            "date_from",
+            "date_to",
+            "facet_q",
             "page",
             "page_size",
             "cursor",

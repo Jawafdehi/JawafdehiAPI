@@ -139,8 +139,14 @@ class SearchControlPlaneTool(_ControlPlaneTool):
         "case_type",
         "tags",
         "status",
+        "court_level",
+        "district",
+        "province",
         "bigo_min",
         "bigo_max",
+        "date_from",
+        "date_to",
+        "facet_q",
         "page",
         "page_size",
         "cursor",
@@ -199,6 +205,30 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     "type": "array",
                     "items": {"type": "string"},
                 },
+                # Court tier facet. COURTCASE-ONLY: only NGM court cases carry a
+                # level, so any value excludes every other result type — pair
+                # with type: ["courtcase"]. Static enum, contract-tested against
+                # the serializer's ChoiceField.
+                "court_level": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["district", "high", "supreme", "special"],
+                    },
+                    "uniqueItems": True,
+                },
+                # Court seat geography facets (courtcase-only, same pairing
+                # caveat). Values are the canonical English names the response's
+                # facets.district / facets.province buckets return; "NATIONAL"
+                # selects supreme + special-court cases.
+                "district": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "province": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
                 # बिगो (alleged embezzled amount, whole NPR) range bounds,
                 # inclusive. CASE-ONLY: no entity/material/court-case document
                 # carries an amount, so either bound also excludes every non-case
@@ -207,6 +237,19 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                 # call cannot come back as a 400 from the API's clamp.
                 "bigo_min": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1},
                 "bigo_max": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1},
+                # Gregorian date-range bounds (inclusive) over the shared record
+                # date. Entities carry no date, so either bound excludes every
+                # entity result.
+                "date_from": {"type": "string", "format": "date"},
+                "date_to": {"type": "string", "format": "date"},
+                # Facet-value search: "<facet>:<text>" recomputes only that
+                # facet's bucket list to buckets containing <text> (case-
+                # insensitive, over the full aggregation) without affecting
+                # results, count, or other facets. Repeatable, once per facet.
+                "facet_q": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
                 "page": {"type": "integer", "minimum": 1, "default": 1},
                 "page_size": {
                     "type": "integer",
