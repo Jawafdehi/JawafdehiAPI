@@ -554,6 +554,27 @@ def test_build_query_includes_status_facet_and_filter():
     assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
 
 
+def test_build_query_includes_court_level_facet_and_filter():
+    """``court_level`` is the promoted court tier (district/high/supreme/special)
+    on NGM court-case docs."""
+    assert svc.FACET_FIELDS["court_level"] == "court_level"
+    body = build_query(q="x", filters={"court_level": ["supreme", "special"]})
+    assert body["aggs"]["court_level"]["terms"]["field"] == "court_level"
+    assert {"terms": {"court_level": ["supreme", "special"]}} in body["query"]["bool"][
+        "filter"
+    ]
+
+
+def test_every_facet_field_has_an_aggregation():
+    """The aggs are GENERATED from FACET_FIELDS, so a registry entry can never
+    exist without its aggregation — this pins that refactor (the aggs used to be
+    hand-listed, and a missing one served an empty facet list forever, silently)."""
+    body = build_query(q="x")
+    for param, field in svc.FACET_FIELDS.items():
+        assert body["aggs"][param]["terms"]["field"] == field, param
+        assert body["aggs"][param]["terms"]["size"] >= 1
+
+
 # ── range filters (बिगो amount) ────────────────────────────────────────────────
 #
 # The SECOND filter kind. Everything above is exact-match ``terms``; these emit a

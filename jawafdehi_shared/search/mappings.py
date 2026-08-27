@@ -213,6 +213,14 @@ def common_mappings() -> dict[str, Any]:
                 # internal scraper enrichment flag pending/enriched/failed). Only
                 # Jawafdehi cases set this; other doc types leave it absent.
                 "case_status": {"type": "keyword"},
+                # Court tier for NGM court cases (district/high/supreme/special),
+                # lower-cased from ``Court.court_type`` at index time. Same
+                # single-type pattern as ``case_status`` above: only court-case
+                # docs set it. Same rebuild caveat as ``weight`` below: an
+                # existing index only gains the mapping on the next --rebuild
+                # generation, until which the facet returns zero buckets and a
+                # filter matches nothing (safe degradation, no errors).
+                "court_level": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get
                 # this declared type — an existing one picks the field up by dynamic

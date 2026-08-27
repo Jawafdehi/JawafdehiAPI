@@ -334,6 +334,44 @@ def test_search_api_equal_date_bounds_are_allowed():
     ]
 
 
+@pytest.mark.django_db
+def test_search_api_threads_court_level_through():
+    """?court_level reaches the DSL as a terms filter on the promoted field."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "", "type": "courtcase", "court_level": "supreme"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert {"terms": {"court_level": ["supreme"]}} in body["query"]["bool"]["filter"]
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_unknown_court_level():
+    """The vocabulary is CLOSED (district/high/supreme/special): a typo is a 400,
+    not a confident empty page."""
+    resp = APIClient().get("/api/search/", {"q": "x", "court_level": "municipal"})
+    assert resp.status_code == 400
+
+
+def test_every_facet_field_has_an_agg_and_a_serializer_field():
+    """``FACET_FIELDS`` and the serializer have to grow together — the view's
+    ``active_filters`` comprehension reads ``validated_data``, and DRF discards
+    any query param the serializer does not declare. The mirror of
+    ``test_every_range_field_is_declared_on_the_query_serializer`` below.
+    """
+    from search.service import FACET_FIELDS
+    from search.views import SearchQuerySerializer
+
+    undeclared = set(FACET_FIELDS) - set(SearchQuerySerializer().get_fields())
+    assert not undeclared, (
+        "these FACET_FIELDS params reach no serializer field, so the API will "
+        f"accept and silently ignore them: {sorted(undeclared)}"
+    )
+
+
 def test_every_range_field_is_declared_on_the_query_serializer():
     """``RANGE_FIELDS`` and the serializer have to grow together.
 

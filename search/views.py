@@ -27,6 +27,7 @@ from .analytics import emit_search_click_event, emit_search_event
 from .service import (
     ALL_SORTS,
     ALL_TYPES,
+    FACET_FIELDS,
     MAX_PAGE_SIZE,
     RANGE_FIELDS,
     SORT_RELEVANCE,
@@ -84,6 +85,16 @@ class SearchQuerySerializer(serializers.Serializer):
     # which holds NGM's scraper enrichment flag).
     status = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
+    # Court tier refine facet (NGM court cases only). A CLOSED vocabulary —
+    # unlike the free-text facets above — so a typo is a 400, not a confident
+    # empty page (the same reasoning as the bigo bounds' strict validation).
+    court_level = serializers.ListField(
+        child=serializers.ChoiceField(
+            choices=["district", "high", "supreme", "special"]
+        ),
+        required=False,
+        default=list,
     )
     # बिगो (alleged embezzled amount, whole NPR) range bounds — the first NON
     # exact-match refine control. Inclusive on both sides (gte/lte).
@@ -209,6 +220,21 @@ class SearchQuerySerializer(serializers.Serializer):
             ),
         ),
         OpenApiParameter(
+            "court_level",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            enum=["district", "high", "supreme", "special"],
+            description=(
+                "Refine facet: court tier. COURT-CASE-SCOPED: only NGM court "
+                "cases carry a level, so any value also excludes every entity, "
+                "material and Jawafdehi-case result — pair it with "
+                "?type=courtcase. Inert until the court-case index is rebuilt "
+                "(reindex_courtcases --rebuild) after this field shipped."
+            ),
+        ),
+        OpenApiParameter(
             "bigo_min",
             OpenApiTypes.INT,
             OpenApiParameter.QUERY,
@@ -285,13 +311,14 @@ class UnifiedSearchView(APIView):
         serializer = SearchQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        filters = {
-            "entity_type": data["entity_type"],
-            "case_type": data["case_type"],
-            "tags": data["tags"],
-            "status": data["status"],
+        # Driven off FACET_FIELDS (params share serializer field names), so a new
+        # facet reaches the service without editing a hand-list here — the same
+        # registry discipline as ``active_ranges`` below, with the same limit:
+        # a FACET_FIELDS entry still needs its serializer field above, pinned by
+        # ``test_every_facet_field_has_an_agg_and_a_serializer_field``.
+        active_filters = {
+            param: values for param in FACET_FIELDS if (values := data[param])
         }
-        active_filters = {k: v for k, v in filters.items() if v}
         # Range bounds are kept SEPARATE from the exact-match facets: they are a
         # different clause kind (``range`` vs ``terms``) and a different value shape
         # (a scalar, not a list). Emptiness is ``is None`` — a truthiness test would

@@ -71,6 +71,7 @@ def test_common_mappings_has_expected_fields():
         "date",
         "date_bs",
         "weight",
+        "court_level",
         "raw",
     }
     assert expected <= set(props)
@@ -85,6 +86,12 @@ def test_weight_is_a_sortable_numeric():
 def test_case_type_is_keyword():
     props = common_mappings()["properties"]
     assert props["case_type"]["type"] == "keyword"
+
+
+def test_court_level_is_keyword():
+    """An analyzed text mapping would tokenize and break exact terms filtering."""
+    props = common_mappings()["properties"]
+    assert props["court_level"]["type"] == "keyword"
 
 
 def test_title_fields_have_sortable_keyword_subfield():

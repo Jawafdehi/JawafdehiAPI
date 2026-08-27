@@ -160,6 +160,15 @@ def build_doc(obj: Any) -> dict[str, Any]:
     if case_type and isinstance(case_type, str):
         doc["case_type"] = case_type.upper()
 
+    # Promote the court tier (district/high/supreme/special) so the unified search
+    # can filter/facet by level. Defensive: pure-shaping tests use bare objects
+    # whose court has no ``court_type``, and scraper stubs create Court rows with
+    # ``court_type=""`` (courts/scraper/base.py) — skip both rather than polluting
+    # the facet with an empty bucket. Lower-cased: one controlled vocabulary.
+    court_type = getattr(getattr(obj, "court", None), "court_type", None)
+    if isinstance(court_type, str) and court_type.strip():
+        doc["court_level"] = court_type.strip().lower()
+
     reg_ad = getattr(obj, "registration_date_ad", None)
     if reg_ad is not None:
         doc["date"] = reg_ad.isoformat() if hasattr(reg_ad, "isoformat") else str(reg_ad)

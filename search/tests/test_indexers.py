@@ -123,7 +123,7 @@ def _courtcase_obj():
         nes_id="https://jawafdehi.org/entity/person/ram-bahadur",
         registration_date_ad=None,
         registration_date_bs="2080-10-01",
-        court=SimpleNamespace(full_name_english="Supreme Court"),
+        court=SimpleNamespace(full_name_english="Supreme Court", court_type="supreme"),
     )
     obj.iri = build_courtcase_iri(obj.court_id, obj.case_number)
     return obj
@@ -153,6 +153,8 @@ def test_courtcase_build_doc_shape_and_title_from_case_number():
     # split into duplicate facet buckets. The verbatim value stays in ``raw``.
     assert doc["case_type"] == "CORRUPTION"
     assert doc["raw"]["case_type"] == "corruption"
+    # Court tier promoted for the unified search's court_level facet.
+    assert doc["court_level"] == "supreme"
 
 
 def test_courtcase_title_en_none_without_english_court_name():
@@ -161,6 +163,31 @@ def test_courtcase_title_en_none_without_english_court_name():
     doc = courtcase_index.build_doc(obj)
     assert doc["title_en"] is None
     assert doc["title_ne"] == "081-CR-0081"
+
+
+def test_courtcase_court_level_absent_for_stub_court():
+    """Scraper stubs create Court rows with ``court_type=""`` — an empty keyword
+    would pollute the facet with a nameless bucket, so the field is dropped."""
+    obj = _courtcase_obj()
+    obj.court = SimpleNamespace(full_name_english=None, court_type="")
+    doc = courtcase_index.build_doc(obj)
+    assert "court_level" not in doc
+
+
+def test_courtcase_court_level_absent_without_court():
+    """Drop the field, never the document (the bigo lesson)."""
+    obj = _courtcase_obj()
+    obj.court = None
+    doc = courtcase_index.build_doc(obj)
+    assert "court_level" not in doc
+
+
+def test_courtcase_court_level_is_lowercased():
+    """One controlled vocabulary — casing variants must not split facet buckets."""
+    obj = _courtcase_obj()
+    obj.court = SimpleNamespace(full_name_english=None, court_type="District")
+    doc = courtcase_index.build_doc(obj)
+    assert doc["court_level"] == "district"
 
 
 # ── case ───────────────────────────────────────────────────────────────────────

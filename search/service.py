@@ -183,7 +183,15 @@ FACET_FIELDS: dict[str, str] = {
     "case_type": "case_type",
     "tags": "keywords",
     "status": "case_status",
+    "court_level": "court_level",
 }
+
+# Bucket count for each facet's ``terms`` aggregation. Most vocabularies fit
+# comfortably under the default; an entry here overrides it for the ones that
+# don't (e.g. a district facet must hold all 77 districts at once — at the
+# default, real buckets would be silently pushed out and their counts zeroed).
+DEFAULT_FACET_AGG_SIZE = 50
+FACET_AGG_SIZES: dict[str, int] = {}
 
 # RANGE filters: the request param name -> (indexed field, the ``range`` bound it
 # sets). The second filter KIND, alongside the exact-match ``terms`` facets above
@@ -442,11 +450,18 @@ def build_query(
         # generations. At exactly len(ALL_TYPES) the extra bucket would push
         # a real one out and silently zero that type's facet count.
         "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
-        "entity_type": {"terms": {"field": "type", "size": 50}},
-        "case_type": {"terms": {"field": "case_type", "size": 50}},
-        "tags": {"terms": {"field": "keywords", "size": 50}},
-        "status": {"terms": {"field": "case_status", "size": 50}},
     }
+    # One ``terms`` agg per exposed refine facet, GENERATED from FACET_FIELDS so a
+    # facet param can never exist without its aggregation. These used to be
+    # hand-listed alongside ``by_index``, which left a trap: a FACET_FIELDS entry
+    # with no matching agg here validated fine, filtered fine, and then served an
+    # empty ``facets.<param>`` list forever — no error, no log. Driving the aggs
+    # off the registry closes that by construction (``by_index`` and the extent
+    # agg below stay hand-written: they are not FACET_FIELDS facets).
+    for param, field in FACET_FIELDS.items():
+        aggs[param] = {
+            "terms": {"field": field, "size": FACET_AGG_SIZES.get(param, DEFAULT_FACET_AGG_SIZE)}
+        }
 
     # बिगो extent: the smallest and largest recorded amount, how many documents
     # carry one at all — the three numbers the SPA's slider ladder is cut from.
@@ -632,7 +647,7 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     extra: dict[str, Any] = {}
     # ``weight`` is here so a ``sort=featured`` response explains its own order;
     # absent from docs indexed before the field existed, hence the None guard.
-    for key in ("date", "date_bs", "type", "weight"):
+    for key in ("date", "date_bs", "type", "weight", "court_level"):
         if source.get(key) is not None:
             extra[key] = source[key]
     raw = source.get("raw") or {}
