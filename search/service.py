@@ -199,17 +199,24 @@ FACET_FIELDS: dict[str, str] = {
 # facet above (also case-only, also applied globally) and callers should pair a
 # bound with ``?type=case``; the API view's OpenAPI description says so outright.
 #
-# Adding ``date_from``/``date_to`` is two entries here — ``("date", "gte")`` and
-# ``("date", "lte")`` — PLUS the two matching fields on ``SearchQuerySerializer``.
-# Both halves, always: the view reads bounds out of ``validated_data``, and DRF
-# discards any param the serializer does not declare, so an entry added here
-# alone is accepted and then silently ignored — no clause, no 400, no log.
+# ``date_from``/``date_to`` bound the shared Gregorian ``date`` field — exactly
+# the two entries the field-agnostic mechanism was built for, PLUS the two
+# matching ``DateField``s on ``SearchQuerySerializer``. Both halves, always: the
+# view reads bounds out of ``validated_data``, and DRF discards any param the
+# serializer does not declare, so an entry added here alone is accepted and then
+# silently ignored — no clause, no 400, no log.
 # ``test_every_range_field_is_declared_on_the_query_serializer`` fails if the two
 # ever drift. The clause-building itself is genuinely field-agnostic, which is
 # the point: a second range mechanism never gets built.
+#
+# ``date`` scoping: entities never index a ``date`` (and a court case with no
+# ``registration_date_ad`` carries none either), so a date bound excludes those
+# docs — the same shape as ``bigo``, documented on the OpenAPI params.
 RANGE_FIELDS: dict[str, tuple[str, str]] = {
     "bigo_min": ("bigo", "gte"),
     "bigo_max": ("bigo", "lte"),
+    "date_from": ("date", "gte"),
+    "date_to": ("date", "lte"),
 }
 
 

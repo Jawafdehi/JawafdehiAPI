@@ -272,6 +272,68 @@ def test_search_api_equal_bigo_bounds_are_allowed():
     assert clauses == [{"range": {"bigo": {"gte": 500, "lte": 500}}}]
 
 
+@pytest.mark.django_db
+def test_search_api_passes_date_bounds_as_iso_strings():
+    """?date_from/?date_to reach the DSL as ONE range clause of ISO STRINGS.
+
+    Strings, not ``datetime.date`` objects: the serializer re-serializes after
+    validating, so the OpenSearch body (and the analytics event) stay pure JSON
+    regardless of any one consumer's encoder.
+    """
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {"q": "", "date_from": "2020-01-01", "date_to": "2021-12-31"},
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert clauses == [
+        {"range": {"date": {"gte": "2020-01-01", "lte": "2021-12-31"}}}
+    ]
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_malformed_dates():
+    """Bad input is a client error, never a query sent on to OpenSearch."""
+    for params in (
+        {"date_from": "abc"},
+        {"date_to": "2024-13-01"},
+        {"date_from": "2024-02-30"},
+        {"date_from": "01/02/2024"},
+    ):
+        resp = APIClient().get("/api/search/", {"q": "x", **params})
+        assert resp.status_code == 400, params
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_inverted_date_interval():
+    """from > to matches nothing — a 400 beats a confident empty page."""
+    resp = APIClient().get(
+        "/api/search/", {"q": "x", "date_from": "2022-01-01", "date_to": "2020-01-01"}
+    )
+    assert resp.status_code == 400
+    assert "date_from" in json.dumps(resp.json())
+
+
+@pytest.mark.django_db
+def test_search_api_equal_date_bounds_are_allowed():
+    """from == to is a single-day range, not an inverted interval."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {"q": "x", "date_from": "2020-06-15", "date_to": "2020-06-15"},
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert clauses == [
+        {"range": {"date": {"gte": "2020-06-15", "lte": "2020-06-15"}}}
+    ]
+
+
 def test_every_range_field_is_declared_on_the_query_serializer():
     """``RANGE_FIELDS`` and the serializer have to grow together.
 

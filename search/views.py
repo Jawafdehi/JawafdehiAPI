@@ -99,6 +99,12 @@ class SearchQuerySerializer(serializers.Serializer):
     # empty result set.
     bigo_min = serializers.IntegerField(required=False, min_value=0, max_value=2**63 - 1)
     bigo_max = serializers.IntegerField(required=False, min_value=0, max_value=2**63 - 1)
+    # Gregorian date-range bounds over the shared indexed ``date`` field —
+    # inclusive on both sides, like the बिगो pair above, and with the same
+    # no-default rule: an absent bound must stay ABSENT from validated_data.
+    # ``DateField`` supplies the 400 on garbage ("2024-13-45", "abc").
+    date_from = serializers.DateField(required=False)
+    date_to = serializers.DateField(required=False)
 
     def validate(self, attrs):
         # An inverted interval matches nothing. Say so with a 400 rather than
@@ -108,6 +114,20 @@ class SearchQuerySerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 "bigo_min must be less than or equal to bigo_max."
             )
+        # Same rule for the date interval (comparison happens while the values are
+        # still ``datetime.date`` objects, so it is calendar-correct).
+        start, end = attrs.get("date_from"), attrs.get("date_to")
+        if start is not None and end is not None and start > end:
+            raise serializers.ValidationError(
+                "date_from must be on or before date_to."
+            )
+        # Re-serialize to ISO strings: everything downstream expects pure-JSON
+        # validated_data — build_query's DSL is contract-tested by byte-stable
+        # dict equality, and the analytics event dict is JSON-logged. A
+        # ``datetime.date`` would be at the mercy of each consumer's serializer.
+        for key in ("date_from", "date_to"):
+            if attrs.get(key) is not None:
+                attrs[key] = attrs[key].isoformat()
         return attrs
 
     page = serializers.IntegerField(required=False, min_value=1, default=1)
@@ -210,6 +230,32 @@ class SearchQuerySerializer(serializers.Serializer):
                 "Refine filter: maximum बिगो in whole NPR (inclusive). Same "
                 "case-scoping caveat as bigo_min. A bigo_min greater than "
                 "bigo_max is rejected with 400 rather than returning nothing."
+            ),
+        ),
+        OpenApiParameter(
+            "date_from",
+            OpenApiTypes.DATE,
+            OpenApiParameter.QUERY,
+            required=False,
+            description=(
+                "Refine filter: earliest record date, Gregorian YYYY-MM-DD "
+                "(inclusive). Filters the shared indexed ``date`` — a case's "
+                "registration date, a material's publication date, a Jawafdehi "
+                "case's start date. Entities carry NO date, so any bound "
+                "excludes every entity result — pair it with ?type=. Documents "
+                "with no recorded date are excluded too."
+            ),
+        ),
+        OpenApiParameter(
+            "date_to",
+            OpenApiTypes.DATE,
+            OpenApiParameter.QUERY,
+            required=False,
+            description=(
+                "Refine filter: latest record date, Gregorian YYYY-MM-DD "
+                "(inclusive). Same entity-scoping caveat as date_from. A "
+                "date_from after date_to is rejected with 400 rather than "
+                "returning nothing."
             ),
         ),
         OpenApiParameter("page", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),

@@ -610,6 +610,46 @@ def test_build_query_ignores_unknown_range_param_and_none_bounds():
     assert body["query"]["bool"]["filter"] == []
 
 
+# ── range filters (date) ────────────────────────────────────────────────────────
+#
+# The bounds the field-agnostic range mechanism was pre-designed for: two more
+# RANGE_FIELDS entries over the shared Gregorian ``date`` field, nothing else.
+
+
+def test_range_fields_map_date_bounds_to_the_shared_date_field():
+    """Both params address the SAME indexed ``date`` field, one bound each."""
+    assert svc.RANGE_FIELDS["date_from"] == ("date", "gte")
+    assert svc.RANGE_FIELDS["date_to"] == ("date", "lte")
+
+
+def test_build_query_date_from_emits_a_gte_range_clause():
+    """A lower bound is inclusive — "from 2020" includes 2020-01-01 itself."""
+    body = build_query(q="x", ranges={"date_from": "2020-01-15"})
+    assert {"range": {"date": {"gte": "2020-01-15"}}} in body["query"]["bool"]["filter"]
+
+
+def test_build_query_merges_date_bounds_into_a_single_range_clause():
+    """One bounded interval on ``date``, exactly like the बिगो pair."""
+    body = build_query(
+        q="x", ranges={"date_from": "2020-01-01", "date_to": "2021-12-31"}
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert clauses == [
+        {"range": {"date": {"gte": "2020-01-01", "lte": "2021-12-31"}}}
+    ]
+
+
+def test_build_query_date_and_bigo_ranges_are_separate_clauses():
+    """Bounds on DIFFERENT fields must not merge — one ``range`` clause per field."""
+    body = build_query(
+        q="x", ranges={"bigo_min": 500, "date_from": "2020-01-01"}
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert {"range": {"bigo": {"gte": 500}}} in clauses
+    assert {"range": {"date": {"gte": "2020-01-01"}}} in clauses
+    assert len(clauses) == 2
+
+
 def test_build_query_keeps_a_zero_lower_bound():
     """``0`` is a real bound. Skipping on falsiness rather than ``is None`` would
     silently drop it and widen the search the user asked to narrow."""
