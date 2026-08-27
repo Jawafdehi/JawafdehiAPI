@@ -184,6 +184,8 @@ FACET_FIELDS: dict[str, str] = {
     "tags": "keywords",
     "status": "case_status",
     "court_level": "court_level",
+    "district": "court_district",
+    "province": "court_province",
 }
 
 # Bucket count for each facet's ``terms`` aggregation. Most vocabularies fit
@@ -191,7 +193,13 @@ FACET_FIELDS: dict[str, str] = {
 # don't (e.g. a district facet must hold all 77 districts at once — at the
 # default, real buckets would be silently pushed out and their counts zeroed).
 DEFAULT_FACET_AGG_SIZE = 50
-FACET_AGG_SIZES: dict[str, int] = {}
+FACET_AGG_SIZES: dict[str, int] = {
+    # 77 districts + the NATIONAL sentinel + headroom; at the default size the
+    # least-frequent districts would be silently pushed out of the facet.
+    "district": 100,
+    # 7 provinces + NATIONAL.
+    "province": 10,
+}
 
 # RANGE filters: the request param name -> (indexed field, the ``range`` bound it
 # sets). The second filter KIND, alongside the exact-match ``terms`` facets above
@@ -647,7 +655,15 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     extra: dict[str, Any] = {}
     # ``weight`` is here so a ``sort=featured`` response explains its own order;
     # absent from docs indexed before the field existed, hence the None guard.
-    for key in ("date", "date_bs", "type", "weight", "court_level"):
+    for key in (
+        "date",
+        "date_bs",
+        "type",
+        "weight",
+        "court_level",
+        "court_district",
+        "court_province",
+    ):
         if source.get(key) is not None:
             extra[key] = source[key]
     raw = source.get("raw") or {}

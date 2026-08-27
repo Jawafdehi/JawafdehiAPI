@@ -356,6 +356,27 @@ def test_search_api_400_on_unknown_court_level():
     assert resp.status_code == 400
 
 
+@pytest.mark.django_db
+def test_search_api_threads_district_and_province_through():
+    """?district/?province reach the DSL as terms filters on the court_* fields."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {
+                "q": "",
+                "type": "courtcase",
+                "district": "Kathmandu",
+                "province": "Bagmati",
+            },
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
+    assert {"terms": {"court_province": ["Bagmati"]}} in clauses
+
+
 def test_every_facet_field_has_an_agg_and_a_serializer_field():
     """``FACET_FIELDS`` and the serializer have to grow together — the view's
     ``active_filters`` comprehension reads ``validated_data``, and DRF discards

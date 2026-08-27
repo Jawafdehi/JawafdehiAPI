@@ -155,6 +155,10 @@ def test_courtcase_build_doc_shape_and_title_from_case_number():
     assert doc["raw"]["case_type"] == "corruption"
     # Court tier promoted for the unified search's court_level facet.
     assert doc["court_level"] == "supreme"
+    # National jurisdiction → the NATIONAL sentinel, so "no location" is a
+    # visible, filterable facet group rather than an absent field.
+    assert doc["court_district"] == "NATIONAL"
+    assert doc["court_province"] == "NATIONAL"
 
 
 def test_courtcase_title_en_none_without_english_court_name():
@@ -188,6 +192,25 @@ def test_courtcase_court_level_is_lowercased():
     obj.court = SimpleNamespace(full_name_english=None, court_type="District")
     doc = courtcase_index.build_doc(obj)
     assert doc["court_level"] == "district"
+
+
+def test_courtcase_district_court_resolves_seat_geography():
+    """A district court's identifier IS its scraper code_name; geography is
+    derived from it alone (no DB access)."""
+    obj = _courtcase_obj()
+    obj.court_id = "achhamdc"
+    doc = courtcase_index.build_doc(obj)
+    assert doc["court_district"] == "Achham"
+    assert doc["court_province"] == "Sudurpashchim"
+
+
+def test_courtcase_unknown_court_indexes_no_location():
+    """Indexing nothing is recoverable; a wrong bucket is a lie the facet serves."""
+    obj = _courtcase_obj()
+    obj.court_id = "atlantisdc"
+    doc = courtcase_index.build_doc(obj)
+    assert "court_district" not in doc
+    assert "court_province" not in doc
 
 
 # ── case ───────────────────────────────────────────────────────────────────────

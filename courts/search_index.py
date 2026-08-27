@@ -29,6 +29,7 @@ from jawafdehi_shared.search.indexing import (
     upsert_doc,
 )
 from jawafdehi_shared.search.opensearch import COURTCASE_INDEX, make_client
+from courts.geography import court_location
 from courts.normalize import is_verdict_sentinel
 
 SOURCE_APP = "ngm"
@@ -168,6 +169,13 @@ def build_doc(obj: Any) -> dict[str, Any]:
     court_type = getattr(getattr(obj, "court", None), "court_type", None)
     if isinstance(court_type, str) and court_type.strip():
         doc["court_level"] = court_type.strip().lower()
+
+    # Court seat geography, derived from the identifier alone (no DB access, so
+    # it works on the bare objects pure-shaping tests use). Unknown identifier →
+    # no fields: indexing nothing is recoverable, a wrong bucket is not.
+    location = court_location(court_id)
+    if location:
+        doc["court_district"], doc["court_province"] = location
 
     reg_ad = getattr(obj, "registration_date_ad", None)
     if reg_ad is not None:

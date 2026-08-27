@@ -96,6 +96,16 @@ class SearchQuerySerializer(serializers.Serializer):
         required=False,
         default=list,
     )
+    # Court seat geography (NGM court cases only). Free-text like ``tags``: the
+    # canonical values are whatever the ``facets.district``/``facets.province``
+    # buckets return (title-case English names, plus the NATIONAL sentinel for
+    # supreme/special-court cases) — a closed 77-way ChoiceField would be brittle.
+    district = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
+    province = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
     # बिगो (alleged embezzled amount, whole NPR) range bounds — the first NON
     # exact-match refine control. Inclusive on both sides (gte/lte).
     #
@@ -232,6 +242,32 @@ class SearchQuerySerializer(serializers.Serializer):
                 "material and Jawafdehi-case result — pair it with "
                 "?type=courtcase. Inert until the court-case index is rebuilt "
                 "(reindex_courtcases --rebuild) after this field shipped."
+            ),
+        ),
+        OpenApiParameter(
+            "district",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Refine facet: the court's seat district. Values are the "
+                "canonical English names returned in facets.district (e.g. "
+                "'Kathmandu'); 'NATIONAL' selects supreme + special-court "
+                "cases (national jurisdiction). COURT-CASE-SCOPED — pair with "
+                "?type=courtcase. Inert until the court-case index is rebuilt."
+            ),
+        ),
+        OpenApiParameter(
+            "province",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Refine facet: the court's province (one of the 7, e.g. "
+                "'Bagmati'), or 'NATIONAL' for supreme + special-court cases. "
+                "Same court-case scoping and rebuild caveat as district."
             ),
         ),
         OpenApiParameter(

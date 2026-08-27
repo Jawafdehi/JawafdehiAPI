@@ -221,6 +221,15 @@ def common_mappings() -> dict[str, Any]:
                 # generation, until which the facet returns zero buckets and a
                 # filter matches nothing (safe degradation, no errors).
                 "court_level": {"type": "keyword"},
+                # Court seat geography for NGM court cases, derived in-repo from
+                # the court identifier (courts/geography.py — there is no DB
+                # column; the courts table is SQLAlchemy-owned). Title-case
+                # English names ("Kathmandu", "Bagmati"); national-jurisdiction
+                # courts (supreme/special) carry the sentinel "NATIONAL" in BOTH
+                # so "no location" stays a visible, filterable group. Same
+                # rebuild caveat as ``court_level``/``weight``.
+                "court_district": {"type": "keyword"},
+                "court_province": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get
                 # this declared type — an existing one picks the field up by dynamic

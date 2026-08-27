@@ -565,6 +565,25 @@ def test_build_query_includes_court_level_facet_and_filter():
     ]
 
 
+def test_build_query_district_and_province_filters_target_court_fields():
+    """The reader-facing params map to the promoted ``court_*`` keywords."""
+    assert svc.FACET_FIELDS["district"] == "court_district"
+    assert svc.FACET_FIELDS["province"] == "court_province"
+    body = build_query(
+        q="x", filters={"district": ["Kathmandu"], "province": ["Bagmati"]}
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
+    assert {"terms": {"court_province": ["Bagmati"]}} in clauses
+
+
+def test_district_facet_agg_holds_every_district_at_once():
+    """77 districts + NATIONAL: at the 50 default, the least-frequent districts
+    would be silently pushed out of the facet."""
+    body = build_query(q="x")
+    assert body["aggs"]["district"]["terms"]["size"] >= 78
+
+
 def test_every_facet_field_has_an_aggregation():
     """The aggs are GENERATED from FACET_FIELDS, so a registry entry can never
     exist without its aggregation — this pins that refactor (the aggs used to be
