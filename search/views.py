@@ -27,9 +27,11 @@ from courts.geography import ALL_COURT_IDENTIFIERS
 
 from .analytics import emit_search_click_event, emit_search_event
 from .service import (
+    ALL_COURT_TYPES,
     ALL_SORTS,
     ALL_TYPES,
     FACET_FIELDS,
+    MAX_FACET_Q_TEXT,
     MAX_PAGE_SIZE,
     RANGE_FIELDS,
     SORT_RELEVANCE,
@@ -105,11 +107,11 @@ class SearchQuerySerializer(serializers.Serializer):
     )
     # Court tier refine facet (NGM court cases only). Also a CLOSED vocabulary,
     # and structurally stable: these are the constitutional tiers, and they are
-    # the only four values ``Court.court_type`` holds.
+    # the only four values ``Court.court_type`` holds. Sourced from
+    # ``ALL_COURT_TYPES`` so this, the OpenAPI enum below and the MCP tool's
+    # schema cannot drift into three different answers.
     court_type = serializers.ListField(
-        child=serializers.ChoiceField(
-            choices=["district", "high", "supreme", "special"]
-        ),
+        child=serializers.ChoiceField(choices=list(ALL_COURT_TYPES)),
         required=False,
         default=list,
     )
@@ -137,6 +139,21 @@ class SearchQuerySerializer(serializers.Serializer):
         queries: dict[str, str] = {}
         for item in value:
             facet, sep, text = item.partition(":")
+            # Strip the TEXT half. DRF's CharField trims the whole ITEM, not the
+            # part after the colon, so the natural ``?facet_q=tags: घुस`` would
+            # otherwise carry a leading space into the include regex
+            # (``.* घुस.*``) and match no bucket at all — a silently empty facet
+            # rather than an error, which is the one outcome this endpoint tries
+            # hardest to avoid.
+            #
+            # Only INTERIOR-leading whitespace can reach here: a trailing-space
+            # item is trimmed by the child field, so whitespace-only text has
+            # already collapsed to ``tags:`` and 400d on the shape check below
+            # before this line runs.
+            #
+            # The FACET half is left strict on purpose: ``?facet_q=tags :x``
+            # already fails loudly, with the legal facet names in the message.
+            text = text.strip()
             if not sep or not facet or not text:
                 raise serializers.ValidationError(
                     f"facet_q must be '<facet>:<text>', got {item!r}."
@@ -148,6 +165,16 @@ class SearchQuerySerializer(serializers.Serializer):
             if facet in queries:
                 raise serializers.ValidationError(
                     f"facet_q given twice for {facet!r}."
+                )
+            # Bound the TEXT, not the whole item: it is the only half interpolated
+            # into the cluster-side ``include`` regex, and it is what the automaton
+            # cost scales with. Unbounded, a long value compiles to a pattern
+            # Lucene refuses to determinize, and the shard error comes back as a
+            # 503 + Sentry outage event rather than the 400 this plainly is.
+            if len(text) > MAX_FACET_Q_TEXT:
+                raise serializers.ValidationError(
+                    f"facet_q text for {facet!r} is {len(text)} characters; "
+                    f"the maximum is {MAX_FACET_Q_TEXT}."
                 )
             queries[facet] = text
         return queries
@@ -300,7 +327,7 @@ class SearchQuerySerializer(serializers.Serializer):
             OpenApiParameter.QUERY,
             required=False,
             many=True,
-            enum=["district", "high", "supreme", "special"],
+            enum=list(ALL_COURT_TYPES),
             description=(
                 "Refine facet: court tier. Same court-case scoping and rebuild "
                 "caveat as court. Note the response's extra.court is the court "
@@ -398,10 +425,12 @@ class SearchQuerySerializer(serializers.Serializer):
                 "Facet-value search: '<facet>:<text>' (e.g. 'tags:\u0918\u0941\u0938') "
                 "recomputes ONLY the named facet's bucket list to the top "
                 "buckets whose key contains <text>, case-insensitively, matched "
-                "over the full aggregation rather than the default top-50 "
-                "slice. Results, count, and every other facet are unaffected. "
+                "over the full aggregation rather than only the buckets that fit "
+                "the facet's own bucket limit. Results, count, and every other "
+                "facet are unaffected. "
                 "Repeatable, once per facet; <text> is treated literally "
-                "(regex-escaped server-side)."
+                "(regex-escaped server-side) and is limited to "
+                f"{MAX_FACET_Q_TEXT} characters."
             ),
         ),
         OpenApiParameter("page", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),

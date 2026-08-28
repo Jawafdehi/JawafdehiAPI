@@ -189,6 +189,18 @@ FACET_FIELDS: dict[str, str] = {
     "province": "court_province",
 }
 
+# The closed vocabulary behind the ``court_type`` facet: Nepal's constitutional
+# court tiers, and the only four values ``Court.court_type`` holds (verified
+# against production: 77 district / 18 high / 1 supreme / 1 special).
+#
+# ONE definition because the tier list has three consumers that must agree — the
+# serializer's ``ChoiceField`` (what actually 400s), the OpenAPI ``enum`` (what
+# the SPA reads), and the MCP tool's static schema (what a model reads). The MCP
+# copy stays a literal so that schema builds without Django, exactly like
+# ``sort``, and is pinned to this tuple by
+# ``test_search_court_type_enum_tracks_all_court_types``.
+ALL_COURT_TYPES: tuple[str, ...] = ("district", "high", "supreme", "special")
+
 # Bucket count for each facet's ``terms`` aggregation. Most vocabularies fit
 # comfortably under the default; an entry here overrides it for the ones that
 # don't (e.g. a district facet must hold all 77 districts at once — at the
@@ -210,6 +222,42 @@ FACET_AGG_SIZES: dict[str, int] = {
 # Lucene RegExp operator characters (the core set plus every optional-operator
 # character, which OpenSearch may enable via flags) — escaped in facet_q text.
 _LUCENE_REGEXP_SPECIAL = frozenset('.?+*|{}[]()"\\#@&<>~')
+
+# Longest ``facet_q`` text accepted, in CODE POINTS (``len()``, so a Devanagari
+# combining mark counts on its own).
+#
+# A HARD bound, not a nicety: the text is expanded into a Lucene RegExp and
+# determinized into an automaton ON THE CLUSTER, and every cased letter widens to
+# a ``[xX]`` class, so the emitted pattern is up to 4n+4 characters. Past a point
+# the determinization throws and ``search()``'s blanket ``except Exception`` can
+# only report that as ``SearchUnavailable`` — a 503 plus a Sentry search-outage
+# event for what is plainly a bad request. Same reasoning as
+# ``bigo_min``/``bigo_max``'s ``max_value``: reject it at the edge rather than
+# mislabel the failure.
+#
+# Where the point actually is. Lucene 9's ``Operations.determinize`` spends
+# ``effort += |subset|`` per popped powerset state against
+# ``effortLimit = determinizeWorkLimit * 10``, i.e. 100,000 for the default
+# 10,000 — the ``* 10`` is easy to miss and puts the ceiling an order of
+# magnitude above the bare limit. For the ``.*<text>.*`` shape emitted here the
+# worst case is a REPEATED cased letter (overlapping subsets, KMP-like), costing
+# n*(n+2); distinct letters are ~10x cheaper and uncased scripts cheaper still.
+# So:
+#     n=200 -> 40,400 (40% of budget), pattern 804 chars
+#     n=315 -> 99,855 (the last value that passes)
+#     n=316 -> throws
+#
+# Why 200 and not a rounder number: it is the longest ``case_type`` value the
+# production corpus actually holds (2,332 distinct values in the NGM docket, 240
+# of them over 64 code points), and ``case_type`` is a facet_q-able facet. A
+# lower cap still works as a typeahead — the include is a CONTAINS match, so a
+# prefix selects the same bucket — but it 400s a client that reads a key out of
+# ``facets.case_type`` and pastes it straight back, which is exactly what the MCP
+# tool now tells a model those values are for. 200 keeps every real key
+# expressible at 40% of the determinize budget, and leaves the pattern under the
+# 1,000-character ``index.max_regex_length`` default should that ever apply to a
+# terms-agg ``include`` (it governs ``regexp`` queries; unverified here).
+MAX_FACET_Q_TEXT = 200
 
 
 def _facet_include_regex(text: str) -> str:

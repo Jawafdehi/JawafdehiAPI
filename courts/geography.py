@@ -23,7 +23,8 @@ rather than an absent field.
 Spelling is canonical-as-in-repo: district keys match ``district_en`` in
 ``court_ids.py`` VERBATIM (``Kavrepalanchowk``, ``Therathum``, and the split
 districts under ``Nawalpur``/``Nawalparasi`` and ``Rukum``/``Rukumkot``) —
-``tests/test_geography.py`` pins full coverage so the two tables cannot drift.
+``courts/tests/test_geography.py`` pins full coverage so the two tables cannot
+drift.
 """
 
 from __future__ import annotations

@@ -94,36 +94,23 @@ class TestOpenAPIDocumentation:
         assert search["summary"] == "Unified platform search"
         assert "search" in search["tags"]
         parameter_names = [parameter["name"] for parameter in search["parameters"]]
-        # The unified-search params: q (optional → empty = browse), type/lang
-        # filters, sort mode, exact-match refine facets (entity_type/case_type/
-        # tags/status, plus the court-case-scoped court/court_type/district/
-        # province), the RANGE bounds (bigo_min/bigo_max and date_from/date_to),
-        # the facet-value search (facet_q), offset paging (page/page_size), and
-        # the deep-paging cursor (search_after). ``status`` is the coarse
-        # case-lifecycle refine facet; ``court`` is one specific court's
-        # identifier and ``court_type`` its tier.
-        assert set(parameter_names) == {
-            "q",
-            "type",
-            "lang",
-            "sort",
-            "entity_type",
-            "case_type",
-            "tags",
-            "status",
-            "court",
-            "court_type",
-            "district",
-            "province",
-            "bigo_min",
-            "bigo_max",
-            "date_from",
-            "date_to",
-            "facet_q",
-            "page",
-            "page_size",
-            "cursor",
-        }
+        # Pinned to the SERIALIZER, not to a hand-maintained literal. The
+        # OpenApiParameter list in ``extend_schema`` is written by hand, so it was
+        # the one of the endpoint's three surfaces bound to nothing: adding a
+        # param to the serializer (and to FACET_FIELDS) while forgetting the
+        # OpenApiParameter left it working but undocumented, and a set literal
+        # here could not tell — you had to remember to edit the literal too. The
+        # MCP tool's schema is pinned exactly this way
+        # (``test_unified_search_schema_tracks_the_search_endpoint``); with this,
+        # all three surfaces track one declaration.
+        #
+        # DRF discards any query param the serializer does not declare, so the
+        # serializer's field set IS the accepted surface: a documented param
+        # missing from it is a lie, and an accepted one missing from the docs is
+        # invisible to the SPA.
+        from search.views import SearchQuerySerializer
+
+        assert set(parameter_names) == set(SearchQuerySerializer().fields)
 
     def test_schema_contains_component_schemas(self):
         """Test that the schema contains component definitions."""

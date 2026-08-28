@@ -447,6 +447,61 @@ def test_search_api_400_on_malformed_facet_q():
 
 
 @pytest.mark.django_db
+def test_search_api_facet_q_tolerates_a_space_after_the_colon():
+    """``?facet_q=tags: घुस`` is the natural thing to type. The child field trims
+    the whole ITEM, not the part after the colon, so without an explicit strip
+    the space rides into the include regex as a literal and the facet comes back
+    empty with a 200 — the silent-wrong-answer case, not an error.
+
+    (Whitespace-ONLY text needs no assertion here: a trailing-space item is
+    trimmed to ``tags:`` by the child field and 400s on the shape check, which
+    ``test_search_api_400_on_malformed_facet_q`` already covers. This test is
+    about interior-leading whitespace, the only kind that reaches the strip.)
+    """
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "x", "facet_q": "tags: घुस"})
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*घुस.*"
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_overlong_facet_q_text():
+    """A facet_q text is expanded into a cluster-side Lucene RegExp (~4x the
+    input, since every cased letter widens to a ``[xX]`` class) and compiled into
+    an automaton there. Past Lucene's default ``determinizeWorkLimit`` the shard
+    throws, and ``search()``'s blanket ``except Exception`` can only report that
+    as ``SearchUnavailable`` — a 503 plus a Sentry search-outage event for what is
+    plainly a bad request. So the length is refused at the edge, like
+    ``bigo_min``/``bigo_max``'s ``max_value``, and the query is never sent.
+    """
+    from search.service import MAX_FACET_Q_TEXT
+
+    # Measured on the TEXT, not the whole item: "tags:" is five characters that
+    # never reach the regex, so a text exactly at the limit must still pass.
+    at_limit = "a" * MAX_FACET_Q_TEXT
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        ok = APIClient().get("/api/search/", {"q": "x", "facet_q": f"tags:{at_limit}"})
+    assert ok.status_code == 200
+
+    over_limit = "a" * (MAX_FACET_Q_TEXT + 1)
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "facet_q": f"tags:{over_limit}"}
+        )
+    assert resp.status_code == 400
+    assert "maximum" in str(resp.data["facet_q"])
+    # ...and the rejected query never reached the cluster.
+    client.search.assert_not_called()
+
+
+@pytest.mark.django_db
 def test_search_api_400_on_duplicate_facet_q_facet():
     """Two facet_q for one facet is ambiguous — refuse rather than pick one."""
     resp = APIClient().get(

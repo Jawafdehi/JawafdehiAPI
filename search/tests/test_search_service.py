@@ -8,6 +8,7 @@ and that a transport error becomes ``SearchUnavailable`` (→ HTTP 503).
 
 from __future__ import annotations
 
+import string
 from unittest.mock import MagicMock
 
 import pytest
@@ -453,6 +454,64 @@ def test_serialize_hit_omits_weight_for_a_doc_indexed_before_the_field():
     assert "weight" not in svc._serialize_hit(hit)["extra"]
 
 
+def test_serialize_hit_surfaces_the_court_geography_a_client_filtered_on():
+    """A court-case hit carries back the three court fields the new ?court_type /
+    ?district / ?province filters select on, so a client can render and re-filter
+    without a second lookup. Names are load-bearing: they are the response half of
+    the request contract, and a typo here loses a key silently and forever."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/kathmandudc/081-CR-0081",
+            "court_type": "district",
+            "court_district": "Kathmandu",
+            "court_province": "Bagmati",
+            "raw": {"court": "kathmandudc", "case_number": "081-CR-0081"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    assert extra["court_type"] == "district"
+    assert extra["court_district"] == "Kathmandu"
+    assert extra["court_province"] == "Bagmati"
+    # ``court`` stays sourced from ``raw``, which every court-case doc has ever
+    # carried — so extra.court keeps working on pre-rebuild docs.
+    assert extra["court"] == "kathmandudc"
+
+
+def test_serialize_hit_omits_court_geography_before_the_rebuild():
+    """The four fields are inert until ``reindex_courtcases --rebuild``, so a doc
+    from the current generation has none of them. They must be ABSENT, not None —
+    a client tells "no district" from "high court, districts do not apply" by the
+    key's presence."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/kathmandudc/081-CR-0081",
+            "raw": {"court": "kathmandudc"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    for key in ("court_type", "court_district", "court_province"):
+        assert key not in extra, key
+
+
+def test_serialize_hit_omits_district_for_a_high_court_but_keeps_province():
+    """The shape that makes ?district= mean "a district court's own district":
+    a high court indexes a province and no district at all."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/patanhc/081-CR-0001",
+            "court_type": "high",
+            "court_province": "Bagmati",
+            "raw": {"court": "patanhc"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    assert extra["court_province"] == "Bagmati"
+    assert "court_district" not in extra
+
+
 # ── facet filters ────────────────────────────────────────────────────────────
 
 
@@ -617,6 +676,63 @@ def test_facet_include_regex_case_folds_and_escapes():
     # Non-operator characters — Devanagari letters, combining vowel signs,
     # digits, spaces — pass through verbatim.
     assert svc._facet_include_regex("घुस 1") == ".*घुस 1.*"
+
+
+#: Lucene's RegExp reserved characters, transcribed from the ``RegExp`` javadoc
+#: syntax table — the core operators plus every optional-syntax one (``#``, ``@``,
+#: ``&``, ``<``, ``>``, ``~``), which OpenSearch enables by constructing
+#: ``RegExp`` with ``ALL`` flags.
+#:
+#: Deliberately a LITERAL here and NOT read from ``svc._LUCENE_REGEXP_SPECIAL``:
+#: a test that iterates the production set cannot detect that set shrinking, it
+#: just iterates fewer members and stays green. This is the independent copy that
+#: makes the assertions below bite.
+LUCENE_REGEXP_OPERATORS = frozenset('.?+*|{}[]()"\\#@&<>~')
+
+
+def test_lucene_operator_set_is_complete():
+    """The escape set must BE Lucene's operator set — pinned against the literal
+    above, so it can neither shrink (an operator reaching Lucene live) nor grow
+    (a literal over-escaped, making real bucket keys unmatchable)."""
+    assert svc._LUCENE_REGEXP_SPECIAL == LUCENE_REGEXP_OPERATORS
+
+
+def test_facet_include_regex_escapes_every_lucene_operator():
+    """Every operator, one at a time, driven off the independent literal.
+
+    The set shrinks silently otherwise: drop ``@`` (ANYSTRING) and
+    ``?facet_q=tags:a@b`` becomes a wildcard returning every ``a…b`` bucket
+    instead of the literal; drop ``[`` and the same param emits the unterminated
+    ``.*[.*``, a PatternSyntaxException the service can only report as a 503.
+    Neither surfaces in a hit assertion.
+
+    This also pins the BRANCH ORDER in ``_facet_include_regex``: the cased-letter
+    arm runs before the escape arm, so an operator that were ever also cased
+    would silently skip escaping.
+    """
+    for ch in LUCENE_REGEXP_OPERATORS:
+        assert svc._facet_include_regex(ch) == f".*\\{ch}.*", ch
+
+
+def test_facet_include_regex_leaves_every_other_character_literal():
+    """The inverse sweep: every printable NON-operator must stay literal (cased
+    ASCII folding to a ``[xX]`` class), so the escape set cannot grow."""
+    for ch in string.printable:
+        if ch in LUCENE_REGEXP_OPERATORS:
+            continue
+        folded = f"[{ch.lower()}{ch.upper()}]" if ch.lower() != ch.upper() else ch
+        assert svc._facet_include_regex(ch) == f".*{folded}.*", repr(ch)
+
+
+def test_facet_include_regex_cannot_smuggle_an_operator():
+    """The docstring's actual security claim: user text can never put a live
+    operator into the aggregation. Feed it EVERY operator at once and require the
+    emitted middle to be exactly those characters, each backslash-escaped — no
+    stray class, no bare operator, nothing that could widen the match."""
+    hostile = "".join(sorted(LUCENE_REGEXP_OPERATORS))
+    pattern = svc._facet_include_regex(hostile)
+    assert pattern.startswith(".*") and pattern.endswith(".*")
+    assert pattern[2:-2] == "".join("\\" + ch for ch in hostile)
 
 
 def test_build_query_facet_q_narrows_only_the_named_facets_buckets():
