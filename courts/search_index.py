@@ -161,21 +161,36 @@ def build_doc(obj: Any) -> dict[str, Any]:
     if case_type and isinstance(case_type, str):
         doc["case_type"] = case_type.upper()
 
+    # Promote the deciding court's identifier to a top-level keyword so the
+    # unified search can filter/facet on ONE court (``?court=kathmandudc``). It
+    # already rides along in ``identifiers`` (text recall) and ``raw.court``
+    # (display), but neither can be a facet: ``identifiers`` mixes in IRIs and
+    # case numbers, and ``raw`` is mapped ``enabled: false``.
+    if court_id:
+        doc["court"] = court_id
+
     # Promote the court tier (district/high/supreme/special) so the unified search
-    # can filter/facet by level. Defensive: pure-shaping tests use bare objects
-    # whose court has no ``court_type``, and scraper stubs create Court rows with
-    # ``court_type=""`` (courts/scraper/base.py) — skip both rather than polluting
-    # the facet with an empty bucket. Lower-cased: one controlled vocabulary.
+    # can filter/facet by tier. Named for the DB column it is read from, which is
+    # also what the SPA and the analytics payloads already call it. Defensive:
+    # pure-shaping tests use bare objects whose court has no ``court_type``, and
+    # scraper stubs create Court rows with ``court_type=""``
+    # (courts/scraper/base.py) — skip both rather than polluting the facet with
+    # an empty bucket. Lower-cased: one controlled vocabulary.
     court_type = getattr(getattr(obj, "court", None), "court_type", None)
     if isinstance(court_type, str) and court_type.strip():
-        doc["court_level"] = court_type.strip().lower()
+        doc["court_type"] = court_type.strip().lower()
 
-    # Court seat geography, derived from the identifier alone (no DB access, so
-    # it works on the bare objects pure-shaping tests use). Unknown identifier →
-    # no fields: indexing nothing is recoverable, a wrong bucket is not.
+    # Court geography, derived from the identifier alone (no DB access, so it
+    # works on the bare objects pure-shaping tests use). Unknown identifier → no
+    # fields: indexing nothing is recoverable, a wrong bucket is not. District is
+    # only ever a district court's OWN district, so high/supreme/special resolve
+    # with district None and set the province alone.
     location = court_location(court_id)
     if location:
-        doc["court_district"], doc["court_province"] = location
+        district, province = location
+        if district is not None:
+            doc["court_district"] = district
+        doc["court_province"] = province
 
     reg_ad = getattr(obj, "registration_date_ad", None)
     if reg_ad is not None:

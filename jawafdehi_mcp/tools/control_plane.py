@@ -139,7 +139,8 @@ class SearchControlPlaneTool(_ControlPlaneTool):
         "case_type",
         "tags",
         "status",
-        "court_level",
+        "court",
+        "court_type",
         "district",
         "province",
         "bigo_min",
@@ -205,11 +206,25 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     "type": "array",
                     "items": {"type": "string"},
                 },
-                # Court tier facet. COURTCASE-ONLY: only NGM court cases carry a
-                # level, so any value excludes every other result type — pair
-                # with type: ["courtcase"]. Static enum, contract-tested against
-                # the serializer's ChoiceField.
-                "court_level": {
+                # ONE-court facet: the deciding court's identifier, e.g.
+                # "kathmandudc" / "patanhc" / "supreme". COURTCASE-ONLY: only NGM
+                # court cases carry a court, so any value excludes every other
+                # result type — pair with type: ["courtcase"]. Repeatable, so an
+                # arbitrary set of courts is selectable; court_type and district
+                # AND together and cannot express one.
+                #
+                # Left as a plain string (not a 97-value enum) for the same reason
+                # district/province are: too large to restate here without it
+                # drifting. The API validates it against a closed list and 400s
+                # on anything else; GET /api/courts/ enumerates the 97.
+                "court": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "uniqueItems": True,
+                },
+                # Court tier facet (courtcase-only, same pairing caveat). Static
+                # enum, contract-tested against the serializer's ChoiceField.
+                "court_type": {
                     "type": "array",
                     "items": {
                         "type": "string",
@@ -217,10 +232,14 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     },
                     "uniqueItems": True,
                 },
-                # Court seat geography facets (courtcase-only, same pairing
-                # caveat). Values are the canonical English names the response's
-                # facets.district / facets.province buckets return; "NATIONAL"
-                # selects supreme + special-court cases.
+                # Court geography facets (courtcase-only, same pairing caveat).
+                # Values are the canonical English names the response's
+                # facets.district / facets.province buckets return.
+                #
+                # "district" is a DISTRICT COURT's own district and matches
+                # nothing else — high courts are provincial and carry no
+                # district, supreme/special carry none. "province" covers all 95
+                # sub-national courts; "NATIONAL" selects supreme + special.
                 "district": {
                     "type": "array",
                     "items": {"type": "string"},

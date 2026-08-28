@@ -183,7 +183,8 @@ FACET_FIELDS: dict[str, str] = {
     "case_type": "case_type",
     "tags": "keywords",
     "status": "case_status",
-    "court_level": "court_level",
+    "court": "court",
+    "court_type": "court_type",
     "district": "court_district",
     "province": "court_province",
 }
@@ -194,8 +195,12 @@ FACET_FIELDS: dict[str, str] = {
 # default, real buckets would be silently pushed out and their counts zeroed).
 DEFAULT_FACET_AGG_SIZE = 50
 FACET_AGG_SIZES: dict[str, int] = {
-    # 77 districts + the NATIONAL sentinel + headroom; at the default size the
-    # least-frequent districts would be silently pushed out of the facet.
+    # All 97 courts (77 district + 18 high + supreme + special) + headroom. Every
+    # one of them carries cases, so at the default size a third of the courts
+    # would be missing from the facet with their counts silently zeroed — and this
+    # is the facet a court picker is built from, so the gap would be user-visible.
+    "court": 150,
+    # 77 districts + headroom (no sentinel: only district courts carry one).
     "district": 100,
     # 7 provinces + NATIONAL.
     "province": 10,
@@ -479,9 +484,24 @@ def build_query(
 
     # Aggregations: per-type ``counts`` (by physical index) PLUS the exposed
     # facets (entity_type via the schema.org ``type`` token, case_type, and tags
-    # via ``keywords``). Facet counts reflect the query but NOT the facet filters
-    # (OpenSearch aggregates over the post-filter result set; that's the accepted
-    # behaviour for these refine-style facets).
+    # via ``keywords``).
+    #
+    # Facet counts reflect the active FILTERS as well as the query: the filters
+    # are ``bool.filter`` clauses on the main query (not a ``post_filter``), so
+    # every agg is computed over the narrowed result set. Two consequences worth
+    # knowing before changing this:
+    #   - CASCADING, which callers rely on: filtering ``court_type=high`` empties
+    #     the ``district`` facet outright, because no high-court doc carries a
+    #     ``court_district`` — that empty bucket list is how a client knows the
+    #     district refine does not apply to the current selection.
+    #   - COLLAPSING, the cost of the same behaviour: a facet also narrows by its
+    #     OWN filter, so selecting one court leaves ``facets.court`` with a single
+    #     bucket and no sibling counts to widen the selection with. Clients drive
+    #     a court picker off GET /api/courts/ (all 97, with names) and read this
+    #     facet for counts only. Fixing that properly means a per-facet ``filter``
+    #     agg applying every filter EXCEPT its own; a ``post_filter`` is NOT a
+    #     substitute, as it would make every facet ignore every filter and so
+    #     destroy the cascading above.
     #
     # Built as its own ``dict[str, Any]`` rather than inline in ``body``: the
     # nested literal would otherwise pin a narrow value type that the extent agg
@@ -703,13 +723,18 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
         "date_bs",
         "type",
         "weight",
-        "court_level",
+        "court_type",
         "court_district",
         "court_province",
     ):
         if source.get(key) is not None:
             extra[key] = source[key]
     raw = source.get("raw") or {}
+    # ``court`` stays sourced from ``raw`` even though it is now ALSO a top-level
+    # indexed field: raw carries it on every court-case doc ever written, so
+    # ``extra.court`` keeps working on docs indexed before the top-level field
+    # existed (i.e. before the --rebuild this change needs). One source, no
+    # precedence question, no window where the response loses the court.
     for key in ("case_type", "case_status", "court", "case_number"):
         if raw.get(key) is not None:
             extra[key] = raw[key]

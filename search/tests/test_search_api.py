@@ -335,25 +335,55 @@ def test_search_api_equal_date_bounds_are_allowed():
 
 
 @pytest.mark.django_db
-def test_search_api_threads_court_level_through():
-    """?court_level reaches the DSL as a terms filter on the promoted field."""
+def test_search_api_threads_court_type_through():
+    """?court_type reaches the DSL as a terms filter on the promoted field."""
     client = MagicMock()
     client.search.return_value = _canned()
     with patch("search.service.make_client", return_value=client):
         resp = APIClient().get(
-            "/api/search/", {"q": "", "type": "courtcase", "court_level": "supreme"}
+            "/api/search/", {"q": "", "type": "courtcase", "court_type": "supreme"}
         )
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
-    assert {"terms": {"court_level": ["supreme"]}} in body["query"]["bool"]["filter"]
+    assert {"terms": {"court_type": ["supreme"]}} in body["query"]["bool"]["filter"]
 
 
 @pytest.mark.django_db
-def test_search_api_400_on_unknown_court_level():
+def test_search_api_400_on_unknown_court_type():
     """The vocabulary is CLOSED (district/high/supreme/special): a typo is a 400,
     not a confident empty page."""
-    resp = APIClient().get("/api/search/", {"q": "x", "court_level": "municipal"})
+    resp = APIClient().get("/api/search/", {"q": "x", "court_type": "municipal"})
     assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_search_api_threads_a_multi_court_selection_through():
+    """?court is repeatable, so an arbitrary set of courts ACROSS tiers lands in
+    one terms clause — the selection court_type+district cannot express."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {"q": "", "type": "courtcase", "court": ["kathmandudc", "patanhc"]},
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert {"terms": {"court": ["kathmandudc", "patanhc"]}} in body["query"]["bool"][
+        "filter"
+    ]
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_unknown_court_identifier():
+    """?court is CLOSED against the 97 real courts. Safe to be strict: a court
+    absent from the scraper registry is a court with no cases to filter for."""
+    resp = APIClient().get("/api/search/", {"q": "x", "court": "atlantisdc"})
+    assert resp.status_code == 400
+    # And the tier vocabulary is NOT accepted here — ?court takes identifiers.
+    assert APIClient().get(
+        "/api/search/", {"q": "x", "court": "district"}
+    ).status_code == 400
 
 
 @pytest.mark.django_db

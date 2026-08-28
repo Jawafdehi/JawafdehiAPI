@@ -23,6 +23,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from courts.geography import ALL_COURT_IDENTIFIERS
+
 from .analytics import emit_search_click_event, emit_search_event
 from .service import (
     ALL_SORTS,
@@ -86,20 +88,37 @@ class SearchQuerySerializer(serializers.Serializer):
     status = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
-    # Court tier refine facet (NGM court cases only). A CLOSED vocabulary —
-    # unlike the free-text facets above — so a typo is a 400, not a confident
-    # empty page (the same reasoning as the bigo bounds' strict validation).
-    court_level = serializers.ListField(
+    # ONE-court refine facet (NGM court cases only) — the deciding court's
+    # identifier, repeatable, so an arbitrary set of courts is selectable
+    # ("kathmandudc" + "patanhc" + "supreme"). That set is what the coarse
+    # court_type/district pair below CANNOT express: those AND together, so
+    # asking for two tiers and two districts returns the cross-product.
+    #
+    # CLOSED, against courts.geography — the same table the indexer resolves
+    # geography from, and the scraper's own registry, so a court missing from it
+    # is a court nothing scrapes and therefore one with no cases to exclude. A
+    # typo is a 400, not a confident empty page.
+    court = serializers.ListField(
+        child=serializers.ChoiceField(choices=sorted(ALL_COURT_IDENTIFIERS)),
+        required=False,
+        default=list,
+    )
+    # Court tier refine facet (NGM court cases only). Also a CLOSED vocabulary,
+    # and structurally stable: these are the constitutional tiers, and they are
+    # the only four values ``Court.court_type`` holds.
+    court_type = serializers.ListField(
         child=serializers.ChoiceField(
             choices=["district", "high", "supreme", "special"]
         ),
         required=False,
         default=list,
     )
-    # Court seat geography (NGM court cases only). Free-text like ``tags``: the
+    # Court geography (NGM court cases only). Free-text like ``tags``: the
     # canonical values are whatever the ``facets.district``/``facets.province``
-    # buckets return (title-case English names, plus the NATIONAL sentinel for
-    # supreme/special-court cases) — a closed 77-way ChoiceField would be brittle.
+    # buckets return (title-case English names, plus the NATIONAL sentinel on
+    # province for supreme/special) — a closed 77-way ChoiceField would be
+    # brittle. ``district`` is a DISTRICT COURT's own district and matches
+    # nothing else; high/supreme/special are reachable via province.
     district = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
@@ -256,18 +275,36 @@ class SearchQuerySerializer(serializers.Serializer):
             ),
         ),
         OpenApiParameter(
-            "court_level",
+            "court",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            enum=sorted(ALL_COURT_IDENTIFIERS),
+            description=(
+                "Refine facet: the deciding court's identifier — one of the 97 "
+                "courts (77 district, 18 high, supreme, special); list them with "
+                "GET /api/courts/. Repeatable, so an arbitrary SET of courts is "
+                "selectable (?court=kathmandudc&court=patanhc); court_type and "
+                "district AND together and so cannot express one. "
+                "COURT-CASE-SCOPED: only NGM court cases carry a court, so any "
+                "value also excludes every entity, material and Jawafdehi-case "
+                "result — pair it with ?type=courtcase. Inert until the "
+                "court-case index is rebuilt (reindex_courtcases --rebuild) "
+                "after this field shipped."
+            ),
+        ),
+        OpenApiParameter(
+            "court_type",
             OpenApiTypes.STR,
             OpenApiParameter.QUERY,
             required=False,
             many=True,
             enum=["district", "high", "supreme", "special"],
             description=(
-                "Refine facet: court tier. COURT-CASE-SCOPED: only NGM court "
-                "cases carry a level, so any value also excludes every entity, "
-                "material and Jawafdehi-case result — pair it with "
-                "?type=courtcase. Inert until the court-case index is rebuilt "
-                "(reindex_courtcases --rebuild) after this field shipped."
+                "Refine facet: court tier. Same court-case scoping and rebuild "
+                "caveat as court. Note the response's extra.court is the court "
+                "IDENTIFIER, not this tier."
             ),
         ),
         OpenApiParameter(
@@ -277,11 +314,14 @@ class SearchQuerySerializer(serializers.Serializer):
             required=False,
             many=True,
             description=(
-                "Refine facet: the court's seat district. Values are the "
-                "canonical English names returned in facets.district (e.g. "
-                "'Kathmandu'); 'NATIONAL' selects supreme + special-court "
-                "cases (national jurisdiction). COURT-CASE-SCOPED — pair with "
-                "?type=courtcase. Inert until the court-case index is rebuilt."
+                "Refine facet: a DISTRICT COURT's own district — the canonical "
+                "English names returned in facets.district (e.g. 'Kathmandu'). "
+                "Matches district-court cases ONLY: a high court is a provincial "
+                "court and carries no district (use ?province=), and "
+                "supreme/special carry none either. So "
+                "?court_type=district&district=Kathmandu is exactly Kathmandu "
+                "District Court. Same court-case scoping and rebuild caveat as "
+                "court."
             ),
         ),
         OpenApiParameter(
@@ -292,8 +332,10 @@ class SearchQuerySerializer(serializers.Serializer):
             many=True,
             description=(
                 "Refine facet: the court's province (one of the 7, e.g. "
-                "'Bagmati'), or 'NATIONAL' for supreme + special-court cases. "
-                "Same court-case scoping and rebuild caveat as district."
+                "'Bagmati') — set for all 95 sub-national courts, a high court "
+                "resolving to the province it serves (its additional benches "
+                "included). 'NATIONAL' selects supreme + special-court cases. "
+                "Same court-case scoping and rebuild caveat as court."
             ),
         ),
         OpenApiParameter(

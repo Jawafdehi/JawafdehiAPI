@@ -554,15 +554,27 @@ def test_build_query_includes_status_facet_and_filter():
     assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
 
 
-def test_build_query_includes_court_level_facet_and_filter():
-    """``court_level`` is the promoted court tier (district/high/supreme/special)
-    on NGM court-case docs."""
-    assert svc.FACET_FIELDS["court_level"] == "court_level"
-    body = build_query(q="x", filters={"court_level": ["supreme", "special"]})
-    assert body["aggs"]["court_level"]["terms"]["field"] == "court_level"
-    assert {"terms": {"court_level": ["supreme", "special"]}} in body["query"]["bool"][
+def test_build_query_includes_court_type_facet_and_filter():
+    """``court_type`` is the promoted court tier (district/high/supreme/special)
+    on NGM court-case docs — named after the DB column it comes from."""
+    assert svc.FACET_FIELDS["court_type"] == "court_type"
+    body = build_query(q="x", filters={"court_type": ["supreme", "special"]})
+    assert body["aggs"]["court_type"]["terms"]["field"] == "court_type"
+    assert {"terms": {"court_type": ["supreme", "special"]}} in body["query"]["bool"][
         "filter"
     ]
+
+
+def test_build_query_court_filter_selects_an_arbitrary_set_of_courts():
+    """The point of the one-court facet: a mixed set ACROSS tiers, which the
+    court_type/district pair cannot express (those AND, so two tiers x two
+    districts returns the cross-product)."""
+    assert svc.FACET_FIELDS["court"] == "court"
+    body = build_query(q="x", filters={"court": ["kathmandudc", "patanhc", "supreme"]})
+    assert body["aggs"]["court"]["terms"]["field"] == "court"
+    assert {"terms": {"court": ["kathmandudc", "patanhc", "supreme"]}} in body["query"][
+        "bool"
+    ]["filter"]
 
 
 def test_build_query_district_and_province_filters_target_court_fields():
@@ -578,10 +590,19 @@ def test_build_query_district_and_province_filters_target_court_fields():
 
 
 def test_district_facet_agg_holds_every_district_at_once():
-    """77 districts + NATIONAL: at the 50 default, the least-frequent districts
-    would be silently pushed out of the facet."""
+    """All 77 districts: at the 50 default, the least-frequent districts would be
+    silently pushed out of the facet."""
     body = build_query(q="x")
-    assert body["aggs"]["district"]["terms"]["size"] >= 78
+    assert body["aggs"]["district"]["terms"]["size"] >= 77
+
+
+def test_court_facet_agg_holds_every_court_at_once():
+    """All 97 courts carry cases, so at the 50 default a third of them would be
+    missing from the facet a court picker is built from, counts silently zeroed."""
+    from courts.geography import ALL_COURT_IDENTIFIERS
+
+    body = build_query(q="x")
+    assert body["aggs"]["court"]["terms"]["size"] >= len(ALL_COURT_IDENTIFIERS)
 
 
 # ── facet-value search (facet_q) ────────────────────────────────────────────────

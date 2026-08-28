@@ -96,11 +96,12 @@ class TestOpenAPIDocumentation:
         parameter_names = [parameter["name"] for parameter in search["parameters"]]
         # The unified-search params: q (optional → empty = browse), type/lang
         # filters, sort mode, exact-match refine facets (entity_type/case_type/
-        # tags/status, plus the court-case-scoped court_level/district/province),
-        # the RANGE bounds (bigo_min/bigo_max and date_from/date_to), the
-        # facet-value search (facet_q), offset paging (page/page_size), and the
-        # deep-paging cursor (search_after). ``status`` is the coarse
-        # case-lifecycle refine facet.
+        # tags/status, plus the court-case-scoped court/court_type/district/
+        # province), the RANGE bounds (bigo_min/bigo_max and date_from/date_to),
+        # the facet-value search (facet_q), offset paging (page/page_size), and
+        # the deep-paging cursor (search_after). ``status`` is the coarse
+        # case-lifecycle refine facet; ``court`` is one specific court's
+        # identifier and ``court_type`` its tier.
         assert set(parameter_names) == {
             "q",
             "type",
@@ -110,7 +111,8 @@ class TestOpenAPIDocumentation:
             "case_type",
             "tags",
             "status",
-            "court_level",
+            "court",
+            "court_type",
             "district",
             "province",
             "bigo_min",
