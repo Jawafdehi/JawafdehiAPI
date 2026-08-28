@@ -183,7 +183,104 @@ FACET_FIELDS: dict[str, str] = {
     "case_type": "case_type",
     "tags": "keywords",
     "status": "case_status",
+    "court": "court",
+    "court_type": "court_type",
+    "district": "court_district",
+    "province": "court_province",
 }
+
+# The closed vocabulary behind the ``court_type`` facet: Nepal's constitutional
+# court tiers, and the only four values ``Court.court_type`` holds (verified
+# against production: 77 district / 18 high / 1 supreme / 1 special).
+#
+# ONE definition because the tier list has three consumers that must agree — the
+# serializer's ``ChoiceField`` (what actually 400s), the OpenAPI ``enum`` (what
+# the SPA reads), and the MCP tool's static schema (what a model reads). The MCP
+# copy stays a literal so that schema builds without Django, exactly like
+# ``sort``, and is pinned to this tuple by
+# ``test_search_court_type_enum_tracks_all_court_types``.
+ALL_COURT_TYPES: tuple[str, ...] = ("district", "high", "supreme", "special")
+
+# Bucket count for each facet's ``terms`` aggregation. Most vocabularies fit
+# comfortably under the default; an entry here overrides it for the ones that
+# don't (e.g. a district facet must hold all 77 districts at once — at the
+# default, real buckets would be silently pushed out and their counts zeroed).
+DEFAULT_FACET_AGG_SIZE = 50
+FACET_AGG_SIZES: dict[str, int] = {
+    # All 97 courts (77 district + 18 high + supreme + special) + headroom. Every
+    # one of them carries cases, so at the default size a third of the courts
+    # would be missing from the facet with their counts silently zeroed — and this
+    # is the facet a court picker is built from, so the gap would be user-visible.
+    "court": 150,
+    # 77 districts + headroom (no sentinel: only district courts carry one).
+    "district": 100,
+    # 7 provinces + NATIONAL.
+    "province": 10,
+}
+
+
+# Lucene RegExp operator characters (the core set plus every optional-operator
+# character, which OpenSearch may enable via flags) — escaped in facet_q text.
+_LUCENE_REGEXP_SPECIAL = frozenset('.?+*|{}[]()"\\#@&<>~')
+
+# Longest ``facet_q`` text accepted, in CODE POINTS (``len()``, so a Devanagari
+# combining mark counts on its own).
+#
+# A HARD bound, not a nicety: the text is expanded into a Lucene RegExp and
+# determinized into an automaton ON THE CLUSTER, and every cased letter widens to
+# a ``[xX]`` class, so the emitted pattern is up to 4n+4 characters. Past a point
+# the determinization throws and ``search()``'s blanket ``except Exception`` can
+# only report that as ``SearchUnavailable`` — a 503 plus a Sentry search-outage
+# event for what is plainly a bad request. Same reasoning as
+# ``bigo_min``/``bigo_max``'s ``max_value``: reject it at the edge rather than
+# mislabel the failure.
+#
+# Where the point actually is. Lucene 9's ``Operations.determinize`` spends
+# ``effort += |subset|`` per popped powerset state against
+# ``effortLimit = determinizeWorkLimit * 10``, i.e. 100,000 for the default
+# 10,000 — the ``* 10`` is easy to miss and puts the ceiling an order of
+# magnitude above the bare limit. For the ``.*<text>.*`` shape emitted here the
+# worst case is a REPEATED cased letter (overlapping subsets, KMP-like), costing
+# n*(n+2); distinct letters are ~10x cheaper and uncased scripts cheaper still.
+# So:
+#     n=200 -> 40,400 (40% of budget), pattern 804 chars
+#     n=315 -> 99,855 (the last value that passes)
+#     n=316 -> throws
+#
+# Why 200 and not a rounder number: it is the longest ``case_type`` value the
+# production corpus actually holds (2,332 distinct values in the NGM docket, 240
+# of them over 64 code points), and ``case_type`` is a facet_q-able facet. A
+# lower cap still works as a typeahead — the include is a CONTAINS match, so a
+# prefix selects the same bucket — but it 400s a client that reads a key out of
+# ``facets.case_type`` and pastes it straight back, which is exactly what the MCP
+# tool now tells a model those values are for. 200 keeps every real key
+# expressible at 40% of the determinize budget, and leaves the pattern under the
+# 1,000-character ``index.max_regex_length`` default should that ever apply to a
+# terms-agg ``include`` (it governs ``regexp`` queries; unverified here).
+MAX_FACET_Q_TEXT = 200
+
+
+def _facet_include_regex(text: str) -> str:
+    """A Lucene-RegExp ``include`` pattern matching bucket keys that CONTAIN
+    ``text``, case-insensitively — for the ``facet_q`` facet-value search.
+
+    Lucene RegExp (what a ``terms`` agg's ``include`` speaks) has no ``(?i)``
+    flag, so case-insensitivity is spelled out as a ``[xX]`` class per cased
+    letter. Only the Lucene operator characters are backslash-escaped — so user
+    text can never smuggle ``.*``/``|``/``{}`` into the aggregation — and every
+    other character (Devanagari letters AND combining vowel signs included)
+    passes through verbatim.
+    """
+    parts: list[str] = []
+    for ch in text:
+        lower, upper = ch.lower(), ch.upper()
+        if lower != upper and len(lower) == 1 and len(upper) == 1:
+            parts.append(f"[{lower}{upper}]")
+        elif ch in _LUCENE_REGEXP_SPECIAL:
+            parts.append("\\" + ch)
+        else:
+            parts.append(ch)
+    return ".*" + "".join(parts) + ".*"
 
 # RANGE filters: the request param name -> (indexed field, the ``range`` bound it
 # sets). The second filter KIND, alongside the exact-match ``terms`` facets above
@@ -199,17 +296,24 @@ FACET_FIELDS: dict[str, str] = {
 # facet above (also case-only, also applied globally) and callers should pair a
 # bound with ``?type=case``; the API view's OpenAPI description says so outright.
 #
-# Adding ``date_from``/``date_to`` is two entries here — ``("date", "gte")`` and
-# ``("date", "lte")`` — PLUS the two matching fields on ``SearchQuerySerializer``.
-# Both halves, always: the view reads bounds out of ``validated_data``, and DRF
-# discards any param the serializer does not declare, so an entry added here
-# alone is accepted and then silently ignored — no clause, no 400, no log.
+# ``date_from``/``date_to`` bound the shared Gregorian ``date`` field — exactly
+# the two entries the field-agnostic mechanism was built for, PLUS the two
+# matching ``DateField``s on ``SearchQuerySerializer``. Both halves, always: the
+# view reads bounds out of ``validated_data``, and DRF discards any param the
+# serializer does not declare, so an entry added here alone is accepted and then
+# silently ignored — no clause, no 400, no log.
 # ``test_every_range_field_is_declared_on_the_query_serializer`` fails if the two
 # ever drift. The clause-building itself is genuinely field-agnostic, which is
 # the point: a second range mechanism never gets built.
+#
+# ``date`` scoping: entities never index a ``date`` (and a court case with no
+# ``registration_date_ad`` carries none either), so a date bound excludes those
+# docs — the same shape as ``bigo``, documented on the OpenAPI params.
 RANGE_FIELDS: dict[str, tuple[str, str]] = {
     "bigo_min": ("bigo", "gte"),
     "bigo_max": ("bigo", "lte"),
+    "date_from": ("date", "gte"),
+    "date_to": ("date", "lte"),
 }
 
 
@@ -318,6 +422,7 @@ def build_query(
     sort: str = SORT_RELEVANCE,
     filters: dict[str, list[str]] | None = None,
     ranges: dict[str, Any] | None = None,
+    facet_queries: dict[str, str] | None = None,
     page: int = 1,
     page_size: int = 10,
     search_after: list[Any] | None = None,
@@ -352,6 +457,11 @@ def build_query(
     Per-type facet counts come from a ``_index`` terms aggregation (one index per
     type — exact regardless of ``source_app``, which is not 1:1 with type since
     ngm owns both materials and courtcases).
+
+    ``facet_queries`` ({facet param: text}) is a facet-VALUE search: it adds a
+    case-insensitive ``include`` regex to the named facet's terms agg so only
+    buckets whose key contains the text come back — the query, hits, count and
+    every other facet are untouched.
     """
     page = max(1, page)
     page_size = max(1, min(page_size, MAX_PAGE_SIZE))
@@ -422,9 +532,24 @@ def build_query(
 
     # Aggregations: per-type ``counts`` (by physical index) PLUS the exposed
     # facets (entity_type via the schema.org ``type`` token, case_type, and tags
-    # via ``keywords``). Facet counts reflect the query but NOT the facet filters
-    # (OpenSearch aggregates over the post-filter result set; that's the accepted
-    # behaviour for these refine-style facets).
+    # via ``keywords``).
+    #
+    # Facet counts reflect the active FILTERS as well as the query: the filters
+    # are ``bool.filter`` clauses on the main query (not a ``post_filter``), so
+    # every agg is computed over the narrowed result set. Two consequences worth
+    # knowing before changing this:
+    #   - CASCADING, which callers rely on: filtering ``court_type=high`` empties
+    #     the ``district`` facet outright, because no high-court doc carries a
+    #     ``court_district`` — that empty bucket list is how a client knows the
+    #     district refine does not apply to the current selection.
+    #   - COLLAPSING, the cost of the same behaviour: a facet also narrows by its
+    #     OWN filter, so selecting one court leaves ``facets.court`` with a single
+    #     bucket and no sibling counts to widen the selection with. Clients drive
+    #     a court picker off GET /api/courts/ (all 97, with names) and read this
+    #     facet for counts only. Fixing that properly means a per-facet ``filter``
+    #     agg applying every filter EXCEPT its own; a ``post_filter`` is NOT a
+    #     substitute, as it would make every facet ignore every filter and so
+    #     destroy the cascading above.
     #
     # Built as its own ``dict[str, Any]`` rather than inline in ``body``: the
     # nested literal would otherwise pin a narrow value type that the extent agg
@@ -435,11 +560,27 @@ def build_query(
         # generations. At exactly len(ALL_TYPES) the extra bucket would push
         # a real one out and silently zero that type's facet count.
         "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
-        "entity_type": {"terms": {"field": "type", "size": 50}},
-        "case_type": {"terms": {"field": "case_type", "size": 50}},
-        "tags": {"terms": {"field": "keywords", "size": 50}},
-        "status": {"terms": {"field": "case_status", "size": 50}},
     }
+    # One ``terms`` agg per exposed refine facet, GENERATED from FACET_FIELDS so a
+    # facet param can never exist without its aggregation. These used to be
+    # hand-listed alongside ``by_index``, which left a trap: a FACET_FIELDS entry
+    # with no matching agg here validated fine, filtered fine, and then served an
+    # empty ``facets.<param>`` list forever — no error, no log. Driving the aggs
+    # off the registry closes that by construction (``by_index`` and the extent
+    # agg below stay hand-written: they are not FACET_FIELDS facets).
+    for param, field in FACET_FIELDS.items():
+        aggs[param] = {
+            "terms": {"field": field, "size": FACET_AGG_SIZES.get(param, DEFAULT_FACET_AGG_SIZE)}
+        }
+        # ``facet_q``: recompute ONLY this facet's bucket list to the top buckets
+        # whose key contains the text. ``include`` filters the term set BEFORE
+        # the size cut, so the match runs over the full aggregation, not the
+        # default top-N slice — and it touches nothing but this one agg: the
+        # query, count, hits and every other facet are computed exactly as
+        # without it. Ordering stays the terms-agg default (count desc).
+        text = (facet_queries or {}).get(param)
+        if text:
+            aggs[param]["terms"]["include"] = _facet_include_regex(text)
 
     # बिगो extent: the smallest and largest recorded amount, how many documents
     # carry one at all — the three numbers the SPA's slider ladder is cut from.
@@ -625,10 +766,23 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     extra: dict[str, Any] = {}
     # ``weight`` is here so a ``sort=featured`` response explains its own order;
     # absent from docs indexed before the field existed, hence the None guard.
-    for key in ("date", "date_bs", "type", "weight"):
+    for key in (
+        "date",
+        "date_bs",
+        "type",
+        "weight",
+        "court_type",
+        "court_district",
+        "court_province",
+    ):
         if source.get(key) is not None:
             extra[key] = source[key]
     raw = source.get("raw") or {}
+    # ``court`` stays sourced from ``raw`` even though it is now ALSO a top-level
+    # indexed field: raw carries it on every court-case doc ever written, so
+    # ``extra.court`` keeps working on docs indexed before the top-level field
+    # existed (i.e. before the --rebuild this change needs). One source, no
+    # precedence question, no window where the response loses the court.
     for key in ("case_type", "case_status", "court", "case_number"):
         if raw.get(key) is not None:
             extra[key] = raw[key]
@@ -739,6 +893,7 @@ class SearchService:
         sort: str = SORT_RELEVANCE,
         filters: dict[str, list[str]] | None = None,
         ranges: dict[str, Any] | None = None,
+        facet_queries: dict[str, str] | None = None,
         page: int = 1,
         page_size: int = 10,
         cursor: str | None = None,
@@ -776,6 +931,7 @@ class SearchService:
             sort=sort,
             filters=filters,
             ranges=ranges,
+            facet_queries=facet_queries,
             page=page,
             page_size=page_size,
             search_after=search_after,

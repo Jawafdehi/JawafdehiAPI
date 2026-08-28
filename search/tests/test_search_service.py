@@ -8,6 +8,7 @@ and that a transport error becomes ``SearchUnavailable`` (→ HTTP 503).
 
 from __future__ import annotations
 
+import string
 from unittest.mock import MagicMock
 
 import pytest
@@ -453,6 +454,64 @@ def test_serialize_hit_omits_weight_for_a_doc_indexed_before_the_field():
     assert "weight" not in svc._serialize_hit(hit)["extra"]
 
 
+def test_serialize_hit_surfaces_the_court_geography_a_client_filtered_on():
+    """A court-case hit carries back the three court fields the new ?court_type /
+    ?district / ?province filters select on, so a client can render and re-filter
+    without a second lookup. Names are load-bearing: they are the response half of
+    the request contract, and a typo here loses a key silently and forever."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/kathmandudc/081-CR-0081",
+            "court_type": "district",
+            "court_district": "Kathmandu",
+            "court_province": "Bagmati",
+            "raw": {"court": "kathmandudc", "case_number": "081-CR-0081"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    assert extra["court_type"] == "district"
+    assert extra["court_district"] == "Kathmandu"
+    assert extra["court_province"] == "Bagmati"
+    # ``court`` stays sourced from ``raw``, which every court-case doc has ever
+    # carried — so extra.court keeps working on pre-rebuild docs.
+    assert extra["court"] == "kathmandudc"
+
+
+def test_serialize_hit_omits_court_geography_before_the_rebuild():
+    """The four fields are inert until ``reindex_courtcases --rebuild``, so a doc
+    from the current generation has none of them. They must be ABSENT, not None —
+    a client tells "no district" from "high court, districts do not apply" by the
+    key's presence."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/kathmandudc/081-CR-0081",
+            "raw": {"court": "kathmandudc"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    for key in ("court_type", "court_district", "court_province"):
+        assert key not in extra, key
+
+
+def test_serialize_hit_omits_district_for_a_high_court_but_keeps_province():
+    """The shape that makes ?district= mean "a district court's own district":
+    a high court indexes a province and no district at all."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/patanhc/081-CR-0001",
+            "court_type": "high",
+            "court_province": "Bagmati",
+            "raw": {"court": "patanhc"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    assert extra["court_province"] == "Bagmati"
+    assert "court_district" not in extra
+
+
 # ── facet filters ────────────────────────────────────────────────────────────
 
 
@@ -554,6 +613,167 @@ def test_build_query_includes_status_facet_and_filter():
     assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
 
 
+def test_build_query_includes_court_type_facet_and_filter():
+    """``court_type`` is the promoted court tier (district/high/supreme/special)
+    on NGM court-case docs — named after the DB column it comes from."""
+    assert svc.FACET_FIELDS["court_type"] == "court_type"
+    body = build_query(q="x", filters={"court_type": ["supreme", "special"]})
+    assert body["aggs"]["court_type"]["terms"]["field"] == "court_type"
+    assert {"terms": {"court_type": ["supreme", "special"]}} in body["query"]["bool"][
+        "filter"
+    ]
+
+
+def test_build_query_court_filter_selects_an_arbitrary_set_of_courts():
+    """The point of the one-court facet: a mixed set ACROSS tiers, which the
+    court_type/district pair cannot express (those AND, so two tiers x two
+    districts returns the cross-product)."""
+    assert svc.FACET_FIELDS["court"] == "court"
+    body = build_query(q="x", filters={"court": ["kathmandudc", "patanhc", "supreme"]})
+    assert body["aggs"]["court"]["terms"]["field"] == "court"
+    assert {"terms": {"court": ["kathmandudc", "patanhc", "supreme"]}} in body["query"][
+        "bool"
+    ]["filter"]
+
+
+def test_build_query_district_and_province_filters_target_court_fields():
+    """The reader-facing params map to the promoted ``court_*`` keywords."""
+    assert svc.FACET_FIELDS["district"] == "court_district"
+    assert svc.FACET_FIELDS["province"] == "court_province"
+    body = build_query(
+        q="x", filters={"district": ["Kathmandu"], "province": ["Bagmati"]}
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
+    assert {"terms": {"court_province": ["Bagmati"]}} in clauses
+
+
+def test_district_facet_agg_holds_every_district_at_once():
+    """All 77 districts: at the 50 default, the least-frequent districts would be
+    silently pushed out of the facet."""
+    body = build_query(q="x")
+    assert body["aggs"]["district"]["terms"]["size"] >= 77
+
+
+def test_court_facet_agg_holds_every_court_at_once():
+    """All 97 courts carry cases, so at the 50 default a third of them would be
+    missing from the facet a court picker is built from, counts silently zeroed."""
+    from courts.geography import ALL_COURT_IDENTIFIERS
+
+    body = build_query(q="x")
+    assert body["aggs"]["court"]["terms"]["size"] >= len(ALL_COURT_IDENTIFIERS)
+
+
+# ── facet-value search (facet_q) ────────────────────────────────────────────────
+
+
+def test_facet_include_regex_case_folds_and_escapes():
+    """Cased letters become ``[xX]`` classes (Lucene RegExp has no ``(?i)``);
+    regex operators in user text are escaped to literals."""
+    assert svc._facet_include_regex("ab") == ".*[aA][bB].*"
+    assert svc._facet_include_regex("c++") == ".*[cC]\\+\\+.*"
+    assert svc._facet_include_regex("a|b.c") == ".*[aA]\\|[bB]\\.[cC].*"
+    # Non-operator characters — Devanagari letters, combining vowel signs,
+    # digits, spaces — pass through verbatim.
+    assert svc._facet_include_regex("घुस 1") == ".*घुस 1.*"
+
+
+#: Lucene's RegExp reserved characters, transcribed from the ``RegExp`` javadoc
+#: syntax table — the core operators plus every optional-syntax one (``#``, ``@``,
+#: ``&``, ``<``, ``>``, ``~``), which OpenSearch enables by constructing
+#: ``RegExp`` with ``ALL`` flags.
+#:
+#: Deliberately a LITERAL here and NOT read from ``svc._LUCENE_REGEXP_SPECIAL``:
+#: a test that iterates the production set cannot detect that set shrinking, it
+#: just iterates fewer members and stays green. This is the independent copy that
+#: makes the assertions below bite.
+LUCENE_REGEXP_OPERATORS = frozenset('.?+*|{}[]()"\\#@&<>~')
+
+
+def test_lucene_operator_set_is_complete():
+    """The escape set must BE Lucene's operator set — pinned against the literal
+    above, so it can neither shrink (an operator reaching Lucene live) nor grow
+    (a literal over-escaped, making real bucket keys unmatchable)."""
+    assert svc._LUCENE_REGEXP_SPECIAL == LUCENE_REGEXP_OPERATORS
+
+
+def test_facet_include_regex_escapes_every_lucene_operator():
+    """Every operator, one at a time, driven off the independent literal.
+
+    The set shrinks silently otherwise: drop ``@`` (ANYSTRING) and
+    ``?facet_q=tags:a@b`` becomes a wildcard returning every ``a…b`` bucket
+    instead of the literal; drop ``[`` and the same param emits the unterminated
+    ``.*[.*``, a PatternSyntaxException the service can only report as a 503.
+    Neither surfaces in a hit assertion.
+
+    This also pins the BRANCH ORDER in ``_facet_include_regex``: the cased-letter
+    arm runs before the escape arm, so an operator that were ever also cased
+    would silently skip escaping.
+    """
+    for ch in LUCENE_REGEXP_OPERATORS:
+        assert svc._facet_include_regex(ch) == f".*\\{ch}.*", ch
+
+
+def test_facet_include_regex_leaves_every_other_character_literal():
+    """The inverse sweep: every printable NON-operator must stay literal (cased
+    ASCII folding to a ``[xX]`` class), so the escape set cannot grow."""
+    for ch in string.printable:
+        if ch in LUCENE_REGEXP_OPERATORS:
+            continue
+        folded = f"[{ch.lower()}{ch.upper()}]" if ch.lower() != ch.upper() else ch
+        assert svc._facet_include_regex(ch) == f".*{folded}.*", repr(ch)
+
+
+def test_facet_include_regex_cannot_smuggle_an_operator():
+    """The docstring's actual security claim: user text can never put a live
+    operator into the aggregation. Feed it EVERY operator at once and require the
+    emitted middle to be exactly those characters, each backslash-escaped — no
+    stray class, no bare operator, nothing that could widen the match."""
+    hostile = "".join(sorted(LUCENE_REGEXP_OPERATORS))
+    pattern = svc._facet_include_regex(hostile)
+    assert pattern.startswith(".*") and pattern.endswith(".*")
+    assert pattern[2:-2] == "".join("\\" + ch for ch in hostile)
+
+
+def test_build_query_facet_q_narrows_only_the_named_facets_buckets():
+    """The include regex lands on the named agg alone — the query, filters, and
+    every other facet's agg are byte-identical to a facet_q-less build."""
+    plain = build_query(q="x")
+    body = build_query(q="x", facet_queries={"tags": "घुस"})
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*घुस.*"
+    assert body["query"] == plain["query"]
+    for param in svc.FACET_FIELDS:
+        if param == "tags":
+            continue
+        assert body["aggs"][param] == plain["aggs"][param], param
+    # Still ordered by count (the terms-agg default): no order override emitted.
+    assert "order" not in body["aggs"]["tags"]["terms"]
+    # And the size cap is unchanged — include filters BEFORE the size cut, so
+    # the match runs over the full term set, not the default top-N slice.
+    assert body["aggs"]["tags"]["terms"]["size"] == svc.DEFAULT_FACET_AGG_SIZE
+
+
+def test_build_query_facet_q_is_repeatable_across_facets():
+    body = build_query(
+        q="x", facet_queries={"tags": "कर", "case_type": "corr"}
+    )
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*कर.*"
+    assert (
+        body["aggs"]["case_type"]["terms"]["include"]
+        == ".*[cC][oO][rR][rR].*"
+    )
+
+
+def test_every_facet_field_has_an_aggregation():
+    """The aggs are GENERATED from FACET_FIELDS, so a registry entry can never
+    exist without its aggregation — this pins that refactor (the aggs used to be
+    hand-listed, and a missing one served an empty facet list forever, silently)."""
+    body = build_query(q="x")
+    for param, field in svc.FACET_FIELDS.items():
+        assert body["aggs"][param]["terms"]["field"] == field, param
+        assert body["aggs"][param]["terms"]["size"] >= 1
+
+
 # ── range filters (बिगो amount) ────────────────────────────────────────────────
 #
 # The SECOND filter kind. Everything above is exact-match ``terms``; these emit a
@@ -608,6 +828,46 @@ def test_build_query_ignores_unknown_range_param_and_none_bounds():
         q="x", ranges={"bogus_min": 5, "bigo_min": None, "bigo_max": None}
     )
     assert body["query"]["bool"]["filter"] == []
+
+
+# ── range filters (date) ────────────────────────────────────────────────────────
+#
+# The bounds the field-agnostic range mechanism was pre-designed for: two more
+# RANGE_FIELDS entries over the shared Gregorian ``date`` field, nothing else.
+
+
+def test_range_fields_map_date_bounds_to_the_shared_date_field():
+    """Both params address the SAME indexed ``date`` field, one bound each."""
+    assert svc.RANGE_FIELDS["date_from"] == ("date", "gte")
+    assert svc.RANGE_FIELDS["date_to"] == ("date", "lte")
+
+
+def test_build_query_date_from_emits_a_gte_range_clause():
+    """A lower bound is inclusive — "from 2020" includes 2020-01-01 itself."""
+    body = build_query(q="x", ranges={"date_from": "2020-01-15"})
+    assert {"range": {"date": {"gte": "2020-01-15"}}} in body["query"]["bool"]["filter"]
+
+
+def test_build_query_merges_date_bounds_into_a_single_range_clause():
+    """One bounded interval on ``date``, exactly like the बिगो pair."""
+    body = build_query(
+        q="x", ranges={"date_from": "2020-01-01", "date_to": "2021-12-31"}
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert clauses == [
+        {"range": {"date": {"gte": "2020-01-01", "lte": "2021-12-31"}}}
+    ]
+
+
+def test_build_query_date_and_bigo_ranges_are_separate_clauses():
+    """Bounds on DIFFERENT fields must not merge — one ``range`` clause per field."""
+    body = build_query(
+        q="x", ranges={"bigo_min": 500, "date_from": "2020-01-01"}
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert {"range": {"bigo": {"gte": 500}}} in clauses
+    assert {"range": {"date": {"gte": "2020-01-01"}}} in clauses
+    assert len(clauses) == 2
 
 
 def test_build_query_keeps_a_zero_lower_bound():

@@ -272,6 +272,261 @@ def test_search_api_equal_bigo_bounds_are_allowed():
     assert clauses == [{"range": {"bigo": {"gte": 500, "lte": 500}}}]
 
 
+@pytest.mark.django_db
+def test_search_api_passes_date_bounds_as_iso_strings():
+    """?date_from/?date_to reach the DSL as ONE range clause of ISO STRINGS.
+
+    Strings, not ``datetime.date`` objects: the serializer re-serializes after
+    validating, so the OpenSearch body (and the analytics event) stay pure JSON
+    regardless of any one consumer's encoder.
+    """
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {"q": "", "date_from": "2020-01-01", "date_to": "2021-12-31"},
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert clauses == [
+        {"range": {"date": {"gte": "2020-01-01", "lte": "2021-12-31"}}}
+    ]
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_malformed_dates():
+    """Bad input is a client error, never a query sent on to OpenSearch."""
+    for params in (
+        {"date_from": "abc"},
+        {"date_to": "2024-13-01"},
+        {"date_from": "2024-02-30"},
+        {"date_from": "01/02/2024"},
+    ):
+        resp = APIClient().get("/api/search/", {"q": "x", **params})
+        assert resp.status_code == 400, params
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_inverted_date_interval():
+    """from > to matches nothing — a 400 beats a confident empty page."""
+    resp = APIClient().get(
+        "/api/search/", {"q": "x", "date_from": "2022-01-01", "date_to": "2020-01-01"}
+    )
+    assert resp.status_code == 400
+    assert "date_from" in json.dumps(resp.json())
+
+
+@pytest.mark.django_db
+def test_search_api_equal_date_bounds_are_allowed():
+    """from == to is a single-day range, not an inverted interval."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {"q": "x", "date_from": "2020-06-15", "date_to": "2020-06-15"},
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert clauses == [
+        {"range": {"date": {"gte": "2020-06-15", "lte": "2020-06-15"}}}
+    ]
+
+
+@pytest.mark.django_db
+def test_search_api_threads_court_type_through():
+    """?court_type reaches the DSL as a terms filter on the promoted field."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "", "type": "courtcase", "court_type": "supreme"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert {"terms": {"court_type": ["supreme"]}} in body["query"]["bool"]["filter"]
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_unknown_court_type():
+    """The vocabulary is CLOSED (district/high/supreme/special): a typo is a 400,
+    not a confident empty page."""
+    resp = APIClient().get("/api/search/", {"q": "x", "court_type": "municipal"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_search_api_threads_a_multi_court_selection_through():
+    """?court is repeatable, so an arbitrary set of courts ACROSS tiers lands in
+    one terms clause — the selection court_type+district cannot express."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {"q": "", "type": "courtcase", "court": ["kathmandudc", "patanhc"]},
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert {"terms": {"court": ["kathmandudc", "patanhc"]}} in body["query"]["bool"][
+        "filter"
+    ]
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_unknown_court_identifier():
+    """?court is CLOSED against the 97 real courts. Safe to be strict: a court
+    absent from the scraper registry is a court with no cases to filter for."""
+    resp = APIClient().get("/api/search/", {"q": "x", "court": "atlantisdc"})
+    assert resp.status_code == 400
+    # And the tier vocabulary is NOT accepted here — ?court takes identifiers.
+    assert APIClient().get(
+        "/api/search/", {"q": "x", "court": "district"}
+    ).status_code == 400
+
+
+@pytest.mark.django_db
+def test_search_api_threads_district_and_province_through():
+    """?district/?province reach the DSL as terms filters on the court_* fields."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {
+                "q": "",
+                "type": "courtcase",
+                "district": "Kathmandu",
+                "province": "Bagmati",
+            },
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
+    assert {"terms": {"court_province": ["Bagmati"]}} in clauses
+
+
+@pytest.mark.django_db
+def test_search_api_threads_facet_q_through():
+    """?facet_q=<facet>:<text> adds an include regex to that facet's agg only,
+    leaving the query itself untouched."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "facet_q": "tags:घुस"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*घुस.*"
+    assert "include" not in body["aggs"]["case_type"]["terms"]
+    assert body["query"]["bool"]["filter"] == []
+
+
+@pytest.mark.django_db
+def test_search_api_facet_q_text_may_contain_colons():
+    """Only the FIRST colon separates facet from text."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "facet_q": "tags:a:b"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*[aA]:[bB].*"
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_malformed_facet_q():
+    """Bad input is a client error, never a query sent on to OpenSearch."""
+    for value in ("tagsx", "tags:", ":घुस", "bogus:x"):
+        resp = APIClient().get("/api/search/", {"q": "x", "facet_q": value})
+        assert resp.status_code == 400, value
+
+
+@pytest.mark.django_db
+def test_search_api_facet_q_tolerates_a_space_after_the_colon():
+    """``?facet_q=tags: घुस`` is the natural thing to type. The child field trims
+    the whole ITEM, not the part after the colon, so without an explicit strip
+    the space rides into the include regex as a literal and the facet comes back
+    empty with a 200 — the silent-wrong-answer case, not an error.
+
+    (Whitespace-ONLY text needs no assertion here: a trailing-space item is
+    trimmed to ``tags:`` by the child field and 400s on the shape check, which
+    ``test_search_api_400_on_malformed_facet_q`` already covers. This test is
+    about interior-leading whitespace, the only kind that reaches the strip.)
+    """
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "x", "facet_q": "tags: घुस"})
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert body["aggs"]["tags"]["terms"]["include"] == ".*घुस.*"
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_overlong_facet_q_text():
+    """A facet_q text is expanded into a cluster-side Lucene RegExp (~4x the
+    input, since every cased letter widens to a ``[xX]`` class) and compiled into
+    an automaton there. Past Lucene's default ``determinizeWorkLimit`` the shard
+    throws, and ``search()``'s blanket ``except Exception`` can only report that
+    as ``SearchUnavailable`` — a 503 plus a Sentry search-outage event for what is
+    plainly a bad request. So the length is refused at the edge, like
+    ``bigo_min``/``bigo_max``'s ``max_value``, and the query is never sent.
+    """
+    from search.service import MAX_FACET_Q_TEXT
+
+    # Measured on the TEXT, not the whole item: "tags:" is five characters that
+    # never reach the regex, so a text exactly at the limit must still pass.
+    at_limit = "a" * MAX_FACET_Q_TEXT
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        ok = APIClient().get("/api/search/", {"q": "x", "facet_q": f"tags:{at_limit}"})
+    assert ok.status_code == 200
+
+    over_limit = "a" * (MAX_FACET_Q_TEXT + 1)
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "facet_q": f"tags:{over_limit}"}
+        )
+    assert resp.status_code == 400
+    assert "maximum" in str(resp.data["facet_q"])
+    # ...and the rejected query never reached the cluster.
+    client.search.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_duplicate_facet_q_facet():
+    """Two facet_q for one facet is ambiguous — refuse rather than pick one."""
+    resp = APIClient().get(
+        "/api/search/",
+        [("q", "x"), ("facet_q", "tags:a"), ("facet_q", "tags:b")],
+    )
+    assert resp.status_code == 400
+
+
+def test_every_facet_field_has_an_agg_and_a_serializer_field():
+    """``FACET_FIELDS`` and the serializer have to grow together — the view's
+    ``active_filters`` comprehension reads ``validated_data``, and DRF discards
+    any query param the serializer does not declare. The mirror of
+    ``test_every_range_field_is_declared_on_the_query_serializer`` below.
+    """
+    from search.service import FACET_FIELDS
+    from search.views import SearchQuerySerializer
+
+    undeclared = set(FACET_FIELDS) - set(SearchQuerySerializer().get_fields())
+    assert not undeclared, (
+        "these FACET_FIELDS params reach no serializer field, so the API will "
+        f"accept and silently ignore them: {sorted(undeclared)}"
+    )
+
+
 def test_every_range_field_is_declared_on_the_query_serializer():
     """``RANGE_FIELDS`` and the serializer have to grow together.
 

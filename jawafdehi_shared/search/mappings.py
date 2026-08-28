@@ -213,6 +213,35 @@ def common_mappings() -> dict[str, Any]:
                 # internal scraper enrichment flag pending/enriched/failed). Only
                 # Jawafdehi cases set this; other doc types leave it absent.
                 "case_status": {"type": "keyword"},
+                # The deciding court's identifier for NGM court cases
+                # ("kathmandudc", "patanhc", "supreme") — the ONE-court facet.
+                # A duplicate of ``raw.court`` on purpose: ``raw`` is
+                # ``enabled: false`` (below) and so cannot be aggregated. Same
+                # single-type pattern as ``case_status`` above: only court-case
+                # docs set it. Same rebuild caveat as ``weight`` below: an
+                # existing index only gains the mapping on the next --rebuild
+                # generation, until which the facet returns zero buckets and a
+                # filter matches nothing (safe degradation, no errors).
+                "court": {"type": "keyword"},
+                # Court tier for NGM court cases (district/high/supreme/special),
+                # lower-cased from ``Court.court_type`` at index time — and named
+                # after that column, which is what the SPA and the analytics
+                # payloads already call it. Same single-type + rebuild caveats.
+                "court_type": {"type": "keyword"},
+                # Court geography for NGM court cases, derived in-repo from the
+                # court identifier (courts/geography.py — there is no DB column;
+                # the courts table is SQLAlchemy-owned). Title-case English names
+                # ("Kathmandu", "Bagmati").
+                #
+                # ``court_district`` is a DISTRICT COURT's own district and
+                # nothing else — high/supreme/special leave it absent (a high
+                # court is a provincial court; its bench town is not whose case
+                # it is). ``court_province`` covers all 95 sub-national courts,
+                # with the sentinel "NATIONAL" for supreme/special so national
+                # jurisdiction stays a visible, filterable group. Same rebuild
+                # caveat as ``court_type``/``weight``.
+                "court_district": {"type": "keyword"},
+                "court_province": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get
                 # this declared type — an existing one picks the field up by dynamic

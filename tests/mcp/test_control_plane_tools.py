@@ -53,7 +53,7 @@ from jobs.serializers import (
     JobStageSerializer,
 )
 from review.serializers import ReviewConfigSerializer, SubmitSerializer
-from search.service import ALL_SORTS
+from search.service import ALL_COURT_TYPES, ALL_SORTS
 
 
 async def _call(tool, arguments):
@@ -137,6 +137,57 @@ def test_search_sort_enum_tracks_all_sorts():
     a mode missing here is unreachable, and one that shouldn't be here 400s."""
     schema = SearchControlPlaneTool().input_schema
     assert schema["properties"]["sort"]["enum"] == list(ALL_SORTS)
+
+
+def test_search_court_type_enum_tracks_all_court_types():
+    """Same static-schema hazard as ``sort``, across one more surface: the court
+    tier list is spelled out in the MCP schema, in the serializer's ChoiceField
+    and in the OpenAPI enum. The latter two are now built from
+    ``ALL_COURT_TYPES``; this pins the literal the MCP schema has to keep, so a
+    fifth tier cannot leave a model unable to ask for it (or asking and getting a
+    400).
+    """
+    from search.views import SearchQuerySerializer
+
+    schema = SearchControlPlaneTool().input_schema
+    assert schema["properties"]["court_type"]["items"]["enum"] == list(ALL_COURT_TYPES)
+    # ...and the endpoint really validates against the same tuple.
+    field = SearchQuerySerializer().fields["court_type"].child
+    assert list(field.choices) == list(ALL_COURT_TYPES)
+
+
+def test_search_facet_q_facets_track_facet_fields():
+    """``facet_q``'s description enumerates the legal facet names for the model.
+    That list is a static literal (this schema builds without the Django app), so
+    pin it to the registry the endpoint actually validates against — otherwise a
+    new facet is one a model is told does not exist."""
+    from jawafdehi_mcp.tools.control_plane import _FACET_Q_FACETS
+    from search.service import FACET_FIELDS
+
+    assert set(_FACET_Q_FACETS) == set(FACET_FIELDS)
+    # ...and the description's advertised LIST is exactly those names. Parsed out
+    # of the prose rather than probed with ``facet in description``: "court" is a
+    # substring of "court_type" and "district" appears in the worked example, so a
+    # containment check passes even on a hand-written list that omits them.
+    description = SearchControlPlaneTool().input_schema["properties"]["facet_q"][
+        "description"
+    ]
+    advertised = description.split("must be one of ", 1)[1].split(";", 1)[0]
+    assert set(advertised.split(", ")) == set(FACET_FIELDS)
+
+
+def test_search_facet_q_length_matches_the_endpoints_limit():
+    """The advertised character limit must not promise more than the endpoint
+    accepts, or a schema-valid call comes back a 400 — the same rule the बिगो
+    bounds are held to."""
+    from jawafdehi_mcp.tools.control_plane import _MAX_FACET_Q_TEXT
+    from search.service import MAX_FACET_Q_TEXT
+
+    assert _MAX_FACET_Q_TEXT == MAX_FACET_Q_TEXT
+    description = SearchControlPlaneTool().input_schema["properties"]["facet_q"][
+        "description"
+    ]
+    assert str(MAX_FACET_Q_TEXT) in description
 
 
 def test_unified_search_schema_tracks_the_search_endpoint():

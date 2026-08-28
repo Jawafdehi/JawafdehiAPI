@@ -123,6 +123,31 @@ class _ControlPlaneTool(BaseTool):
             return _error(f"Unexpected control-plane error: {exc}")
 
 
+#: The facet names ``facet_q`` accepts on the left of its colon — i.e. the keys of
+#: ``search.service.FACET_FIELDS``, restated here BY CONVENTION: this schema is
+#: kept buildable without the Django app, as the ``sort`` enum is. Note it is only
+#: a convention, not a constraint — nothing enforces it, ``import search.service``
+#: succeeds with no settings configured, and ``tools/ngm_judicial.py`` already
+#: imports ``courts`` at module level — so if this list grows a third copy, prefer
+#: importing the registry to restating it. Pinned to that registry by
+#: ``test_search_facet_q_facets_track_facet_fields``.
+_FACET_Q_FACETS: tuple[str, ...] = (
+    "entity_type",
+    "case_type",
+    "tags",
+    "status",
+    "court",
+    "court_type",
+    "district",
+    "province",
+)
+
+#: Mirror of ``search.service.MAX_FACET_Q_TEXT``, pinned by
+#: ``test_search_facet_q_length_matches_the_endpoints_limit`` so the advertised
+#: limit cannot promise more than the endpoint accepts.
+_MAX_FACET_Q_TEXT = 200
+
+
 class SearchControlPlaneTool(_ControlPlaneTool):
     #: The query params forwarded to ``/api/search/``. A single list, used by both
     #: ``input_schema`` and ``execute``, so the advertised surface and the
@@ -139,8 +164,15 @@ class SearchControlPlaneTool(_ControlPlaneTool):
         "case_type",
         "tags",
         "status",
+        "court",
+        "court_type",
+        "district",
+        "province",
         "bigo_min",
         "bigo_max",
+        "date_from",
+        "date_to",
+        "facet_q",
         "page",
         "page_size",
         "cursor",
@@ -199,6 +231,74 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     "type": "array",
                     "items": {"type": "string"},
                 },
+                # ONE-court facet: the deciding court's identifier, e.g.
+                # "kathmandudc" / "patanhc" / "supreme". COURTCASE-ONLY: only NGM
+                # court cases carry a court, so any value excludes every other
+                # result type — pair with type: ["courtcase"]. Repeatable, so an
+                # arbitrary set of courts is selectable; court_type and district
+                # AND together and cannot express one.
+                #
+                # Left as a plain string (not a 97-value enum) for the same reason
+                # district/province are: too large to restate here without it
+                # drifting. The API validates it against a closed list and 400s
+                # on anything else; GET /api/courts/ enumerates the 97.
+                "court": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "uniqueItems": True,
+                },
+                # Court tier facet (courtcase-only, same pairing caveat). Static
+                # (this schema must build without Django) but contract-tested
+                # against search.service.ALL_COURT_TYPES — the tuple the
+                # endpoint's ChoiceField and the OpenAPI enum are both built
+                # from — by test_search_court_type_enum_tracks_all_court_types.
+                "court_type": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["district", "high", "supreme", "special"],
+                    },
+                    "uniqueItems": True,
+                },
+                # Court geography facets (courtcase-only, same pairing caveat).
+                # Values are the canonical English names the response's
+                # facets.district / facets.province buckets return.
+                #
+                # "district" is a DISTRICT COURT's own district and matches
+                # nothing else — high courts are provincial and carry no
+                # district, supreme/special carry none. "province" covers all 95
+                # sub-national courts; "NATIONAL" selects supreme + special.
+                "district": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "A DISTRICT COURT's own district, as the canonical "
+                        "Title-Case English name returned in facets.district — "
+                        "e.g. 'Kathmandu', not 'kathmandu'. Values are "
+                        "CASE-SENSITIVE and a wrong case returns an empty result "
+                        "set rather than an error, so take values from the "
+                        "response's facets.district buckets. Matches "
+                        "district-court cases ONLY: a high court is a provincial "
+                        "court and carries no district (use province), and "
+                        "supreme/special carry none either. Courtcase-only."
+                    ),
+                },
+                "province": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "The court's province, as the canonical Title-Case "
+                        "English name returned in facets.province — one of "
+                        "Koshi, Madhesh, Bagmati, Gandaki, Lumbini, Karnali, "
+                        "Sudurpashchim — or the UPPER-CASE sentinel 'NATIONAL', "
+                        "which selects supreme + special-court cases. Values are "
+                        "CASE-SENSITIVE and a wrong case returns an empty result "
+                        "set rather than an error. Set for all 95 sub-national "
+                        "courts, a high court resolving to the province it "
+                        "serves (its additional benches included). "
+                        "Courtcase-only."
+                    ),
+                },
                 # बिगो (alleged embezzled amount, whole NPR) range bounds,
                 # inclusive. CASE-ONLY: no entity/material/court-case document
                 # carries an amount, so either bound also excludes every non-case
@@ -207,6 +307,34 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                 # call cannot come back as a 400 from the API's clamp.
                 "bigo_min": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1},
                 "bigo_max": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1},
+                # Gregorian date-range bounds (inclusive) over the shared record
+                # date. Entities carry no date, so either bound excludes every
+                # entity result.
+                "date_from": {"type": "string", "format": "date"},
+                "date_to": {"type": "string", "format": "date"},
+                # Facet-value search: "<facet>:<text>" recomputes only that
+                # facet's bucket list to buckets containing <text> (case-
+                # insensitive, over the full aggregation) without affecting
+                # results, count, or other facets. Repeatable, once per facet.
+                "facet_q": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Facet-value search, one entry per facet, each of the form "
+                        "'<facet>:<text>' — e.g. 'district:kath'. The FORM IS "
+                        "MANDATORY: an entry with no colon is a 400. <facet> must "
+                        "be one of "
+                        + ", ".join(sorted(_FACET_Q_FACETS))
+                        + f"; <text> is matched literally (regex-escaped "
+                        f"server-side), case-insensitively, and is limited to "
+                        f"{_MAX_FACET_Q_TEXT} characters. Recomputes ONLY that "
+                        "facet's bucket list to the buckets whose key contains "
+                        "<text>, matched over the full aggregation; results, "
+                        "count and every other facet are unaffected. This is a "
+                        "typeahead for picking a filter value, NOT a way to "
+                        "filter results."
+                    ),
+                },
                 "page": {"type": "integer", "minimum": 1, "default": 1},
                 "page_size": {
                     "type": "integer",

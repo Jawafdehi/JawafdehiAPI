@@ -123,7 +123,7 @@ def _courtcase_obj():
         nes_id="https://jawafdehi.org/entity/person/ram-bahadur",
         registration_date_ad=None,
         registration_date_bs="2080-10-01",
-        court=SimpleNamespace(full_name_english="Supreme Court"),
+        court=SimpleNamespace(full_name_english="Supreme Court", court_type="supreme"),
     )
     obj.iri = build_courtcase_iri(obj.court_id, obj.case_number)
     return obj
@@ -153,6 +153,16 @@ def test_courtcase_build_doc_shape_and_title_from_case_number():
     # split into duplicate facet buckets. The verbatim value stays in ``raw``.
     assert doc["case_type"] == "CORRUPTION"
     assert doc["raw"]["case_type"] == "corruption"
+    # The court identifier promoted to a top-level keyword for the one-court
+    # facet — ``identifiers`` and ``raw.court`` carry it too, but neither can
+    # aggregate.
+    assert doc["court"] == "supreme"
+    # Court tier promoted for the unified search's court_type facet.
+    assert doc["court_type"] == "supreme"
+    # National jurisdiction: no district at all, and the NATIONAL sentinel for
+    # province so "national jurisdiction" stays a visible, filterable group.
+    assert "court_district" not in doc
+    assert doc["court_province"] == "NATIONAL"
 
 
 def test_courtcase_title_en_none_without_english_court_name():
@@ -161,6 +171,74 @@ def test_courtcase_title_en_none_without_english_court_name():
     doc = courtcase_index.build_doc(obj)
     assert doc["title_en"] is None
     assert doc["title_ne"] == "081-CR-0081"
+
+
+def test_courtcase_court_type_absent_for_stub_court():
+    """Scraper stubs create Court rows with ``court_type=""`` — an empty keyword
+    would pollute the facet with a nameless bucket, so the field is dropped."""
+    obj = _courtcase_obj()
+    obj.court = SimpleNamespace(full_name_english=None, court_type="")
+    doc = courtcase_index.build_doc(obj)
+    assert "court_type" not in doc
+
+
+def test_courtcase_court_type_absent_without_court():
+    """Drop the field, never the document (the bigo lesson)."""
+    obj = _courtcase_obj()
+    obj.court = None
+    doc = courtcase_index.build_doc(obj)
+    assert "court_type" not in doc
+
+
+def test_courtcase_court_type_is_lowercased():
+    """One controlled vocabulary — casing variants must not split facet buckets."""
+    obj = _courtcase_obj()
+    obj.court = SimpleNamespace(full_name_english=None, court_type="District")
+    doc = courtcase_index.build_doc(obj)
+    assert doc["court_type"] == "district"
+
+
+def test_courtcase_court_identifier_is_indexed_even_without_a_court_row():
+    """The one-court facet is fed from ``court_id``, not the joined Court row, so
+    it survives the stub/None cases that drop ``court_type``."""
+    obj = _courtcase_obj()
+    obj.court_id = "achhamdc"
+    obj.court = None
+    doc = courtcase_index.build_doc(obj)
+    assert doc["court"] == "achhamdc"
+
+
+def test_courtcase_district_court_resolves_its_own_district_and_province():
+    """A district court's identifier IS its scraper code_name; geography is
+    derived from it alone (no DB access)."""
+    obj = _courtcase_obj()
+    obj.court_id = "achhamdc"
+    doc = courtcase_index.build_doc(obj)
+    assert doc["court_district"] == "Achham"
+    assert doc["court_province"] == "Sudurpashchim"
+
+
+def test_courtcase_high_court_gets_a_province_but_no_district():
+    """A high court is a PROVINCIAL court: its seat district would answer "which
+    town is the bench in", not "whose case is this" — so only province is
+    indexed, and an additional bench resolves to its parent court's province."""
+    obj = _courtcase_obj()
+    obj.court_id = "patanhc"
+    doc = courtcase_index.build_doc(obj)
+    assert "court_district" not in doc
+    assert doc["court_province"] == "Bagmati"
+    # Butwal is an additional bench of High Court Tulsipur — same province.
+    obj.court_id = "butwalhc"
+    assert courtcase_index.build_doc(obj)["court_province"] == "Lumbini"
+
+
+def test_courtcase_unknown_court_indexes_no_location():
+    """Indexing nothing is recoverable; a wrong bucket is a lie the facet serves."""
+    obj = _courtcase_obj()
+    obj.court_id = "atlantisdc"
+    doc = courtcase_index.build_doc(obj)
+    assert "court_district" not in doc
+    assert "court_province" not in doc
 
 
 # ── case ───────────────────────────────────────────────────────────────────────
