@@ -86,10 +86,21 @@ bind without writing anything; `--apply` is required to actually write, and
 even then `CaseworkApi` itself refuses a non-loopback host unless
 `--allow-remote-writes` is also passed -- never pass that against production.
 
+IT ALSO UPDATES ACCUSED BINDS IT DID NOT CREATE. `enrich_court_record` binds
+every court-record defendant with `outcome = charged` and a placeholder note,
+because a `ठहर` on a 19-defendant judgment does not say who. When a case has a
+bound court order, accused binds and no terminal outcome yet, this stage reads
+the judgment's operative section and rewrites those binds in place -- a real
+role note and a per-defendant verdict -- in the SAME `/entities` replace the
+new binds go out in, never a second PATCH. It still proposes no accused bind of
+its own. Gated INDEPENDENTLY of the `related`-bind idempotency skip: nearly
+every case this targets has already been through an extraction run.
+
 Usage:
     uv run python -m casework.enrich_related_entities --dry-run
     uv run python -m casework.enrich_related_entities --slug case-0123
     uv run python -m casework.enrich_related_entities --limit 10 --verbose
+    uv run python -m casework.enrich_related_entities --no-verdicts
     uv run python -m casework.enrich_related_entities --apply   # loopback only
 """
 
@@ -654,6 +665,159 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
                 f"chunk returned {len(answered)} of {len(chunk)} defendants; "
                 f"missing: {', '.join(missing)}")
     return results, errors
+
+
+def accused_verdict_targets(case):
+    """The accused binds a name-keyed verdict may be applied to:
+    `({display_name: nes_id}, skipped)`, in bind order.
+
+    `skipped` rows are `(nes_id, display_name, reason)` -- the binds this run
+    declines to decide, which the caller must still report. `display_name` is
+    `None` when NES could not resolve the id, so there is no name to match the
+    judgment against; and two accused binds sharing one name leave a verdict
+    keyed on that name unable to say which person the court meant, so BOTH are
+    dropped rather than settled by a coin flip on a criminal record.
+    """
+    by_name: dict = {}
+    skipped: list = []
+    for entity in (case.get("entities") or []):
+        if bind_relationship_type(entity) != ACCUSED_SECTION:
+            continue
+        nes_id = (entity.get("nes_id") or "").strip()
+        if not nes_id:
+            continue
+        name = (entity.get("display_name") or "").strip()
+        if not name:
+            skipped.append((nes_id, "", "no display_name: NES did not resolve this "
+                                        "bind, so no name can be matched to the judgment"))
+            continue
+        by_name.setdefault(name, []).append(nes_id)
+    targets = {}
+    for name, nes_ids in by_name.items():
+        if len(nes_ids) > 1:
+            for nes_id in nes_ids:
+                skipped.append((nes_id, name,
+                                f"{len(nes_ids)} accused binds share the display name "
+                                f"{name!r}: a name-keyed verdict cannot say which"))
+            continue
+        targets[name] = nes_ids[0]
+    return targets, skipped
+
+
+def verdict_gate(case, court_text):
+    """Whether this case's judgment may be read for per-defendant verdicts,
+    and the reason it may not.
+
+    The court order's presence IS the decided-ness test: an order is bound to a
+    case only after it is decided, so an undecided case spends nothing here. A
+    terminal outcome already on an accused bind means a human or the whole-case
+    सफाई rule has settled it, and this stage does not re-litigate that.
+    """
+    if not court_text:
+        return False, "no court-order text"
+    accused = [entity for entity in (case.get("entities") or [])
+               if bind_relationship_type(entity) == ACCUSED_SECTION]
+    if not accused:
+        return False, "no accused bind to update"
+    settled = [entity for entity in accused
+               if (entity.get("outcome") or "").strip().lower() in TERMINAL_OUTCOMES]
+    if settled:
+        return False, (f"{len(settled)} of {len(accused)} accused bind(s) already "
+                       "carry a terminal outcome")
+    return True, ""
+
+
+def _verdict_row(slug, name, nes_id, old_outcome, new_outcome, role, evidence,
+                 reason, written=False):
+    """One `*.verdicts.jsonl` row -- every accused bind considered, decided or not."""
+    return {"slug": slug, "name": name, "nes_id": nes_id,
+            "old_outcome": old_outcome, "new_outcome": new_outcome,
+            "role": role, "evidence": evidence, "reason": reason,
+            "written": written}
+
+
+def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
+    """Read one case's judgment for its accused binds:
+    `(updates, rows, errors)`.
+
+    `updates` is `apply_accused_updates`' input, keyed by `nes_id`; `rows` cover
+    EVERY accused bind, including the ones never sent to the model, so a
+    defendant this run declined to decide is as visible in the artefact as one
+    it decided. The name -> `nes_id` mapping is exact, never normalised: this is
+    the step where a verdict can land on the wrong person.
+    """
+    targets, skipped = accused_verdict_targets(case)
+    outcomes = {(entity.get("nes_id") or "").strip():
+                (entity.get("outcome") or "").strip()
+                for entity in (case.get("entities") or [])}
+    rows = [_verdict_row(slug, name, nes_id, outcomes.get(nes_id, ""), "", "", "", reason)
+            for nes_id, name, reason in skipped]
+    if not targets:
+        return {}, rows, []
+    verdicts, errors = accused_verdicts(list(targets), court_text, invoke_text,
+                                        usage=usage)
+    updates = {}
+    for name, nes_id in targets.items():
+        verdict = verdicts.get(name)
+        if verdict is None:
+            rows.append(_verdict_row(
+                slug, name, nes_id, outcomes.get(nes_id, ""), "", "", "",
+                "the judgment reply did not answer for this name"))
+            continue
+        updates[nes_id] = {"outcome": verdict["outcome"], "notes": verdict["role"]}
+        rows.append(_verdict_row(
+            slug, name, nes_id, outcomes.get(nes_id, ""), verdict["outcome"],
+            verdict["role"], verdict["evidence"], ""))
+    return updates, rows, errors
+
+
+def settle_verdict_rows(rows, before, after):
+    """Fill in each undecided row's `reason` from what the patch list actually
+    changed, and return the `nes_id`s whose bind changed.
+
+    `before`/`after` are `{nes_id: bind}` over the accused binds either side of
+    `apply_accused_updates`. Derived from the diff rather than re-deciding the
+    rules, so the report can never disagree with the list that gets sent.
+    """
+    changed = set()
+    for row in rows:
+        nes_id = row["nes_id"]
+        old, new = before.get(nes_id), after.get(nes_id)
+        if old is not None and new != old:
+            changed.add(nes_id)
+        if row["reason"]:
+            continue
+        if old is None:
+            row["reason"] = ("the bind was no longer on the case when it was "
+                             "re-read for the write")
+            continue
+        reasons = []
+        if row["new_outcome"] not in TERMINAL_OUTCOMES:
+            reasons.append(f"outcome {row['new_outcome']!r} is not terminal, "
+                           "so no verdict was written")
+        if not row["role"]:
+            reasons.append("the judgment states no role; the existing note was left alone")
+        elif new.get("notes") == old.get("notes"):
+            reasons.append("note kept: the existing note is not the machine "
+                           "placeholder this stage may overwrite")
+        row["reason"] = "; ".join(reasons)
+    return changed
+
+
+def verdict_bind_row(slug, row, written):
+    """A `*.binds.jsonl` row for an accused bind the judgment changed.
+
+    The verdict path updates binds that already exist, so it never produces a
+    resolver row of its own -- without this the evidence phrase behind a machine
+    `convicted` would appear in no bind audit file at all. `score` and
+    `matched_name` are absent by construction: nothing was matched, the bind was
+    already there.
+    """
+    return {"slug": slug, "extracted": row["name"], "role": ACCUSED_SECTION,
+            "nes_id": row["nes_id"], "score": None, "matched_name": row["name"],
+            "notes": row["role"],
+            "reason": f"verdict {row['new_outcome']}: {row['evidence']}",
+            "written": written}
 
 
 def validate_bind_item(item):
@@ -1519,7 +1683,7 @@ def plan_summary(plan, extracted_items):
 
 
 def report_paths(paths):
-    """The three report files, sharing the run log's timestamp-and-run-id stem.
+    """The run's report files, sharing the run log's timestamp-and-run-id stem.
 
     Guards against blindly slicing off the last 4 characters of any path: a
     log path that genuinely ends in ".log" has that suffix stripped so the
@@ -1543,7 +1707,11 @@ def report_paths(paths):
             # left no trace of either beyond a count in the log.
             "extracted": f"{stem}.extracted.jsonl",
             "accused_notes": f"{stem}.accused_notes.jsonl",
-            "created": f"{stem}.created.jsonl"}
+            "created": f"{stem}.created.jsonl",
+            # Every accused bind the verdict step LOOKED AT, decided or not --
+            # a defendant left undecided is as much of a fact about the run as
+            # one that was convicted, and this is the only place it is visible.
+            "verdicts": f"{stem}.verdicts.jsonl"}
 
 
 #: The no-match report IS the caseworker queue, so an unescaped `|` in an
@@ -1740,6 +1908,14 @@ def main(argv=None):
              "including a match that exists only across scripts -- that refusal "
              "was removed on 2026-08-05, so a case charging कमल थापा can bind a "
              "Kamala Thapa entity.")
+    ap.add_argument(
+        "--no-verdicts", action="store_true",
+        help="Skip the per-defendant verdict read. It is ON by default: a DRAFT "
+             "case with a bound court order, accused binds and no terminal "
+             "outcome yet costs one extra LLM call, and the outcome and role "
+             "note it decides ride out in the SAME /entities write as the "
+             "binds. With this flag the run extracts and binds only, and an "
+             "already-enriched case is skipped without a read, as before.")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -1783,6 +1959,8 @@ def main(argv=None):
         print("  --dry-run: printing what WOULD bind; no /entities writes will be made.")
     if args.force:
         print("  --force: re-extracting even for cases with a 'related' bind already present")
+    if args.no_verdicts:
+        print("  --no-verdicts: not reading any judgment for per-defendant outcomes")
     if args.strict:
         print("  --strict: a veto or an ambiguity means REVIEW, not a bind")
     else:
@@ -1807,7 +1985,12 @@ def main(argv=None):
     # reviewed nor unmatched, so without their own counter the zero-bind footer
     # below blames the resolver for a refusal that happened after it.
     total_refused_binds = 0
-    bind_rows, review_rows, nomatch_rows = [], [], []
+    # Accused binds the judgment actually changed, and the defendants this run
+    # declined to decide. Counted apart because "we set 40 verdicts" and "9
+    # defendants got none" are different facts, and only the second one tells a
+    # caseworker there is still work on those cases.
+    total_verdicts = total_verdicts_undecided = 0
+    bind_rows, review_rows, nomatch_rows, verdict_rows = [], [], [], []
     # Collected BEFORE resolution, so they survive a run where nothing binds.
     extracted_rows, accused_notes_rows = [], []
     created_rows = []
@@ -1818,6 +2001,101 @@ def main(argv=None):
     run_entities = {}
     # Fetched on first use, not at startup -- see the call site.
     live_prefixes = None
+
+    def extract_entities_for(slug, content_parts):
+        """One case's LLM extraction: `(valid_items, produced)`.
+
+        Lifted out of the loop body so that every way extraction can come up
+        empty -- an unusable prompt, a failed call, a reply with nothing in it --
+        is a `return` rather than a `continue`. The verdict step below has to run
+        on a case whose extraction gave nothing, and a `continue` skipped it.
+        `produced` is False when the case would have been abandoned before, so
+        the caller can keep the old reporting exactly.
+        """
+        nonlocal total_entities_extracted, total_accused_notes_extracted, live_prefixes
+
+        user_prompt = _enforce_prompt_budget(content_parts)
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="prompt", status="ok", detail=f"{len(user_prompt)} chars")
+
+        if not user_prompt.strip():
+            report.record(slug, "entities", "skipped", "empty prompt after truncation")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="prompt", status="skipped",
+                      detail="empty prompt after truncation", level=logging.WARNING)
+            return [], False
+
+        # The category list rides on the system prompt only when we might create
+        # something. Fetched once per run, here as well as at the create step,
+        # because the prompt is built first.
+        if args.create_entities and live_prefixes is None:
+            live_prefixes = read_live_prefixes(api)
+
+        try:
+            response_text = invoke_text(
+                system=SYSTEM_PROMPT + prefix_prompt_section(
+                    live_prefixes if args.create_entities else None),
+                content=user_prompt,
+                max_tokens=EXTRACTION_MAX_TOKENS,
+                tier=tier_for("entities"),
+                usage=usage,
+            )
+        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
+            report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="extract", status="error", detail=str(exc),
+                      level=logging.ERROR)
+            if args.verbose:
+                import traceback
+
+                traceback.print_exc()
+            return [], False
+
+        entities_data, accused_notes = _parse_extraction_response(response_text)
+        # Only two things are dropped here: a non-dict, and an item with no name.
+        # Both are unrecordable -- `plan_case_entities` skips a nameless item
+        # without putting it in ANY of its three lists, so `plan_summary` would
+        # count it as already-bound (it derives that by subtraction).
+        #
+        # The relationship_type is deliberately NOT filtered here. It used to be
+        # (`in ("location", "related")`), which silently discarded every other
+        # section before the planner could see it -- so widening the planner to
+        # all nine types would have been dead code for seven of them. One place
+        # decides which sections are bindable, and that place is the planner.
+        valid_items = [
+            item for item in entities_data
+            if isinstance(item, dict) and (item.get("entity_name") or "").strip()
+        ]
+
+        if not valid_items and not accused_notes:
+            report.record(
+                slug, "entities", "skipped", "LLM returned no entities or accused notes")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="extract", status="skipped",
+                      detail="LLM returned no entities or accused notes",
+                      level=logging.WARNING)
+            return [], False
+
+        total_entities_extracted += len(valid_items)
+        total_accused_notes_extracted += len(accused_notes)
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="extract", status="ok",
+                  detail=f"{len(valid_items)} entities + {len(accused_notes)} accused_notes")
+
+        # Record the extraction itself, here, before anything can drop it. Every
+        # later exit -- an ETag failure, a refused plan, a whole case of
+        # no-matches -- leaves these rows already written.
+        for item in valid_items:
+            extracted_rows.append({
+                "slug": slug,
+                "extracted": (item.get("entity_name") or "").strip(),
+                "relationship_type": (item.get("relationship_type") or "").strip().lower(),
+                "notes": (item.get("notes") or "").strip(),
+            })
+        for note in accused_notes:
+            if isinstance(note, dict):
+                accused_notes_rows.append({**note, "slug": slug})
+        return valid_items, True
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
@@ -1851,7 +2129,13 @@ def main(argv=None):
             bind for bind in (case.get("entities") or [])
             if bind_relationship_type(bind) == "related"
         ]
-        if existing_related and not args.force:
+        # THE SKIP IS EXTRACTION-ONLY SINCE THE VERDICT STEP LANDED. It stops
+        # the premium extraction call, not the case: nearly every case the
+        # verdict step targets has already been through an extraction run, so
+        # sharing this gate with it would skip all of them. `--no-verdicts`
+        # restores the free skip -- no detail read, nothing.
+        skip_extraction = bool(existing_related) and not args.force
+        if skip_extraction:
             total_skipped_enriched += 1
             report.record(
                 slug, "entities", "already",
@@ -1859,7 +2143,8 @@ def main(argv=None):
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="idempotency", status="already",
                       detail=f"{len(existing_related)} 'related' bind(s) already present")
-            continue
+            if args.no_verdicts:
+                continue
 
         try:
             detail = api.get_case(slug)
@@ -1869,121 +2154,83 @@ def main(argv=None):
                       step="fetch", status="fallback", detail=str(exc),
                       level=logging.WARNING)
 
-        unmet = unmet_prerequisites(STAGE, detail)
-        if unmet:
-            for reason in unmet:
-                report.record(slug, "entities", "unmet", reason)
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="prereq", status="unmet", detail="; ".join(unmet),
-                      level=logging.WARNING)
+        if skip_extraction:
+            # Here for the verdicts only, and those read the court order alone --
+            # fetching the press release too would spend a markdown read per
+            # case on a prompt this run will never build.
+            court_text, _court_unmet = source_text(detail, types=COURT_TYPES)
+            court_text = court_text.strip() or None
+            valid_items, produced = [], False
+        else:
+            unmet = unmet_prerequisites(STAGE, detail)
+            if unmet:
+                for reason in unmet:
+                    report.record(slug, "entities", "unmet", reason)
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="prereq", status="unmet",
+                          detail="; ".join(unmet), level=logging.WARNING)
+                continue
+
+            press_text, press_unmet = source_text(detail, types=PRESS_TYPES)
+            court_text, court_unmet = source_text(detail, types=COURT_TYPES)
+            press_text = press_text.strip() or None
+            court_text = court_text.strip() or None
+
+            content_parts = _build_content_parts(press_text, court_text)
+            if not content_parts:
+                # Donor-preserved gate (donor line 404): skip only when BOTH
+                # press release and court order content are absent.
+                reasons = (press_unmet + court_unmet) or [
+                    "no press release or court order content"]
+                for reason in reasons:
+                    report.record(slug, "entities", "unmet", reason)
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="source", status="unmet",
+                          detail="; ".join(reasons), level=logging.WARNING)
+                continue
+
+            if press_text:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="source", status="ok",
+                          detail=f"press release {len(press_text)} chars")
+            if court_text:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="source", status="ok",
+                          detail=f"court order {len(court_text)} chars")
+
+            valid_items, produced = extract_entities_for(slug, content_parts)
+
+        # THE VERDICT GATE, EVALUATED INDEPENDENTLY OF THE SKIP ABOVE. The
+        # updates it produces are merged into the SAME whole-list replace the
+        # binds go out in -- `/entities` is destructive, so a second PATCH would
+        # re-run the delete-and-recreate over a list this one just rewrote.
+        updates, case_verdict_rows, verdict_errors = {}, [], []
+        if not args.no_verdicts:
+            decidable, why_not = verdict_gate(detail, court_text)
+            if not decidable:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="verdicts", status="skipped", detail=why_not)
+            else:
+                updates, case_verdict_rows, verdict_errors = case_verdict_updates(
+                    slug, detail, court_text, invoke_text, usage=usage)
+
+        # Nothing extracted and no verdict to write: the extraction path already
+        # recorded why, and there is no reason to spend the conditional re-read.
+        if not produced and not updates:
+            # Every row here already carries its own reason: `updates` is empty
+            # only when no accused bind was decidable or the reply answered for
+            # none of them.
+            verdict_rows.extend(case_verdict_rows)
+            total_verdicts_undecided += len(case_verdict_rows)
+            for error in verdict_errors:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="verdicts", status="error", detail=error,
+                          level=logging.ERROR)
+            if case_verdict_rows:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="verdicts", status="ok",
+                          detail=f"0 of {len(case_verdict_rows)} accused bind(s) updated")
             continue
-
-        press_text, press_unmet = source_text(detail, types=PRESS_TYPES)
-        court_text, court_unmet = source_text(detail, types=COURT_TYPES)
-        press_text = press_text.strip() or None
-        court_text = court_text.strip() or None
-
-        content_parts = _build_content_parts(press_text, court_text)
-        if not content_parts:
-            # Donor-preserved gate (donor line 404): skip only when BOTH
-            # press release and court order content are absent.
-            reasons = (press_unmet + court_unmet) or [
-                "no press release or court order content"]
-            for reason in reasons:
-                report.record(slug, "entities", "unmet", reason)
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="source", status="unmet", detail="; ".join(reasons),
-                      level=logging.WARNING)
-            continue
-
-        if press_text:
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="source", status="ok", detail=f"press release {len(press_text)} chars")
-        if court_text:
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="source", status="ok", detail=f"court order {len(court_text)} chars")
-
-        user_prompt = _enforce_prompt_budget(content_parts)
-        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                  step="prompt", status="ok", detail=f"{len(user_prompt)} chars")
-
-        if not user_prompt.strip():
-            report.record(slug, "entities", "skipped", "empty prompt after truncation")
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="prompt", status="skipped",
-                      detail="empty prompt after truncation", level=logging.WARNING)
-            continue
-
-        # The category list rides on the system prompt only when we might create
-        # something. Fetched once per run, here as well as at the create step,
-        # because the prompt is built first.
-        if args.create_entities and live_prefixes is None:
-            live_prefixes = read_live_prefixes(api)
-
-        try:
-            response_text = invoke_text(
-                system=SYSTEM_PROMPT + prefix_prompt_section(
-                    live_prefixes if args.create_entities else None),
-                content=user_prompt,
-                max_tokens=EXTRACTION_MAX_TOKENS,
-                tier=tier_for("entities"),
-                usage=usage,
-            )
-        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
-            report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="extract", status="error", detail=str(exc),
-                      level=logging.ERROR)
-            if args.verbose:
-                import traceback
-
-                traceback.print_exc()
-            continue
-
-        entities_data, accused_notes = _parse_extraction_response(response_text)
-        # Only two things are dropped here: a non-dict, and an item with no name.
-        # Both are unrecordable -- `plan_case_entities` skips a nameless item
-        # without putting it in ANY of its three lists, so `plan_summary` would
-        # count it as already-bound (it derives that by subtraction).
-        #
-        # The relationship_type is deliberately NOT filtered here. It used to be
-        # (`in ("location", "related")`), which silently discarded every other
-        # section before the planner could see it -- so widening the planner to
-        # all nine types would have been dead code for seven of them. One place
-        # decides which sections are bindable, and that place is the planner.
-        valid_items = [
-            item for item in entities_data
-            if isinstance(item, dict) and (item.get("entity_name") or "").strip()
-        ]
-
-        if not valid_items and not accused_notes:
-            report.record(
-                slug, "entities", "skipped", "LLM returned no entities or accused notes")
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="extract", status="skipped",
-                      detail="LLM returned no entities or accused notes",
-                      level=logging.WARNING)
-            continue
-
-        total_entities_extracted += len(valid_items)
-        total_accused_notes_extracted += len(accused_notes)
-        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                  step="extract", status="ok",
-                  detail=f"{len(valid_items)} entities + {len(accused_notes)} accused_notes")
-
-        # Record the extraction itself, here, before anything can drop it. Every
-        # later exit -- an ETag failure, a refused plan, a whole case of
-        # no-matches -- leaves these rows already written.
-        for item in valid_items:
-            extracted_rows.append({
-                "slug": slug,
-                "extracted": (item.get("entity_name") or "").strip(),
-                "relationship_type": (item.get("relationship_type") or "").strip().lower(),
-                "notes": (item.get("notes") or "").strip(),
-            })
-        for note in accused_notes:
-            if isinstance(note, dict):
-                accused_notes_rows.append({**note, "slug": slug})
 
         # Re-read WITH the ETag so the whole-list replace is conditional. `detail`
         # above came from `get_case`, which returns no ETag.
@@ -2020,6 +2267,13 @@ def main(argv=None):
                       step="resolve", status="skipped" if refused_state else "error",
                       detail=plan.reason,
                       level=logging.WARNING if refused_state else logging.ERROR)
+            # The judgment was still read, so say what it said and why none of
+            # it landed. A verdict that vanishes with the plan is a defendant
+            # nobody knows was looked at.
+            for row in case_verdict_rows:
+                row["reason"] = row["reason"] or f"case not written: {plan.reason}"
+            verdict_rows.extend(case_verdict_rows)
+            total_verdicts_undecided += len(case_verdict_rows)
             continue
 
         # `role` is the section the extraction ASKED for, which the planner records
@@ -2068,6 +2322,35 @@ def main(argv=None):
                 plan.patch_items = merge_entity_binds(base, created_binds)
                 plan.action = "WOULD_PATCH"
 
+        # THE LAST MERGE, and the only one that rewrites a row rather than
+        # appending one. It goes into the same `patch_items` the binds above
+        # built, so the case still gets exactly one conditional whole-list
+        # replace. `apply_accused_updates` never adds or drops a bind, so the
+        # destructive replace stays exactly as safe as it was.
+        base = plan.patch_items or current_entity_binds(fresh)
+        updated = apply_accused_updates(base, updates) if updates else base
+        changed_ids = settle_verdict_rows(
+            case_verdict_rows,
+            {b["nes_id"]: b for b in base
+             if bind_relationship_type(b) == ACCUSED_SECTION},
+            {b["nes_id"]: b for b in updated
+             if bind_relationship_type(b) == ACCUSED_SECTION})
+        verdict_rows.extend(case_verdict_rows)
+        total_verdicts_undecided += sum(
+            1 for row in case_verdict_rows if row["nes_id"] not in changed_ids)
+        for error in verdict_errors:
+            log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                      slug=slug, step="verdicts", status="error", detail=error,
+                      level=logging.ERROR)
+        if case_verdict_rows:
+            log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                      slug=slug, step="verdicts", status="ok",
+                      detail=(f"{len(changed_ids)} of {len(case_verdict_rows)} accused "
+                              f"bind(s) updated, {len(verdict_errors)} chunk error(s)"))
+        if changed_ids:
+            plan.patch_items = updated
+            plan.action = "WOULD_PATCH"
+
         for name, decision, section in plan.nomatch:
             nomatch_rows.append((name, slug, decision, section))
 
@@ -2103,7 +2386,8 @@ def main(argv=None):
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
                           slug=slug, step="write", status="would-refuse",
                           detail=refusal, level=logging.WARNING)
-                print(f"  WOULD REFUSE {len(plan.bound)} bind(s) on {slug}: {refusal}")
+                print(f"  WOULD REFUSE {len(plan.bound)} bind(s) and "
+                      f"{len(changed_ids)} verdict update(s) on {slug}: {refusal}")
                 continue
             total_bound += counts["bound"]
             for name, decision, notes, section in plan.bound:
@@ -2113,8 +2397,15 @@ def main(argv=None):
                 print(f"  WOULD BIND ({section}) {name}  ->  {decision.nes_id}  "
                       f"(score {decision.score:.2f})"
                       f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
+            total_verdicts += len(changed_ids)
+            for row in case_verdict_rows:
+                if row["nes_id"] in changed_ids:
+                    bind_rows.append(verdict_bind_row(slug, row, False))
+                    print(f"  WOULD SET ({ACCUSED_SECTION}) {row['name']}  ->  "
+                          f"{row['new_outcome'] or 'note only'}")
             report.record(slug, "entities", "would-bind",
-                          f"{len(plan.bound)} would bind")
+                          f"{len(plan.bound)} would bind, "
+                          f"{len(changed_ids)} verdict update(s)")
             continue
 
         try:
@@ -2131,9 +2422,18 @@ def main(argv=None):
             total_promoted += is_promoted(decision)
             print(f"  BOUND ({section}) {name}  ->  {decision.nes_id}"
                   f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
-        report.record(slug, "entities", "bound", f"{len(plan.bound)} bound")
+        total_verdicts += len(changed_ids)
+        for row in case_verdict_rows:
+            if row["nes_id"] in changed_ids:
+                row["written"] = True
+                bind_rows.append(verdict_bind_row(slug, row, True))
+                print(f"  SET ({ACCUSED_SECTION}) {row['name']}  ->  "
+                      f"{row['new_outcome'] or 'note only'}")
+        report.record(slug, "entities", "bound",
+                      f"{len(plan.bound)} bound, {len(changed_ids)} verdict update(s)")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                  step="write", status="ok", detail=f"{len(plan.bound)} bound")
+                  step="write", status="ok",
+                  detail=f"{len(plan.bound)} bound, {len(changed_ids)} verdict update(s)")
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Related-entity extraction")
@@ -2149,6 +2449,7 @@ def main(argv=None):
     write_jsonl(reports["extracted"], extracted_rows)
     write_jsonl(reports["accused_notes"], accused_notes_rows)
     write_jsonl(reports["created"], created_rows)
+    write_jsonl(reports["verdicts"], verdict_rows)
     write_nomatch_report(reports["nomatch"], nomatch_rows)
 
     print()
@@ -2176,6 +2477,16 @@ def main(argv=None):
             n = sum(1 for row in created_rows if row["outcome"] == outcome)
             if n:
                 print(f"    {n} {outcome} (left unmatched)")
+    if verdict_rows:
+        verb = "WOULD update" if args.dry_run else "updated"
+        print(f"  TOTAL accused bind(s) {verb} from the judgment: {total_verdicts}"
+              f"  -> {reports['verdicts']}")
+        if total_verdicts_undecided:
+            # Named, not merely subtracted: an unresolved bind, two defendants
+            # sharing a name, and a judgment that says nothing about someone are
+            # all cases a human still has to settle.
+            print(f"    {total_verdicts_undecided} accused bind(s) were left exactly "
+                  "as they were -- each is a row in that file carrying the reason.")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
     if total_skipped_enriched:
         # Not necessarily finished, since the section scope widened after those
