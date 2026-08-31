@@ -514,10 +514,11 @@ def apply_accused_updates(binds, updates):
 
     Never creates or drops a bind -- same order, same length as `binds`. A
     verdict is written only when it is in `TERMINAL_OUTCOMES`, so a model
-    that answers 'unknown' or 'charged' cannot blank a stored one. A note is
-    replaced only when it is empty or still `enrich_court_record`'s
-    placeholder, and the placeholder's `ALIAS_MARKER` tail (the court's own
-    alias for this person) is carried onto the new note rather than dropped.
+    that answers 'unknown' or 'charged' cannot blank a stored one. An update's
+    `notes` replaces an empty or still-placeholder existing note, carrying
+    forward the placeholder's `ALIAS_MARKER` tail; an EMPTY `notes` means "no
+    role known" and leaves the existing note untouched rather than blanking
+    it, since a judgment can convict a defendant it never describes.
     """
     result = []
     for bind in binds:
@@ -529,8 +530,9 @@ def apply_accused_updates(binds, updates):
         if update.get("outcome") in TERMINAL_OUTCOMES:
             new_bind["outcome"] = update["outcome"]
         notes = bind.get("notes") or ""
-        if not notes or notes.startswith(MACHINE_NOTE_PREFIX):
-            new_notes = update.get("notes") or ""
+        role = update.get("notes") or ""
+        if role and (not notes or notes.startswith(MACHINE_NOTE_PREFIX)):
+            new_notes = role
             if notes.startswith(MACHINE_NOTE_PREFIX) and ALIAS_MARKER in notes:
                 new_notes += notes[notes.index(ALIAS_MARKER):]
             new_bind["notes"] = new_notes

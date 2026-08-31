@@ -3907,6 +3907,29 @@ class TestApplyAccusedUpdates:
         assert got[0]["notes"].startswith("तत्कालीन सचिव")
         assert "; अदालतको अभिलेखमा: रामे भन्ने राम बहादुर" in got[0]["notes"]
 
+    def test_an_empty_role_never_blanks_a_placeholder(self):
+        # A judgment can convict a defendant it never describes. An empty
+        # `notes` means "no role known", not "erase the placeholder".
+        binds = [self._bind(notes="प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "convicted", "notes": ""}})
+        assert got[0]["notes"] == "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"
+        assert got[0]["outcome"] == "convicted"
+
+    def test_an_empty_role_never_blanks_a_placeholders_alias_tail(self):
+        note = ("प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"
+                "; अदालतको अभिलेखमा: रामे भन्ने राम बहादुर")
+        got = ere.apply_accused_updates(
+            [self._bind(notes=note)],
+            {self.IRI: {"outcome": "convicted", "notes": ""}})
+        assert got[0]["notes"] == note
+
+    def test_an_empty_note_and_an_empty_role_stay_empty(self):
+        got = ere.apply_accused_updates(
+            [self._bind(notes="")],
+            {self.IRI: {"outcome": "convicted", "notes": ""}})
+        assert got[0]["notes"] == ""
+
     def test_a_bind_with_no_update_is_copied_through_unchanged(self):
         other = {"nes_id": "https://jawafdehi.org/entity/person/other-9",
                  "relationship_type": "accused", "notes": "मानव लेख", "outcome": "acquitted"}
