@@ -45,7 +45,6 @@ from casework.enrich_related_entities import (
     _build_content_parts,
     _enforce_prompt_budget,
     _parse_extraction_response,
-    _truncate_court_order,
     _truncate_press_release,
     current_entity_binds,
     is_promoted,
@@ -182,17 +181,18 @@ class TestDonorFidelity:
             assert section in RELATIONSHIP_TYPES, (
                 f"the prompt offers {section!r} but the binder would refuse it")
 
-    def test_court_order_full_threshold_matches_donor(self, donor):
-        assert ere.COURT_ORDER_FULL_THRESHOLD == donor["COURT_ORDER_FULL_THRESHOLD"]
-
-    def test_court_order_head_chars_matches_donor(self, donor):
-        assert ere.COURT_ORDER_HEAD_CHARS == donor["COURT_ORDER_HEAD_CHARS"]
-
-    def test_court_order_tail_chars_matches_donor(self, donor):
-        assert ere.COURT_ORDER_TAIL_CHARS == donor["COURT_ORDER_TAIL_CHARS"]
-
-    def test_court_order_thahar_chars_matches_donor(self, donor):
-        assert ere.COURT_ORDER_THAHAR_CHARS == donor["COURT_ORDER_THAHAR_CHARS"]
+    # THE FOUR COURT-ORDER TRUNCATION CONSTANTS ARE DELIBERATELY NO LONGER
+    # PINNED. COURT_ORDER_FULL_THRESHOLD / _HEAD_CHARS / _TAIL_CHARS /
+    # _THAHAR_CHARS described a slice that anchored on the literal `ठहर खण्ड`
+    # and took 12,000 chars forward. Measured over 37 production court orders
+    # (2026-08-31), that reached the operative verdict in 10 of them: the
+    # verdict sits a median 2,852 chars from the END of the file, and the
+    # marker is a section heading roughly two-thirds of the way in. Fidelity to
+    # a donor constant is worth nothing when the constant encodes a defect, and
+    # `PRESS_RELEASE_CHARS`, `PRESS_RELEASE_CHARS_NO_COURT` and
+    # `PROMPT_HARD_MAX` stay pinned because nothing was found wrong with them.
+    # The replacement's own numbers are pinned in
+    # `tests/casework/test_court_order.py::TestZoneSizes`.
 
     def test_press_release_chars_matches_donor(self, donor):
         assert ere.PRESS_RELEASE_CHARS == donor["PRESS_RELEASE_CHARS"]
@@ -298,48 +298,6 @@ class TestTruncatePressRelease:
 
 
 # --------------------------------------------------------------------------
-# _truncate_court_order
-# --------------------------------------------------------------------------
-
-
-class TestTruncateCourtOrder:
-    def test_none_text_passthrough(self):
-        assert _truncate_court_order(None) is None
-
-    def test_text_under_threshold_is_unchanged(self):
-        text = "छोटो आदेश।" * 5
-        assert len(text) < ere.COURT_ORDER_FULL_THRESHOLD
-        assert _truncate_court_order(text) == text
-
-    def test_thahar_khanda_extracted_when_present_and_short(self):
-        head = "क" * ere.COURT_ORDER_FULL_THRESHOLD
-        thahar = "ठहर खण्ड\nयो ठहर खण्डको सामग्री हो।"
-        text = head + thahar
-        result = _truncate_court_order(text)
-        assert "ठहर खण्ड (verdict section)" in result
-        assert thahar in result
-        assert head not in result
-
-    def test_thahar_khanda_truncated_at_sentence_boundary_when_long(self):
-        head = "क" * ere.COURT_ORDER_FULL_THRESHOLD
-        long_thahar_body = "वाक्य एक। " + ("ख" * (ere.COURT_ORDER_THAHAR_CHARS + 500))
-        text = head + "ठहर खण्ड" + long_thahar_body
-        result = _truncate_court_order(text)
-        assert "[...ठहर खण्ड (verdict section)...]" in result
-        # Truncated content must not exceed the thahar budget.
-        after_label = result.split("...]\n\n", 1)[1]
-        assert len(after_label) <= ere.COURT_ORDER_THAHAR_CHARS
-
-    def test_head_tail_fallback_when_no_thahar_khanda(self):
-        text = "श" * (ere.COURT_ORDER_FULL_THRESHOLD + 1000)
-        result = _truncate_court_order(text)
-        assert "[...court order header section...]" in result
-        assert "[...court order verdict section...]" in result
-        assert text[:ere.COURT_ORDER_HEAD_CHARS] in result
-        assert text[-ere.COURT_ORDER_TAIL_CHARS:] in result
-
-
-# --------------------------------------------------------------------------
 # _enforce_prompt_budget
 # --------------------------------------------------------------------------
 
@@ -424,6 +382,35 @@ class TestBuildContentPartsMatrix:
         parts = _build_content_parts("प्रेस।", "आदेश।")
         assert parts[0] == "--- PRESS RELEASE ---"
         assert parts[2] == "--- COURT ORDER ---"
+
+
+# --------------------------------------------------------------------------
+# The extraction call reads the order's HEAD zone, not its middle
+# --------------------------------------------------------------------------
+
+
+class TestExtractionReadsTheHeadZone:
+    def test_court_order_section_carries_the_start_of_the_order(self):
+        # The extractor wants the caption and party list, which sit in the
+        # first 3% of every order in the 38-order sample. Its narrative comes
+        # from the press release, which it is also given.
+        press = "प्रेस विज्ञप्ति पाठ"
+        order = "वादी: नेपाल सरकार। प्रतिवादी: राम बहादुर।" + "ख" * 80_000
+        parts = ere._build_content_parts(press, order)
+        joined = "\n\n".join(parts)
+        assert "प्रतिवादी: राम बहादुर।" in joined
+        assert "ख" * 80_000 not in joined
+
+    def test_truncate_court_order_is_gone(self):
+        # Its replacement is casework.common.court_order. A lingering copy is
+        # how two slicing rules end up in one module.
+        assert not hasattr(ere, "_truncate_court_order")
+
+    def test_prompt_stays_within_the_hard_max(self):
+        press = "प" * 40_000
+        order = "अ" * 400_000
+        prompt = ere._enforce_prompt_budget(ere._build_content_parts(press, order))
+        assert len(prompt) <= ere.PROMPT_HARD_MAX
 
 
 # --------------------------------------------------------------------------

@@ -112,6 +112,7 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
+from casework.common.court_order import court_order_head
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_chunks, source_text
 from casework.entity_identity import entity_slug, prefix_is_creatable
@@ -173,12 +174,8 @@ EXTRACTION_MAX_TOKENS = 8000
 # defaults). The donor read these via an `env_int()` helper that lived in the
 # deleted `casework/common.py` and was never re-created in the Task 5-11
 # common package (see `enrich_missing_bigo.py`'s identical note) -- fixed at
-# the donor's own defaults.
-COURT_ORDER_FULL_THRESHOLD = 8_000
-COURT_ORDER_HEAD_CHARS = 4_000
-COURT_ORDER_TAIL_CHARS = 2_000
-COURT_ORDER_THAHAR_CHARS = 12_000
-
+# the donor's own defaults. The court-order side of this budget is no longer
+# here: it comes from `casework.common.court_order.court_order_head`.
 PRESS_RELEASE_CHARS = 3_000
 PRESS_RELEASE_CHARS_NO_COURT = 18_000
 
@@ -1483,39 +1480,6 @@ def _truncate_press_release(text, limit=None):
     return chunk
 
 
-def _truncate_court_order(text):
-    """Extract the most entity-rich section from a court order."""
-    if not text:
-        return text
-
-    if len(text) < COURT_ORDER_FULL_THRESHOLD:
-        return text
-
-    thahar_marker = "ठहर खण्ड"
-    idx = text.find(thahar_marker)
-    if idx != -1:
-        thahar_text = text[idx:]
-        limit = COURT_ORDER_THAHAR_CHARS
-        if len(thahar_text) <= limit:
-            return f"\n\n[...ठहर खण्ड (verdict section)...]\n\n{thahar_text}"
-        chunk = thahar_text[:limit]
-        for sep in ("।", "\n", ".", "!"):
-            sep_idx = chunk.rfind(sep)
-            if sep_idx >= limit // 2:
-                chunk = chunk[: sep_idx + 1]
-                break
-        return f"\n\n[...ठहर खण्ड (verdict section)...]\n\n{chunk}"
-
-    label_head = "\n\n[...court order header section...]\n\n"
-    label_tail = "\n\n[...court order verdict section...]\n\n"
-    return (
-        label_head
-        + text[:COURT_ORDER_HEAD_CHARS]
-        + label_tail
-        + text[-COURT_ORDER_TAIL_CHARS:]
-    )
-
-
 def _enforce_prompt_budget(parts):
     """Ensure combined prompt stays within budget."""
     combined = "\n\n".join(parts)
@@ -1536,14 +1500,18 @@ def _enforce_prompt_budget(parts):
 def _build_content_parts(press_release_text, court_order_text):
     """Build the LLM's user-prompt sections from the two independently-sourced
     texts. Extracted verbatim from the donor's inline `_process_case` (donor
-    lines 385-405) into a named, unit-testable function -- the logic itself is
-    unchanged: either source alone is sufficient, and the press-release
-    truncation limit depends on whether a court order is ALSO present
+    lines 385-405) into a named, unit-testable function -- the press-release
+    side is unchanged: either source alone is sufficient, and its truncation
+    limit depends on whether a court order is ALSO present
     (`PRESS_RELEASE_CHARS_NO_COURT` vs `PRESS_RELEASE_CHARS`). One divergence
     from the verbatim donor: an EMPTY court_order_text ("") is now treated the
     same as None (no court present), so a case with fetched-but-empty court text
     still gets the larger no-court press budget instead of being needlessly
-    clipped to the with-court limit."""
+    clipped to the with-court limit.
+
+    The court-order side is NOT the donor's: it now takes `court_order_head`,
+    which the extraction needs for the caption and party list -- its
+    narrative comes from the press release, which it is also given."""
     content_parts = []
 
     if press_release_text:
@@ -1557,7 +1525,7 @@ def _build_content_parts(press_release_text, court_order_text):
         content_parts.append(truncated)
 
     if court_order_text:
-        truncated = _truncate_court_order(court_order_text)
+        truncated = court_order_head(court_order_text)
         content_parts.append("--- COURT ORDER ---")
         content_parts.append(truncated)
 
