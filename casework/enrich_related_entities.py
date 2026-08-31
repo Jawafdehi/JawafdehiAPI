@@ -605,16 +605,22 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
     operative section decided for each -- returns `({name: {"outcome", "role",
     "evidence"}}, errors)`.
 
-    A chunk that returns fewer rows than it was given is an error, not a
-    silent partial: a short reply and a reasoning failure are otherwise
-    indistinguishable, and the earlier measurement that read as "0 of 9
-    correct" was really nine rows silently missing.
+    Every returned row is reconciled against the chunk it was asked about,
+    by EXACT name match -- the prompt already tells the model to copy `name`
+    verbatim from the input list, so a fuzzy match would risk binding a
+    verdict to the wrong person. A row naming someone never asked about is
+    dropped and flagged rather than admitted into `results`; a requested name
+    the reply never answers is flagged too, so a same-row-count swap (a
+    fabricated name replacing a requested one) cannot leave the real
+    defendant silently missing with `errors == []` -- the exact failure the
+    chunking design exists to prevent.
     """
     zone = court_order_verdict_zone(order_text)
     results: dict = {}
     errors: list = []
     for start in range(0, len(names), VERDICT_CHUNK):
         chunk = names[start:start + VERDICT_CHUNK]
+        chunk_set = set(chunk)
         listing = "\n".join(f"- {name}" for name in chunk)
         content = (
             f"ACCUSED ON THIS CASE:\n{listing}\n\n"
@@ -632,12 +638,21 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
             errors.append(f"chunk of {len(chunk)} defendants failed: {exc}")
             continue
         rows = parse_verdict_response(response_text)
+        answered = set()
         for row in rows:
-            results[row["name"]] = {
+            name = row["name"]
+            if name not in chunk_set:
+                errors.append(f"chunk returned an unrequested name: {name!r}")
+                continue
+            results[name] = {
                 "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
             }
-        if len(rows) < len(chunk):
-            errors.append(f"chunk returned {len(rows)} of {len(chunk)} defendants")
+            answered.add(name)
+        missing = [name for name in chunk if name not in answered]
+        if missing:
+            errors.append(
+                f"chunk returned {len(answered)} of {len(chunk)} defendants; "
+                f"missing: {', '.join(missing)}")
     return results, errors
 
 

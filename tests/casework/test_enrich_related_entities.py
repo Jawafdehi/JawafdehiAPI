@@ -4049,6 +4049,46 @@ class TestAccusedVerdicts:
         assert errors
         assert len(got) == 5           # the second chunk survived
 
+    def test_an_unrequested_name_in_the_reply_is_dropped_and_flagged(self):
+        # A hallucinated extra row must not slip into `results` unflagged.
+        def fake(system, content, max_tokens, tier, usage=None):
+            return self._reply(["क", "ख", "अनाधिकृत नाम"])
+
+        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        assert "अनाधिकृत नाम" not in got
+        assert got["क"]["outcome"] == "convicted"
+        assert got["ख"]["outcome"] == "convicted"
+        assert any("अनाधिकृत नाम" in e for e in errors)
+
+    def test_a_swapped_name_leaves_the_request_missing_and_errors(self):
+        # Same row count as requested, but the name is fabricated. The
+        # requested defendant must not vanish with errors == [] -- that is
+        # the exact silent-drop failure the chunking design exists to catch.
+        def fake(system, content, max_tokens, tier, usage=None):
+            return self._reply(["नक्कली नाम"])
+
+        got, errors = ere.accused_verdicts(["क"], "आदेश", fake)
+        assert "क" not in got
+        assert errors
+
+    def test_a_reply_omitting_one_requested_name_still_returns_the_others(self):
+        def fake(system, content, max_tokens, tier, usage=None):
+            return self._reply(["क"])  # "ख" was requested but never answered
+
+        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        assert got["क"]["outcome"] == "convicted"
+        assert "ख" not in got
+        assert any("ख" in e for e in errors)
+
+    def test_an_unusable_reply_errors_for_every_name_in_the_chunk(self):
+        def fake(system, content, max_tokens, tier, usage=None):
+            return "the model apologised"
+
+        got, errors = ere.accused_verdicts(["क", "ख", "ग"], "आदेश", fake)
+        assert got == {}
+        assert errors
+        assert all(name in errors[0] for name in ("क", "ख", "ग"))
+
     def test_the_model_sees_the_verdict_zone_not_the_plain_tail(self):
         # Replaces the original brief's plain-tail assertion (Ruling 14): the
         # verdict call now reads `court_order_verdict_zone`, a union of the
