@@ -394,12 +394,24 @@ class TestExtractionReadsTheHeadZone:
         # The extractor wants the caption and party list, which sit in the
         # first 3% of every order in the 38-order sample. Its narrative comes
         # from the press release, which it is also given.
+        #
+        # Built to actually DISCRIMINATE from the old `_truncate_court_order`,
+        # not merely pass under both: caption/party list at the top, then
+        # filler long enough to push the `ठहर खण्ड` marker well past
+        # HEAD_CHARS, then the marker and verdict text. Verified against the
+        # pre-change helper (commit 4b30173) in a scratch script: once that
+        # marker is found, the old slice starts AT the marker and drops the
+        # caption entirely. `court_order_head` just takes the first
+        # HEAD_CHARS chars, so the caption survives and the filler does not.
         press = "प्रेस विज्ञप्ति पाठ"
-        order = "वादी: नेपाल सरकार। प्रतिवादी: राम बहादुर।" + "ख" * 80_000
+        caption = "वादी: नेपाल सरकार। प्रतिवादी: राम बहादुर।"
+        filler = "ख" * 20_000
+        verdict = "ठहर खण्ड\nयो ठहर खण्डको सामग्री हो।"
+        order = caption + filler + verdict
         parts = ere._build_content_parts(press, order)
         joined = "\n\n".join(parts)
-        assert "प्रतिवादी: राम बहादुर।" in joined
-        assert "ख" * 80_000 not in joined
+        assert caption in joined
+        assert filler not in joined
 
     def test_truncate_court_order_is_gone(self):
         # Its replacement is casework.common.court_order. A lingering copy is
@@ -407,6 +419,9 @@ class TestExtractionReadsTheHeadZone:
         assert not hasattr(ere, "_truncate_court_order")
 
     def test_prompt_stays_within_the_hard_max(self):
+        # An invariant guard, not a regression test: it passes unchanged
+        # against the old `_truncate_court_order` too, so it proves the hard
+        # cap holds, not that the slice changed.
         press = "प" * 40_000
         order = "अ" * 400_000
         prompt = ere._enforce_prompt_budget(ere._build_content_parts(press, order))
