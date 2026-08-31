@@ -4155,6 +4155,8 @@ class TestTheServerPreservesOmittedOutcomes:
 
 ACCUSED_IRI = "https://jawafdehi.org/entity/person/ram-bahadur-1"
 SECOND_ACCUSED_IRI = "https://jawafdehi.org/entity/person/ram-bahadur-2"
+SAJHA_IRI = ("https://jawafdehi.org/entity/organization/"
+             "sajha-bhandara-sahakari-9f9f9f")
 
 
 def _two_call_stub(entity_response=None, verdict_response=None):
@@ -4386,11 +4388,9 @@ class TestVerdictWrite:
         # ONE conditional whole-list replace per case, never two: the /entities
         # write is destructive, so a second PATCH would re-run the whole
         # delete-and-recreate against a list the first one just changed.
-        sajha_iri = ("https://jawafdehi.org/entity/organization/"
-                     "sajha-bhandara-sahakari-9f9f9f")
         api = _SearchStubApi(
             [_accused_case()],
-            {"साझा भण्डार सहकारी": [{"id": sajha_iri,
+            {"साझा भण्डार सहकारी": [{"id": SAJHA_IRI,
                                      "title": {"ne": "साझा भण्डार सहकारी"},
                                      "score": 200.0}]})
         stub = _two_call_stub(entity_response=ENTITY_RESPONSE,
@@ -4400,16 +4400,56 @@ class TestVerdictWrite:
         _slug, _path, items, _if_match = api.replace_list_calls[0]
         by_id = {i["nes_id"]: i for i in items}
         assert by_id[ACCUSED_IRI]["outcome"] == "convicted"
-        assert sajha_iri in by_id
+        assert SAJHA_IRI in by_id
 
     def test_a_non_terminal_outcome_never_reaches_the_patch(
             self, monkeypatch, patched_fetch_markdown):
-        api = _SearchStubApi([_accused_case()])
-        stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
-            {"name": "राम बहादुर", "outcome": "charged", "role": "",
-             "evidence": ""}]}, ensure_ascii=False))
+        # Asserted on the ITEMS, not on the absence of a call: a test that only
+        # checks `replace_list_calls == []` passes just as well when the whole
+        # verdict feature is deleted. The run must reach the write path with a
+        # non-terminal verdict in hand -- an extraction bind supplies the PATCH --
+        # and the accused row in that PATCH must carry no new `outcome`, so the
+        # server's omitted-outcome preservation keeps the stored verdict.
+        api = _SearchStubApi(
+            [_accused_case()],
+            {"साझा भण्डार सहकारी": [{"id": SAJHA_IRI,
+                                     "title": {"ne": "साझा भण्डार सहकारी"},
+                                     "score": 200.0}]})
+        stub = _two_call_stub(entity_response=ENTITY_RESPONSE,
+                              verdict_response=json.dumps({"defendants": [
+                                  {"name": "राम बहादुर", "outcome": "charged",
+                                   "role": "", "evidence": ""}]}, ensure_ascii=False))
         _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
-        assert api.replace_list_calls == []
+        assert len(api.replace_list_calls) == 1, "the write path was never reached"
+        _slug, _path, items, if_match = api.replace_list_calls[0]
+        assert if_match == api.etag
+        assert SAJHA_IRI in {i["nes_id"] for i in items}, "no PATCH-forcing bind"
+        row = next(i for i in items if i["nes_id"] == ACCUSED_IRI)
+        assert "outcome" not in row
+        assert row["notes"] == "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"
+
+    def test_a_bind_this_run_never_touched_survives_the_whole_list_replace(
+            self, monkeypatch, patched_fetch_markdown):
+        # THE PROPERTY MOST WORTH PINNING. `/entities` deletes every bind and
+        # recreates the list from exactly what is sent, so an omitted bind is a
+        # deleted bind -- and this case is the production shape: a `related`
+        # bind is already there (which skips extraction entirely), carrying a
+        # human's note that nothing in this run may touch.
+        human_note = "ठेक्का प्राप्त गर्ने संस्था — मानिसले लेखेको टिप्पणी"
+        untouched = {"nes_id": SAJHA_IRI, "type": "related",
+                     "display_name": "साझा भण्डार सहकारी", "notes": human_note}
+        api = _SearchStubApi([_accused_case(extra_entities=[untouched])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+
+        assert len(api.replace_list_calls) == 1
+        _slug, path, items, if_match = api.replace_list_calls[0]
+        assert (path, if_match) == ("entities", api.etag)
+        by_id = {i["nes_id"]: i for i in items}
+        assert by_id[SAJHA_IRI] == {"nes_id": SAJHA_IRI,
+                                    "relationship_type": "related",
+                                    "notes": human_note}
+        assert by_id[ACCUSED_IRI]["outcome"] == "convicted"
 
 
 class TestVerdictReport:
@@ -4469,6 +4509,34 @@ class TestVerdictReport:
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
         _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
         assert "accused bind(s) updated from the judgment: 1" in capsys.readouterr().out
+
+    def test_a_refused_write_says_so_on_the_row_it_would_have_written(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # `_StubApi` has no `get_case_with_etag`, so the unconditional
+        # whole-list replace is refused at the write gate. The bind DID change,
+        # so `settle_verdict_rows` has nothing to explain -- without a reason
+        # here the row reads `written: false` and says nothing at all.
+        api = _StubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        rows = _verdict_rows(tmp_path)
+        row = next(r for r in rows if r["nes_id"] == ACCUSED_IRI)
+        assert row["written"] is False
+        assert "not written" in row["reason"] and "ETag" in row["reason"]
+
+    def test_a_failed_write_says_so_on_the_row_it_would_have_written(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        class _FailingApi(_SearchStubApi):
+            def replace_list(self, slug, path, items, timeout=60, if_match=None):
+                raise urllib.error.HTTPError(
+                    "https://x/api/cases/", 412, "Precondition Failed", {}, None)
+
+        api = _FailingApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert row["written"] is False
+        assert "write failed" in row["reason"]
 
     def test_report_paths_carries_the_verdicts_file(self):
         paths = ere.report_paths({"log": "/tmp/run-abc.log"})

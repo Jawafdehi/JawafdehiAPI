@@ -747,10 +747,19 @@ def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
     the step where a verdict can land on the wrong person.
     """
     targets, skipped = accused_verdict_targets(case)
-    outcomes = {(entity.get("nes_id") or "").strip():
+    # Keyed on `(nes_id, relationship_type)`, the DB's own bind identity (see
+    # `bind_key`): one entity may hold two binds on a case under different
+    # sections, and a `nes_id`-only key lets the non-accused one overwrite the
+    # accused outcome this report is about.
+    outcomes = {bind_key({"nes_id": entity.get("nes_id"),
+                          "relationship_type": bind_relationship_type(entity)}):
                 (entity.get("outcome") or "").strip()
                 for entity in (case.get("entities") or [])}
-    rows = [_verdict_row(slug, name, nes_id, outcomes.get(nes_id, ""), "", "", "", reason)
+
+    def old_outcome(nes_id):
+        return outcomes.get((nes_id, ACCUSED_SECTION), "")
+
+    rows = [_verdict_row(slug, name, nes_id, old_outcome(nes_id), "", "", "", reason)
             for nes_id, name, reason in skipped]
     if not targets:
         return {}, rows, []
@@ -761,12 +770,12 @@ def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
         verdict = verdicts.get(name)
         if verdict is None:
             rows.append(_verdict_row(
-                slug, name, nes_id, outcomes.get(nes_id, ""), "", "", "",
+                slug, name, nes_id, old_outcome(nes_id), "", "", "",
                 "the judgment reply did not answer for this name"))
             continue
         updates[nes_id] = {"outcome": verdict["outcome"], "notes": verdict["role"]}
         rows.append(_verdict_row(
-            slug, name, nes_id, outcomes.get(nes_id, ""), verdict["outcome"],
+            slug, name, nes_id, old_outcome(nes_id), verdict["outcome"],
             verdict["role"], verdict["evidence"], ""))
     return updates, rows, errors
 
@@ -804,14 +813,28 @@ def settle_verdict_rows(rows, before, after):
     return changed
 
 
+def note_verdict_not_written(rows, changed_ids, reason):
+    """Record on every row this run WOULD have written why it was not.
+
+    `settle_verdict_rows` explains the rows nothing changed for; these are the
+    opposite -- the bind did change, and then the write did not happen. Without
+    this a `*.verdicts.jsonl` row reads `written: false` with an empty `reason`,
+    which is the one thing that artefact exists to prevent.
+    """
+    for row in rows:
+        if row["nes_id"] not in changed_ids:
+            continue
+        row["reason"] = f"{row['reason']}; {reason}" if row["reason"] else reason
+
+
 def verdict_bind_row(slug, row, written):
     """A `*.binds.jsonl` row for an accused bind the judgment changed.
 
     The verdict path updates binds that already exist, so it never produces a
     resolver row of its own -- without this the evidence phrase behind a machine
-    `convicted` would appear in no bind audit file at all. `score` and
-    `matched_name` are absent by construction: nothing was matched, the bind was
-    already there.
+    `convicted` would appear in no bind audit file at all. `score` is null and
+    `matched_name` is just the bind's own display name: nothing was matched here,
+    the bind was already on the case.
     """
     return {"slug": slug, "extracted": row["name"], "role": ACCUSED_SECTION,
             "nes_id": row["nes_id"], "score": None, "matched_name": row["name"],
@@ -2386,6 +2409,8 @@ def main(argv=None):
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
                           slug=slug, step="write", status="would-refuse",
                           detail=refusal, level=logging.WARNING)
+                note_verdict_not_written(case_verdict_rows, changed_ids,
+                                         f"not written: {refusal}")
                 print(f"  WOULD REFUSE {len(plan.bound)} bind(s) and "
                       f"{len(changed_ids)} verdict update(s) on {slug}: {refusal}")
                 continue
@@ -2398,6 +2423,8 @@ def main(argv=None):
                       f"(score {decision.score:.2f})"
                       f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
             total_verdicts += len(changed_ids)
+            note_verdict_not_written(case_verdict_rows, changed_ids,
+                                     "dry run: nothing was written")
             for row in case_verdict_rows:
                 if row["nes_id"] in changed_ids:
                     bind_rows.append(verdict_bind_row(slug, row, False))
@@ -2414,6 +2441,8 @@ def main(argv=None):
             report.record(slug, "entities", "error", f"bind failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="write", status="error", detail=str(exc), level=logging.ERROR)
+            note_verdict_not_written(case_verdict_rows, changed_ids,
+                                     f"the /entities write failed: {exc}")
             continue
 
         total_bound += counts["bound"]
@@ -2489,12 +2518,16 @@ def main(argv=None):
                   "as they were -- each is a row in that file carrying the reason.")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
     if total_skipped_enriched:
-        # Not necessarily finished, since the section scope widened after those
-        # cases were enriched -- see the idempotency gate's comment.
-        print(f"  {total_skipped_enriched} case(s) skipped as already enriched, on "
-              "the presence of a 'related' bind. A case enriched before the "
-              "section scope widened may still have accused/location/witness "
-              "names outstanding; re-run those with --force to pick them up.")
+        # EXTRACTION, not the case. The verdict gate is independent of this
+        # skip, so some of these cases were written in this very run and
+        # calling them "skipped" would misreport what happened to them.
+        also = ("" if args.no_verdicts
+                else " Their judgments were still read for verdicts.")
+        print(f"  {total_skipped_enriched} case(s) skipped EXTRACTION as already "
+              "enriched, on the presence of a 'related' bind."
+              f"{also} A case enriched before the section scope widened may "
+              "still have accused/location/witness names outstanding; re-run "
+              "those with --force to pick them up.")
     if total_refused_binds:
         print(f"  {total_refused_binds} resolved bind(s) were REFUSED at the write "
               "gate, not rejected by the matcher -- see the WOULD REFUSE lines "
