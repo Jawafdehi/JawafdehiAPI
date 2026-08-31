@@ -76,28 +76,23 @@ def court_order_thahar(text: str, limit: int = THAHAR_CHARS, label: bool = True)
 # (holding 8,456 chars from EOF, past the old 8,000-char tail), and
 # case-081-cr-0046 missed by 19,427 (deep in the gap, 0 of 9 defendants
 # scored). Marker-to-end has no gap by construction, so it replaces the
-# two-window union below as the primary shape.
+# two-window union as the primary shape.
 #
-# VERDICT_ZONE_CHARS is the largest marker-to-end span measured across those
-# 7 orders (356,775 - 253,520 = 103,255, likhu-tamakoshi); the other 5 that
-# carry a marker measure 60,832 / 31,415 / 36,749 / 22,291 / 49,807. Set
-# there, none of the 7 need the fallback below.
+# The population this runs against is ~546 cases, so a document longer than
+# every sample measured so far is not a hypothetical -- the fallback for
+# that case must not reintroduce a gap of its own. It does not: past the
+# cap, this returns the last VERDICT_ZONE_CHARS chars of the WHOLE document
+# as one contiguous slice (via `court_order_tail`), never a marker window
+# plus a separate tail. What that drops is the beginning of an unusually
+# long ठहर खण्ड -- recital, not the holding, which sits at the end.
 #
-# VERDICT_TAIL_CHARS is derived, not independently chosen, so the fallback's
-# total budget still traces back to that one evidence-based number: sized as
-# VERDICT_ZONE_CHARS - VERDICT_THAHAR_CHARS, it comfortably clears the
-# 8,456-char miss that sank likhu-tamakoshi under the old 8,000-char tail,
-# and it proves the fallback's marker window and tail can never overlap --
-# the fallback only triggers once the whole span exceeds VERDICT_ZONE_CHARS,
-# at which point `tail_start > marker_end` always holds, so no
-# overlap-collapse case exists here (unlike the two-window design this
-# replaces).
+# VERDICT_ZONE_CHARS is the largest marker-to-end span measured across the 7
+# sampled orders (356,775 - 253,520 = 103,255, likhu-tamakoshi); the other 5
+# that carry a marker measure 60,832 / 31,415 / 36,749 / 22,291 / 49,807, so
+# none of the 7 need the fallback.
 VERDICT_ZONE_CHARS: int = 103_255
-VERDICT_THAHAR_CHARS: int = 20_000
-VERDICT_TAIL_CHARS: int = VERDICT_ZONE_CHARS - VERDICT_THAHAR_CHARS
 
 _VERDICT_LABEL = "\n\n[...अदालतको आदेशको ठहर तथा अन्त्यको भाग...]\n\n"
-_VERDICT_GAP_LABEL = "\n\n[...बीचको अंश हटाइएको...]\n\n"
 
 
 def court_order_verdict_zone(text: str, label: bool = True) -> str:
@@ -105,9 +100,12 @@ def court_order_verdict_zone(text: str, label: bool = True) -> str:
     `VERDICT_ZONE_CHARS` -- the slice `accused_verdicts` reads to decide a
     per-defendant disposition.
 
-    Falls back to a marker window plus a tail only when marker-to-end still
-    exceeds the cap; see the constants above for why that fallback cannot
-    reproduce the gap this replaces.
+    Marker-to-end has no gap by construction. When that span still exceeds
+    the cap, or there is no marker at all, this falls back to
+    `court_order_tail` -- the last `VERDICT_ZONE_CHARS` chars of the WHOLE
+    document as one contiguous slice, never a second, disjoint window: a
+    gap must be structurally impossible, not merely unlikely on the
+    documents measured so far.
     """
     if not text:
         return ""
@@ -115,19 +113,13 @@ def court_order_verdict_zone(text: str, label: bool = True) -> str:
         return text
 
     idx = text.find(THAHAR_MARKER)
-    if idx == -1:
-        return court_order_tail(text, VERDICT_ZONE_CHARS, label)
+    if idx != -1:
+        span = len(text) - idx
+        if span <= VERDICT_ZONE_CHARS:
+            window = text[idx:]
+            return _VERDICT_LABEL + window if label else window
 
-    span = len(text) - idx
-    if span <= VERDICT_ZONE_CHARS:
-        window = text[idx:]
-        return _VERDICT_LABEL + window if label else window
-
-    marker_window = text[idx : idx + VERDICT_THAHAR_CHARS]
-    tail_window = text[-VERDICT_TAIL_CHARS:]
-    if label:
-        return _VERDICT_LABEL + marker_window + _VERDICT_GAP_LABEL + tail_window
-    return marker_window + tail_window
+    return court_order_tail(text, VERDICT_ZONE_CHARS, label)
 
 
 VERDICT_SUMMARY_TRIGGER = 12000

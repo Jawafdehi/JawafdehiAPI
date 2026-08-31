@@ -140,17 +140,22 @@ class TestVerdictZone:
         assert got.rstrip().endswith(ending)
         assert "क" * 200_000 not in got
 
-    def test_a_span_past_the_cap_falls_back_to_a_marker_window_plus_tail(self):
-        # Only once the marker-to-end span exceeds VERDICT_ZONE_CHARS does the
-        # union collapse to a marker window and a tail -- sized so the two
-        # can never overlap or duplicate the marker.
+    def test_a_span_past_the_cap_is_one_contiguous_slice_ending_at_the_document(self):
+        # A gap must be structurally impossible, not merely rare on the 7
+        # sampled orders: once marker-to-end still exceeds VERDICT_ZONE_CHARS,
+        # this must never split into a marker window and a separate tail with
+        # a hole between them -- it must fall back to one contiguous slice.
         head = "क" * 10_000
         marker_region = THAHAR_MARKER + "ठ" * (VERDICT_ZONE_CHARS + 20_000)
         ending = "सफाई पाउने ठहर्छ।"
-        got = court_order_verdict_zone(head + marker_region + ending)
-        assert got.count(THAHAR_MARKER) == 1
-        assert got.rstrip().endswith(ending)
-        assert "क" * 10_000 not in got
+        text = head + marker_region + ending
+
+        raw = court_order_verdict_zone(text, label=False)
+        assert raw in text              # contiguous: a single substring of the source
+        assert text.endswith(raw)       # ends at the document end
+
+        labelled = court_order_verdict_zone(text)
+        assert "बीचको अंश हटाइएको" not in labelled   # no elision inside a contiguous slice
 
     def test_a_document_with_no_marker_falls_back_to_the_ending(self):
         text = "क" * (VERDICT_ZONE_CHARS + 50_000) + "अन्तिम"
