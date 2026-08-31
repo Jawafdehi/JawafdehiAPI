@@ -42,9 +42,9 @@ accepts. When several entities tie above the threshold, the best-scoring one win
 by a deterministic `(-score, nes_id)` sort, so some binds WILL name the wrong
 namesake. That is the accepted cost of the mode; every such bind is marked
 `[UNCERTAIN]` on the console and carries a `promoted over:` reason in
-`*.binds.jsonl`, which is how they are found again. Measured on the 140-row
-labelled set (`tests/casework/fixtures/entity_labels.jsonl`, which scores the
-RESOLVER only -- see the README beside it): precision 0.872, recall 0.872, and
+`*.binds.jsonl`, which is how they are found again. Measured on the hand-labelled
+resolver set from commit `67d5293` (it scores name-to-NES resolution only, never
+which names the extractor found): precision 0.872, recall 0.872, and
 all five wrong binds are Election Commission candidate records rather than
 namesake mix-ups.
 

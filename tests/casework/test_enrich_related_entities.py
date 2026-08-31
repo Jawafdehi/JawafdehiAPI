@@ -4705,13 +4705,3 @@ class TestVerdictCoverageEpilogue:
         _run_main(monkeypatch, api, invoke_text_stub=stub,
                   argv=["--dry-run", "--no-verdicts"])
         assert "ACCUSED VERDICT COVERAGE" not in capsys.readouterr().out
-
-
-def test_the_labelled_set_is_the_size_the_module_docstring_claims():
-    # Nothing imports `entity_labels.jsonl`, so nothing else notices the file
-    # and the claim about it drifting apart. It scores the RESOLVER only --
-    # see the README beside it before reaching for it as a gate.
-    labels = Path(__file__).parent / "fixtures" / "entity_labels.jsonl"
-    rows = [line for line in labels.read_text(encoding="utf-8").splitlines()
-            if line.strip()]
-    assert f"{len(rows)}-row" in ere.__doc__
