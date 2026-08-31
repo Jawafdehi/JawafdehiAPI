@@ -4049,6 +4049,53 @@ class TestAccusedVerdicts:
         assert errors
         assert len(got) == 5           # the second chunk survived
 
+    def test_a_short_chunk_is_retried_and_the_retry_fills_the_gap(self):
+        # A chunk of 20 that returns 1 defendant must not lose the other 19:
+        # retry once, asking only about the names still missing.
+        names = [f"नाम{i}" for i in range(5)]
+        calls = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls.append(content)
+            if len(calls) == 1:
+                return self._reply(["नाम0"])
+            batch = [n for n in names if f"- {n}\n" in content + "\n"]
+            return self._reply(batch)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert len(calls) == 2
+        assert len(got) == 5
+        assert errors == []
+
+    def test_a_chunk_still_short_after_retry_keeps_partial_results_and_errors(self):
+        # If the retry also comes back short, keep what was answered, error
+        # on the rest, and never retry a second time.
+        names = [f"नाम{i}" for i in range(5)]
+        calls = {"n": 0}
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls["n"] += 1
+            return self._reply(["नाम0"])
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert calls["n"] == 2          # exactly one retry, never a second
+        assert got["नाम0"]["outcome"] == "convicted"
+        assert len(got) == 1
+        assert errors
+
+    def test_a_complete_first_reply_triggers_no_retry(self):
+        names = ["क", "ख"]
+        calls = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls.append(content)
+            return self._reply(names)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert len(calls) == 1
+        assert len(got) == 2
+        assert errors == []
+
     def test_an_unrequested_name_in_the_reply_is_dropped_and_flagged(self):
         # A hallucinated extra row must not slip into `results` unflagged.
         def fake(system, content, max_tokens, tier, usage=None):

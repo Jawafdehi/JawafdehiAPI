@@ -70,43 +70,61 @@ def court_order_thahar(text: str, limit: int = THAHAR_CHARS, label: bool = True)
     return _THAHAR_LABEL + window if label else window
 
 
+# A marker window and a tail are two fixed-size ranges with a HOLE between
+# them -- and on 2 of 7 measured production judgments (2026-08-31), the
+# operative holding sat in that hole: likhu-tamakoshi missed by 456 chars
+# (holding 8,456 chars from EOF, past the old 8,000-char tail), and
+# case-081-cr-0046 missed by 19,427 (deep in the gap, 0 of 9 defendants
+# scored). Marker-to-end has no gap by construction, so it replaces the
+# two-window union below as the primary shape.
+#
+# VERDICT_ZONE_CHARS is the largest marker-to-end span measured across those
+# 7 orders (356,775 - 253,520 = 103,255, likhu-tamakoshi); the other 5 that
+# carry a marker measure 60,832 / 31,415 / 36,749 / 22,291 / 49,807. Set
+# there, none of the 7 need the fallback below.
+#
+# VERDICT_TAIL_CHARS is derived, not independently chosen, so the fallback's
+# total budget still traces back to that one evidence-based number: sized as
+# VERDICT_ZONE_CHARS - VERDICT_THAHAR_CHARS, it comfortably clears the
+# 8,456-char miss that sank likhu-tamakoshi under the old 8,000-char tail,
+# and it proves the fallback's marker window and tail can never overlap --
+# the fallback only triggers once the whole span exceeds VERDICT_ZONE_CHARS,
+# at which point `tail_start > marker_end` always holds, so no
+# overlap-collapse case exists here (unlike the two-window design this
+# replaces).
+VERDICT_ZONE_CHARS: int = 103_255
 VERDICT_THAHAR_CHARS: int = 20_000
-VERDICT_TAIL_CHARS: int = 8_000
+VERDICT_TAIL_CHARS: int = VERDICT_ZONE_CHARS - VERDICT_THAHAR_CHARS
 
 _VERDICT_LABEL = "\n\n[...अदालतको आदेशको ठहर तथा अन्त्यको भाग...]\n\n"
 _VERDICT_GAP_LABEL = "\n\n[...बीचको अंश हटाइएको...]\n\n"
 
 
 def court_order_verdict_zone(text: str, label: bool = True) -> str:
-    """Return the union of the thahar window and the order's tail -- the slice
-    `accused_verdicts` reads to decide a per-defendant disposition.
+    """Return the marker-to-end span of a court order, capped at
+    `VERDICT_ZONE_CHARS` -- the slice `accused_verdicts` reads to decide a
+    per-defendant disposition.
 
-    Neither zone alone reaches both regions a verdict call needs: the marker
-    sits well before the end on a long order, but the final operative
-    pronouncement sits a median 2,852 chars from the very end, past a
-    fixed-distance-from-marker window. When the two windows overlap or abut,
-    they collapse into one contiguous slice -- the model is never shown the
-    same text twice, or handed a fabricated gap across continuous prose.
+    Falls back to a marker window plus a tail only when marker-to-end still
+    exceeds the cap; see the constants above for why that fallback cannot
+    reproduce the gap this replaces.
     """
     if not text:
         return ""
-    whole_limit = VERDICT_THAHAR_CHARS + VERDICT_TAIL_CHARS
-    if len(text) <= whole_limit:
+    if len(text) <= VERDICT_ZONE_CHARS:
         return text
 
     idx = text.find(THAHAR_MARKER)
     if idx == -1:
-        return court_order_tail(text, whole_limit, label)
+        return court_order_tail(text, VERDICT_ZONE_CHARS, label)
 
-    marker_end = min(idx + VERDICT_THAHAR_CHARS, len(text))
-    tail_start = len(text) - VERDICT_TAIL_CHARS
-
-    if tail_start <= marker_end:
+    span = len(text) - idx
+    if span <= VERDICT_ZONE_CHARS:
         window = text[idx:]
         return _VERDICT_LABEL + window if label else window
 
-    marker_window = text[idx:marker_end]
-    tail_window = text[tail_start:]
+    marker_window = text[idx : idx + VERDICT_THAHAR_CHARS]
+    tail_window = text[-VERDICT_TAIL_CHARS:]
     if label:
         return _VERDICT_LABEL + marker_window + _VERDICT_GAP_LABEL + tail_window
     return marker_window + tail_window

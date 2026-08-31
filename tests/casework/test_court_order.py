@@ -12,8 +12,7 @@ from casework.common.court_order import (
     TAIL_CHARS,
     THAHAR_CHARS,
     THAHAR_MARKER,
-    VERDICT_THAHAR_CHARS,
-    VERDICT_TAIL_CHARS,
+    VERDICT_ZONE_CHARS,
     court_order_head,
     court_order_tail,
     court_order_thahar,
@@ -141,22 +140,50 @@ class TestVerdictZone:
         assert got.rstrip().endswith(ending)
         assert "क" * 200_000 not in got
 
-    def test_overlapping_regions_are_emitted_once(self):
-        # A document just past the whole-return threshold: the marker window and
-        # the tail overlap, so the result must be one contiguous slice with no
-        # duplicated text and no elision marker inside continuous prose.
-        text = "क" * 5_000 + "ठहर खण्ड" + "ठ" * 25_000
-        got = court_order_verdict_zone(text)
-        assert got.count("ठहर खण्ड") == 1
+    def test_a_span_past_the_cap_falls_back_to_a_marker_window_plus_tail(self):
+        # Only once the marker-to-end span exceeds VERDICT_ZONE_CHARS does the
+        # union collapse to a marker window and a tail -- sized so the two
+        # can never overlap or duplicate the marker.
+        head = "क" * 10_000
+        marker_region = THAHAR_MARKER + "ठ" * (VERDICT_ZONE_CHARS + 20_000)
+        ending = "सफाई पाउने ठहर्छ।"
+        got = court_order_verdict_zone(head + marker_region + ending)
+        assert got.count(THAHAR_MARKER) == 1
+        assert got.rstrip().endswith(ending)
+        assert "क" * 10_000 not in got
 
     def test_a_document_with_no_marker_falls_back_to_the_ending(self):
-        text = "क" * 100_000 + "अन्तिम"
+        text = "क" * (VERDICT_ZONE_CHARS + 50_000) + "अन्तिम"
         got = court_order_verdict_zone(text, label=False)
         assert got.endswith("अन्तिम")
-        assert len(got) == VERDICT_THAHAR_CHARS + VERDICT_TAIL_CHARS
+        assert len(got) == VERDICT_ZONE_CHARS
 
     def test_empty_text_is_empty(self):
         assert court_order_verdict_zone("") == ""
+
+    def test_a_holding_just_past_the_old_tail_boundary_is_now_visible(self):
+        # likhu-tamakoshi (production, 2026-08-31): the holding sat 8,456
+        # chars from EOF -- past the old 8,000-char VERDICT_TAIL_CHARS, and
+        # past the old marker window too, so it fell in the inter-window gap.
+        holding = "सफाई पाउने ठहर्छ"
+        head = "क" * 300_000
+        marker_region = THAHAR_MARKER + "ठ" * 40_000
+        after = "अ" * (8_456 - len(holding))
+        text = head + marker_region + holding + after
+        got = court_order_verdict_zone(text)
+        assert holding in got
+
+    def test_a_holding_deep_in_the_old_gap_is_now_visible(self):
+        # case-081-cr-0046 (production, 2026-08-31): the holding sat 19,427
+        # chars from EOF, deep in the gap between the old marker window and
+        # tail -- 0 of 9 defendants scored.
+        holding = "ठहर्छ"
+        head = "क" * 250_000
+        marker_region = THAHAR_MARKER + "ठ" * 20_500
+        after = "अ" * (19_427 - len(holding))
+        text = head + marker_region + holding + after
+        got = court_order_verdict_zone(text)
+        assert holding in got
 
 
 class TestSummariseVerdictLivesHere:

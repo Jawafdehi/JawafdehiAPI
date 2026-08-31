@@ -611,59 +611,90 @@ def parse_verdict_response(text: str) -> list:
     return out
 
 
+def _ask_verdict_names(names, zone, invoke_text, usage):
+    """One verdict call for exactly `names`, reconciled by EXACT name match.
+
+    Returns `(answered, unrequested_errors)`, where `answered` is
+    `{name: {"outcome", "role", "evidence"}}` for rows naming one of `names`.
+    A row naming anyone else is dropped and reported in `unrequested_errors`
+    rather than admitted -- the prompt already tells the model to copy `name`
+    verbatim, so a fuzzy match here would risk binding a verdict to the wrong
+    person. Propagates an `invoke_text` failure; the caller decides whether
+    that is worth a retry.
+    """
+    requested = set(names)
+    listing = "\n".join(f"- {name}" for name in names)
+    content = (
+        f"ACCUSED ON THIS CASE:\n{listing}\n\n"
+        f"COURT ORDER (operative section):\n{zone}"
+    )
+    response_text = invoke_text(
+        system=VERDICT_SYSTEM_PROMPT,
+        content=content,
+        max_tokens=VERDICT_MAX_TOKENS,
+        tier=tier_for("entities"),
+        usage=usage,
+    )
+    answered = {}
+    unrequested_errors = []
+    for row in parse_verdict_response(response_text):
+        name = row["name"]
+        if name not in requested:
+            unrequested_errors.append(f"chunk returned an unrequested name: {name!r}")
+            continue
+        answered[name] = {
+            "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
+        }
+    return answered, unrequested_errors
+
+
 def accused_verdicts(names, order_text, invoke_text, usage=None):
     """Ask the model, per chunk of `VERDICT_CHUNK` names, what the order's
     operative section decided for each -- returns `({name: {"outcome", "role",
     "evidence"}}, errors)`.
 
-    Every returned row is reconciled against the chunk it was asked about,
-    by EXACT name match -- the prompt already tells the model to copy `name`
-    verbatim from the input list, so a fuzzy match would risk binding a
-    verdict to the wrong person. A row naming someone never asked about is
-    dropped and flagged rather than admitted into `results`; a requested name
-    the reply never answers is flagged too, so a same-row-count swap (a
-    fabricated name replacing a requested one) cannot leave the real
-    defendant silently missing with `errors == []` -- the exact failure the
-    chunking design exists to prevent.
+    A chunk that comes back short is retried ONCE, asking only about the
+    names still missing, and the retry's answers are merged in without
+    disturbing what the first attempt already got right. A chunk still short
+    after the retry keeps every row it did answer and records an error
+    naming the rest -- a silent partial loss is what the reconciliation this
+    wraps exists to prevent, and a lost verdict is sticky: `verdict_gate`
+    refuses a later run once a case holds any terminal outcome.
     """
     zone = court_order_verdict_zone(order_text)
     results: dict = {}
     errors: list = []
     for start in range(0, len(names), VERDICT_CHUNK):
         chunk = names[start:start + VERDICT_CHUNK]
-        chunk_set = set(chunk)
-        listing = "\n".join(f"- {name}" for name in chunk)
-        content = (
-            f"ACCUSED ON THIS CASE:\n{listing}\n\n"
-            f"COURT ORDER (operative section):\n{zone}"
-        )
         try:
-            response_text = invoke_text(
-                system=VERDICT_SYSTEM_PROMPT,
-                content=content,
-                max_tokens=VERDICT_MAX_TOKENS,
-                tier=tier_for("entities"),
-                usage=usage,
-            )
+            answered, unrequested_errors = _ask_verdict_names(chunk, zone, invoke_text, usage)
         except Exception as exc:  # noqa: BLE001 - one bad chunk must not lose the rest
             errors.append(f"chunk of {len(chunk)} defendants failed: {exc}")
             continue
-        rows = parse_verdict_response(response_text)
-        answered = set()
-        for row in rows:
-            name = row["name"]
-            if name not in chunk_set:
-                errors.append(f"chunk returned an unrequested name: {name!r}")
-                continue
-            results[name] = {
-                "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
-            }
-            answered.add(name)
+        results.update(answered)
         missing = [name for name in chunk if name not in answered]
-        if missing:
+        if not missing:
+            errors.extend(unrequested_errors)
+            continue
+
+        try:
+            retry_answered, retry_unrequested = _ask_verdict_names(
+                missing, zone, invoke_text, usage)
+        except Exception as exc:  # noqa: BLE001 - a retry failure keeps the first attempt's rows
+            errors.extend(unrequested_errors)
             errors.append(
                 f"chunk returned {len(answered)} of {len(chunk)} defendants; "
-                f"missing: {', '.join(missing)}")
+                f"missing: {', '.join(missing)} (retry failed: {exc})")
+            continue
+
+        results.update(retry_answered)
+        still_missing = [name for name in missing if name not in retry_answered]
+        errors.extend(unrequested_errors)
+        if still_missing:
+            errors.append(
+                f"chunk returned {len(answered) + len(retry_answered)} of {len(chunk)} "
+                f"defendants after retry; missing: {', '.join(still_missing)}")
+        errors.extend(retry_unrequested)
     return results, errors
 
 
