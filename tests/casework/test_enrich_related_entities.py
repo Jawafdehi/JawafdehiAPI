@@ -3865,3 +3865,96 @@ def test_an_uncanonical_created_iri_costs_one_name_not_the_run(
     rows = _created_rows()
     assert [r["outcome"] for r in rows] == ["error", "error"]
     assert all("canonical NES entity IRI" in r["reason"] for r in rows)
+
+
+class TestApplyAccusedUpdates:
+    IRI = "https://jawafdehi.org/entity/person/ram-bahadur-1"
+
+    def _bind(self, notes="", outcome="charged", rel="accused"):
+        return {"nes_id": self.IRI, "relationship_type": rel,
+                "notes": notes, "outcome": outcome}
+
+    def test_placeholder_note_is_replaced(self):
+        binds = [self._bind(notes="प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "convicted", "notes": "तत्कालीन सचिव — घूस लिने"}})
+        assert got[0]["notes"] == "तत्कालीन सचिव — घूस लिने"
+        assert got[0]["outcome"] == "convicted"
+
+    def test_a_humans_note_is_never_overwritten(self):
+        binds = [self._bind(notes="तत्कालीन प्रमुख नापी अधिकृत — मुख्य प्रतिवादी")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "convicted", "notes": "मोडेलको पाठ"}})
+        assert got[0]["notes"] == "तत्कालीन प्रमुख नापी अधिकृत — मुख्य प्रतिवादी"
+        # The verdict still lands. Refusing the note must not refuse the outcome.
+        assert got[0]["outcome"] == "convicted"
+
+    def test_an_empty_note_is_filled(self):
+        binds = [self._bind(notes="")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "acquitted", "notes": "सहायक"}})
+        assert got[0]["notes"] == "सहायक"
+
+    def test_the_alias_tail_of_a_placeholder_survives(self):
+        # enrich_court_record puts the court's own alias on the bind. It is the
+        # only place the record says the court called this person something
+        # else; replacing the whole note drops it on the floor.
+        note = ("प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"
+                "; अदालतको अभिलेखमा: रामे भन्ने राम बहादुर")
+        got = ere.apply_accused_updates(
+            [self._bind(notes=note)],
+            {self.IRI: {"outcome": "convicted", "notes": "तत्कालीन सचिव"}})
+        assert got[0]["notes"].startswith("तत्कालीन सचिव")
+        assert "; अदालतको अभिलेखमा: रामे भन्ने राम बहादुर" in got[0]["notes"]
+
+    def test_a_bind_with_no_update_is_copied_through_unchanged(self):
+        other = {"nes_id": "https://jawafdehi.org/entity/person/other-9",
+                 "relationship_type": "accused", "notes": "मानव लेख", "outcome": "acquitted"}
+        got = ere.apply_accused_updates([self._bind(), other], {})
+        assert got[1] == other
+
+    def test_a_non_accused_bind_is_never_touched(self):
+        rel = {"nes_id": self.IRI, "relationship_type": "related", "notes": "स्थान"}
+        got = ere.apply_accused_updates(
+            [rel], {self.IRI: {"outcome": "convicted", "notes": "x"}})
+        assert got[0] == rel
+
+    def test_unknown_is_never_written(self):
+        binds = [self._bind(outcome="charged")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "unknown", "notes": "भूमिका"}})
+        assert got[0]["outcome"] == "charged"
+        # The role note is still worth having even when the verdict is not.
+        assert got[0]["notes"] == "भूमिका"
+
+    def test_order_and_length_are_preserved(self):
+        binds = [self._bind(), {"nes_id": "https://jawafdehi.org/entity/person/b-2",
+                                "relationship_type": "accused", "notes": "", "outcome": "charged"}]
+        got = ere.apply_accused_updates(binds, {})
+        assert [b["nes_id"] for b in got] == [b["nes_id"] for b in binds]
+
+    def test_every_row_it_returns_passes_the_serializer_mirror(self):
+        binds = [self._bind(notes="प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "convicted", "notes": "सचिव"}})
+        for item in got:
+            ere.validate_bind_item(item)
+
+
+class TestTheServerPreservesOmittedOutcomes:
+    """`apply_accused_updates` sends `outcome` only on the rows it decided.
+
+    Every other accused row goes out with no `outcome` key, and
+    `cases.api_views.CaseViewSet._rewrite_entity_binds` preserves that bind's prior
+    verdict across the whole-list delete/recreate. If that ever stops being true,
+    this enricher silently resets verdicts to 'charged' -- so pin it here.
+    """
+
+    def test_the_replace_handler_still_preserves_an_omitted_outcome(self):
+        import inspect
+
+        from cases.api_views import CaseViewSet
+
+        source = inspect.getsource(CaseViewSet._rewrite_entity_binds)
+        assert '"outcome" in item' in source
+        assert "prior_outcomes" in source

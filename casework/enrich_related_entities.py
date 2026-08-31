@@ -504,6 +504,40 @@ def merge_entity_binds(current, additions):
     return merged
 
 
+MACHINE_NOTE_PREFIX = "प्रतिवादी — विशेष अदालत मुद्दा "
+ALIAS_MARKER = "; अदालतको अभिलेखमा: "
+TERMINAL_OUTCOMES = frozenset({"convicted", "acquitted", "abated"})
+
+
+def apply_accused_updates(binds, updates):
+    """Rewrite in place only the accused binds `updates` (`{nes_id: {"outcome", "notes"}}`) covers.
+
+    Never creates or drops a bind -- same order, same length as `binds`. A
+    verdict is written only when it is in `TERMINAL_OUTCOMES`, so a model
+    that answers 'unknown' or 'charged' cannot blank a stored one. A note is
+    replaced only when it is empty or still `enrich_court_record`'s
+    placeholder, and the placeholder's `ALIAS_MARKER` tail (the court's own
+    alias for this person) is carried onto the new note rather than dropped.
+    """
+    result = []
+    for bind in binds:
+        update = updates.get(bind.get("nes_id"))
+        if bind_relationship_type(bind) != "accused" or not update:
+            result.append(bind)
+            continue
+        new_bind = dict(bind)
+        if update.get("outcome") in TERMINAL_OUTCOMES:
+            new_bind["outcome"] = update["outcome"]
+        notes = bind.get("notes") or ""
+        if not notes or notes.startswith(MACHINE_NOTE_PREFIX):
+            new_notes = update.get("notes") or ""
+            if notes.startswith(MACHINE_NOTE_PREFIX) and ALIAS_MARKER in notes:
+                new_notes += notes[notes.index(ALIAS_MARKER):]
+            new_bind["notes"] = new_notes
+        result.append(new_bind)
+    return result
+
+
 def validate_bind_item(item):
     """Local mirror of `EntityPatchItemSerializer`'s rules, applied BEFORE the
     request body is built so a bad item never reaches the API. Raises ValueError.
