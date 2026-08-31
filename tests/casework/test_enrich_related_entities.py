@@ -4018,6 +4018,23 @@ class TestParseVerdictResponse:
         assert len(got[0]["role"]) <= 90
 
 
+class TestVerdictPromptBounds:
+    """Every field the reply carries is bounded. `role` was capped at 90 chars
+    from the start; `evidence` -- quoted VERBATIM, and the one field that can
+    run to a paragraph -- was not, and 20 unbounded quotes overrun
+    VERDICT_MAX_TOKENS. A reply cut off there parses as nothing at all.
+    """
+
+    def test_the_prompt_bounds_the_evidence_quote(self):
+        assert "under 200 characters" in ere.VERDICT_SYSTEM_PROMPT
+        assert "one sentence" in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_the_quote_is_still_required_to_be_verbatim(self):
+        # Bounded, not paraphrased: the evidence phrase is the only way a
+        # wrong `convicted` is findable in the artefact.
+        assert "VERBATIM" in ere.VERDICT_SYSTEM_PROMPT
+
+
 class TestAccusedVerdicts:
     def _reply(self, names):
         import json
@@ -4110,6 +4127,48 @@ class TestAccusedVerdicts:
         assert got["नाम0"]["outcome"] == "convicted"
         assert len(got) == 1
         assert errors
+
+    def _sizes_stub(self, names, truncate_over):
+        """A stub that truncates its reply whenever more than `truncate_over`
+        names are asked for, and records the size of every request."""
+        sizes = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            batch = [n for n in names if f"- {n}\n" in content + "\n"]
+            sizes.append(len(batch))
+            reply = self._reply(batch)
+            # A reply cut off at VERDICT_MAX_TOKENS: the JSON never closes, so
+            # `parse_extraction_response` returns None and the WHOLE chunk is
+            # lost -- not just the tail.
+            return reply[:60] if len(batch) > truncate_over else reply
+
+        return fake, sizes
+
+    def test_a_truncated_reply_is_recovered_by_halving_the_chunk(self):
+        # The likeliest cause of a short chunk is a reply truncated at
+        # VERDICT_MAX_TOKENS, and a retry of the SAME size just reproduces it.
+        # The retry re-enters the chunk loop at VERDICT_CHUNK // 2 instead.
+        names = [f"नाम{i}" for i in range(ere.VERDICT_CHUNK)]
+        fake, sizes = self._sizes_stub(names, ere.VERDICT_CHUNK // 2)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert sizes == [ere.VERDICT_CHUNK,
+                         ere.VERDICT_CHUNK // 2, ere.VERDICT_CHUNK // 2]
+        assert len(got) == ere.VERDICT_CHUNK
+        assert errors == []
+
+    def test_a_chunk_short_after_the_halved_retry_is_never_retried_again(self):
+        # One retry PASS, not a recursion: the halves are asked once each, and
+        # every name still missing is an error carrying its own name.
+        names = [f"नाम{i}" for i in range(ere.VERDICT_CHUNK)]
+        fake, sizes = self._sizes_stub(names, 0)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert sizes == [ere.VERDICT_CHUNK,
+                         ere.VERDICT_CHUNK // 2, ere.VERDICT_CHUNK // 2]
+        assert got == {}
+        assert errors and f"0 of {ere.VERDICT_CHUNK}" in errors[0]
+        assert all(name in errors[0] for name in names)
 
     def test_a_complete_first_reply_triggers_no_retry(self):
         names = ["क", "ख"]
@@ -4317,17 +4376,27 @@ class TestVerdictGate:
         # so this costs no extra request and undecided cases spend nothing.
         api = _StubApi([_accused_case(court=False)])
         stub = _two_call_stub()
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         assert stub.verdict_calls == []
 
-    def test_a_case_whose_accused_already_carry_a_terminal_outcome_is_skipped(
+    def test_a_case_whose_accused_ALL_carry_a_terminal_outcome_is_skipped(
             self, monkeypatch, patched_fetch_markdown):
         # 486 production cases read all-`acquitted` from bind_outcome's सफाई
         # rule -- whole-case acquittals, not re-litigated here.
         api = _StubApi([_accused_case(outcome="acquitted")])
         stub = _two_call_stub()
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         assert stub.verdict_calls == []
+
+    def test_the_spend_gate_and_the_planner_read_the_state_the_same_way(self):
+        # The spend gate used to upper-case the state while the planner
+        # compared it exactly, so a payload carrying `draft` passed the gate,
+        # bought a premium verdict call per chunk, and was then refused at the
+        # write -- the one thing the state clause exists to prevent.
+        case = dict(_accused_case(), state="draft")
+        assert ere.verdict_state_refusal(case), "the spend gate let `draft` through"
+        plan = ere.plan_case_entities(None, case, 'W/"abc123"', [])
+        assert plan.action == "SKIP_STATE"
 
     def test_an_in_review_case_never_pays_for_a_verdict_call(
             self, monkeypatch, patched_fetch_markdown):
@@ -4338,7 +4407,7 @@ class TestVerdictGate:
         case = dict(_accused_case(slug="case-in-review-verdict"), state="IN_REVIEW")
         api = _StubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         assert stub.verdict_calls == []
 
     def test_the_state_skip_is_a_row_in_the_verdicts_file(
@@ -4349,7 +4418,7 @@ class TestVerdictGate:
         case = dict(_accused_case(slug="case-in-review-verdict"), state="IN_REVIEW")
         api = _StubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
         assert row["written"] is False
         assert "IN_REVIEW" in row["reason"] and "DRAFT" in row["reason"]
@@ -4367,15 +4436,18 @@ class TestVerdictGate:
             self, monkeypatch, patched_fetch_markdown):
         api = _StubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         assert len(stub.verdict_calls) == 1
 
-    def test_no_verdicts_flag_disables_the_call_entirely(
+    def test_the_verdict_read_is_off_unless_asked_for(
             self, monkeypatch, patched_fetch_markdown):
+        # OPT-IN. `convicted` on a real person is the worst thing this module
+        # can get wrong, so a run that only wants entity binds must not write
+        # one. Same case as the test above, minus the flag.
         api = _StubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
         _run_main(monkeypatch, api, invoke_text_stub=stub,
-                  argv=["--dry-run", "--no-verdicts"])
+                  argv=["--dry-run"])
         assert stub.verdict_calls == []
 
     def test_a_case_already_carrying_related_binds_still_gets_its_verdicts(
@@ -4389,22 +4461,200 @@ class TestVerdictGate:
              "type": "related", "display_name": "संस्था", "notes": ""}])
         api = _StubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         assert stub.entity_calls == []
         assert len(stub.verdict_calls) == 1
 
-    def test_no_verdicts_keeps_the_already_enriched_skip_free(
+    def test_without_verdicts_the_already_enriched_skip_stays_free(
             self, monkeypatch, patched_fetch_markdown):
-        # The other half of --no-verdicts: with it, an already-enriched case
-        # must still cost nothing at all, not merely no LLM call.
+        # The other half of the default: without --verdicts, an already-enriched
+        # case must still cost nothing at all, not merely no LLM call.
         case = _accused_case(extra_entities=[
             {"nes_id": "https://jawafdehi.org/entity/organization/o-1",
              "type": "related", "display_name": "संस्था", "notes": ""}])
         api = _StubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
         _run_main(monkeypatch, api, invoke_text_stub=stub,
-                  argv=["--dry-run", "--no-verdicts"])
+                  argv=["--dry-run"])
         assert stub.entity_calls == [] and stub.verdict_calls == []
+
+
+RELATED_BIND = {"nes_id": "https://jawafdehi.org/entity/organization/o-1",
+                "type": "related", "display_name": "संस्था", "notes": ""}
+
+
+def _sita(outcome):
+    return {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+            "display_name": "सीता देवी", "outcome": outcome,
+            "notes": "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"}
+
+
+class TestSettledOutcomesAreSkippedPerBind:
+    """A judgment that decides some defendants and not others is the NORMAL
+    case -- 8 abstentions in 83 measured defendants. Refusing the whole case
+    on any terminal outcome wrote the answered ones and then locked the rest
+    at `charged` forever. The filter is per-BIND: a settled bind is never
+    re-litigated, and the case stays finishable.
+    """
+
+    def test_a_partly_settled_case_is_still_read(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case(extra_entities=[_sita("convicted")])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        assert len(stub.verdict_calls) == 1
+        prompt = stub.verdict_calls[0]["content"]
+        assert "राम बहादुर" in prompt
+        assert "सीता देवी" not in prompt
+
+    def test_the_settled_bind_is_reported_with_its_reason(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        api = _SearchStubApi([_accused_case(extra_entities=[_sita("convicted")])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        row = next(r for r in _verdict_rows(tmp_path)
+                   if r["nes_id"] == SECOND_ACCUSED_IRI)
+        assert row["written"] is False
+        assert row["old_outcome"] == "convicted"
+        assert "terminal outcome" in row["reason"]
+
+    def test_the_settled_binds_stored_outcome_is_not_rewritten(
+            self, monkeypatch, patched_fetch_markdown):
+        # An omitted `outcome` is what makes the server preserve the stored
+        # one across the whole-list replace. The settled bind must go out
+        # without one, and must not be dropped from the list either.
+        api = _SearchStubApi([_accused_case(extra_entities=[_sita("convicted")])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        _slug, _path, items, _if_match = api.replace_list_calls[0]
+        by_id = {i["nes_id"]: i for i in items}
+        assert "outcome" not in by_id[SECOND_ACCUSED_IRI]
+        assert by_id[ACCUSED_IRI]["outcome"] == "convicted"
+
+    def test_a_re_run_finishes_a_half_decided_case(
+            self, monkeypatch, patched_fetch_markdown):
+        # THE GUARANTEE B1 RESTORES. This is the case exactly as a first run
+        # that answered for राम बहादुर only would have left it; the second run
+        # must be able to decide सीता देवी rather than find the case locked.
+        api = _SearchStubApi([_accused_case(outcome="convicted",
+                                            extra_entities=[_sita("charged")])])
+        stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
+            {"name": "सीता देवी", "outcome": "acquitted", "role": "तत्कालीन लेखापाल",
+             "evidence": "सफाई पाउने ठहर्छ"}]}, ensure_ascii=False))
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls, "the re-run wrote nothing"
+        _slug, _path, items, _if_match = api.replace_list_calls[0]
+        by_id = {i["nes_id"]: i for i in items}
+        assert by_id[SECOND_ACCUSED_IRI]["outcome"] == "acquitted"
+        assert "outcome" not in by_id[ACCUSED_IRI]
+
+
+class TestTheGateSpendsNothingItCannotUse:
+    def test_a_refused_case_pays_for_no_document_fetch(
+            self, monkeypatch, patched_fetch_markdown):
+        # The clauses answerable from the case payload -- state, an accused
+        # bind, an already-settled list -- run BEFORE the markdown fetch. The
+        # API client has no 5xx retry, so a request that can only be discarded
+        # is a request worth not making.
+        import casework.common.materials as m
+        fetched = []
+
+        def counting(link, timeout=60):
+            fetched.append(link)
+            return "अदालतको आदेशमा ठहर खण्ड उल्लेख छ।"
+
+        monkeypatch.setattr(m, "fetch_markdown", counting)
+        api = _StubApi([_accused_case(outcome="acquitted",
+                                      extra_entities=[RELATED_BIND])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        assert stub.verdict_calls == []
+        assert fetched == []
+
+    def test_the_state_skip_is_still_a_row_when_no_document_was_fetched(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # Saving the fetch must not cost the artefact row: an IN_REVIEW case
+        # that is ALSO skipped for extraction reaches the gate with no court
+        # text at all, and the row is keyed on the order being BOUND.
+        import casework.common.materials as m
+        fetched = []
+
+        def counting(link, timeout=60):
+            fetched.append(link)
+            return "अदालतको आदेशमा ठहर खण्ड उल्लेख छ।"
+
+        monkeypatch.setattr(m, "fetch_markdown", counting)
+        case = dict(_accused_case(slug="case-in-review-skipped",
+                                  extra_entities=[RELATED_BIND]), state="IN_REVIEW")
+        api = _StubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        assert fetched == []
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert "judgment was not read" in row["reason"]
+
+
+class TestAHumanWhoSettlesABindMidRunWins:
+    """The gate reads `detail`; the write list is built from the later `fresh`
+    read, and `If-Match` cannot catch a human who settled a bind in between --
+    the ETag comes from that same later read.
+    """
+
+    class _RacedApi(_SearchStubApi):
+        def get_case_with_etag(self, slug, timeout=60):
+            case = dict(self._cases[slug])
+            case["entities"] = [
+                dict(bind, outcome="acquitted")
+                if bind["nes_id"] == ACCUSED_IRI else bind
+                for bind in case["entities"]]
+            return case, self.etag
+
+    def test_the_verdict_is_dropped_rather_than_written_over_the_human(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        api = self._RacedApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)  # says convicted
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls == []
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert row["written"] is False
+        assert "between" in row["reason"]
+
+
+class TestEveryRowIsAccountedFor:
+    def test_a_refused_write_leaves_its_rows_in_the_undecided_count(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # `_StubApi` has no `get_case_with_etag`, so the write gate refuses.
+        # The row was computed and never written: counted in neither total,
+        # the epilogue's two numbers stop accounting for every row in the file.
+        api = _StubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "WOULD update from the judgment: 0" in out
+        assert "1 accused bind(s) were left exactly as they were" in out
+
+    def test_a_failed_write_leaves_its_rows_in_the_undecided_count(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        class _FailingApi(_SearchStubApi):
+            def replace_list(self, slug, path, items, timeout=60, if_match=None):
+                raise urllib.error.HTTPError(
+                    "https://x/api/cases/", 412, "Precondition Failed", {}, None)
+
+        api = _FailingApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "updated from the judgment: 0" in out
+        assert "1 accused bind(s) were left exactly as they were" in out
 
 
 class TestVerdictNameMapping:
@@ -4417,7 +4667,7 @@ class TestVerdictNameMapping:
              "display_name": "राम बहादुर", "outcome": "charged", "notes": ""}])
         api = _SearchStubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         assert stub.verdict_calls == []
         assert api.replace_list_calls == []
         rows = _verdict_rows(tmp_path)
@@ -4431,7 +4681,7 @@ class TestVerdictNameMapping:
         case = _accused_case(display_name=None)
         api = _SearchStubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         assert stub.verdict_calls == []
         assert api.replace_list_calls == []
         rows = _verdict_rows(tmp_path)
@@ -4442,7 +4692,7 @@ class TestVerdictNameMapping:
             self, monkeypatch, patched_fetch_markdown, tmp_path):
         api = _SearchStubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=json.dumps({"defendants": []}))
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         assert api.replace_list_calls == []
         rows = _verdict_rows(tmp_path)
         assert [r["nes_id"] for r in rows] == [ACCUSED_IRI]
@@ -4456,7 +4706,7 @@ class TestVerdictNameMapping:
         stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
             {"name": "श्याम बहादुर", "outcome": "convicted", "role": "स",
              "evidence": "ठहर्छ"}]}, ensure_ascii=False))
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         assert api.replace_list_calls == []
         rows = _verdict_rows(tmp_path)
         assert [r["nes_id"] for r in rows] == [ACCUSED_IRI]
@@ -4476,7 +4726,7 @@ class TestVerdictWrite:
             self, monkeypatch, patched_fetch_markdown):
         api = _SearchStubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         assert api.replace_list_calls, "the run wrote nothing"
         _slug, path, items, if_match = api.replace_list_calls[0]
         assert path == "entities"
@@ -4488,7 +4738,7 @@ class TestVerdictWrite:
     def test_a_dry_run_writes_nothing(self, monkeypatch, patched_fetch_markdown):
         api = _SearchStubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         assert api.replace_list_calls == []
         assert api.patch_calls == []
 
@@ -4504,7 +4754,7 @@ class TestVerdictWrite:
                                      "score": 200.0}]})
         stub = _two_call_stub(entity_response=ENTITY_RESPONSE,
                               verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         assert len(api.replace_list_calls) == 1
         _slug, _path, items, _if_match = api.replace_list_calls[0]
         by_id = {i["nes_id"]: i for i in items}
@@ -4528,7 +4778,7 @@ class TestVerdictWrite:
                               verdict_response=json.dumps({"defendants": [
                                   {"name": "राम बहादुर", "outcome": "charged",
                                    "role": "", "evidence": ""}]}, ensure_ascii=False))
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         assert len(api.replace_list_calls) == 1, "the write path was never reached"
         _slug, _path, items, if_match = api.replace_list_calls[0]
         assert if_match == api.etag
@@ -4549,7 +4799,7 @@ class TestVerdictWrite:
                      "display_name": "साझा भण्डार सहकारी", "notes": human_note}
         api = _SearchStubApi([_accused_case(extra_entities=[untouched])])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
 
         assert len(api.replace_list_calls) == 1
         _slug, path, items, if_match = api.replace_list_calls[0]
@@ -4569,7 +4819,7 @@ class TestVerdictReport:
         stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
             {"name": "राम बहादुर", "outcome": "unknown", "role": "",
              "evidence": ""}]}, ensure_ascii=False))
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         rows = _verdict_rows(tmp_path)
         assert rows and rows[0]["new_outcome"] == "unknown"
         assert rows[0]["written"] is False
@@ -4578,7 +4828,7 @@ class TestVerdictReport:
             self, monkeypatch, patched_fetch_markdown, tmp_path):
         api = _StubApi([_accused_case(notes="तत्कालीन प्रमुख — मुख्य प्रतिवादी")])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         rows = _verdict_rows(tmp_path)
         assert any("note" in (r.get("reason") or "") for r in rows)
 
@@ -4588,7 +4838,7 @@ class TestVerdictReport:
         # a machine write, and the only way a wrong `convicted` is findable.
         api = _StubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         text = _read_report(tmp_path, "verdicts.jsonl")
         assert "निज प्रतिवादीले कसुर गरेको ठहर्छ" in text
 
@@ -4596,7 +4846,7 @@ class TestVerdictReport:
             self, monkeypatch, patched_fetch_markdown, tmp_path):
         api = _SearchStubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         rows = [json.loads(line) for line in
                 _read_report(tmp_path, "binds.jsonl").splitlines() if line.strip()]
         row = next(r for r in rows if r["nes_id"] == ACCUSED_IRI)
@@ -4608,7 +4858,7 @@ class TestVerdictReport:
             self, monkeypatch, patched_fetch_markdown):
         api = _SearchStubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         steps = {(r["step"], r["status"]) for r in _read_events(_events_path())}
         assert ("verdicts", "ok") in steps
 
@@ -4616,7 +4866,7 @@ class TestVerdictReport:
             self, monkeypatch, patched_fetch_markdown, capsys):
         api = _SearchStubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         assert "accused bind(s) updated from the judgment: 1" in capsys.readouterr().out
 
     def test_a_refused_write_says_so_on_the_row_it_would_have_written(
@@ -4627,7 +4877,7 @@ class TestVerdictReport:
         # here the row reads `written: false` and says nothing at all.
         api = _StubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         rows = _verdict_rows(tmp_path)
         row = next(r for r in rows if r["nes_id"] == ACCUSED_IRI)
         assert row["written"] is False
@@ -4642,7 +4892,7 @@ class TestVerdictReport:
 
         api = _FailingApi([_accused_case()])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
         assert row["written"] is False
         assert "write failed" in row["reason"]
@@ -4653,11 +4903,10 @@ class TestVerdictReport:
 
 
 # --------------------------------------------------------------------------
-# Round 10 (I4) -- a case the judgment only half-answered is LOCKED, and the
-# epilogue is the only place a caseworker can find it. `verdict_gate` refuses
-# any case that already carries a terminal outcome, so the defendants a short
-# chunk never answered for stay `charged` until a human clears the answered
-# ones by hand.
+# A case the judgment only half-answered, and the epilogue that names it. The
+# defendants a short chunk never answered for stay `charged`; the gate is
+# per-bind, so a re-run asks about exactly those, and the epilogue's list is
+# what to check by hand when a re-run leaves them undecided.
 # --------------------------------------------------------------------------
 
 SECOND_ACCUSED = {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
@@ -4672,16 +4921,19 @@ class TestVerdictCoverageEpilogue:
         api = _SearchStubApi([_accused_case(slug="case-half",
                                             extra_entities=[SECOND_ACCUSED])])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         out = capsys.readouterr().out
         assert "1 partially decided" in out
-        assert "\n      case-half\n" in out, "the locked case is not named"
+        assert "\n      case-half\n" in out, "the half-decided case is not named"
+        # NOT locked: the per-bind gate lets a re-run decide the rest.
+        assert "LOCKED" not in out
+        assert "re-run" in out
 
     def test_a_fully_answered_judgment_is_not_reported_as_partial(
             self, monkeypatch, patched_fetch_markdown, capsys):
         api = _SearchStubApi([_accused_case(slug="case-whole")])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
         out = capsys.readouterr().out
         assert "1 fully decided" in out and "0 partially decided" in out
         assert "LOCKED" not in out
@@ -4689,19 +4941,19 @@ class TestVerdictCoverageEpilogue:
     def test_a_case_nothing_was_decided_on_counts_as_undecided(
             self, monkeypatch, patched_fetch_markdown, capsys):
         # No court order, so the gate never reads a judgment -- the case is
-        # untouched, not half-done, and must not be filed with the locked ones.
+        # untouched, not half-done, and must not be filed with the partial ones.
         api = _StubApi([_accused_case(slug="case-untouched", court=False)])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
-        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         out = capsys.readouterr().out
         assert "1 undecided" in out
         assert "LOCKED" not in out
 
-    def test_no_verdicts_reports_no_coverage_at_all(
+    def test_a_run_without_verdicts_reports_no_coverage_at_all(
             self, monkeypatch, patched_fetch_markdown, capsys):
         # Nothing read the judgments, so there is no coverage to claim.
         api = _StubApi([_accused_case(slug="case-skipped")])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
         _run_main(monkeypatch, api, invoke_text_stub=stub,
-                  argv=["--dry-run", "--no-verdicts"])
+                  argv=["--dry-run"])
         assert "ACCUSED VERDICT COVERAGE" not in capsys.readouterr().out

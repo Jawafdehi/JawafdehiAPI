@@ -153,8 +153,16 @@ class TestThaharWindow:
 
 
 class TestVerdictZone:
-    def test_a_short_document_comes_back_whole_and_unlabelled(self):
+    def test_a_short_document_with_a_marker_still_starts_at_the_marker(self):
+        # THE SAME INVERSION `court_order_thahar` records as a past bug. This
+        # used to short-circuit on length BEFORE the marker lookup, so 6 of the
+        # 7 sampled orders -- every one under the 103,255-char cap -- got the
+        # whole document, recital included, re-sent once per 20-name chunk.
         text = "क" * 1_000 + "ठहर खण्ड" + "ठ" * 1_000
+        assert court_order_verdict_zone(text, label=False) == "ठहर खण्ड" + "ठ" * 1_000
+
+    def test_a_short_document_with_no_marker_comes_back_whole_and_unlabelled(self):
+        text = "क" * 1_000 + "आदेश।"
         assert court_order_verdict_zone(text) == text
 
     def test_it_carries_both_the_marker_region_and_the_ending(self):
@@ -197,7 +205,8 @@ class TestVerdictZone:
         # its cap in, so a caller could not ask for a smaller zone at all.
         text = "क" * 5_000 + THAHAR_MARKER + "ठ" * 5_000
         assert len(court_order_verdict_zone(text, limit=1_000, label=False)) == 1_000
-        assert court_order_verdict_zone(text, limit=VERDICT_ZONE_CHARS) == text
+        assert (court_order_verdict_zone(text, limit=VERDICT_ZONE_CHARS, label=False)
+                == THAHAR_MARKER + "ठ" * 5_000)
 
     def test_a_holding_just_past_the_old_tail_boundary_is_now_visible(self):
         # likhu-tamakoshi (production, 2026-08-31): the holding sat 8,456

@@ -102,6 +102,11 @@ def court_order_verdict_zone(text: str, limit: int = VERDICT_ZONE_CHARS,
     """Return the marker-to-end span of a court order, capped at `limit` -- the
     slice `accused_verdicts` reads to decide a per-defendant disposition.
 
+    The marker is looked for FIRST, before any length short-circuit -- the
+    same inversion `court_order_thahar` records as a past bug. Under the cap a
+    length-first reader returns the whole document, recital included, and the
+    zone is re-sent once per name chunk.
+
     Marker-to-end has no gap by construction. When that span still exceeds
     the cap, or there is no marker at all, this falls back to
     `court_order_tail` -- the last `limit` chars of the WHOLE document as one
@@ -111,16 +116,10 @@ def court_order_verdict_zone(text: str, limit: int = VERDICT_ZONE_CHARS,
     """
     if not text:
         return ""
-    if len(text) <= limit:
-        return text
-
     idx = text.find(THAHAR_MARKER)
-    if idx != -1:
-        span = len(text) - idx
-        if span <= limit:
-            window = text[idx:]
-            return _VERDICT_LABEL + window if label else window
-
+    if idx != -1 and len(text) - idx <= limit:
+        window = text[idx:]
+        return _VERDICT_LABEL + window if label else window
     return court_order_tail(text, limit, label)
 
 

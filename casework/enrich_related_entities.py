@@ -88,21 +88,23 @@ bind without writing anything; `--apply` is required to actually write, and
 even then `CaseworkApi` itself refuses a non-loopback host unless
 `--allow-remote-writes` is also passed -- never pass that against production.
 
-IT ALSO UPDATES ACCUSED BINDS IT DID NOT CREATE. `enrich_court_record` binds
-every court-record defendant with `outcome = charged` and a placeholder note,
-because a `ठहर` on a 19-defendant judgment does not say who. When a case has a
-bound court order, accused binds and no terminal outcome yet, this stage reads
-the judgment's operative section and rewrites those binds in place -- a real
-role note and a per-defendant verdict -- in the SAME `/entities` replace the
-new binds go out in, never a second PATCH. It still proposes no accused bind of
-its own. Gated INDEPENDENTLY of the `related`-bind idempotency skip: nearly
-every case this targets has already been through an extraction run.
+IT ALSO UPDATES ACCUSED BINDS IT DID NOT CREATE, under `--verdicts`.
+`enrich_court_record` binds every court-record defendant with
+`outcome = charged` and a placeholder note, because a `ठहर` on a 19-defendant
+judgment does not say who. With `--verdicts`, a case with a bound court order
+and an accused bind not yet settled has the judgment's operative section read
+and those binds rewritten in place -- a real role note and a per-defendant
+verdict -- in the SAME `/entities` replace the new binds go out in, never a
+second PATCH. It still proposes no accused bind of its own. OPT-IN, because
+`convicted` on a real person is the worst thing this module can get wrong.
+Gated INDEPENDENTLY of the `related`-bind idempotency skip: nearly every case
+this targets has already been through an extraction run.
 
 Usage:
     uv run python -m casework.enrich_related_entities --dry-run
     uv run python -m casework.enrich_related_entities --slug case-0123
     uv run python -m casework.enrich_related_entities --limit 10 --verbose
-    uv run python -m casework.enrich_related_entities --no-verdicts
+    uv run python -m casework.enrich_related_entities --verdicts
     uv run python -m casework.enrich_related_entities --apply   # loopback only
 """
 
@@ -133,7 +135,7 @@ from casework.common.court_order import (
     court_order_verdict_zone,
 )
 from casework.common.llm import bootstrap, tier_for
-from casework.common.materials import source_chunks, source_text
+from casework.common.materials import materials_of_type, source_chunks, source_text
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.common.parse import parse_extraction_response
 from casework.common.pipeline import (
@@ -528,16 +530,26 @@ ALIAS_MARKER = "; अदालतको अभिलेखमा: "
 TERMINAL_OUTCOMES = frozenset({"convicted", "acquitted", "abated"})
 
 
+def is_settled(bind):
+    """Whether a bind already carries a terminal outcome this stage may not re-decide."""
+    return (bind.get("outcome") or "").strip().lower() in TERMINAL_OUTCOMES
+
+
+def settled_accused_ids(case):
+    """The `nes_id`s whose accused bind on `case` is already settled."""
+    return {(bind.get("nes_id") or "").strip()
+            for bind in (case.get("entities") or [])
+            if bind_relationship_type(bind) == ACCUSED_SECTION and is_settled(bind)}
+
+
 def apply_accused_updates(binds, updates):
     """Rewrite in place only the accused binds `updates` (`{nes_id: {"outcome", "notes"}}`) covers.
 
-    Never creates or drops a bind -- same order, same length as `binds`. A
-    verdict is written only when it is in `TERMINAL_OUTCOMES`, so a model
-    that answers 'unknown' or 'charged' cannot blank a stored one. An update's
-    `notes` replaces an empty or still-placeholder existing note, carrying
-    forward the placeholder's `ALIAS_MARKER` tail; an EMPTY `notes` means "no
-    role known" and leaves the existing note untouched rather than blanking
-    it, since a judgment can convict a defendant it never describes.
+    Never creates or drops a bind -- same order, same length as `binds`. Only a
+    `TERMINAL_OUTCOMES` verdict is written, so an 'unknown' or 'charged' reply
+    cannot blank a stored one; an EMPTY `notes` leaves the existing note alone
+    rather than blanking it, since a judgment can convict a defendant it never
+    describes.
     """
     result = []
     for bind in binds:
@@ -582,7 +594,8 @@ For EACH name in the accused list, answer:
   role      a short Nepali note: the person's post and employer at the time,
             plus what the court found they did, under 90 characters. "" if the
             document does not say.
-  evidence  the phrase the answer was decided from, quoted VERBATIM.
+  evidence  the phrase the answer was decided from, quoted VERBATIM from the
+            order: at most one sentence, under 200 characters.
 
 Reply with ONLY this JSON object, no other text:
 {"defendants": [{"name": "<copied exactly from the accused list>", "outcome": "...", \
@@ -593,9 +606,9 @@ Reply with ONLY this JSON object, no other text:
 def parse_verdict_response(text: str) -> list:
     """Parse a verdict-call reply into validated `{name, outcome, role, evidence}` rows.
 
-    Drops a row with no `name` or whose `outcome` is not in `VERDICT_OUTCOMES` --
-    never coerced, since a model answering `दोषी` has not answered the question
-    asked -- and truncates `role` to 90 chars.
+    Drops a row with no `name` or whose `outcome` is not in `VERDICT_OUTCOMES`,
+    never coercing one: a model answering `दोषी` has not answered the question
+    asked. Truncates `role` to 90 chars.
     """
     rows = parse_extraction_response(text, ("defendants",)) or []
     out = []
@@ -618,13 +631,10 @@ def parse_verdict_response(text: str) -> list:
 def _ask_verdict_names(names, zone, invoke_text, usage):
     """One verdict call for exactly `names`, reconciled by EXACT name match.
 
-    Returns `(answered, unrequested_errors)`, where `answered` is
-    `{name: {"outcome", "role", "evidence"}}` for rows naming one of `names`.
-    A row naming anyone else is dropped and reported in `unrequested_errors`
-    rather than admitted -- the prompt already tells the model to copy `name`
-    verbatim, so a fuzzy match here would risk binding a verdict to the wrong
-    person. Propagates an `invoke_text` failure; the caller decides whether
-    that is worth a retry.
+    Returns `(answered, unrequested_errors)`. A row naming anyone but one of
+    `names` is dropped and reported, never fuzzily matched: the prompt tells
+    the model to copy `name` verbatim, and a near-match here binds a verdict to
+    the wrong person. Propagates an `invoke_text` failure to the caller.
     """
     requested = set(names)
     listing = "\n".join(f"- {name}" for name in names)
@@ -652,18 +662,38 @@ def _ask_verdict_names(names, zone, invoke_text, usage):
     return answered, unrequested_errors
 
 
+def _retry_verdict_names(missing, zone, invoke_text, usage):
+    """One retry pass over `missing`, re-entered in chunks of `VERDICT_CHUNK // 2`.
+
+    Halved, not repeated: the likeliest cause of a short chunk is a reply
+    truncated at `VERDICT_MAX_TOKENS`, whose unbalanced JSON parses as nothing
+    at all, so a same-size retry reproduces it. One pass, never a recursion.
+    """
+    answered: dict = {}
+    errors: list = []
+    size = max(1, VERDICT_CHUNK // 2)
+    for start in range(0, len(missing), size):
+        part = missing[start:start + size]
+        try:
+            part_answered, part_unrequested = _ask_verdict_names(
+                part, zone, invoke_text, usage)
+        except Exception as exc:  # noqa: BLE001 - one failed half must not lose the other
+            errors.append(f"retry of {len(part)} defendants failed: {exc}")
+            continue
+        answered.update(part_answered)
+        errors.extend(part_unrequested)
+    return answered, errors
+
+
 def accused_verdicts(names, order_text, invoke_text, usage=None):
     """Ask the model, per chunk of `VERDICT_CHUNK` names, what the order's
     operative section decided for each -- returns `({name: {"outcome", "role",
     "evidence"}}, errors)`.
 
-    A chunk that comes back short is retried ONCE, asking only about the
-    names still missing, and the retry's answers are merged in without
-    disturbing what the first attempt already got right. A chunk still short
-    after the retry keeps every row it did answer and records an error
-    naming the rest -- a silent partial loss is what the reconciliation this
-    wraps exists to prevent, and a lost verdict is sticky: `verdict_gate`
-    refuses a later run once a case holds any terminal outcome.
+    A short chunk is retried ONCE over the missing names at half the chunk
+    size (`_retry_verdict_names`); one still short after that keeps the rows it
+    did answer and errors naming the rest. A silent partial loss is what the
+    reconciliation this wraps exists to prevent.
     """
     zone = court_order_verdict_zone(order_text)
     results: dict = {}
@@ -681,15 +711,8 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
             errors.extend(unrequested_errors)
             continue
 
-        try:
-            retry_answered, retry_unrequested = _ask_verdict_names(
-                missing, zone, invoke_text, usage)
-        except Exception as exc:  # noqa: BLE001 - a retry failure keeps the first attempt's rows
-            errors.extend(unrequested_errors)
-            errors.append(
-                f"chunk returned {len(answered)} of {len(chunk)} defendants; "
-                f"missing: {', '.join(missing)} (retry failed: {exc})")
-            continue
+        retry_answered, retry_unrequested = _retry_verdict_names(
+            missing, zone, invoke_text, usage)
 
         results.update(retry_answered)
         still_missing = [name for name in missing if name not in retry_answered]
@@ -706,12 +729,12 @@ def accused_verdict_targets(case):
     """The accused binds a name-keyed verdict may be applied to:
     `({display_name: nes_id}, skipped)`, in bind order.
 
-    `skipped` rows are `(nes_id, display_name, reason)` -- the binds this run
-    declines to decide, which the caller must still report. `display_name` is
-    `None` when NES could not resolve the id, so there is no name to match the
-    judgment against; and two accused binds sharing one name leave a verdict
-    keyed on that name unable to say which person the court meant, so BOTH are
-    dropped rather than settled by a coin flip on a criminal record.
+    `skipped` rows are `(nes_id, display_name, reason)` -- unresolved binds (no
+    name to match the judgment against), namesakes (BOTH dropped: a name-keyed
+    verdict cannot say which person the court meant), and binds already settled.
+    The settled filter runs AFTER the name grouping: dropping one namesake for
+    being settled would make the other look unique and hand it a verdict the
+    name cannot place.
     """
     by_name: dict = {}
     skipped: list = []
@@ -726,22 +749,39 @@ def accused_verdict_targets(case):
             skipped.append((nes_id, "", "no display_name: NES did not resolve this "
                                         "bind, so no name can be matched to the judgment"))
             continue
-        by_name.setdefault(name, []).append(nes_id)
+        by_name.setdefault(name, []).append((nes_id, entity))
     targets = {}
-    for name, nes_ids in by_name.items():
-        if len(nes_ids) > 1:
-            for nes_id in nes_ids:
+    for name, binds in by_name.items():
+        if len(binds) > 1:
+            for nes_id, _entity in binds:
                 skipped.append((nes_id, name,
-                                f"{len(nes_ids)} accused binds share the display name "
+                                f"{len(binds)} accused binds share the display name "
                                 f"{name!r}: a name-keyed verdict cannot say which"))
             continue
-        targets[name] = nes_ids[0]
+        nes_id, entity = binds[0]
+        if is_settled(entity):
+            outcome = (entity.get("outcome") or "").strip()
+            skipped.append((nes_id, name,
+                            f"the bind already carries the terminal outcome {outcome!r}: "
+                            "a settled verdict is not re-decided"))
+            continue
+        targets[name] = nes_id
     return targets, skipped
+
+
+def case_state(case):
+    """A case's state as EVERY write gate reads it.
+
+    One helper, so the spend gate and `plan_case_entities` cannot disagree: the
+    gate used to upper-case while the planner compared exactly, so `draft`
+    bought the verdict call and was then refused at the write.
+    """
+    return (case.get("state") or "").strip()
 
 
 def verdict_state_refusal(case):
     """The reason this case's state forbids reading its judgment, or "" if it does not."""
-    state = (case.get("state") or "").strip().upper()
+    state = case_state(case)
     if state == REQUIRED_WRITE_STATE:
         return ""
     return (f"case state {state!r} != {REQUIRED_WRITE_STATE!r}: the verdict write "
@@ -751,9 +791,8 @@ def verdict_state_refusal(case):
 def verdict_skip_rows(slug, case, reason):
     """One `*.verdicts.jsonl` row per accused bind on a case the gate refused.
 
-    Used for the state refusal, whose binds are decidable in every other
-    respect: without a row, an IN_REVIEW case is simply absent from the
-    artefact and nothing says its defendants were passed over.
+    For the state refusal, whose binds are decidable in every other respect:
+    without a row an IN_REVIEW case is absent from the artefact entirely.
     """
     return [
         _verdict_row(slug, (entity.get("display_name") or "").strip(),
@@ -768,19 +807,41 @@ def verdict_decidedness(binds):
     """How much of a case's accused list carries a terminal outcome: "all",
     "partial", "none", or "" when the case has no accused bind.
 
-    "partial" is the one a caseworker must act on: `verdict_gate` refuses a case
-    that holds ANY terminal outcome, so a half-answered judgment leaves the rest
-    `charged` until a human clears the outcomes by hand.
+    "partial" is the one worth naming in the epilogue: the binds the judgment
+    did not answer for stay `charged`, and a re-run is what decides them.
     """
     accused = [bind for bind in binds
                if bind_relationship_type(bind) == ACCUSED_SECTION]
     if not accused:
         return ""
-    decided = sum(1 for bind in accused
-                  if (bind.get("outcome") or "").strip().lower() in TERMINAL_OUTCOMES)
+    decided = sum(1 for bind in accused if is_settled(bind))
     if not decided:
         return "none"
     return "all" if decided == len(accused) else "partial"
+
+
+def verdict_case_refusal(case):
+    """The reason this case may not be read for verdicts, from the payload
+    ALONE (so no clause needing a document fetch), or "" if there is none.
+
+    The state clause only stops the SPEND (`select.ENRICHABLE_STATES` admits
+    IN_REVIEW); `plan_case_entities`' own non-DRAFT refusal is what keeps a
+    notes-redacted read away from the destructive replace, and stays there.
+    """
+    state_refusal = verdict_state_refusal(case)
+    if state_refusal:
+        return state_refusal
+    accused = [entity for entity in (case.get("entities") or [])
+               if bind_relationship_type(entity) == ACCUSED_SECTION]
+    if not accused:
+        return "no accused bind to update"
+    # PER-CASE only when there is nothing left to decide. The per-BIND filter
+    # is `accused_verdict_targets`': a judgment that decides some defendants
+    # and not others is the normal case (8 abstentions in 83 measured), and
+    # refusing on ANY terminal outcome locked the rest at `charged` for good.
+    if all(is_settled(entity) for entity in accused):
+        return f"all {len(accused)} accused bind(s) already carry a terminal outcome"
+    return ""
 
 
 def verdict_gate(case, court_text):
@@ -788,31 +849,13 @@ def verdict_gate(case, court_text):
     and the reason it may not.
 
     The court order's presence IS the decided-ness test: an order is bound to a
-    case only after it is decided, so an undecided case spends nothing here. A
-    terminal outcome already on an accused bind means a human or the whole-case
-    सफाई rule has settled it, and this stage does not re-litigate that.
-
-    The state clause is an ADDITIONAL gate, never a relocation of
-    `plan_case_entities`' own non-DRAFT refusal -- that one is what stops a
-    notes-redacted IN_REVIEW read from reaching the destructive replace. This
-    one only stops the spend: `select.ENRICHABLE_STATES` admits IN_REVIEW, and
-    every such case otherwise pays a premium verdict call per chunk before
-    being refused at the write.
+    case only after it is decided, so an undecided case spends nothing here.
     """
+    refusal = verdict_case_refusal(case)
+    if refusal:
+        return False, refusal
     if not court_text:
         return False, "no court-order text"
-    state_refusal = verdict_state_refusal(case)
-    if state_refusal:
-        return False, state_refusal
-    accused = [entity for entity in (case.get("entities") or [])
-               if bind_relationship_type(entity) == ACCUSED_SECTION]
-    if not accused:
-        return False, "no accused bind to update"
-    settled = [entity for entity in accused
-               if (entity.get("outcome") or "").strip().lower() in TERMINAL_OUTCOMES]
-    if settled:
-        return False, (f"{len(settled)} of {len(accused)} accused bind(s) already "
-                       "carry a terminal outcome")
     return True, ""
 
 
@@ -826,14 +869,12 @@ def _verdict_row(slug, name, nes_id, old_outcome, new_outcome, role, evidence,
 
 
 def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
-    """Read one case's judgment for its accused binds:
-    `(updates, rows, errors)`.
+    """Read one case's judgment for its accused binds: `(updates, rows, errors)`.
 
     `updates` is `apply_accused_updates`' input, keyed by `nes_id`; `rows` cover
-    EVERY accused bind, including the ones never sent to the model, so a
-    defendant this run declined to decide is as visible in the artefact as one
-    it decided. The name -> `nes_id` mapping is exact, never normalised: this is
-    the step where a verdict can land on the wrong person.
+    EVERY accused bind, including the ones never sent to the model. The
+    name -> `nes_id` mapping is exact, never normalised: this is the step where
+    a verdict can land on the wrong person.
     """
     targets, skipped = accused_verdict_targets(case)
     # Keyed on `(nes_id, relationship_type)`, the DB's own bind identity (see
@@ -873,9 +914,9 @@ def settle_verdict_rows(rows, before, after):
     """Fill in each undecided row's `reason` from what the patch list actually
     changed, and return the `nes_id`s whose bind changed.
 
-    `before`/`after` are `{nes_id: bind}` over the accused binds either side of
-    `apply_accused_updates`. Derived from the diff rather than re-deciding the
-    rules, so the report can never disagree with the list that gets sent.
+    `before`/`after` are `{nes_id: bind}` either side of
+    `apply_accused_updates`. Derived from the diff, never from re-deciding the
+    rules, so the report cannot disagree with the list that gets sent.
     """
     changed = set()
     for row in rows:
@@ -905,10 +946,9 @@ def settle_verdict_rows(rows, before, after):
 def note_verdict_not_written(rows, changed_ids, reason):
     """Record on every row this run WOULD have written why it was not.
 
-    `settle_verdict_rows` explains the rows nothing changed for; these are the
-    opposite -- the bind did change, and then the write did not happen. Without
-    this a `*.verdicts.jsonl` row reads `written: false` with an empty `reason`,
-    which is the one thing that artefact exists to prevent.
+    The opposite of `settle_verdict_rows`: the bind did change, and then the
+    write did not happen. Without it the row reads `written: false` with an
+    empty `reason`, the one thing that artefact exists to prevent.
     """
     for row in rows:
         if row["nes_id"] not in changed_ids:
@@ -919,11 +959,9 @@ def note_verdict_not_written(rows, changed_ids, reason):
 def verdict_bind_row(slug, row, written):
     """A `*.binds.jsonl` row for an accused bind the judgment changed.
 
-    The verdict path updates binds that already exist, so it never produces a
-    resolver row of its own -- without this the evidence phrase behind a machine
-    `convicted` would appear in no bind audit file at all. `score` is null and
-    `matched_name` is just the bind's own display name: nothing was matched here,
-    the bind was already on the case.
+    Without it the evidence phrase behind a machine `convicted` appears in no
+    bind audit file at all. `score` is null and `matched_name` is the bind's own
+    display name: nothing was matched, the bind was already on the case.
     """
     return {"slug": slug, "extracted": row["name"], "role": ACCUSED_SECTION,
             "nes_id": row["nes_id"], "score": None, "matched_name": row["name"],
@@ -1298,7 +1336,7 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     the write, and a reader must not infer a guard that no longer exists.
     """
     slug = case.get("slug")
-    state = case.get("state")
+    state = case_state(case)
     plan = EntityBindPlan(slug=slug, action="NOOP", state=state, if_match=etag)
     if state != REQUIRED_WRITE_STATE:
         plan.action = "SKIP_STATE"
@@ -2031,13 +2069,15 @@ def main(argv=None):
              "was removed on 2026-08-05, so a case charging कमल थापा can bind a "
              "Kamala Thapa entity.")
     ap.add_argument(
-        "--no-verdicts", action="store_true",
-        help="Skip the per-defendant verdict read. It is ON by default: a DRAFT "
-             "case with a bound court order, accused binds and no terminal "
-             "outcome yet costs one extra LLM call, and the outcome and role "
-             "note it decides ride out in the SAME /entities write as the "
-             "binds. With this flag the run extracts and binds only, and an "
-             "already-enriched case is skipped without a read, as before.")
+        "--verdicts", action="store_true",
+        help="Also read each bound judgment for per-defendant outcomes. OFF by "
+             "default: it writes a terminal criminal outcome (convicted / "
+             "acquitted / abated) onto an accused bind, so a run that only "
+             "wants entity binds must not do it by accident. With the flag, a "
+             "DRAFT case with a bound court order and an unsettled accused "
+             "bind costs one extra LLM call per chunk of 20 defendants, and "
+             "the outcome and role note it decides ride out in the SAME "
+             "/entities write as the binds.")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -2081,8 +2121,8 @@ def main(argv=None):
         print("  --dry-run: printing what WOULD bind; no /entities writes will be made.")
     if args.force:
         print("  --force: re-extracting even for cases with a 'related' bind already present")
-    if args.no_verdicts:
-        print("  --no-verdicts: not reading any judgment for per-defendant outcomes")
+    if args.verdicts:
+        print("  --verdicts: reading each bound judgment for per-defendant outcomes")
     if args.strict:
         print("  --strict: a veto or an ambiguity means REVIEW, not a bind")
     else:
@@ -2110,12 +2150,14 @@ def main(argv=None):
     # Accused binds the judgment actually changed, and the defendants this run
     # declined to decide. Counted apart because "we set 40 verdicts" and "9
     # defendants got none" are different facts, and only the second one tells a
-    # caseworker there is still work on those cases.
+    # caseworker there is still work on those cases. Together they must account
+    # for every row in `*.verdicts.jsonl`, so a row computed and then refused
+    # or lost to a failed write is counted as undecided.
     total_verdicts = total_verdicts_undecided = 0
     # Per CASE, not per bind: how much of its accused list ends this run with a
     # terminal outcome. A partially decided case is the one nobody can find
-    # otherwise -- the gate refuses it from now on, so its undecided binds are
-    # stuck at `charged` until a human clears the ones that were answered.
+    # otherwise -- its remaining binds stay `charged` until a re-run (or a
+    # human) decides them.
     verdict_coverage = {"all": 0, "partial": 0, "none": 0}
     partially_decided = []
     bind_rows, review_rows, nomatch_rows, verdict_rows = [], [], [], []
@@ -2269,8 +2311,8 @@ def main(argv=None):
         # THE SKIP IS EXTRACTION-ONLY SINCE THE VERDICT STEP LANDED. It stops
         # the premium extraction call, not the case: nearly every case the
         # verdict step targets has already been through an extraction run, so
-        # sharing this gate with it would skip all of them. `--no-verdicts`
-        # restores the free skip -- no detail read, nothing.
+        # sharing this gate with it would skip all of them. Without
+        # `--verdicts` the skip is free again -- no detail read, nothing.
         skip_extraction = bool(existing_related) and not args.force
         if skip_extraction:
             total_skipped_enriched += 1
@@ -2280,7 +2322,7 @@ def main(argv=None):
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="idempotency", status="already",
                       detail=f"{len(existing_related)} 'related' bind(s) already present")
-            if args.no_verdicts:
+            if not args.verdicts:
                 continue
 
         try:
@@ -2294,9 +2336,13 @@ def main(argv=None):
         if skip_extraction:
             # Here for the verdicts only, and those read the court order alone --
             # fetching the press release too would spend a markdown read per
-            # case on a prompt this run will never build.
-            court_text, _court_unmet = source_text(detail, types=COURT_TYPES)
-            court_text = court_text.strip() or None
+            # case on a prompt this run will never build. The clauses the case
+            # payload can answer run FIRST, so a case the gate refuses pays for
+            # no document fetch at all.
+            court_text = None
+            if not verdict_case_refusal(detail):
+                court_text, _court_unmet = source_text(detail, types=COURT_TYPES)
+                court_text = court_text.strip() or None
             valid_items, produced = [], False
         else:
             unmet = unmet_prerequisites(STAGE, detail)
@@ -2342,16 +2388,19 @@ def main(argv=None):
         # binds go out in -- `/entities` is destructive, so a second PATCH would
         # re-run the delete-and-recreate over a list this one just rewrote.
         updates, case_verdict_rows, verdict_errors = {}, [], []
-        if not args.no_verdicts:
+        if args.verdicts:
             decidable, why_not = verdict_gate(detail, court_text)
             if not decidable:
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
                           slug=slug, step="verdicts", status="skipped", detail=why_not)
-                if court_text and verdict_state_refusal(detail):
+                if verdict_state_refusal(detail) and materials_of_type(
+                        detail, types=COURT_TYPES):
                     # The one refusal whose binds were decidable in every other
                     # respect -- there is a judgment, and only the state stops
                     # it being read. Without a row the case is absent from the
-                    # artefact entirely.
+                    # artefact entirely. Keyed on the material being BOUND, not
+                    # on its text: the fetch is what the gate just declined to
+                    # pay for.
                     case_verdict_rows = verdict_skip_rows(slug, detail, why_not)
             else:
                 updates, case_verdict_rows, verdict_errors = case_verdict_updates(
@@ -2365,7 +2414,7 @@ def main(argv=None):
             # none of them.
             verdict_rows.extend(case_verdict_rows)
             total_verdicts_undecided += len(case_verdict_rows)
-            if not args.no_verdicts:
+            if args.verdicts:
                 record_decidedness(slug, detail.get("entities") or [])
             for error in verdict_errors:
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
@@ -2419,7 +2468,7 @@ def main(argv=None):
                 row["reason"] = row["reason"] or f"case not written: {plan.reason}"
             verdict_rows.extend(case_verdict_rows)
             total_verdicts_undecided += len(case_verdict_rows)
-            if not args.no_verdicts:
+            if args.verdicts:
                 record_decidedness(slug, detail.get("entities") or [])
             continue
 
@@ -2469,6 +2518,18 @@ def main(argv=None):
                 plan.patch_items = merge_entity_binds(base, created_binds)
                 plan.action = "WOULD_PATCH"
 
+        # THE GATE READ `detail`; THIS LIST IS BUILT FROM `fresh`. A human who
+        # settled a bind between the two reads is invisible to `If-Match` --
+        # the ETag came from `fresh` too -- so re-check against it and drop
+        # those binds rather than write a machine verdict over a human one.
+        raced = settled_accused_ids(fresh) & set(updates)
+        for nes_id in raced:
+            del updates[nes_id]
+        for row in case_verdict_rows:
+            if row["nes_id"] in raced:
+                row["reason"] = ("the bind gained a terminal outcome between the gate "
+                                 "read and the write, so it was left alone")
+
         # THE LAST MERGE, and the only one that rewrites a row rather than
         # appending one. It goes into the same `patch_items` the binds above
         # built, so the case still gets exactly one conditional whole-list
@@ -2489,7 +2550,7 @@ def main(argv=None):
         # a refused or failed write) this is a projection, which is what the
         # epilogue says. The alternative -- counting only after a successful
         # write -- reports nothing at all on the default run.
-        if not args.no_verdicts:
+        if args.verdicts:
             record_decidedness(slug, updated)
         for error in verdict_errors:
             log_event(logger, paths["events"], run_id=run_id, stage="entities",
@@ -2541,6 +2602,10 @@ def main(argv=None):
                           detail=refusal, level=logging.WARNING)
                 note_verdict_not_written(case_verdict_rows, changed_ids,
                                          f"not written: {refusal}")
+                # Computed and then refused: these rows belong to the undecided
+                # count, or the epilogue's two numbers stop accounting for
+                # every row in the file.
+                total_verdicts_undecided += len(changed_ids)
                 print(f"  WOULD REFUSE {len(plan.bound)} bind(s) and "
                       f"{len(changed_ids)} verdict update(s) on {slug}: {refusal}")
                 continue
@@ -2573,6 +2638,7 @@ def main(argv=None):
                       step="write", status="error", detail=str(exc), level=logging.ERROR)
             note_verdict_not_written(case_verdict_rows, changed_ids,
                                      f"the /entities write failed: {exc}")
+            total_verdicts_undecided += len(changed_ids)
             continue
 
         total_bound += counts["bound"]
@@ -2654,10 +2720,10 @@ def main(argv=None):
               f"{verdict_coverage['partial']} partially decided, "
               f"{verdict_coverage['none']} undecided.{projected}")
         if partially_decided:
-            print("    A PARTIALLY DECIDED case is LOCKED: the gate refuses any case "
-                  "that already carries a terminal outcome, so the accused bind(s) "
-                  "the judgment did not answer for stay 'charged' until a human "
-                  "clears the answered ones. Check these by hand:")
+            print("    A PARTIALLY DECIDED case still has accused bind(s) the judgment "
+                  "did not answer for; they stay 'charged'. The gate is per-bind, so a "
+                  "re-run asks about exactly those and leaves the settled ones alone. "
+                  "Check these by hand once a re-run has not moved them:")
             for case_slug in partially_decided[:20]:
                 print(f"      {case_slug}")
             if len(partially_decided) > 20:
@@ -2667,7 +2733,7 @@ def main(argv=None):
         # EXTRACTION, not the case. The verdict gate is independent of this
         # skip, so some of these cases were written in this very run and
         # calling them "skipped" would misreport what happened to them.
-        also = ("" if args.no_verdicts
+        also = ("" if not args.verdicts
                 else " Their judgments were still read for verdicts.")
         print(f"  {total_skipped_enriched} case(s) skipped EXTRACTION as already "
               "enriched, on the presence of a 'related' bind."
