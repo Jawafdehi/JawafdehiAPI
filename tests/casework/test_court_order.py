@@ -12,9 +12,12 @@ from casework.common.court_order import (
     TAIL_CHARS,
     THAHAR_CHARS,
     THAHAR_MARKER,
+    VERDICT_THAHAR_CHARS,
+    VERDICT_TAIL_CHARS,
     court_order_head,
     court_order_tail,
     court_order_thahar,
+    court_order_verdict_zone,
 )
 
 
@@ -122,6 +125,38 @@ class TestThaharWindow:
         # `_truncate_court_order` anchored on -- a normalised or re-typed
         # variant silently stops matching and the window slides to the tail.
         assert THAHAR_MARKER == "ठहर खण्ड"
+
+
+class TestVerdictZone:
+    def test_a_short_document_comes_back_whole_and_unlabelled(self):
+        text = "क" * 1_000 + "ठहर खण्ड" + "ठ" * 1_000
+        assert court_order_verdict_zone(text) == text
+
+    def test_it_carries_both_the_marker_region_and_the_ending(self):
+        head = "क" * 200_000
+        operative = "ठहर खण्ड" + "ठ" * 100_000
+        ending = "सफाई पाउने ठहर्छ।"
+        got = court_order_verdict_zone(head + operative + ending)
+        assert "ठहर खण्ड" in got
+        assert got.rstrip().endswith(ending)
+        assert "क" * 200_000 not in got
+
+    def test_overlapping_regions_are_emitted_once(self):
+        # A document just past the whole-return threshold: the marker window and
+        # the tail overlap, so the result must be one contiguous slice with no
+        # duplicated text and no elision marker inside continuous prose.
+        text = "क" * 5_000 + "ठहर खण्ड" + "ठ" * 25_000
+        got = court_order_verdict_zone(text)
+        assert got.count("ठहर खण्ड") == 1
+
+    def test_a_document_with_no_marker_falls_back_to_the_ending(self):
+        text = "क" * 100_000 + "अन्तिम"
+        got = court_order_verdict_zone(text, label=False)
+        assert got.endswith("अन्तिम")
+        assert len(got) == VERDICT_THAHAR_CHARS + VERDICT_TAIL_CHARS
+
+    def test_empty_text_is_empty(self):
+        assert court_order_verdict_zone("") == ""
 
 
 class TestSummariseVerdictLivesHere:

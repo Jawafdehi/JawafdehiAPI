@@ -112,7 +112,11 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
-from casework.common.court_order import court_order_head, court_order_thahar
+from casework.common.court_order import (
+    court_order_head,
+    court_order_thahar,
+    court_order_verdict_zone,
+)
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_chunks, source_text
 from casework.entity_identity import entity_slug, prefix_is_creatable
@@ -538,6 +542,103 @@ def apply_accused_updates(binds, updates):
             new_bind["notes"] = new_notes
         result.append(new_bind)
     return result
+
+
+VERDICT_MAX_TOKENS = 8_000
+# Measured: ~300 output tokens per defendant in Devanagari, so 8,000 buys
+# about 25 rows. Production holds cases with 185 and 249 accused binds.
+VERDICT_CHUNK = 20
+VERDICT_OUTCOMES = frozenset({"convicted", "acquitted", "abated", "charged", "unknown"})
+
+VERDICT_SYSTEM_PROMPT = """You are a Nepali legal research assistant reading a Special Court \
+(विशेष अदालत) judgment (फैसला) to record what the court decided about each named defendant.
+
+Decide from the OPERATIVE section only -- the ठहर खण्ड and the तपसिल directions near the \
+end. The earlier sections recite the charge and the defence; they state what was ALLEGED, \
+not what was decided.
+
+The operative verbs are ठहर्छ / ठहरेको (held guilty) and सफाई पाउने ठहर्छ (acquitted). A \
+defendant whose case was discontinued on death is abated (मुद्दा तामेली).
+
+For EACH name in the accused list, answer:
+  outcome   exactly one of: convicted | acquitted | abated | charged | unknown.
+            Answer unknown -- never a guess -- when the operative section does
+            not decide that person's case.
+  role      a short Nepali note: the person's post and employer at the time,
+            plus what the court found they did, under 90 characters. "" if the
+            document does not say.
+  evidence  the phrase the answer was decided from, quoted VERBATIM.
+
+Reply with ONLY this JSON object, no other text:
+{"defendants": [{"name": "<copied exactly from the accused list>", "outcome": "...", \
+"role": "...", "evidence": "..."}]}
+"""
+
+
+def parse_verdict_response(text: str) -> list:
+    """Parse a verdict-call reply into validated `{name, outcome, role, evidence}` rows.
+
+    Drops a row with no `name` or whose `outcome` is not in `VERDICT_OUTCOMES` --
+    never coerced, since a model answering `दोषी` has not answered the question
+    asked -- and truncates `role` to 90 chars.
+    """
+    rows = parse_extraction_response(text, ("defendants",)) or []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = (row.get("name") or "").strip()
+        outcome = (row.get("outcome") or "").strip()
+        if not name or outcome not in VERDICT_OUTCOMES:
+            continue
+        out.append({
+            "name": name,
+            "outcome": outcome,
+            "role": (row.get("role") or "")[:90],
+            "evidence": row.get("evidence") or "",
+        })
+    return out
+
+
+def accused_verdicts(names, order_text, invoke_text, usage=None):
+    """Ask the model, per chunk of `VERDICT_CHUNK` names, what the order's
+    operative section decided for each -- returns `({name: {"outcome", "role",
+    "evidence"}}, errors)`.
+
+    A chunk that returns fewer rows than it was given is an error, not a
+    silent partial: a short reply and a reasoning failure are otherwise
+    indistinguishable, and the earlier measurement that read as "0 of 9
+    correct" was really nine rows silently missing.
+    """
+    zone = court_order_verdict_zone(order_text)
+    results: dict = {}
+    errors: list = []
+    for start in range(0, len(names), VERDICT_CHUNK):
+        chunk = names[start:start + VERDICT_CHUNK]
+        listing = "\n".join(f"- {name}" for name in chunk)
+        content = (
+            f"ACCUSED ON THIS CASE:\n{listing}\n\n"
+            f"COURT ORDER (operative section):\n{zone}"
+        )
+        try:
+            response_text = invoke_text(
+                system=VERDICT_SYSTEM_PROMPT,
+                content=content,
+                max_tokens=VERDICT_MAX_TOKENS,
+                tier=tier_for("entities"),
+                usage=usage,
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad chunk must not lose the rest
+            errors.append(f"chunk of {len(chunk)} defendants failed: {exc}")
+            continue
+        rows = parse_verdict_response(response_text)
+        for row in rows:
+            results[row["name"]] = {
+                "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
+            }
+        if len(rows) < len(chunk):
+            errors.append(f"chunk returned {len(rows)} of {len(chunk)} defendants")
+    return results, errors
 
 
 def validate_bind_item(item):

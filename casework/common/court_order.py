@@ -70,6 +70,48 @@ def court_order_thahar(text: str, limit: int = THAHAR_CHARS, label: bool = True)
     return _THAHAR_LABEL + window if label else window
 
 
+VERDICT_THAHAR_CHARS: int = 20_000
+VERDICT_TAIL_CHARS: int = 8_000
+
+_VERDICT_LABEL = "\n\n[...अदालतको आदेशको ठहर तथा अन्त्यको भाग...]\n\n"
+_VERDICT_GAP_LABEL = "\n\n[...बीचको अंश हटाइएको...]\n\n"
+
+
+def court_order_verdict_zone(text: str, label: bool = True) -> str:
+    """Return the union of the thahar window and the order's tail -- the slice
+    `accused_verdicts` reads to decide a per-defendant disposition.
+
+    Neither zone alone reaches both regions a verdict call needs: the marker
+    sits well before the end on a long order, but the final operative
+    pronouncement sits a median 2,852 chars from the very end, past a
+    fixed-distance-from-marker window. When the two windows overlap or abut,
+    they collapse into one contiguous slice -- the model is never shown the
+    same text twice, or handed a fabricated gap across continuous prose.
+    """
+    if not text:
+        return ""
+    whole_limit = VERDICT_THAHAR_CHARS + VERDICT_TAIL_CHARS
+    if len(text) <= whole_limit:
+        return text
+
+    idx = text.find(THAHAR_MARKER)
+    if idx == -1:
+        return court_order_tail(text, whole_limit, label)
+
+    marker_end = min(idx + VERDICT_THAHAR_CHARS, len(text))
+    tail_start = len(text) - VERDICT_TAIL_CHARS
+
+    if tail_start <= marker_end:
+        window = text[idx:]
+        return _VERDICT_LABEL + window if label else window
+
+    marker_window = text[idx:marker_end]
+    tail_window = text[tail_start:]
+    if label:
+        return _VERDICT_LABEL + marker_window + _VERDICT_GAP_LABEL + tail_window
+    return marker_window + tail_window
+
+
 VERDICT_SUMMARY_TRIGGER = 12000
 VERDICT_SUMMARY_TARGET = 8000
 VERDICT_SUMMARY_MAX_TOKENS = 8000

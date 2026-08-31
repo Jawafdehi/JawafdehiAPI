@@ -3964,6 +3964,125 @@ class TestApplyAccusedUpdates:
             ere.validate_bind_item(item)
 
 
+class TestParseVerdictResponse:
+    def test_extracts_the_defendants_array(self):
+        got = ere.parse_verdict_response(
+            'text before {"defendants":[{"name":"क","outcome":"convicted",'
+            '"role":"सचिव","evidence":"ठहर्छ"}]} after')
+        assert got[0]["name"] == "क"
+
+    def test_a_row_with_no_name_is_dropped(self):
+        got = ere.parse_verdict_response('{"defendants":[{"outcome":"convicted"}]}')
+        assert got == []
+
+    def test_an_unknown_outcome_value_is_dropped_not_coerced(self):
+        got = ere.parse_verdict_response(
+            '{"defendants":[{"name":"क","outcome":"दोषी","role":"","evidence":""}]}')
+        assert got == []
+
+    def test_unparseable_text_returns_empty(self):
+        assert ere.parse_verdict_response("the model apologised") == []
+
+    def test_role_is_capped_at_90_chars(self):
+        got = ere.parse_verdict_response(
+            '{"defendants":[{"name":"क","outcome":"charged","role":"' + "अ" * 300
+            + '","evidence":""}]}')
+        assert len(got[0]["role"]) <= 90
+
+
+class TestAccusedVerdicts:
+    def _reply(self, names):
+        import json
+        return json.dumps({"defendants": [
+            {"name": n, "outcome": "convicted", "role": "सचिव", "evidence": "ठहर्छ"}
+            for n in names]}, ensure_ascii=False)
+
+    def test_one_chunk_for_a_small_case(self):
+        calls = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls.append(content)
+            return self._reply(["क", "ख"])
+
+        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        assert len(calls) == 1
+        assert got["क"]["outcome"] == "convicted"
+        assert errors == []
+
+    def test_a_long_accused_list_is_chunked(self):
+        # Measured: ~300 output tokens per defendant in Devanagari, so 8,000
+        # buys about 25. Production holds cases with 185 and 249 accused binds.
+        names = [f"नाम{i}" for i in range(45)]
+        seen = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            batch = [n for n in names if f"- {n}\n" in content + "\n"]
+            seen.append(len(batch))
+            return self._reply(batch)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert len(seen) == 3          # 20 + 20 + 5
+        assert max(seen) <= ere.VERDICT_CHUNK
+        assert len(got) == 45
+
+    def test_a_short_chunk_is_an_error_not_a_partial(self):
+        # The probe's apparent "0 of 9 correct" was really nine rows silently
+        # missing. A run that reports that as a clean result is the one failure
+        # mode this must never ship with.
+        def fake(system, content, max_tokens, tier, usage=None):
+            return self._reply(["नाम0"])
+
+        got, errors = ere.accused_verdicts([f"नाम{i}" for i in range(5)], "आदेश", fake)
+        assert errors and "1 of 5" in errors[0]
+
+    def test_a_failed_chunk_does_not_lose_the_others(self):
+        names = [f"नाम{i}" for i in range(25)]
+        calls = {"n": 0}
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("provider 502")
+            return self._reply([n for n in names if f"- {n}\n" in content + "\n"])
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert errors
+        assert len(got) == 5           # the second chunk survived
+
+    def test_the_model_sees_the_verdict_zone_not_the_plain_tail(self):
+        # Replaces the original brief's plain-tail assertion (Ruling 14): the
+        # verdict call now reads `court_order_verdict_zone`, a union of the
+        # marker-anchored window and the order's last chars, not a single
+        # fixed-distance-from-the-end slice. Build an order whose marker
+        # region carries a distinctive name and whose ending carries the
+        # pronouncement, and require both to reach the prompt.
+        seen = {}
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            seen["content"] = content
+            return self._reply(["क"])
+
+        order = (
+            "सुरुको भाग" + "ख" * 200_000
+            + "ठहर खण्ड" + "राम बहादुर कारागार सजाय" + "ग" * 50_000
+            + "सफाई पाउने ठहर्छ"
+        )
+        ere.accused_verdicts(["क"], order, fake)
+        assert "राम बहादुर कारागार सजाय" in seen["content"]
+        assert "सफाई पाउने ठहर्छ" in seen["content"]
+        assert "सुरुको भाग" not in seen["content"]
+
+    def test_the_accused_list_is_put_in_the_prompt(self):
+        seen = {}
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            seen["content"] = content
+            return self._reply(["राम बहादुर"])
+
+        ere.accused_verdicts(["राम बहादुर"], "आदेश", fake)
+        assert "राम बहादुर" in seen["content"]
+
+
 class TestTheServerPreservesOmittedOutcomes:
     """`apply_accused_updates` sends `outcome` only on the rows it decided.
 
