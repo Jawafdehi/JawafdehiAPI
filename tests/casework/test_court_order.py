@@ -84,3 +84,65 @@ class TestCourtOrderHead:
         head = court_order_head(text, label=False)
         tail = court_order_tail(text, label=False)
         assert len(head) + len(tail) < len(text)
+
+
+class TestSummariseVerdictLivesHere:
+    """`summarize_verdict` used to live in `enrich_timeline` and
+    `enrich_description` reached across to borrow it. `enrich_related_entities`
+    never did, which is the whole reason its court-order handling was broken:
+    a shared function that has to be reached for is a function that gets
+    missed. Its home is here, beside the zone reader.
+    """
+
+    def test_importable_from_the_shared_home(self):
+        from casework.common.court_order import summarize_verdict
+        assert callable(summarize_verdict)
+
+    def test_timeline_still_exposes_it_for_existing_importers(self):
+        from casework.common.court_order import summarize_verdict as shared
+        from casework.enrich_timeline import summarize_verdict as viatimeline
+        assert viatimeline is shared
+
+    def test_description_uses_the_shared_home(self):
+        import casework.enrich_description as ed
+        from casework.common.court_order import summarize_verdict as shared
+        assert ed.summarize_verdict is shared
+
+    def test_long_text_is_summarised_in_multiple_passes(self):
+        # A single head-truncated pass drops the फैसला/ठहर, which sits at the
+        # end. The chunked pass is the reason this function exists.
+        from casework.common import court_order as co
+        calls = []
+
+        def fake_invoke(system, content, tier, usage, max_tokens):
+            calls.append(content)
+            return f"सारांश {len(calls)}"
+
+        text = "क" * (co.VERDICT_SUMMARY_CHUNK_CHARS * 2 + 10)
+        got = co.summarize_verdict(text, fake_invoke, usage=None)
+        assert len(calls) == 3
+        assert "खण्ड 1/3" in got and "खण्ड 3/3" in got
+
+    def test_a_failed_chunk_does_not_renumber_the_survivors(self):
+        from casework.common import court_order as co
+        seen = []
+
+        def fake_invoke(system, content, tier, usage, max_tokens):
+            seen.append(content)
+            if len(seen) == 2:
+                raise RuntimeError("provider 502")
+            return f"सारांश {len(seen)}"
+
+        text = "क" * (co.VERDICT_SUMMARY_CHUNK_CHARS * 2 + 10)
+        got = co.summarize_verdict(text, fake_invoke, usage=None)
+        assert "खण्ड 1/3" in got
+        assert "खण्ड 3/3" in got
+        assert "खण्ड 2/3" not in got
+
+    def test_total_failure_returns_none(self):
+        from casework.common import court_order as co
+
+        def always_fails(system, content, tier, usage, max_tokens):
+            raise RuntimeError("provider down")
+
+        assert co.summarize_verdict("क" * 20_000, always_fails, usage=None) is None
