@@ -23,9 +23,12 @@ log = logging.getLogger("casework.court_order")
 
 HEAD_CHARS: int = 6_000
 TAIL_CHARS: int = 25_000
+THAHAR_CHARS: int = 16_000
+THAHAR_MARKER = "ठहर खण्ड"
 
 _HEAD_LABEL = "\n\n[...अदालतको आदेशको सुरुको भाग...]\n\n"
 _TAIL_LABEL = "\n\n[...अदालतको आदेश — ठहर खण्ड...]\n\n"
+_THAHAR_LABEL = "\n\n[...अदालतको आदेशको ठहर खण्डबाट अंश...]\n\n"
 
 
 def court_order_head(text: str, limit: int = HEAD_CHARS, label: bool = True) -> str:
@@ -46,6 +49,25 @@ def court_order_tail(text: str, limit: int = TAIL_CHARS, label: bool = True) -> 
         return text
     tail = text[-limit:]
     return _TAIL_LABEL + tail if label else tail
+
+
+def court_order_thahar(text: str, limit: int = THAHAR_CHARS, label: bool = True) -> str:
+    """Return `limit` chars starting at the first `ठहर खण्ड` marker, falling
+    back to `court_order_tail` when the marker is absent.
+
+    A repeated mention just past the old 12,000-char window is real lost
+    signal, not noise -- this window is 16,000 so it strictly dominates what
+    the old marker-anchored slice ever saw.
+    """
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    idx = text.find(THAHAR_MARKER)
+    if idx == -1:
+        return court_order_tail(text, limit, label)
+    window = text[idx : idx + limit]
+    return _THAHAR_LABEL + window if label else window
 
 
 VERDICT_SUMMARY_TRIGGER = 12000

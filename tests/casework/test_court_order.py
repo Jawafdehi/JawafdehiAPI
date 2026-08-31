@@ -10,8 +10,10 @@ only 10 of 37 orders. Median order length is 60,842 chars; the longest is
 from casework.common.court_order import (
     HEAD_CHARS,
     TAIL_CHARS,
+    THAHAR_MARKER,
     court_order_head,
     court_order_tail,
+    court_order_thahar,
 )
 
 
@@ -84,6 +86,41 @@ class TestCourtOrderHead:
         head = court_order_head(text, label=False)
         tail = court_order_tail(text, label=False)
         assert len(head) + len(tail) < len(text)
+
+
+class TestThaharWindow:
+    def test_it_starts_at_the_marker(self):
+        head = "क" * 50_000
+        body = "ठहर खण्ड" + "ठ" * 500
+        got = court_order_thahar(head + body, limit=16_000, label=False)
+        assert got.startswith("ठहर खण्ड")
+        assert "क" * 50_000 not in got
+
+    def test_it_takes_limit_chars_forward_from_the_marker(self):
+        text = "क" * 1_000 + "ठहर खण्ड" + "ठ" * 40_000
+        got = court_order_thahar(text, limit=16_000, label=False)
+        assert len(got) == 16_000
+
+    def test_a_document_with_no_marker_falls_back_to_the_tail(self):
+        # 078-CR-0042 is a real example: no marker anywhere. The old code fell
+        # back to head+tail there too, and that case measured clean.
+        text = "क" * 40_000 + "अन्तिम"
+        got = court_order_thahar(text, limit=16_000, label=False)
+        assert got.endswith("अन्तिम")
+        assert len(got) == 16_000
+
+    def test_a_short_document_comes_back_whole(self):
+        text = "क" * 100 + "ठहर खण्ड" + "ठ" * 100
+        assert court_order_thahar(text, limit=16_000, label=False) == text
+
+    def test_empty_text_is_empty(self):
+        assert court_order_thahar("", limit=16_000) == ""
+
+    def test_the_marker_is_the_donor_literal(self):
+        # Devanagari is data. This pins the exact string the old
+        # `_truncate_court_order` anchored on -- a normalised or re-typed
+        # variant silently stops matching and the window slides to the tail.
+        assert THAHAR_MARKER == "ठहर खण्ड"
 
 
 class TestSummariseVerdictLivesHere:

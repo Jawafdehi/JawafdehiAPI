@@ -112,7 +112,7 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
-from casework.common.court_order import court_order_head
+from casework.common.court_order import court_order_head, court_order_thahar
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_chunks, source_text
 from casework.entity_identity import entity_slug, prefix_is_creatable
@@ -175,7 +175,8 @@ EXTRACTION_MAX_TOKENS = 8000
 # deleted `casework/common.py` and was never re-created in the Task 5-11
 # common package (see `enrich_missing_bigo.py`'s identical note) -- fixed at
 # the donor's own defaults. The court-order side of this budget is no longer
-# here: it comes from `casework.common.court_order.court_order_head`.
+# here: it comes from `casework.common.court_order.court_order_head` and
+# `court_order_thahar`.
 PRESS_RELEASE_CHARS = 3_000
 PRESS_RELEASE_CHARS_NO_COURT = 18_000
 
@@ -1498,20 +1499,13 @@ def _enforce_prompt_budget(parts):
 
 
 def _build_content_parts(press_release_text, court_order_text):
-    """Build the LLM's user-prompt sections from the two independently-sourced
-    texts. Extracted verbatim from the donor's inline `_process_case` (donor
-    lines 385-405) into a named, unit-testable function -- the press-release
-    side is unchanged: either source alone is sufficient, and its truncation
-    limit depends on whether a court order is ALSO present
-    (`PRESS_RELEASE_CHARS_NO_COURT` vs `PRESS_RELEASE_CHARS`). One divergence
-    from the verbatim donor: an EMPTY court_order_text ("") is now treated the
-    same as None (no court present), so a case with fetched-but-empty court text
-    still gets the larger no-court press budget instead of being needlessly
-    clipped to the with-court limit.
+    """Build the LLM's user-prompt sections from the two independently-sourced texts.
 
-    The court-order side is NOT the donor's: it now takes `court_order_head`,
-    which the extraction needs for the caption and party list -- its
-    narrative comes from the press release, which it is also given."""
+    The court order contributes the UNION of `court_order_head` (caption,
+    party list) and `court_order_thahar` (the operative section), as two
+    separate labelled sections rather than one joined block -- they are not
+    contiguous in the source document, and telling the model otherwise would
+    mislead it about what it's reading."""
     content_parts = []
 
     if press_release_text:
@@ -1525,9 +1519,10 @@ def _build_content_parts(press_release_text, court_order_text):
         content_parts.append(truncated)
 
     if court_order_text:
-        truncated = court_order_head(court_order_text)
         content_parts.append("--- COURT ORDER ---")
-        content_parts.append(truncated)
+        content_parts.append(court_order_head(court_order_text))
+        content_parts.append("--- COURT ORDER (ठहर खण्ड) ---")
+        content_parts.append(court_order_thahar(court_order_text))
 
     return content_parts
 

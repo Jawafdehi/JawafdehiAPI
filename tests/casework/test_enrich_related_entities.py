@@ -360,10 +360,17 @@ class TestBuildContentPartsMatrix:
         assert parts[1] == text  # untouched: under the NO_COURT limit
         assert "COURT ORDER" not in "\n".join(parts)
 
-    def test_court_only_yields_only_court_section(self):
+    def test_court_only_yields_only_court_sections(self):
+        # Both zones ship even for a short order: each zone reader returns
+        # the text unchanged when it is already within that zone's limit.
         court_text = "अदालतको आदेश।" * 5
         parts = _build_content_parts(None, court_text)
-        assert parts == ["--- COURT ORDER ---", court_text]
+        assert parts == [
+            "--- COURT ORDER ---",
+            court_text,
+            "--- COURT ORDER (ठहर खण्ड) ---",
+            court_text,
+        ]
 
     def test_both_present_press_uses_the_smaller_limit(self):
         # Same press text as the press-only case, but WITH a court order
@@ -389,7 +396,7 @@ class TestBuildContentPartsMatrix:
 # --------------------------------------------------------------------------
 
 
-class TestExtractionReadsTheHeadZone:
+class TestExtractionReadsHeadAndThahar:
     def test_court_order_section_carries_the_start_of_the_order(self):
         # The extractor wants the caption and party list, which sit in the
         # first 3% of every order in the 38-order sample. Its narrative comes
@@ -426,6 +433,33 @@ class TestExtractionReadsTheHeadZone:
         order = "अ" * 400_000
         prompt = ere._enforce_prompt_budget(ere._build_content_parts(press, order))
         assert len(prompt) <= ere.PROMPT_HARD_MAX
+
+    def test_the_operative_section_is_carried_too(self):
+        # The Task 4 A/B: 12 entities live in [marker, marker+12000) and were
+        # lost when the extraction saw only the head. Both zones ship now.
+        press = "प्रेस विज्ञप्ति पाठ"
+        caption = "वादी: नेपाल सरकार। प्रतिवादी: राम बहादुर।"
+        filler = "ख" * 20_000
+        operative = "ठहर खण्ड\nदिनेश लामिछाने उपर कसुर ठहर्छ।"
+        parts = ere._build_content_parts(press, caption + filler + operative)
+        joined = "\n\n".join(parts)
+        assert caption in joined
+        assert "दिनेश लामिछाने" in joined
+        assert filler not in joined
+
+    def test_realistic_budget_is_not_clipped(self):
+        # 3,000 press + 6,000 head + 16,000 window = 25,000, the exact hard
+        # max -- proving the union isn't silently clipped back down by
+        # _enforce_prompt_budget would undo the whole point of this task.
+        press = "प" * 3_000
+        head_zone = "क" * 6_000
+        window_zone = "ठहर खण्ड" + "ठ" * 15_992
+        court = head_zone + "फ" * 100_000 + window_zone
+        parts = ere._build_content_parts(press, court)
+        prompt = ere._enforce_prompt_budget(parts)
+        assert "क" * 6_000 in prompt
+        assert "ठहर खण्ड" in prompt
+        assert "फ" * 100_000 not in prompt
 
 
 # --------------------------------------------------------------------------
