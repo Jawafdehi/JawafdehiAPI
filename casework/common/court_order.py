@@ -1,20 +1,15 @@
-"""A character-anchored zone reader for court-order text.
+"""Character-anchored readers that pick which part of a court order an LLM sees.
 
-WHY ZONES AND NOT ONE SLICE. The slice this replaces anchored on the literal
-`ठहर खण्ड` and took 12,000 chars forward from that marker. Measured over 37
-production court orders (2026-08-31), that reached the operative verdict in
-only 10 of 37: the verdict actually sits a median 2,852 chars from the END of
-the file (p90 8,389, max 38,792), and the marker is a section heading two-
-thirds of the way through the document, not immediately before the verdict.
+Four readers, two consumers. The extraction reads `court_order_head` (caption,
+party list and bench, which sit in the first 3% of all 38 orders in the sample)
+plus `court_order_thahar` (a window forward from the `ठहर खण्ड` marker, the
+operative section). A per-defendant verdict reads `court_order_verdict_zone`
+(marker to end). `court_order_tail` is the ending, and the fallback both
+marker-anchored readers use when an order carries no marker.
 
-A 25,000-char TAIL reaches the verdict in 36 of 37 measured orders (10,000
-reaches only 34). Caption, party list and bench sit in the first 3% of every
-order in the sample (38/38); a 6,000-char HEAD clears that on a median
-60,842-char order.
-
-Both zones are capped in characters, never a percentage of the input. The
-tail is roughly 12% of a document -- on the 379,484-char order in the sample
-that would be 45,538 chars, which blows past PROMPT_HARD_MAX outright.
+Every limit is an absolute character count, never a percentage of the input: a
+tail is roughly 12% of a document, and on the 379,484-char order in the sample
+that is 45,538 chars, past PROMPT_HARD_MAX on its own.
 """
 
 import logging
@@ -22,12 +17,13 @@ import logging
 log = logging.getLogger("casework.court_order")
 
 HEAD_CHARS: int = 6_000
-TAIL_CHARS: int = 25_000
 THAHAR_CHARS: int = 15_500
 THAHAR_MARKER = "ठहर खण्ड"
 
 _HEAD_LABEL = "\n\n[...अदालतको आदेशको सुरुको भाग...]\n\n"
-_TAIL_LABEL = "\n\n[...अदालतको आदेश — ठहर खण्ड...]\n\n"
+# Says only "the ending", because that is all a tail is. It used to claim
+# `ठहर खण्ड`, which is exactly what the reader reaching for it did NOT find.
+_TAIL_LABEL = "\n\n[...अदालतको आदेशको अन्त्यको भाग...]\n\n"
 _THAHAR_LABEL = "\n\n[...अदालतको आदेशको ठहर खण्डबाट अंश...]\n\n"
 
 
@@ -41,8 +37,12 @@ def court_order_head(text: str, limit: int = HEAD_CHARS, label: bool = True) -> 
     return _HEAD_LABEL + head if label else head
 
 
-def court_order_tail(text: str, limit: int = TAIL_CHARS, label: bool = True) -> str:
-    """Return the last `limit` chars of a court order, labelled as a fragment when truncated."""
+def court_order_tail(text: str, limit: int, label: bool = True) -> str:
+    """Return the last `limit` chars of a court order, labelled as a fragment when truncated.
+
+    `limit` is required: a tail has no size of its own, it borrows the size of
+    whichever reader fell back to it.
+    """
     if not text:
         return ""
     if len(text) <= limit:
@@ -55,14 +55,16 @@ def court_order_thahar(text: str, limit: int = THAHAR_CHARS, label: bool = True)
     """Return `limit` chars starting at the first `ठहर खण्ड` marker, falling
     back to `court_order_tail` when the marker is absent.
 
+    The marker is looked for FIRST, before any length short-circuit: only a
+    fragment that actually starts at the marker may wear `_THAHAR_LABEL`, and
+    a short order used to come back whole under it, marker or no marker.
+
     15,500 clears PROMPT_HARD_MAX with the two section headers and two
     fragment labels also counted in, while still dominating the old
     marker-anchored slice's 12,000-char window -- the bar the A/B measured.
     """
     if not text:
         return ""
-    if len(text) <= limit:
-        return text
     idx = text.find(THAHAR_MARKER)
     if idx == -1:
         return court_order_tail(text, limit, label)
@@ -95,31 +97,31 @@ VERDICT_ZONE_CHARS: int = 103_255
 _VERDICT_LABEL = "\n\n[...अदालतको आदेशको ठहर तथा अन्त्यको भाग...]\n\n"
 
 
-def court_order_verdict_zone(text: str, label: bool = True) -> str:
-    """Return the marker-to-end span of a court order, capped at
-    `VERDICT_ZONE_CHARS` -- the slice `accused_verdicts` reads to decide a
-    per-defendant disposition.
+def court_order_verdict_zone(text: str, limit: int = VERDICT_ZONE_CHARS,
+                             label: bool = True) -> str:
+    """Return the marker-to-end span of a court order, capped at `limit` -- the
+    slice `accused_verdicts` reads to decide a per-defendant disposition.
 
     Marker-to-end has no gap by construction. When that span still exceeds
     the cap, or there is no marker at all, this falls back to
-    `court_order_tail` -- the last `VERDICT_ZONE_CHARS` chars of the WHOLE
-    document as one contiguous slice, never a second, disjoint window: a
-    gap must be structurally impossible, not merely unlikely on the
-    documents measured so far.
+    `court_order_tail` -- the last `limit` chars of the WHOLE document as one
+    contiguous slice, never a second, disjoint window: a gap must be
+    structurally impossible, not merely unlikely on the documents measured so
+    far.
     """
     if not text:
         return ""
-    if len(text) <= VERDICT_ZONE_CHARS:
+    if len(text) <= limit:
         return text
 
     idx = text.find(THAHAR_MARKER)
     if idx != -1:
         span = len(text) - idx
-        if span <= VERDICT_ZONE_CHARS:
+        if span <= limit:
             window = text[idx:]
             return _VERDICT_LABEL + window if label else window
 
-    return court_order_tail(text, VERDICT_ZONE_CHARS, label)
+    return court_order_tail(text, limit, label)
 
 
 VERDICT_SUMMARY_TRIGGER = 12000

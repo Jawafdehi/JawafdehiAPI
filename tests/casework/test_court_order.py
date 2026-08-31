@@ -7,9 +7,11 @@ literal `ठहर खण्ड` and took 12,000 chars FORWARD, which reached th
 only 10 of 37 orders. Median order length is 60,842 chars; the longest is
 379,484.
 """
+import pytest
+
+from casework.common import court_order as co
 from casework.common.court_order import (
     HEAD_CHARS,
-    TAIL_CHARS,
     THAHAR_CHARS,
     THAHAR_MARKER,
     VERDICT_ZONE_CHARS,
@@ -21,10 +23,14 @@ from casework.common.court_order import (
 
 
 class TestZoneSizes:
-    def test_tail_is_25k(self):
-        # 25,000 contains the last operative verb in 36 of 37 measured orders;
-        # 10,000 reaches 34. Do not shrink this without re-measuring.
-        assert TAIL_CHARS == 25_000
+    def test_a_tail_carries_no_size_of_its_own(self):
+        # TAIL_CHARS = 25,000 was measured for a HEAD+TAIL design that no
+        # longer exists: nothing outside this module calls `court_order_tail`,
+        # and both callers inside it pass THAHAR_CHARS or VERDICT_ZONE_CHARS.
+        # A default here is a number nobody chose, kept alive by a test.
+        assert not hasattr(co, "TAIL_CHARS")
+        with pytest.raises(TypeError):
+            court_order_tail("क" * 100)  # ty: ignore[missing-argument]
 
     def test_head_is_6k(self):
         # Caption, party list and bench sit in the first 3% of every order in
@@ -34,18 +40,18 @@ class TestZoneSizes:
 
 class TestCourtOrderTail:
     def test_none_passthrough(self):
-        assert court_order_tail(None) == ""
+        assert court_order_tail(None, THAHAR_CHARS) == ""
 
     def test_empty_passthrough(self):
-        assert court_order_tail("") == ""
+        assert court_order_tail("", THAHAR_CHARS) == ""
 
     def test_short_text_returned_whole_and_unlabelled(self):
         text = "छोटो आदेश। ठहर्छ।"
-        assert court_order_tail(text) == text
+        assert court_order_tail(text, THAHAR_CHARS) == text
 
     def test_long_text_keeps_the_end_not_the_start(self):
         text = "क" * 30_000 + "यो ठहर खण्ड हो। ठहर्छ।"
-        got = court_order_tail(text)
+        got = court_order_tail(text, THAHAR_CHARS)
         assert got.endswith("यो ठहर खण्ड हो। ठहर्छ।")
         assert "क" * 30_000 not in got
 
@@ -54,16 +60,22 @@ class TestCourtOrderTail:
         # char order in the sample that is 45,538 chars -- far over
         # PROMPT_HARD_MAX. The cap must be absolute.
         text = "क" * 379_484
-        got = court_order_tail(text, label=False)
-        assert len(got) == TAIL_CHARS
+        got = court_order_tail(text, THAHAR_CHARS, label=False)
+        assert len(got) == THAHAR_CHARS
 
     def test_label_marks_the_text_as_a_fragment(self):
         text = "क" * 30_000
-        assert "[" in court_order_tail(text)
+        assert "[" in court_order_tail(text, THAHAR_CHARS)
+
+    def test_the_label_claims_only_the_ending(self):
+        # It used to say `ठहर खण्ड`, which is precisely what the caller that
+        # fell back to a tail did NOT find in the document.
+        text = "क" * 30_000
+        assert THAHAR_MARKER not in court_order_tail(text, THAHAR_CHARS)
 
     def test_label_can_be_switched_off(self):
         text = "क" * 30_000
-        assert court_order_tail(text, label=False).startswith("क")
+        assert court_order_tail(text, THAHAR_CHARS, label=False).startswith("क")
 
     def test_respects_an_explicit_smaller_limit(self):
         text = "क" * 30_000
@@ -87,7 +99,7 @@ class TestCourtOrderHead:
     def test_head_and_tail_of_the_same_order_do_not_overlap(self):
         text = "क" * 100_000
         head = court_order_head(text, label=False)
-        tail = court_order_tail(text, label=False)
+        tail = court_order_tail(text, THAHAR_CHARS, label=False)
         assert len(head) + len(tail) < len(text)
 
 
@@ -112,9 +124,23 @@ class TestThaharWindow:
         assert got.endswith("अन्तिम")
         assert len(got) == THAHAR_CHARS
 
-    def test_a_short_document_comes_back_whole(self):
+    def test_a_short_document_with_a_marker_still_starts_at_the_marker(self):
+        # THE MISLABEL. This used to short-circuit on length BEFORE looking for
+        # the marker, so a short order came back whole wearing an "excerpt from
+        # the ठहर खण्ड" label. Only a fragment that starts at the marker may
+        # claim to be one; the caption the leading chars carry is the head
+        # reader's job.
         text = "क" * 100 + "ठहर खण्ड" + "ठ" * 100
-        assert court_order_thahar(text, limit=16_000, label=False) == text
+        got = court_order_thahar(text, limit=16_000, label=False)
+        assert got == "ठहर खण्ड" + "ठ" * 100
+
+    def test_a_short_document_with_no_marker_comes_back_whole_and_unlabelled(self):
+        text = "क" * 100 + "आदेश।"
+        assert court_order_thahar(text, limit=16_000) == text
+
+    def test_a_document_with_no_marker_is_never_labelled_a_thahar_excerpt(self):
+        text = "क" * 40_000 + "अन्तिम"
+        assert THAHAR_MARKER not in court_order_thahar(text, limit=THAHAR_CHARS)
 
     def test_empty_text_is_empty(self):
         assert court_order_thahar("", limit=16_000) == ""
@@ -165,6 +191,13 @@ class TestVerdictZone:
 
     def test_empty_text_is_empty(self):
         assert court_order_verdict_zone("") == ""
+
+    def test_it_takes_a_limit_like_the_other_three_readers(self):
+        # All four readers are `(text, limit, label)`. This one used to bake
+        # its cap in, so a caller could not ask for a smaller zone at all.
+        text = "क" * 5_000 + THAHAR_MARKER + "ठ" * 5_000
+        assert len(court_order_verdict_zone(text, limit=1_000, label=False)) == 1_000
+        assert court_order_verdict_zone(text, limit=VERDICT_ZONE_CHARS) == text
 
     def test_a_holding_just_past_the_old_tail_boundary_is_now_visible(self):
         # likhu-tamakoshi (production, 2026-08-31): the holding sat 8,456

@@ -42,9 +42,11 @@ accepts. When several entities tie above the threshold, the best-scoring one win
 by a deterministic `(-score, nes_id)` sort, so some binds WILL name the wrong
 namesake. That is the accepted cost of the mode; every such bind is marked
 `[UNCERTAIN]` on the console and carries a `promoted over:` reason in
-`*.binds.jsonl`, which is how they are found again. Measured on the 142-row
-labelled set: precision 0.872, recall 0.872, and all five wrong binds are
-Election Commission candidate records rather than namesake mix-ups.
+`*.binds.jsonl`, which is how they are found again. Measured on the 140-row
+labelled set (`tests/casework/fixtures/entity_labels.jsonl`, which scores the
+RESOLVER only -- see the README beside it): precision 0.872, recall 0.872, and
+all five wrong binds are Election Commission candidate records rather than
+namesake mix-ups.
 
 ONE REFUSAL SURVIVES THAT MODE:
 
@@ -124,6 +126,8 @@ from casework.common.cli import (
     setup_logging,
 )
 from casework.common.court_order import (
+    THAHAR_CHARS,
+    THAHAR_MARKER,
     court_order_head,
     court_order_thahar,
     court_order_verdict_zone,
@@ -735,6 +739,50 @@ def accused_verdict_targets(case):
     return targets, skipped
 
 
+def verdict_state_refusal(case):
+    """The reason this case's state forbids reading its judgment, or "" if it does not."""
+    state = (case.get("state") or "").strip().upper()
+    if state == REQUIRED_WRITE_STATE:
+        return ""
+    return (f"case state {state!r} != {REQUIRED_WRITE_STATE!r}: the verdict write "
+            "would be refused, so the judgment was not read")
+
+
+def verdict_skip_rows(slug, case, reason):
+    """One `*.verdicts.jsonl` row per accused bind on a case the gate refused.
+
+    Used for the state refusal, whose binds are decidable in every other
+    respect: without a row, an IN_REVIEW case is simply absent from the
+    artefact and nothing says its defendants were passed over.
+    """
+    return [
+        _verdict_row(slug, (entity.get("display_name") or "").strip(),
+                     (entity.get("nes_id") or "").strip(),
+                     (entity.get("outcome") or "").strip(), "", "", "", reason)
+        for entity in (case.get("entities") or [])
+        if bind_relationship_type(entity) == ACCUSED_SECTION
+    ]
+
+
+def verdict_decidedness(binds):
+    """How much of a case's accused list carries a terminal outcome: "all",
+    "partial", "none", or "" when the case has no accused bind.
+
+    "partial" is the one a caseworker must act on: `verdict_gate` refuses a case
+    that holds ANY terminal outcome, so a half-answered judgment leaves the rest
+    `charged` until a human clears the outcomes by hand.
+    """
+    accused = [bind for bind in binds
+               if bind_relationship_type(bind) == ACCUSED_SECTION]
+    if not accused:
+        return ""
+    decided = sum(1 for bind in accused
+                  if (bind.get("outcome") or "").strip().lower() in TERMINAL_OUTCOMES)
+    if not decided:
+        return "none"
+    return "all" if decided == len(accused) else "partial"
+
+
 def verdict_gate(case, court_text):
     """Whether this case's judgment may be read for per-defendant verdicts,
     and the reason it may not.
@@ -743,9 +791,19 @@ def verdict_gate(case, court_text):
     case only after it is decided, so an undecided case spends nothing here. A
     terminal outcome already on an accused bind means a human or the whole-case
     सफाई rule has settled it, and this stage does not re-litigate that.
+
+    The state clause is an ADDITIONAL gate, never a relocation of
+    `plan_case_entities`' own non-DRAFT refusal -- that one is what stops a
+    notes-redacted IN_REVIEW read from reaching the destructive replace. This
+    one only stops the spend: `select.ENRICHABLE_STATES` admits IN_REVIEW, and
+    every such case otherwise pays a premium verdict call per chunk before
+    being refused at the write.
     """
     if not court_text:
         return False, "no court-order text"
+    state_refusal = verdict_state_refusal(case)
+    if state_refusal:
+        return False, state_refusal
     accused = [entity for entity in (case.get("entities") or [])
                if bind_relationship_type(entity) == ACCUSED_SECTION]
     if not accused:
@@ -1875,11 +1933,14 @@ def _enforce_prompt_budget(parts):
 def _build_content_parts(press_release_text, court_order_text):
     """Build the LLM's user-prompt sections from the two independently-sourced texts.
 
-    The court order contributes the UNION of `court_order_head` (caption,
-    party list) and `court_order_thahar` (the operative section), as two
-    separate labelled sections rather than one joined block -- they are not
-    contiguous in the source document, and telling the model otherwise would
-    mislead it about what it's reading."""
+    A court order short enough to fit `THAHAR_CHARS` goes out ONCE, whole,
+    under the plain header. Longer, it contributes the UNION of
+    `court_order_head` (caption, party list) and `court_order_thahar` (the
+    operative section), as two separate labelled sections rather than one
+    joined block -- they are not contiguous in the source document, and
+    telling the model otherwise would mislead it about what it's reading. The
+    second header names the `ठहर खण्ड` only when the order actually carries
+    the marker; without one, `court_order_thahar` returns the ending."""
     content_parts = []
 
     if press_release_text:
@@ -1894,9 +1955,16 @@ def _build_content_parts(press_release_text, court_order_text):
 
     if court_order_text:
         content_parts.append("--- COURT ORDER ---")
-        content_parts.append(court_order_head(court_order_text))
-        content_parts.append("--- COURT ORDER (ठहर खण्ड) ---")
-        content_parts.append(court_order_thahar(court_order_text))
+        if len(court_order_text) <= THAHAR_CHARS:
+            # The head is a prefix of this and the thahar window is a slice of
+            # it, so both readers would send text the model already has.
+            content_parts.append(court_order_text)
+        else:
+            content_parts.append(court_order_head(court_order_text))
+            content_parts.append(
+                "--- COURT ORDER (ठहर खण्ड) ---" if THAHAR_MARKER in court_order_text
+                else "--- COURT ORDER (अन्त्य) ---")
+            content_parts.append(court_order_thahar(court_order_text))
 
     return content_parts
 
@@ -2044,6 +2112,12 @@ def main(argv=None):
     # defendants got none" are different facts, and only the second one tells a
     # caseworker there is still work on those cases.
     total_verdicts = total_verdicts_undecided = 0
+    # Per CASE, not per bind: how much of its accused list ends this run with a
+    # terminal outcome. A partially decided case is the one nobody can find
+    # otherwise -- the gate refuses it from now on, so its undecided binds are
+    # stuck at `charged` until a human clears the ones that were answered.
+    verdict_coverage = {"all": 0, "partial": 0, "none": 0}
+    partially_decided = []
     bind_rows, review_rows, nomatch_rows, verdict_rows = [], [], [], []
     # Collected BEFORE resolution, so they survive a run where nothing binds.
     extracted_rows, accused_notes_rows = [], []
@@ -2055,6 +2129,15 @@ def main(argv=None):
     run_entities = {}
     # Fetched on first use, not at startup -- see the call site.
     live_prefixes = None
+
+    def record_decidedness(slug, binds):
+        """Count one case's verdict coverage. Called at exactly one exit per case."""
+        coverage = verdict_decidedness(binds)
+        if not coverage:
+            return
+        verdict_coverage[coverage] += 1
+        if coverage == "partial":
+            partially_decided.append(slug)
 
     def extract_entities_for(slug, content_parts):
         """One case's LLM extraction: `(valid_items, produced)`.
@@ -2264,6 +2347,12 @@ def main(argv=None):
             if not decidable:
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
                           slug=slug, step="verdicts", status="skipped", detail=why_not)
+                if court_text and verdict_state_refusal(detail):
+                    # The one refusal whose binds were decidable in every other
+                    # respect -- there is a judgment, and only the state stops
+                    # it being read. Without a row the case is absent from the
+                    # artefact entirely.
+                    case_verdict_rows = verdict_skip_rows(slug, detail, why_not)
             else:
                 updates, case_verdict_rows, verdict_errors = case_verdict_updates(
                     slug, detail, court_text, invoke_text, usage=usage)
@@ -2276,6 +2365,8 @@ def main(argv=None):
             # none of them.
             verdict_rows.extend(case_verdict_rows)
             total_verdicts_undecided += len(case_verdict_rows)
+            if not args.no_verdicts:
+                record_decidedness(slug, detail.get("entities") or [])
             for error in verdict_errors:
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
                           slug=slug, step="verdicts", status="error", detail=error,
@@ -2328,6 +2419,8 @@ def main(argv=None):
                 row["reason"] = row["reason"] or f"case not written: {plan.reason}"
             verdict_rows.extend(case_verdict_rows)
             total_verdicts_undecided += len(case_verdict_rows)
+            if not args.no_verdicts:
+                record_decidedness(slug, detail.get("entities") or [])
             continue
 
         # `role` is the section the extraction ASKED for, which the planner records
@@ -2392,6 +2485,12 @@ def main(argv=None):
         verdict_rows.extend(case_verdict_rows)
         total_verdicts_undecided += sum(
             1 for row in case_verdict_rows if row["nes_id"] not in changed_ids)
+        # `updated` is the list the write would send, so under --dry-run (and on
+        # a refused or failed write) this is a projection, which is what the
+        # epilogue says. The alternative -- counting only after a successful
+        # write -- reports nothing at all on the default run.
+        if not args.no_verdicts:
+            record_decidedness(slug, updated)
         for error in verdict_errors:
             log_event(logger, paths["events"], run_id=run_id, stage="entities",
                       slug=slug, step="verdicts", status="error", detail=error,
@@ -2547,6 +2646,22 @@ def main(argv=None):
             # all cases a human still has to settle.
             print(f"    {total_verdicts_undecided} accused bind(s) were left exactly "
                   "as they were -- each is a row in that file carrying the reason.")
+    cases_seen = sum(verdict_coverage.values())
+    if cases_seen:
+        projected = "  Projected -- this dry run wrote nothing." if args.dry_run else ""
+        print(f"  ACCUSED VERDICT COVERAGE -- of {cases_seen} case(s) with accused "
+              f"bind(s): {verdict_coverage['all']} fully decided, "
+              f"{verdict_coverage['partial']} partially decided, "
+              f"{verdict_coverage['none']} undecided.{projected}")
+        if partially_decided:
+            print("    A PARTIALLY DECIDED case is LOCKED: the gate refuses any case "
+                  "that already carries a terminal outcome, so the accused bind(s) "
+                  "the judgment did not answer for stay 'charged' until a human "
+                  "clears the answered ones. Check these by hand:")
+            for case_slug in partially_decided[:20]:
+                print(f"      {case_slug}")
+            if len(partially_decided) > 20:
+                print(f"      ... and {len(partially_decided) - 20} more")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
     if total_skipped_enriched:
         # EXTRACTION, not the case. The verdict gate is independent of this

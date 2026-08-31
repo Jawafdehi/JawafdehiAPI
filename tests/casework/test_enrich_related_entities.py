@@ -360,17 +360,22 @@ class TestBuildContentPartsMatrix:
         assert parts[1] == text  # untouched: under the NO_COURT limit
         assert "COURT ORDER" not in "\n".join(parts)
 
-    def test_court_only_yields_only_court_sections(self):
-        # Both zones ship even for a short order: each zone reader returns
-        # the text unchanged when it is already within that zone's limit.
+    def test_a_short_order_ships_once_whole(self):
+        # It used to ship TWICE -- once as the head zone, once as the thahar
+        # zone, because each reader returns the text unchanged when it is
+        # already within that zone's limit. The second copy was labelled an
+        # excerpt from the ठहर खण्ड whether or not the order had one.
         court_text = "अदालतको आदेश।" * 5
         parts = _build_content_parts(None, court_text)
-        assert parts == [
-            "--- COURT ORDER ---",
-            court_text,
-            "--- COURT ORDER (ठहर खण्ड) ---",
-            court_text,
-        ]
+        assert parts == ["--- COURT ORDER ---", court_text]
+
+    def test_an_order_under_the_thahar_limit_is_never_sent_twice(self):
+        # The boundary case the head zone hides: over HEAD_CHARS the two
+        # sections are no longer identical, so the duplication is partial and
+        # invisible to an equality check on short text.
+        court_text = "क" * (ere.THAHAR_CHARS - 1)
+        joined = "\n\n".join(_build_content_parts(None, court_text))
+        assert joined.count("क") == len(court_text)
 
     def test_both_present_press_uses_the_smaller_limit(self):
         # Same press text as the press-only case, but WITH a court order
@@ -446,6 +451,29 @@ class TestExtractionReadsHeadAndThahar:
         assert caption in joined
         assert "दिनेश लामिछाने" in joined
         assert filler not in joined
+
+    def test_an_order_with_no_marker_is_never_labelled_a_thahar_excerpt(self):
+        # Long enough to need both zones, but with no `ठहर खण्ड` anywhere --
+        # so neither the section header nor the fragment label may claim one.
+        from casework.common import court_order as co
+
+        order = "क" * 40_000 + "अन्तिम"
+        joined = "\n\n".join(ere._build_content_parts("प्रेस।", order))
+        assert co.THAHAR_MARKER not in joined
+        assert joined.endswith("अन्तिम")
+
+    def test_a_long_order_with_a_marker_still_gets_head_plus_marker_window(self):
+        # THE MEASURED SLICE, PINNED. Everything M5 changed is about orders
+        # that do NOT get this shape; this one must come through untouched.
+        from casework.common import court_order as co
+
+        order = "वादी: नेपाल सरकार।" + "ख" * 20_000 + co.THAHAR_MARKER + "ठ" * 500
+        assert ere._build_content_parts(None, order) == [
+            "--- COURT ORDER ---",
+            co.court_order_head(order),
+            "--- COURT ORDER (ठहर खण्ड) ---",
+            co.court_order_thahar(order),
+        ]
 
     def test_realistic_budget_is_not_clipped(self):
         # The true worst case: press sits AT its cap (so it is not shrunk
@@ -4301,6 +4329,40 @@ class TestVerdictGate:
         _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
         assert stub.verdict_calls == []
 
+    def test_an_in_review_case_never_pays_for_a_verdict_call(
+            self, monkeypatch, patched_fetch_markdown):
+        # `select.ENRICHABLE_STATES` admits IN_REVIEW, but the write requires
+        # DRAFT. Without this clause every IN_REVIEW case in the population
+        # buys a premium verdict prompt per chunk -- up to ~103k chars of zone
+        # each time -- and is then refused at the write gate.
+        case = dict(_accused_case(slug="case-in-review-verdict"), state="IN_REVIEW")
+        api = _StubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        assert stub.verdict_calls == []
+
+    def test_the_state_skip_is_a_row_in_the_verdicts_file(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # The skip must be VISIBLE. Its binds are decidable in every other
+        # respect, so without a row the case is simply absent from the
+        # artefact and nothing says its defendants were passed over.
+        case = dict(_accused_case(slug="case-in-review-verdict"), state="IN_REVIEW")
+        api = _StubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert row["written"] is False
+        assert "IN_REVIEW" in row["reason"] and "DRAFT" in row["reason"]
+        # Not the write refusal the planner records further down: this row says
+        # the judgment was never read at all, which is the spend being saved.
+        assert "judgment was not read" in row["reason"]
+        assert stub.verdict_calls == []
+
+    # THE TWO TESTS ABOVE GATE A SPEND, NOT THE WRITE. The planner's own
+    # non-DRAFT refusal is what stops a notes-redacted IN_REVIEW read from
+    # reaching the destructive whole-list replace, and it stays where it is --
+    # `test_plan_refuses_a_non_draft_case` pins it.
+
     def test_a_charged_case_with_an_order_is_processed(
             self, monkeypatch, patched_fetch_markdown):
         api = _StubApi([_accused_case()])
@@ -4588,3 +4650,68 @@ class TestVerdictReport:
     def test_report_paths_carries_the_verdicts_file(self):
         paths = ere.report_paths({"log": "/tmp/run-abc.log"})
         assert paths["verdicts"] == "/tmp/run-abc.verdicts.jsonl"
+
+
+# --------------------------------------------------------------------------
+# Round 10 (I4) -- a case the judgment only half-answered is LOCKED, and the
+# epilogue is the only place a caseworker can find it. `verdict_gate` refuses
+# any case that already carries a terminal outcome, so the defendants a short
+# chunk never answered for stay `charged` until a human clears the answered
+# ones by hand.
+# --------------------------------------------------------------------------
+
+SECOND_ACCUSED = {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+                  "display_name": "सीता देवी", "outcome": "charged",
+                  "notes": "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"}
+
+
+class TestVerdictCoverageEpilogue:
+    def test_a_half_answered_judgment_is_named_as_partially_decided(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # Two accused, and VERDICT_RESPONSE answers for राम बहादुर only.
+        api = _SearchStubApi([_accused_case(slug="case-half",
+                                            extra_entities=[SECOND_ACCUSED])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        out = capsys.readouterr().out
+        assert "1 partially decided" in out
+        assert "\n      case-half\n" in out, "the locked case is not named"
+
+    def test_a_fully_answered_judgment_is_not_reported_as_partial(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        api = _SearchStubApi([_accused_case(slug="case-whole")])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
+        out = capsys.readouterr().out
+        assert "1 fully decided" in out and "0 partially decided" in out
+        assert "LOCKED" not in out
+
+    def test_a_case_nothing_was_decided_on_counts_as_undecided(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # No court order, so the gate never reads a judgment -- the case is
+        # untouched, not half-done, and must not be filed with the locked ones.
+        api = _StubApi([_accused_case(slug="case-untouched", court=False)])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+        out = capsys.readouterr().out
+        assert "1 undecided" in out
+        assert "LOCKED" not in out
+
+    def test_no_verdicts_reports_no_coverage_at_all(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # Nothing read the judgments, so there is no coverage to claim.
+        api = _StubApi([_accused_case(slug="case-skipped")])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run", "--no-verdicts"])
+        assert "ACCUSED VERDICT COVERAGE" not in capsys.readouterr().out
+
+
+def test_the_labelled_set_is_the_size_the_module_docstring_claims():
+    # Nothing imports `entity_labels.jsonl`, so nothing else notices the file
+    # and the claim about it drifting apart. It scores the RESOLVER only --
+    # see the README beside it before reaching for it as a gate.
+    labels = Path(__file__).parent / "fixtures" / "entity_labels.jsonl"
+    rows = [line for line in labels.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+    assert f"{len(rows)}-row" in ere.__doc__
