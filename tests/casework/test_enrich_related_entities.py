@@ -448,18 +448,33 @@ class TestExtractionReadsHeadAndThahar:
         assert filler not in joined
 
     def test_realistic_budget_is_not_clipped(self):
-        # 3,000 press + 6,000 head + 16,000 window = 25,000, the exact hard
-        # max -- proving the union isn't silently clipped back down by
-        # _enforce_prompt_budget would undo the whole point of this task.
-        press = "प" * 3_000
-        head_zone = "क" * 6_000
-        window_zone = "ठहर खण्ड" + "ठ" * 15_992
-        court = head_zone + "फ" * 100_000 + window_zone
+        # The true worst case: press sits AT its cap (so it is not shrunk
+        # further and still contributes its full size), and both
+        # court-order zones are long enough to truncate -- which attaches
+        # their fragment labels, the bytes Fix round 1 found missing from
+        # the brief's arithmetic. A sentinel at the very end of the source
+        # region the thahar window should reach pins the failure mode
+        # directly: `_enforce_prompt_budget` truncates its largest part
+        # from the END, so a silent clip drops this sentinel first.
+        from casework.common import court_order as co
+
+        sentinel = "SENTINEL-END-OF-WINDOW"
+        press = "प" * ere.PRESS_RELEASE_CHARS
+        head_source = "क" * (co.HEAD_CHARS + 1)  # forces head to truncate + label
+        filler = "फ" * 200_000  # pushes the marker well past the head zone
+        window_filler_len = co.THAHAR_CHARS - len(co.THAHAR_MARKER) - len(sentinel)
+        court = (
+            head_source
+            + filler
+            + co.THAHAR_MARKER
+            + ("ठ" * window_filler_len)
+            + sentinel
+        )
         parts = ere._build_content_parts(press, court)
         prompt = ere._enforce_prompt_budget(parts)
-        assert "क" * 6_000 in prompt
-        assert "ठहर खण्ड" in prompt
-        assert "फ" * 100_000 not in prompt
+
+        assert sentinel in prompt, "the thahar window's tail was clipped"
+        assert len(prompt) < ere.PROMPT_HARD_MAX
 
 
 # --------------------------------------------------------------------------

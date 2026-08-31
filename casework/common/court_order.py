@@ -23,7 +23,7 @@ log = logging.getLogger("casework.court_order")
 
 HEAD_CHARS: int = 6_000
 TAIL_CHARS: int = 25_000
-THAHAR_CHARS: int = 16_000
+THAHAR_CHARS: int = 15_500
 THAHAR_MARKER = "ठहर खण्ड"
 
 _HEAD_LABEL = "\n\n[...अदालतको आदेशको सुरुको भाग...]\n\n"
@@ -55,9 +55,9 @@ def court_order_thahar(text: str, limit: int = THAHAR_CHARS, label: bool = True)
     """Return `limit` chars starting at the first `ठहर खण्ड` marker, falling
     back to `court_order_tail` when the marker is absent.
 
-    A repeated mention just past the old 12,000-char window is real lost
-    signal, not noise -- this window is 16,000 so it strictly dominates what
-    the old marker-anchored slice ever saw.
+    15,500 clears PROMPT_HARD_MAX with the two section headers and two
+    fragment labels also counted in, while still dominating the old
+    marker-anchored slice's 12,000-char window -- the bar the A/B measured.
     """
     if not text:
         return ""

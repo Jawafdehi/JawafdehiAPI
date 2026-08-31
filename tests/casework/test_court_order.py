@@ -10,6 +10,7 @@ only 10 of 37 orders. Median order length is 60,842 chars; the longest is
 from casework.common.court_order import (
     HEAD_CHARS,
     TAIL_CHARS,
+    THAHAR_CHARS,
     THAHAR_MARKER,
     court_order_head,
     court_order_tail,
@@ -98,16 +99,16 @@ class TestThaharWindow:
 
     def test_it_takes_limit_chars_forward_from_the_marker(self):
         text = "क" * 1_000 + "ठहर खण्ड" + "ठ" * 40_000
-        got = court_order_thahar(text, limit=16_000, label=False)
-        assert len(got) == 16_000
+        got = court_order_thahar(text, limit=THAHAR_CHARS, label=False)
+        assert len(got) == THAHAR_CHARS
 
     def test_a_document_with_no_marker_falls_back_to_the_tail(self):
         # 078-CR-0042 is a real example: no marker anywhere. The old code fell
         # back to head+tail there too, and that case measured clean.
         text = "क" * 40_000 + "अन्तिम"
-        got = court_order_thahar(text, limit=16_000, label=False)
+        got = court_order_thahar(text, limit=THAHAR_CHARS, label=False)
         assert got.endswith("अन्तिम")
-        assert len(got) == 16_000
+        assert len(got) == THAHAR_CHARS
 
     def test_a_short_document_comes_back_whole(self):
         text = "क" * 100 + "ठहर खण्ड" + "ठ" * 100
