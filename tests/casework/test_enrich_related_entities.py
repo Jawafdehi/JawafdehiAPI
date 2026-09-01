@@ -5141,3 +5141,37 @@ class TestAnAccusedIsNotReboundUnderAnotherSection:
         plan = ere.plan_case_entities(api, case, "etag-1", items)
         assert plan.already_accused == []
         assert [d.nes_id for _n, d, _no, _s in plan.bound] == [other]
+
+
+class TestNoteNameFolding:
+    """The court and the model join compound given names; NES spaces them."""
+
+    @pytest.mark.parametrize("written,bound", [
+        ("रामप्रसाद घिमिरे", "राम प्रसाद घिमिरे"),
+        ("जयराज घिमिरे", "जय राज घिमिरे"),
+        ("चन्द्रकुमार पोखरेल", "चन्द्र कुमार पोखरेल"),
+        ("धर्मराज खड्का", "धर्म राज खड्का"),
+        ("बिष्णुप्रसाद न्यौपाने", "बिष्णु प्रसाद न्यौपाने"),
+    ])
+    def test_a_joined_given_name_matches_its_spaced_bind(self, written, bound):
+        case = _accused_case(outcome="acquitted", display_name=bound)
+        assert ere.accused_note_updates(
+            case, [{"name": written, "notes": ROLE_NOTE}]) == {
+                ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_a_real_spelling_difference_still_does_not_match(self):
+        # बोहरा / बोहोरा differ by a vowel, not a space. Folding that too would
+        # start guessing; this one belongs to a human.
+        case = _accused_case(outcome="acquitted", display_name="प्रशान्त बोहोरा")
+        assert ere.accused_note_updates(
+            case, [{"name": "प्रशान्त बोहरा", "notes": ROLE_NOTE}]) == {}
+
+    def test_a_collision_created_by_the_fold_is_dropped(self):
+        # If two binds fold to one key they are as ambiguous as two binds
+        # sharing a display name, and get the same treatment.
+        case = _accused_case(outcome="acquitted", display_name="राम प्रसाद")
+        case["entities"].append(
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "रामप्रसाद", "outcome": "acquitted", "notes": ""})
+        assert ere.accused_note_updates(
+            case, [{"name": "रामप्रसाद", "notes": ROLE_NOTE}]) == {}

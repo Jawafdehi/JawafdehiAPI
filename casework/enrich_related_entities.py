@@ -788,6 +788,23 @@ def accused_verdict_targets(case):
     return targets, skipped
 
 
+def note_match_key(name):
+    """The key an `accused_notes` name is matched on: `normalise_name` with the
+    spaces taken out.
+
+    SPACES ONLY. Nepali compound given names are written joined by the court and
+    the model, and spaced in NES -- `रामप्रसाद` against `राम प्रसाद` -- and that
+    one difference accounted for 5 of the 6 unmatched notes on 078-CR-0042. It is
+    a spelling convention, not a different person, and removing it is a
+    deterministic fold rather than a similarity score.
+
+    A real vowel difference still does not match: `बोहरा` against `बोहोरा` stays
+    unmatched, which is the right answer. That one needs a human, not a looser
+    rule.
+    """
+    return normalise_name(name).replace(" ", "")
+
+
 def accused_note_updates(case, accused_notes):
     """`{nes_id: {"notes": role}}` from the extraction's `accused_notes`, keyed
     by EXACT display-name match against this case's accused binds.
@@ -802,20 +819,30 @@ def accused_note_updates(case, accused_notes):
     leaves the verdict alone; that function also refuses to overwrite anything
     but an empty or placeholder note, so a human's text is safe.
 
-    Exact match, never fuzzy: a near match staples one defendant's job title
-    onto another, and the accused binds are the rows this module is least
-    entitled to get wrong.
+    Matched on `note_match_key`, never on a similarity score: a near match
+    staples one defendant's job title onto another, and the accused binds are
+    the rows this module is least entitled to get wrong.
     """
     grouped, _skipped = accused_binds_by_name(case)
+    by_key: dict = {}
+    for name, (nes_id, _entity) in grouped.items():
+        by_key.setdefault(note_match_key(name), []).append(nes_id)
+    # Two binds landing on one key is the same ambiguity `accused_binds_by_name`
+    # drops a shared display name for, one fold later -- so drop it the same way
+    # rather than letting the fold introduce a collision the caller never saw.
+    index = {key: ids[0] for key, ids in by_key.items() if len(ids) == 1}
     updates = {}
     for note in (accused_notes or []):
         if not isinstance(note, dict):
             continue
         name = (note.get("name") or "").strip()
         role = (note.get("notes") or "").strip()
-        if not name or not role or name not in grouped:
+        if not name or not role:
             continue
-        updates[grouped[name][0]] = {"notes": role}
+        nes_id = index.get(note_match_key(name))
+        if nes_id is None:
+            continue
+        updates[nes_id] = {"notes": role}
     return updates
 
 
