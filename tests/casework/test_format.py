@@ -125,7 +125,6 @@ class TestFormatEntities:
             [_Rel()],
             {"person/kamal-raj-gautam": {"display_name": "कमल राज गौतम",
                                          "entity_type": "person"}},
-            include_notes=True,
         )
         assert format_entities(binds) == (
             "- [accused] कमल राज गौतम — फैसला: convicted — तत्कालीन प्रमुख")
