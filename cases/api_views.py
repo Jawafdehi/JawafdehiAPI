@@ -778,12 +778,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             case.material_references.values_list("material_iri", flat=True)
         )
 
-        # Build the echo WITH the request context: CaseSerializer gates internal
-        # casework content (the case ``notes`` field and each entity bind's
-        # ``notes``) on ``_viewer_has_casework_access``, which reads
-        # ``context["request"]`` and returns False when there is none. A
-        # context-less serializer therefore blanks every note it just stored, so
-        # the 201 body looks like the notes were dropped.
+        # Build the echo WITH the request context: CaseSerializer gates the
+        # case-level ``notes`` field on ``_viewer_has_casework_access``, which
+        # reads ``context["request"]`` and returns False when there is none. A
+        # context-less serializer therefore blanks the note it just stored, so
+        # the 201 body looks like the note was dropped. (Per-entity bind notes
+        # are public and need no context, but the case-level one does.)
         return Response(
             CaseSerializer(case, context=self.get_serializer_context()).data,
             status=status.HTTP_201_CREATED,

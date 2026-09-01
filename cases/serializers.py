@@ -244,7 +244,10 @@ class CaseSerializer(serializers.ModelSerializer):
 
     entities = serializers.SerializerMethodField(
         help_text="Entity binds for this case (NES entity id, relationship type, "
-        "notes), with display details resolved from NES"
+        "role note), with display details resolved from NES. The per-bind "
+        "``notes`` is PUBLIC — the party's role line, shown beside the name on "
+        "the case page. Not to be confused with the case-level ``notes`` field, "
+        "which is internal."
     )
     notes = serializers.SerializerMethodField(
         help_text="Internal casework notes. Returned only to authenticated "
@@ -282,9 +285,13 @@ class CaseSerializer(serializers.ModelSerializer):
     def get_entities(self, obj):
         """Get the case's entity binds, resolving display details from NES.
 
-        Each entry is ``{nes_id, display_name, entity_type, type, notes}`` where
-        ``type`` is the relationship type. ``display_name``/``entity_type`` come
-        from the NES resolver (``None`` when NES can't resolve the id).
+        Each entry is ``{nes_id, display_name, entity_type, type, outcome, notes}``
+        where ``type`` is the relationship type. ``display_name``/``entity_type``
+        come from the NES resolver (``None`` when NES can't resolve the id).
+
+        The per-bind ``notes`` is the party's PUBLIC role line and is returned to
+        every caller — see ``build_entity_binds``. The case-level ``notes`` field
+        (``get_notes`` above) is a different, internal column and stays gated.
         """
         from cases.services.nes_resolver import build_entity_binds, resolve_entities
 
@@ -296,15 +303,7 @@ class CaseSerializer(serializers.ModelSerializer):
             resolved = self.context.get("resolved_entities")
             if resolved is None:
                 resolved = resolve_entities(rel.nes_id for rel in relationships)
-            # Per-entity relationship notes are internal-only, same as the
-            # case-level notes field (BB-04): expose them to casework roles only.
-            # The shared shaper (build_entity_binds) defaults notes to "" so the
-            # public search-card path can't leak them; we pass include_notes for
-            # casework viewers here.
-            notes_visible = _viewer_has_casework_access(self.context)
-            return build_entity_binds(
-                relationships, resolved, include_notes=notes_visible
-            )
+            return build_entity_binds(relationships, resolved)
         except (ValueError, TypeError, AttributeError) as e:
             logger.error(
                 f"Error serializing entities for case {obj.slug}: {e}",
