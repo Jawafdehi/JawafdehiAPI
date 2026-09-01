@@ -17,6 +17,7 @@ equality -- a drifted clause changes LLM behavior with zero other test failures.
 import ast
 import json
 import logging
+import re
 import subprocess
 import sys
 import types
@@ -26,14 +27,57 @@ import pytest
 
 from casework import enrich_allegations as ea
 from casework.enrich_allegations import (
+    _append_acquittal_line,
     _clamp,
     _extract_allegations,
+    _hedge,
     _parse_allegations_response,
 )
 from tests.casework.fakes import FakeUsage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DONOR_COMMIT = "0321a85"
+
+# The only intended divergence from the donor prompts: the reviewer's
+# `tone.hedge_key_allegations` rule (work/slug-fix/enricher-fix-rules.json).
+# Stated as substitutions so the byte-pin above still catches every OTHER drift.
+SYSTEM_SUBS = [
+    (
+        "10. Follow the established Jawafdehi allegation style (see examples below)",
+        "10. Follow the established Jawafdehi allegation style (see examples below)\n"
+        '11. End with the charge marker "भन्ने आरोप छ।" — a participle clause closed'
+        " by that phrase, so the sentence reads as the CIAA's claim and not as a"
+        " finding of fact",
+    ),
+    (
+        '- End allegations with attribution phrases such as "उल्लेख छ", '
+        '"भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"',
+        '- End allegations with source-attribution phrases such as "उल्लेख छ", '
+        '"भनिएको छ", "जनाइएको छ", or "देखिन्छ" — these attribute the sentence to '
+        "the document rather than to the charge",
+    ),
+    ('गरेको।"', 'गरेको भन्ने आरोप छ।"'),
+    ('पुर्याएको।"', 'पुर्याएको भन्ने आरोप छ।"'),
+    ('लिएको।"', 'लिएको भन्ने आरोप छ।"'),
+]
+
+USER_SUBS = [
+    (
+        '- Do not end any allegation with attribution wording such as "उल्लेख छ", '
+        '"भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"',
+        '- End every allegation with "भन्ने आरोप छ।" — write the act as a participle '
+        'clause and close with that phrase, as in "…गरेको भन्ने आरोप छ।"\n'
+        '- Do not use source-attribution wording such as "उल्लेख छ", "भनिएको छ", '
+        '"जनाइएको छ", or "देखिन्छ"',
+    ),
+]
+
+
+def _apply(text: str, subs) -> str:
+    for old, new in subs:
+        assert old in text, f"donor text no longer contains: {old[:40]}…"
+        text = text.replace(old, new)
+    return text
 
 
 def _donor_source() -> str:
@@ -74,11 +118,26 @@ class TestDonorFidelity:
     silent failure available in these files: it changes LLM behavior with
     zero test failures anywhere else."""
 
-    def test_system_prompt_matches_donor(self, donor):
-        assert ea.SYSTEM_PROMPT == donor["SYSTEM_PROMPT"]
+    def test_system_prompt_is_donor_plus_the_charge_marker_rule(self, donor):
+        assert ea.SYSTEM_PROMPT == _apply(donor["SYSTEM_PROMPT"], SYSTEM_SUBS)
 
-    def test_user_prompt_template_matches_donor(self, donor):
-        assert ea.USER_PROMPT_TEMPLATE == donor["USER_PROMPT_TEMPLATE"]
+    def test_user_prompt_is_donor_plus_the_charge_marker_rule(self, donor):
+        assert ea.USER_PROMPT_TEMPLATE == _apply(
+            donor["USER_PROMPT_TEMPLATE"], USER_SUBS)
+
+    def test_every_reference_example_carries_the_charge_marker(self):
+        block = ea.SYSTEM_PROMPT.split("REFERENCE EXAMPLES", 1)[1]
+        examples = re.findall(r'"([^"]+)"', block, re.S)
+        assert len(examples) == 4
+        for text in examples:
+            assert text.rstrip().endswith(ea.HEDGE.strip())
+
+    def test_the_charge_marker_is_not_banned_as_attribution_wording(self):
+        for prompt in (ea.SYSTEM_PROMPT, ea.USER_PROMPT_TEMPLATE):
+            banlines = [ln for ln in prompt.splitlines() if "उल्लेख छ" in ln]
+            assert banlines
+            for line in banlines:
+                assert '"आरोप छ"' not in line
 
     def test_donor_never_mentions_missing_details(self):
         # Pins the brief-vs-donor finding: the donor source itself never
@@ -94,6 +153,133 @@ class TestDonorFidelity:
 # --------------------------------------------------------------------------
 # _parse_allegations_response
 # --------------------------------------------------------------------------
+
+
+class TestHedge:
+    """`tone.hedge_key_allegations` -- a bare declarative ('…गरेको।') reads as an
+    established fact, so it closes with the CIAA's charge instead. Proven on 10
+    cases / 30 allegations, 2026-08-13 (work/slug-fix/tone-fixes.jsonl)."""
+
+    def test_matra_participle_gets_the_charge_marker(self):
+        assert _hedge("गैरकानूनी सम्पत्ति आर्जन गरेको।") == (
+            "गैरकानूनी सम्पत्ति आर्जन गरेको भन्ने आरोप छ।")
+
+    def test_independent_vowel_participle_gets_the_charge_marker(self):
+        # A /ेको।$/ pattern misses this form and 6 others like it.
+        assert _hedge("राजस्व लुकाएको।") == "राजस्व लुकाएको भन्ने आरोप छ।"
+
+    def test_marker_is_not_applied_twice(self):
+        already = "रकम हिनामिना गरेको भन्ने आरोप छ।"
+        assert _hedge(already) == already
+
+    def test_an_existing_abhiyog_dabi_phrasing_is_left_alone(self):
+        already = "यो अभियोग दाबी विशेष अदालतमा पेस भएको छ।"
+        assert _hedge(already) == already
+
+    def test_non_participle_ending_is_skipped_not_force_suffixed(self):
+        # Force-suffixing a non-participle produces ungrammatical Nepali.
+        plain = "बिगो रु. ५ करोड कायम भएको छ।"
+        assert _hedge(plain) == plain
+
+    def test_trailing_whitespace_does_not_defeat_the_match(self):
+        assert _hedge("पद दुरुपयोग गरेको।  \n") == (
+            "पद दुरुपयोग गरेको भन्ने आरोप छ।")
+
+
+def _accused(name, outcome):
+    return {"nes_id": f"https://jawafdehi.org/entity/person/{name}",
+            "display_name": name, "type": "accused", "outcome": outcome}
+
+
+class TestAppendAcquittalLine:
+    """`tone.append_acquittal_line` -- key_allegations renders standalone on some
+    surfaces, so on a case where the court cleared everyone the field alone reads
+    as an unqualified guilt narrative. The verdict is read from the accused binds'
+    `outcome`, never from the title or the prose."""
+
+    ALLEGATIONS = ["गैरकानूनी सम्पत्ति आर्जन गरेको भन्ने आरोप छ।"]
+
+    def test_sole_acquitted_defendant_gets_the_singular_line(self):
+        detail = {"entities": [_accused("राम", "acquitted")]}
+        out = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        assert len(out) == 2
+        assert out[:1] == self.ALLEGATIONS
+        assert "प्रतिवादीलाई आरोपित कसुरबाट सफाइ दिने ठहर गरेको छ।" in out[1]
+        assert "प्रतिवादीहरूलाई" not in out[1]
+
+    def test_several_acquitted_defendants_get_the_plural_line(self):
+        detail = {"entities": [_accused("राम", "acquitted"),
+                               _accused("श्याम", "acquitted")]}
+        out = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        assert "प्रतिवादीहरूलाई आरोपित कसुरबाट सफाइ दिने ठहर गरेको छ।" in out[1]
+
+    def test_the_line_names_the_ciaa_claim_and_the_special_court(self):
+        detail = {"entities": [_accused("राम", "acquitted")]}
+        line = _append_acquittal_line(detail, list(self.ALLEGATIONS))[1]
+        assert line.startswith("माथि उल्लिखित कुराहरू अख्तियार दुरुपयोग अनुसन्धान आयोगको अभियोग दाबी हुन्;")
+        assert "विशेष अदालतले उक्त दाबी पुग्न नसकी" in line
+
+    def test_a_mixed_verdict_is_left_alone(self):
+        # A partial conviction: appending a blanket acquittal would be false.
+        detail = {"entities": [_accused("राम", "acquitted"),
+                               _accused("श्याम", "convicted")]}
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+
+    def test_an_undecided_case_is_left_alone(self):
+        # 4 of the 10 cases the rule was proven on sat at `charged`.
+        detail = {"entities": [_accused("राम", "charged")]}
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+
+    def test_a_missing_outcome_is_left_alone(self):
+        detail = {"entities": [{"display_name": "राम", "type": "accused"}]}
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+
+    def test_an_abated_co_defendant_blocks_the_line(self):
+        detail = {"entities": [_accused("राम", "acquitted"),
+                               _accused("श्याम", "abated")]}
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+
+    def test_a_case_with_no_accused_bind_is_left_alone(self):
+        detail = {"entities": [{"display_name": "झापा", "type": "location"}]}
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+
+    def test_an_outcome_on_a_non_accused_row_does_not_count(self):
+        # `outcome` is meaningful only on an accused bind (cases.models
+        # RelationshipOutcome); a stray value elsewhere must not decide a verdict.
+        detail = {"entities": [_accused("राम", "charged"),
+                               dict(_accused("संस्था", "acquitted"), type="related")]}
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+
+    def test_list_shaped_detail_without_entities_is_left_alone(self):
+        # The donor-preserved get_case-failure fallback hands main() a LIST-shaped
+        # case, which carries no entity binds. No binds, no verdict, no line.
+        assert _append_acquittal_line({}, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+
+    def test_an_existing_safai_entry_is_not_duplicated(self):
+        detail = {"entities": [_accused("राम", "acquitted")]}
+        already = list(self.ALLEGATIONS) + ["अदालतले सफाइ दिएको छ।"]
+        assert _append_acquittal_line(detail, list(already)) == already
+
+    def test_the_other_safai_spelling_also_blocks_the_line(self):
+        detail = {"entities": [_accused("राम", "acquitted")]}
+        already = list(self.ALLEGATIONS) + ["अदालतले सफाई दिएको छ।"]
+        assert _append_acquittal_line(detail, list(already)) == already
+
+    def test_running_twice_appends_only_once(self):
+        detail = {"entities": [_accused("राम", "acquitted")]}
+        once = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        assert _append_acquittal_line(detail, list(once)) == once
+
+    def test_a_malformed_entity_row_does_not_crash_the_case(self):
+        detail = {"entities": ["not-a-dict", _accused("राम", "acquitted")]}
+        out = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        assert len(out) == 2
+
+    def test_the_input_list_is_not_mutated(self):
+        detail = {"entities": [_accused("राम", "acquitted")]}
+        allegations = list(self.ALLEGATIONS)
+        _append_acquittal_line(detail, allegations)
+        assert allegations == self.ALLEGATIONS
 
 
 class TestParseAllegationsResponse:
@@ -125,6 +311,11 @@ class TestParseAllegationsResponse:
     def test_strips_whitespace_from_each_allegation(self):
         body = json.dumps({"allegations": ["  आरोप एक  "]})
         assert _parse_allegations_response(body) == ["आरोप एक"]
+
+    def test_bare_declarative_allegations_are_hedged_on_the_way_out(self):
+        body = json.dumps({"allegations": ["सार्वजनिक सम्पत्ति हानि नोक्सानी पुर्याएको।"]})
+        assert _parse_allegations_response(body) == [
+            "सार्वजनिक सम्पत्ति हानि नोक्सानी पुर्याएको भन्ने आरोप छ।"]
 
     def test_fenced_json_is_parsed(self):
         body = (
@@ -444,6 +635,80 @@ def test_apply_patches_key_allegations(monkeypatch, patched_fetch_markdown):
     assert report.rows[0]["status"] == "enriched"
     assert api.patched == [
         ("case-ready", "key_allegations", ["पहिलो आरोप।", "दोस्रो आरोप।"])]
+
+
+# An acquitted-on-all-counts case, entity binds included. Only the DETAIL
+# response carries `entities`, which is what `_append_acquittal_line` reads.
+PRESS_CASE_ACQUITTED_DETAIL = dict(
+    PRESS_CASE_READY,
+    entities=[
+        {"nes_id": "https://jawafdehi.org/entity/person/hem-raj-bista",
+         "display_name": "हेमराज बिष्ट", "type": "accused", "outcome": "acquitted"},
+        {"nes_id": "https://jawafdehi.org/entity/district/jhapa-np0104",
+         "display_name": "झापा", "type": "location"},
+    ],
+)
+
+PRESS_CASE_CONVICTED_DETAIL = dict(
+    PRESS_CASE_READY,
+    entities=[
+        {"nes_id": "https://jawafdehi.org/entity/person/hem-raj-bista",
+         "display_name": "हेमराज बिष्ट", "type": "accused", "outcome": "convicted"},
+    ],
+)
+
+
+def test_apply_appends_the_acquittal_line_when_the_court_cleared_everyone(
+    monkeypatch, patched_fetch_markdown
+):
+    response = json.dumps({"allegations": ["पहिलो आरोप गरेको।"]})
+    api = _StubApi(
+        [PRESS_CASE_READY],
+        detail_overrides={"case-ready": PRESS_CASE_ACQUITTED_DETAIL},
+    )
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--apply"],
+    )
+    (_, _, patched), = api.patched
+    assert patched == [
+        "पहिलो आरोप गरेको भन्ने आरोप छ।",
+        "माथि उल्लिखित कुराहरू अख्तियार दुरुपयोग अनुसन्धान आयोगको अभियोग दाबी हुन्; "
+        "विशेष अदालतले उक्त दाबी पुग्न नसकी प्रतिवादीलाई आरोपित कसुरबाट सफाइ दिने "
+        "ठहर गरेको छ।",
+    ]
+
+
+def test_apply_does_not_append_the_acquittal_line_on_a_conviction(
+    monkeypatch, patched_fetch_markdown
+):
+    response = json.dumps({"allegations": ["पहिलो आरोप गरेको।"]})
+    api = _StubApi(
+        [PRESS_CASE_READY],
+        detail_overrides={"case-ready": PRESS_CASE_CONVICTED_DETAIL},
+    )
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--apply"],
+    )
+    (_, _, patched), = api.patched
+    assert patched == ["पहिलो आरोप गरेको भन्ने आरोप छ।"]
+
+
+def test_dry_run_reports_the_acquittal_line_it_would_write(
+    monkeypatch, patched_fetch_markdown
+):
+    # The dry-run ledger is how a run is audited before --apply, so the line has
+    # to be visible there, not added later on the write path.
+    response = json.dumps({"allegations": ["पहिलो आरोप गरेको।"]})
+    api = _StubApi(
+        [PRESS_CASE_READY],
+        detail_overrides={"case-ready": PRESS_CASE_ACQUITTED_DETAIL},
+    )
+    report = _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--dry-run"],
+    )
+    assert report.rows[0]["status"] == "would-enrich"
+    assert "सफाइ दिने ठहर गरेको छ।" in report.rows[0]["reason"]
+    assert api.patched == []
 
 
 def test_only_key_allegations_field_is_ever_patched(monkeypatch, patched_fetch_markdown):
