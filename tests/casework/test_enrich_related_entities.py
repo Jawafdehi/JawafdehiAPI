@@ -1667,10 +1667,11 @@ def test_strict_downgrades_a_bind_to_review_when_the_document_is_an_election_rec
     assert api.get_entity_calls == [ANKUR_IRI]
 
 
-def test_permissive_binds_an_election_record_and_records_the_overridden_veto():
-    # The default mode overrides this veto -- that is the requested behaviour --
-    # but the bind must carry WHY, so the run's binds.jsonl can be filtered back
-    # down to exactly the judgement calls.
+def test_permissive_does_not_bind_an_election_record():
+    # NOT promotable, even in permissive mode. NES holds the bulk ECN candidate
+    # rolls, so a name match against one carries no information: 5 of 5 wrong in
+    # the 2026-08-13 review, 12 of 12 on the FY078/079 batch. Permissive mode
+    # accepts uncertainty ABOUT a match; this is a match with nothing behind it.
     case = {"slug": "case-elect", "state": "DRAFT", "entities": []}
     election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
     api = _SearchStubApi(
@@ -1678,21 +1679,20 @@ def test_permissive_binds_an_election_record_and_records_the_overridden_veto():
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
 
-    assert plan.action == "WOULD_PATCH"
-    assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
-    assert plan.review == []
-    _name, decision, _notes, _section = plan.bound[0]
-    assert decision.nes_id == ANKUR_IRI
-    assert is_promoted(decision)
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    _name, decision, _section = plan.review[0]
+    assert decision.nes_id is None
     assert "Election Commission" in decision.reason
 
 
-def test_a_doubly_uncertain_bind_records_both_vetoes_it_overrode():
+def test_a_doubly_vetoed_name_records_both_reasons():
     # `apply_document_veto` REPLACES the reason, so a name that was ambiguous AND
     # turned out to be an election record used to end up recorded as only the
-    # second. `*.binds.jsonl` is the whole audit trail for permissive mode -- the
-    # file a caseworker filters to find the judgement calls -- so it must not
-    # under-report how uncertain a bind was.
+    # second. The carry-forward still has to hold now that the election veto
+    # refuses rather than promotes -- the review row is what a caseworker reads,
+    # and it must not under-report how uncertain the name was.
     election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
     case = {"slug": "case-both", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]},
@@ -1700,9 +1700,8 @@ def test_a_doubly_uncertain_bind_records_both_vetoes_it_overrode():
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"}])
 
-    _name, decision, _notes, _section = plan.bound[0]
-    assert decision.nes_id == ANISH_A["id"]
-    assert is_promoted(decision)
+    assert plan.bound == []
+    _name, decision, _section = plan.review[0]
     assert "Election Commission" in decision.reason   # the second veto
     assert "ambiguous" in decision.reason             # the first, no longer lost
 
@@ -5242,3 +5241,84 @@ def test_the_variant_fold_collides_no_two_accused_on_any_production_case():
     ]
     for a, b in different_people:
         assert ere.note_match_key(a) != ere.note_match_key(b), (a, b)
+
+
+# ---------------------------------------------------------------------------
+# enricher-fix-rules.json: entity.drop_duplicate_location_org and
+# entity.reject_ecn_candidate_binds.
+# ---------------------------------------------------------------------------
+
+KANCHANPUR_CODED = "https://jawafdehi.org/entity/location/district/kanchanpur-np0772"
+KANCHANPUR_BARE = "https://jawafdehi.org/entity/location/kanchanpur"
+
+
+class TestAGazetteerTwinIsNotBoundAlongsideItsCodedRecord:
+    """NES holds कञ्चनपुर twice. `resolve` drops the bare twin; this pins that
+    `qualifying_binds` does not put it back."""
+
+    @staticmethod
+    def _api(case):
+        return _SearchStubApi([case], {"कञ्चनपुर": [
+            {"id": KANCHANPUR_CODED, "title": {"ne": "कञ्चनपुर"}, "score": 180.0},
+            {"id": KANCHANPUR_BARE, "title": {"ne": "कञ्चनपुर"}, "score": 180.0}]})
+
+    @staticmethod
+    def _items():
+        return [{"entity_name": "कञ्चनपुर", "relationship_type": "location",
+                 "entity_prefix": "location/district", "entity_type": "Place",
+                 "is_named_entity": True, "name_en": "Kanchanpur",
+                 "notes": "कसुर भएको जिल्ला"}]
+
+    def test_only_the_coded_record_binds(self):
+        case = {"slug": "case-kanchanpur", "state": "DRAFT", "entities": []}
+        plan = plan_case_entities(self._api(case), case, 'W/"e"', self._items())
+        assert [i["nes_id"] for i in plan.patch_items] == [KANCHANPUR_CODED]
+
+    def test_the_dropped_twin_still_reaches_the_report(self):
+        # `candidates` is the audit trail -- narrowing the BIND must not hide
+        # that NES holds the place twice.
+        case = {"slug": "case-kanchanpur-2", "state": "DRAFT", "entities": []}
+        plan = plan_case_entities(self._api(case), case, 'W/"e"', self._items())
+        _name, decision, _notes, _section = plan.bound[0]
+        assert KANCHANPUR_BARE in {c[1] for c in decision.candidates}
+
+    def test_a_person_with_two_candidates_still_binds_both(self):
+        # The narrowing keys on the winner being a coded place, so it must not
+        # touch the person fan-out that `qualifying_binds` exists for.
+        a = "https://jawafdehi.org/entity/person/anish-shrestha-1"
+        b = "https://jawafdehi.org/entity/person/anish-shrestha-2"
+        case = {"slug": "case-person-fanout", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [
+            {"id": a, "title": {"ne": "अनिष श्रेष्ठ"}, "score": 180.0},
+            {"id": b, "title": {"ne": "अनिष श्रेष्ठ"}, "score": 180.0}]})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "entity_prefix": "person", "entity_type": "Person",
+             "is_named_entity": True, "name_en": "", "notes": "क"}])
+        assert {i["nes_id"] for i in plan.patch_items} == {a, b}
+
+
+class TestElectionRecordsAreNeverPromoted:
+    ELECTION_DOC = {"identifier": [
+        {"propertyID": "ecn-candidate-id", "value": "187623"}]}
+
+    def test_strict_and_permissive_agree_on_an_election_record(self):
+        # The one veto where the two modes must NOT differ.
+        case = {"slug": "case-ecn-modes", "state": "DRAFT", "entities": []}
+        items = [{"entity_name": "अंकुर खत्री", "relationship_type": "related",
+                  "notes": "क"}]
+        for strict in (False, True):
+            api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]},
+                                 documents={ANKUR_IRI: self.ELECTION_DOC})
+            plan = plan_case_entities(api, case, 'W/"e"', items, strict=strict)
+            assert plan.bound == [], f"bound under strict={strict}"
+
+    def test_a_clean_document_still_promotes_an_ambiguity(self):
+        # Only the election veto became absolute. The ambiguity promotion that
+        # permissive mode exists for must survive.
+        case = {"slug": "case-still-promotes", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        assert plan.bound, "a clean ambiguity must still promote"

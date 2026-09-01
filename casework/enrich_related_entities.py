@@ -161,6 +161,8 @@ from casework.entity_resolver import (
     Decision,
     _name_vetoes,
     apply_document_veto,
+    is_election_candidate_record,
+    names_a_gazetteer_place,
     normalise_name,
     resolve,
 )
@@ -1286,6 +1288,20 @@ def qualifying_binds(decision):
         return []
     qualifying = [c for c in (decision.candidates or ())
                   if c[0] >= MIN_BIND_SCORE]
+    # THE GAZETTEER NARROWING HAS TO SURVIVE THIS FUNCTION. `resolve` already
+    # drops the un-coded twin of a district or province -- NES holds `कञ्चनपुर`
+    # as both `location/district/kanchanpur-np0772` and a bare
+    # `location/kanchanpur` -- but it keeps every candidate in `candidates` so
+    # the report can still show the twin. Re-deriving the bind set from that
+    # tuple put the twin straight back, and 079-CR-0122 and 079-CR-0156 each
+    # carried कञ्चनपुर twice in production because of it.
+    #
+    # Keyed on the WINNER being coded, which is the same condition `resolve`
+    # narrowed under, and false for every person and organisation IRI. Two coded
+    # entries never reach here: `resolve` calls that ambiguous and reviews it,
+    # which is what the two Miklajung rural municipalities need.
+    if names_a_gazetteer_place(decision.nes_id):
+        qualifying = [c for c in qualifying if names_a_gazetteer_place(c[1])]
     if not qualifying:
         return [decision]
     return [Decision(BIND, nes_id, score, matched,
@@ -1374,7 +1390,20 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     # not -- one 403 or 502 would bind whichever namesake happened to sort first,
     # with nothing having actually been matched against. Distinguished by whether
     # the document came back, never by parsing the veto's reason text.
-    if not strict and readable:
+    # NEITHER IS AN ELECTION-CANDIDATE RECORD, and that one is a measured call
+    # rather than a principle. NES holds the bulk Election Commission candidate
+    # rolls -- 1,542 people named विजय दास, 1,877 named मोहन अधिकारी -- so a
+    # name match against one carries no information at all. Every promoted
+    # election bind anyone has checked was wrong: 5 of 5 in the 2026-08-13
+    # review (`work/slug-fix/enricher-fix-rules.json`,
+    # `entity.reject_ecn_candidate_binds`) and 12 of 12 on the FY078/079 batch
+    # of 2026-09-01, where a Standards Department lab officer and a CIAA
+    # investigating officer were each bound to five defeated local candidates.
+    #
+    # Read from the document, never from the veto's reason text, for the same
+    # reason the unreadable branch is: reason strings are for humans.
+    election_record = readable and is_election_candidate_record(document)
+    if not strict and readable and not election_record:
         decision = _promote_top_candidate(decision)
     return decision
 
