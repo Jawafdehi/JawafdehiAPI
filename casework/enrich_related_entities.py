@@ -788,21 +788,65 @@ def accused_verdict_targets(case):
     return targets, skipped
 
 
+#: Devanagari vowel signs. `NOTE_VARIANTS` folds the ones that only ever mark a
+#: spelling convention; this set is what the second matching pass may insert or
+#: drop, and nothing else.
+MATRAS = frozenset("ािीुूृॄॅॆेैॉॊोौ")
+
+#: Spellings of one Nepali name that are never two different people. Measured
+#: over the 2,860 accused binds in FY076-079: folding these merges 13 name pairs,
+#: every one of them the same person (`बिकास`/`विकास`, `घनश्याम दुबे`/`दुवे`,
+#: `हरिशंकर`/`हरीशंकर`), and collides no two accused anywhere in the corpus.
+#:
+#: DROPPING ALL MATRAS WAS MEASURED AND REJECTED. It additionally merges
+#: `सरोज`/`सुरज`, `मिना`/`मुना`, `हरि`/`हिरा` and `राजकुमार साह`/`राजकुमार सिंह` --
+#: different people every time.
+NOTE_VARIANTS = str.maketrans({
+    "ी": "ि", "ू": "ु", "ई": "इ", "ऊ": "उ",     # vowel length
+    "ब": "व", "श": "स", "ष": "स", "ण": "न",     # ba/va, sibilants, retroflex n
+})
+
+
 def note_match_key(name):
-    """The key an `accused_notes` name is matched on: `normalise_name` with the
-    spaces taken out.
+    """The key an `accused_notes` name is matched on.
 
-    SPACES ONLY. Nepali compound given names are written joined by the court and
-    the model, and spaced in NES -- `रामप्रसाद` against `राम प्रसाद` -- and that
-    one difference accounted for 5 of the 6 unmatched notes on 078-CR-0042. It is
-    a spelling convention, not a different person, and removing it is a
-    deterministic fold rather than a similarity score.
+    `normalise_name`, spaces removed, `NOTE_VARIANTS` applied. Two folds, both
+    deterministic, neither a similarity score:
 
-    A real vowel difference still does not match: `बोहरा` against `बोहोरा` stays
-    unmatched, which is the right answer. That one needs a human, not a looser
-    rule.
+    SPACES, because Nepali compound given names are written joined by the court
+    and the model and spaced in NES -- `रामप्रसाद` against `राम प्रसाद`. That one
+    difference accounted for 5 of the 6 unmatched notes on 078-CR-0042.
+
+    VARIANT LETTERS, because `बिकास` and `विकास` are one person spelled two ways.
     """
-    return normalise_name(name).replace(" ", "")
+    return normalise_name(name).translate(NOTE_VARIANTS).replace(" ", "")
+
+
+def is_matra_variant(a, b):
+    """True when `a` and `b` differ by at most ONE inserted or dropped matra.
+
+    For `बोहरा` against `बोहोरा`, which `note_match_key` cannot reach: the
+    difference is an inserted vowel sign, not a substituted one.
+
+    THIS RULE IS NOT SAFE ON ITS OWN and is never used on its own. `दल` and `दिल`
+    also differ by one inserted matra and are different people, so
+    `accused_note_updates` runs it ONLY after an exact key match found nothing,
+    and only accepts a single candidate. What makes that sound is measured, not
+    assumed: across the 2,860 accused binds in FY076-079 no two accused on the
+    SAME case fall within one matra of each other, so the relaxed pass has no
+    pair to confuse. A future case that breaks that holds two candidates and is
+    refused rather than guessed at.
+
+    Insertion only, never substitution -- `सरोज`/`सुरज` move a matra rather than
+    add one, which is two edits here and stays unmatched.
+    """
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) != 1:
+        return False
+    longer, shorter = (a, b) if len(a) > len(b) else (b, a)
+    return any(longer[i] in MATRAS and longer[:i] + longer[i + 1:] == shorter
+               for i in range(len(longer)))
 
 
 def accused_note_updates(case, accused_notes):
@@ -839,9 +883,15 @@ def accused_note_updates(case, accused_notes):
         role = (note.get("notes") or "").strip()
         if not name or not role:
             continue
-        nes_id = index.get(note_match_key(name))
+        key = note_match_key(name)
+        nes_id = index.get(key)
         if nes_id is None:
-            continue
+            # SECOND PASS, and only ever second. See `is_matra_variant` for why
+            # it may not run first and why a tie is refused rather than broken.
+            near = [i for k, i in index.items() if is_matra_variant(key, k)]
+            if len(near) != 1:
+                continue
+            nes_id = near[0]
         updates[nes_id] = {"notes": role}
     return updates
 

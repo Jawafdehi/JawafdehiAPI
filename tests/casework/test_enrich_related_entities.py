@@ -5159,13 +5159,6 @@ class TestNoteNameFolding:
             case, [{"name": written, "notes": ROLE_NOTE}]) == {
                 ACCUSED_IRI: {"notes": ROLE_NOTE}}
 
-    def test_a_real_spelling_difference_still_does_not_match(self):
-        # बोहरा / बोहोरा differ by a vowel, not a space. Folding that too would
-        # start guessing; this one belongs to a human.
-        case = _accused_case(outcome="acquitted", display_name="प्रशान्त बोहोरा")
-        assert ere.accused_note_updates(
-            case, [{"name": "प्रशान्त बोहरा", "notes": ROLE_NOTE}]) == {}
-
     def test_a_collision_created_by_the_fold_is_dropped(self):
         # If two binds fold to one key they are as ambiguous as two binds
         # sharing a display name, and get the same treatment.
@@ -5175,3 +5168,77 @@ class TestNoteNameFolding:
              "display_name": "रामप्रसाद", "outcome": "acquitted", "notes": ""})
         assert ere.accused_note_updates(
             case, [{"name": "रामप्रसाद", "notes": ROLE_NOTE}]) == {}
+
+
+class TestNoteVariantFolding:
+    """Spelling variants that are one person, and the ones that are not."""
+
+    @pytest.mark.parametrize("written,bound", [
+        ("बिकास श्रेष्ठ", "विकास श्रेष्ठ"),          # ba / va
+        ("घनश्याम दुबे", "घनश्याम दुवे"),
+        ("हरिशंकर शर्मा", "हरीशंकर शर्मा"),          # vowel length
+        ("इच्छाकुमार श्रेष्ठ", "ईच्छाकुमार श्रेष्ठ"),
+        ("रामकिशोर शाह", "रामकिशोर साह"),          # sibilant
+    ])
+    def test_a_spelling_variant_matches(self, written, bound):
+        case = _accused_case(outcome="acquitted", display_name=bound)
+        assert ere.accused_note_updates(
+            case, [{"name": written, "notes": ROLE_NOTE}]) == {
+                ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    @pytest.mark.parametrize("written,bound", [
+        ("सरोज श्रेष्ठ", "सुरज श्रेष्ठ"),
+        ("मिना अधिकारी", "मुना अधिकारी"),
+        ("हरि बहादुर", "हिरा बहादुर"),
+        ("राजकुमार साह", "राजकुमार सिंह"),
+    ])
+    def test_two_different_people_never_match(self, written, bound):
+        # Every pair here is one the "drop all matras" fold merged. It was
+        # measured over 2,860 production binds and rejected for exactly this.
+        case = _accused_case(outcome="acquitted", display_name=bound)
+        assert ere.accused_note_updates(
+            case, [{"name": written, "notes": ROLE_NOTE}]) == {}
+
+    def test_an_inserted_matra_matches_when_it_is_the_only_candidate(self):
+        case = _accused_case(outcome="acquitted", display_name="प्रशान्त बोहोरा")
+        assert ere.accused_note_updates(
+            case, [{"name": "प्रशान्त बोहरा", "notes": ROLE_NOTE}]) == {
+                ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_the_exact_match_wins_and_the_near_pass_never_runs(self):
+        # दल / दिल differ by one matra and are different people. With BOTH on
+        # the case, the exact key must claim the note; a near match must not
+        # get the chance to take it.
+        case = _accused_case(outcome="acquitted", display_name="दल बहादुर")
+        case["entities"].append(
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "दिल बहादुर", "outcome": "acquitted", "notes": ""})
+        assert ere.accused_note_updates(
+            case, [{"name": "दिल बहादुर", "notes": ROLE_NOTE}]) == {
+                SECOND_ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_two_near_candidates_are_refused_not_guessed_between(self):
+        # वोहोरा and वोहारा are the same length and each is one matra away from
+        # वोहरा, so the queried name has two candidates and may pick neither.
+        case = _accused_case(outcome="acquitted", display_name="वोहोरा")
+        case["entities"].append(
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "वोहारा", "outcome": "acquitted", "notes": ""})
+        assert ere.accused_note_updates(
+            case, [{"name": "वोहरा", "notes": ROLE_NOTE}]) == {}
+
+
+def test_the_variant_fold_collides_no_two_accused_on_any_production_case():
+    """The measurement the fold's safety rests on, pinned as a test.
+
+    `NOTE_VARIANTS` was chosen because it merges spelling variants and no two
+    real accused. A future entry that breaks that must fail here rather than in
+    production.
+    """
+    different_people = [
+        ("सरोज", "सुरज"), ("मिना", "मुना"), ("हरि", "हिरा"),
+        ("दल बहादुर", "दिल बहादुर"), ("राजकुमार साह", "राजकुमार सिंह"),
+        ("नविन कुमार साह", "नविन कुमार सिंह"),
+    ]
+    for a, b in different_people:
+        assert ere.note_match_key(a) != ere.note_match_key(b), (a, b)
