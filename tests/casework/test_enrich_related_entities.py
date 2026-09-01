@@ -4957,3 +4957,187 @@ class TestVerdictCoverageEpilogue:
         _run_main(monkeypatch, api, invoke_text_stub=stub,
                   argv=["--dry-run"])
         assert "ACCUSED VERDICT COVERAGE" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Accused role notes reach a settled case, and a defendant is not re-bound
+# under a lesser section.
+# ---------------------------------------------------------------------------
+
+ROLE_NOTE = "तत्कालीन प्रबन्ध निर्देशक, नेपाल टेलिकम"
+
+
+def _notes_response(name="राम बहादुर", role=ROLE_NOTE, entities=()):
+    return json.dumps({"entities": list(entities),
+                       "accused_notes": [{"name": name, "notes": role}]},
+                      ensure_ascii=False)
+
+
+class TestAccusedNoteUpdates:
+    """`accused_note_updates` -- the mapping, in isolation."""
+
+    def test_a_settled_bind_still_gets_its_note(self):
+        case = _accused_case(outcome="acquitted")
+        updates = ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": ROLE_NOTE}])
+        assert updates == {ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_no_outcome_key_is_ever_produced(self):
+        # The whole safety story: `apply_accused_updates` only writes an
+        # outcome it is handed, so absence is what protects the verdict.
+        case = _accused_case(outcome="convicted")
+        updates = ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": ROLE_NOTE}])
+        assert "outcome" not in updates[ACCUSED_IRI]
+
+    def test_namesakes_are_both_skipped(self):
+        case = _accused_case(extra_entities=[
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "राम बहादुर", "outcome": "acquitted", "notes": ""}])
+        assert ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": ROLE_NOTE}]) == {}
+
+    def test_a_name_no_bind_carries_is_dropped(self):
+        case = _accused_case()
+        assert ere.accused_note_updates(
+            case, [{"name": "श्याम बहादुर", "notes": ROLE_NOTE}]) == {}
+
+    def test_a_blank_role_is_not_written(self):
+        case = _accused_case()
+        assert ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": "   "}]) == {}
+
+    def test_junk_rows_do_not_raise(self):
+        case = _accused_case()
+        assert ere.accused_note_updates(case, ["nope", None, {}]) == {}
+
+
+class TestAccusedVerdictTargetsAfterTheSplit:
+    """The settled filter must stay on the VERDICT path, not the shared one."""
+
+    def test_the_verdict_path_still_skips_a_settled_bind(self):
+        targets, skipped = ere.accused_verdict_targets(
+            _accused_case(outcome="acquitted"))
+        assert targets == {}
+        assert "terminal outcome" in skipped[0][2]
+
+    def test_the_shared_grouping_does_not(self):
+        grouped, skipped = ere.accused_binds_by_name(
+            _accused_case(outcome="acquitted"))
+        assert list(grouped) == ["राम बहादुर"]
+        assert skipped == []
+
+
+class TestNotesReachASettledCase:
+    """End to end: the case the verdict gate refuses still gets its notes."""
+
+    def test_a_fully_settled_case_gets_notes_without_verdicts(
+            self, monkeypatch, patched_fetch_markdown):
+        case = _accused_case(outcome="acquitted")
+        api = _SearchStubApi([case])
+        stub = _two_call_stub(entity_response=_notes_response())
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        # The gate refused the case, so no judgment was read...
+        assert stub.verdict_calls == []
+        # ...and the note landed anyway.
+        _slug, _path, items, _etag = api.replace_list_calls[0]
+        written = [i for i in items if i["nes_id"] == ACCUSED_IRI]
+        assert written[0]["notes"] == ROLE_NOTE
+
+    def test_the_verdict_survives_the_note_write(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply"])
+        _slug, _path, items, _etag = api.replace_list_calls[0]
+        # `outcome` is omitted entirely, which is what makes the server keep it.
+        assert all("outcome" not in i for i in items)
+
+    def test_notes_do_not_need_the_verdicts_flag(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply"])
+        _slug, _path, items, _etag = api.replace_list_calls[0]
+        assert [i for i in items if i["nes_id"] == ACCUSED_IRI][0]["notes"] == ROLE_NOTE
+
+    def test_a_human_written_note_is_never_overwritten(
+            self, monkeypatch, patched_fetch_markdown):
+        human = "यो मानिसको भूमिका हातले लेखिएको"
+        api = _SearchStubApi([_accused_case(outcome="acquitted", notes=human)])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply"])
+        assert api.replace_list_calls == []
+
+    def test_a_verdict_role_note_wins_over_an_extracted_one(
+            self, monkeypatch, patched_fetch_markdown):
+        # The judgment's own wording is the better source; the extraction's job
+        # title only fills a gap it leaves.
+        api = _SearchStubApi([_accused_case(outcome="charged")])
+        stub = _two_call_stub(entity_response=_notes_response(),
+                              verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        _slug, _path, items, _etag = api.replace_list_calls[0]
+        note = [i for i in items if i["nes_id"] == ACCUSED_IRI][0]["notes"]
+        assert note == "तत्कालीन सचिव, अर्थ मन्त्रालय — घूस लिने"
+
+
+class TestAnAccusedIsNotReboundUnderAnotherSection:
+    """The extraction is told not to name defendants; this is what happens when
+    it does it anyway."""
+
+    @staticmethod
+    def _extracted(section):
+        return json.dumps({"entities": [
+            {"entity_name": "राम बहादुर", "relationship_type": section,
+             "entity_prefix": "person", "entity_type": "Person",
+             "is_named_entity": True, "name_en": "Ram Bahadur",
+             "notes": "सम्बद्ध"}], "accused_notes": []}, ensure_ascii=False)
+
+    def _api(self, case):
+        return _SearchStubApi([case], {
+            "राम बहादुर": [{"id": ACCUSED_IRI, "title": {"ne": "राम बहादुर"},
+                             "score": 180.0}]})
+
+    def test_a_defendant_relabelled_related_is_refused(
+            self, monkeypatch, patched_fetch_markdown):
+        api = self._api(_accused_case(outcome="acquitted"))
+        _run_main(monkeypatch, api,
+                  invoke_text_stub=lambda **kw: self._extracted("related"),
+                  argv=["--apply"])
+        assert api.replace_list_calls == []
+
+    def test_a_defendant_relabelled_alleged_is_refused(
+            self, monkeypatch, patched_fetch_markdown):
+        api = self._api(_accused_case(outcome="acquitted"))
+        _run_main(monkeypatch, api,
+                  invoke_text_stub=lambda **kw: self._extracted("alleged"),
+                  argv=["--apply"])
+        assert api.replace_list_calls == []
+
+    def test_the_refusal_is_recorded_on_the_plan(self):
+        case = _accused_case(outcome="acquitted")
+        api = self._api(case)
+        plan = ere.plan_case_entities(
+            api, case, "etag-1",
+            json.loads(self._extracted("related"))["entities"])
+        assert plan.action == "NOOP"
+        assert [(n, sec) for n, sec, _ in plan.already_accused] == [
+            ("राम बहादुर", "related")]
+        assert plan.bound == []
+
+    def test_a_non_defendant_still_binds(self):
+        # The guard must key on THIS case's accused, not on being a person.
+        case = _accused_case(outcome="acquitted")
+        other = "https://jawafdehi.org/entity/person/nani-kaji-thapa"
+        api = _SearchStubApi([case], {
+            "नानी काजी थापा": [{"id": other, "title": {"ne": "नानी काजी थापा"},
+                                 "score": 180.0}]})
+        items = [{"entity_name": "नानी काजी थापा", "relationship_type": "alleged",
+                  "entity_prefix": "person", "entity_type": "Person",
+                  "is_named_entity": True, "name_en": "", "notes": "उल्लेख"}]
+        plan = ere.plan_case_entities(api, case, "etag-1", items)
+        assert plan.already_accused == []
+        assert [d.nes_id for _n, d, _no, _s in plan.bound] == [other]
