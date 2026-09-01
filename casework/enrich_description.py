@@ -91,15 +91,16 @@ from casework.common.pipeline import (
 from casework.common.review import ReviewRow, build_review_file
 from casework.common.select import court_number, select_for_run
 
-# `summarize_verdict` and its four donor-pinned constants are imported from the
-# timeline enricher rather than re-copied. The donor kept them in the shared
-# `casework/common.py`; on `main` they landed in `enrich_timeline.py` only
-# because that was the sole enricher in their porting task's scope, and
-# `tests/casework/test_enrich_timeline.py` now asserts each constant against
-# the donor source. A second copy here would be four more numbers free to
-# drift from that pin. Their proper home is `casework/common/`; moving them is
-# a separate change, not this port's business.
-from casework.enrich_timeline import (
+# `summarize_verdict` and its donor-pinned constants live in
+# `casework/common/court_order.py`, imported from there rather than re-copied.
+# The donor kept them in the shared `casework/common.py`; they landed in
+# `enrich_timeline.py` only because that was the sole enricher in their
+# porting task's scope, then moved to their proper home in
+# `casework/common/court_order.py` so a third enricher would not have to reach
+# across an unrelated module to find them. `enrich_timeline.py` re-exports the
+# same names so `tests/casework/test_enrich_timeline.py`'s donor pins keep
+# testing the same values through its namespace.
+from casework.common.court_order import (
     VERDICT_SUMMARY_TARGET,
     VERDICT_SUMMARY_TRIGGER,
     summarize_verdict,

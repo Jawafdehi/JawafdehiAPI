@@ -141,6 +141,20 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
+# `summarize_verdict` and its four donor-pinned constants moved to
+# `casework/common/court_order.py`. They are re-exported here because they
+# landed in this module only by accident of porting scope, and because
+# `tests/casework/test_enrich_timeline.py` pins each constant against the donor
+# through this module's namespace. Removing these names would break that pin
+# without any behaviour changing.
+from casework.common.court_order import (  # noqa: F401
+    VERDICT_SUMMARY_CHUNK_CHARS,
+    VERDICT_SUMMARY_MAX_TOKENS,
+    VERDICT_SUMMARY_SYSTEM_PROMPT,
+    VERDICT_SUMMARY_TARGET,
+    VERDICT_SUMMARY_TRIGGER,
+    summarize_verdict,
+)
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_text
 from casework.common.parse import is_valid_iso_date, parse_extraction_response
@@ -165,16 +179,6 @@ STAGE = STAGES["timeline"]
 # at the donor's own default values (`enrich_timeline.py:67-68`).
 TIMELINE_SOURCE_CHARS = 60000
 TIMELINE_MAX_TOKENS = 8000
-
-# Verdict-summarisation knobs + prompt, ported from the deleted
-# `casework/common.py` (donor commit 0321a85, NOT from enrich_timeline.py
-# itself -- `summarize_verdict` was shared by `enrich_description.py` and
-# `enrich_timeline.py`; only the latter is in this task's scope). Same
-# env_int-not-ported fixed-constant treatment as above.
-VERDICT_SUMMARY_TRIGGER = 12000
-VERDICT_SUMMARY_TARGET = 8000
-VERDICT_SUMMARY_MAX_TOKENS = 8000
-VERDICT_SUMMARY_CHUNK_CHARS = 150000
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst reconstructing the FACTUAL TIMELINE of a \
@@ -283,29 +287,6 @@ DOCUMENT TEXT (chargesheet, press release, court order — use for milestones,
 narrative, amounts, and any dates not in the NGM data):
 
 {source_text}
-"""
-
-VERDICT_SUMMARY_SYSTEM_PROMPT = f"""\
-You are a Nepali legal analyst. You are given the full text of a Special Court \
-(विशेष अदालत) judgment (फैसला) in a CIAA corruption case. Produce a faithful \
-Nepali summary (देवनागरी, government/court register; keep English technical terms \
-as-is) that a downstream writer will use to draft the "विशेष अदालतको फैसलाको सार" \
-section of a public case record.
-
-Capture ONLY what the judgment states — never infer or invent:
-- फैसला मिति (judgment date) and the इजलास / न्यायाधीशहरू (the bench, by name).
-- नि.नं. / मुद्दा नं. and the parties (वादी / प्रतिवादीहरू).
-- For EACH defendant: the outcome — दोषी (convicted, with कैद/जरिवाना/बिगो असुल) or
-  सफाई (acquitted) — and the court's key reasoning for it.
-- Any legal principle the court applied or relied on, noting whether it cites a
-  Supreme Court precedent (नजिर) — a Special Court ruling does not itself set one.
-- The disputed बिगो the court accepted or rejected, and why.
-- Every concrete DATE the judgment cites for a factual event (the alleged conduct,
-  bids, committee decisions, payments, registrations, complaint, chargesheet) —
-  keep the BS date as written; a downstream timeline extractor relies on these.
-
-Be specific (names, दफा, amounts, dates) but concise — aim for about \
-{VERDICT_SUMMARY_TARGET} characters. Output plain Nepali prose/short lists, NOT JSON.
 """
 
 _DEVANAGARI_TO_ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
@@ -418,54 +399,6 @@ def _clamp(text: str, limit: int, label: str = "source") -> str:
     note = "" if len(sent) == total else f"  (capped at {limit:,})"
     print(f"    {label}: {total:,} total chars, sent {len(sent):,}{note}")
     return sent
-
-
-def summarize_verdict(verdict_text: str, invoke_text, usage):
-    """LLM summary of a long Special Court verdict. Ported from the deleted
-    `casework/common.py` (donor commit 0321a85), where it was shared by
-    `enrich_description.py` and `enrich_timeline.py`.
-
-    Long judgments are summarised in MULTIPLE passes (one per chunk) and the
-    per-chunk summaries concatenated, so the WHOLE document is covered — a single
-    head-truncated pass drops the फैसला/ठहर, which sits at the end. Returns the
-    summary string, or None on total failure.
-    """
-    if not verdict_text or not invoke_text:
-        return None
-    chunk = max(20000, VERDICT_SUMMARY_CHUNK_CHARS)
-    chunks = [verdict_text[i : i + chunk] for i in range(0, len(verdict_text), chunk)]
-    n = len(chunks)
-    summaries: list = []
-    for idx, part in enumerate(chunks):
-        framing = (
-            "Summarise this Special Court judgment as instructed.\n\n"
-            if n == 1
-            else f"This is part {idx + 1} of {n} of a long Special Court judgment "
-            "(split only by length, mid-sentence boundaries possible). Summarise the "
-            "substantive content of THIS part as instructed; the फैसला/ठहर may appear "
-            "in a later part.\n\n"
-        )
-        try:
-            result = invoke_text(
-                system=VERDICT_SUMMARY_SYSTEM_PROMPT,
-                content=framing + part,
-                tier="premium",
-                usage=usage,
-                max_tokens=VERDICT_SUMMARY_MAX_TOKENS,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Verdict part %d/%d summarisation failed: %s", idx + 1, n, exc)
-            continue
-        if result and result.strip():
-            summaries.append((idx + 1, result.strip()))
-    if not summaries:
-        return None
-    if n == 1:
-        return summaries[0][1]
-    log.info("Verdict summarised in %d passes (of %d parts)", len(summaries), n)
-    # Label with the ORIGINAL part index so a failed/skipped chunk doesn't
-    # renumber the survivors (खण्ड 3/5 must stay 3/5, not become 2/5).
-    return "\n\n".join(f"[खण्ड {part_idx}/{n}]\n{s}" for part_idx, s in summaries)
 
 
 def _assemble_source_text(court_text: str, press_text: str, invoke_text, usage) -> str:
