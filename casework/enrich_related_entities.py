@@ -589,6 +589,26 @@ not what was decided.
 The operative verbs are ठहर्छ / ठहरेको (held guilty) and सफाई पाउने ठहर्छ (acquitted). A \
 defendant whose case was discontinued on death is abated (मुद्दा तामेली).
 
+THREE SITUATIONS THE OPERATIVE SECTION DOES NOT DECIDE THE WAY IT READS.
+
+CONFISCATION-ONLY DEFENDANTS. A spouse, parent or child is routinely captioned \
+प्रतिवादी purely so their property can be attached -- "जफत प्रयोजनको लागि प्रतिवादी \
+बनाएको", "असुल उपर गर्ने प्रयोजनार्थ मात्र प्रतिवादी बनाईएको". The court never \
+adjudicates their guilt, so a blanket line acquitting or convicting प्रतिवादीहरू does \
+NOT reach them. Answer charged for these -- never acquitted, never convicted.
+
+A SPLIT BENCH SETTLES ONLY WHO BOTH OPINIONS AGREE ON. When the order carries a \
+फरक राय, says मतैक्य हुन नसकी, or is referred on under विशेष अदालत ऐन, २०५९ को दफा ६ \
+को उपदफा (४), read BOTH opinions. Answer unknown for every name they treat \
+differently: that name goes to a third judge and is not decided yet. Only names \
+both opinions decide the same way are settled.
+
+AN ABETTOR IS CONVICTED. A defendant found मतियार under दफा २२ (the \
+प्रतिबन्धात्मक वाक्यांश) with कैद or जरिबाना ordered is convicted, even though the \
+wording differs from the main formula. Death is the ONLY route to abated \
+(मुद्दा तामेली) -- a defendant who absconded, or who died after judgment, can still \
+be convicted or acquitted on what the order says.
+
 For EACH name in the accused list, answer:
   outcome   exactly one of: convicted | acquitted | abated | charged | unknown.
             Answer unknown -- never a guess -- when the operative section does

@@ -5322,3 +5322,48 @@ class TestElectionRecordsAreNeverPromoted:
             {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
              "notes": "क"}])
         assert plan.bound, "a clean ambiguity must still promote"
+
+
+class TestTheVerdictPromptCarriesItsGuardrails:
+    """enricher-fix-rules.json `entity.outcome_from_verdict`. Each marker below
+    is quoted from a real order in this corpus, so a reworded prompt that drops
+    one fails here rather than in a criminal outcome."""
+
+    @pytest.mark.parametrize("marker", [
+        "जफत प्रयोजनको लागि प्रतिवादी",      # 079-CR-0019
+        "प्रयोजनार्थ मात्र प्रतिवादी",         # 079-CR-0156
+    ])
+    def test_confiscation_only_defendants_are_described(self, marker):
+        assert marker in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_a_confiscation_only_defendant_is_told_to_stay_charged(self):
+        block = ere.VERDICT_SYSTEM_PROMPT[
+            ere.VERDICT_SYSTEM_PROMPT.index("CONFISCATION-ONLY"):]
+        block = block[:block.index("A SPLIT BENCH")]
+        assert "charged" in block and "never acquitted" in block
+
+    @pytest.mark.parametrize("marker", [
+        "फरक राय", "मतैक्य हुन नसकी", "दफा ६ को उपदफा (४)",   # 079-CR-0025
+    ])
+    def test_the_split_bench_markers_are_named(self, marker):
+        assert marker in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_a_split_bench_disagreement_is_told_to_answer_unknown(self):
+        block = ere.VERDICT_SYSTEM_PROMPT[
+            ere.VERDICT_SYSTEM_PROMPT.index("A SPLIT BENCH"):]
+        block = block[:block.index("AN ABETTOR")]
+        assert "unknown" in block
+
+    @pytest.mark.parametrize("marker", [
+        "मतियार", "दफा २२", "प्रतिबन्धात्मक वाक्यांश",          # 078-CR-0073
+    ])
+    def test_the_abettor_markers_are_named(self, marker):
+        assert marker in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_abated_is_still_reserved_for_death(self):
+        assert "मुद्दा तामेली" in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_the_outcome_vocabulary_is_unchanged(self):
+        # The guardrails must not have introduced a fifth answer.
+        assert ere.VERDICT_OUTCOMES == frozenset(
+            {"convicted", "acquitted", "abated", "charged", "unknown"})
