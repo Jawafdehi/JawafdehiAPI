@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from django.conf import settings
 
+from llm.exhaustion import is_exhaustion
 from llm.invoke import invoke_json
 
 
@@ -51,7 +52,18 @@ _NON_TRANSPORT_ERRORS = (
 
 def _is_transport_error(exc):
     """Did the call fail to *land*, as opposed to landing badly or hitting a bug?"""
-    return not isinstance(exc, _NON_TRANSPORT_ERRORS)
+    if isinstance(exc, _NON_TRANSPORT_ERRORS):
+        return False
+    # Out of room is not out of reach. Both causes -- the output cap and the turn
+    # cap -- abort a call the provider ACCEPTED and billed: the judge was there,
+    # it just could not finish inside the budget we gave it. Calling that
+    # unreachable dead-letters a whole review over rules that are merely
+    # ungraded, which is what the lenient degrade-to-neutral path is for. By the
+    # time one of these reaches here `_invoke_rule` has already retried the rule
+    # at a larger budget, so the room really has run out.
+    if is_exhaustion(exc):
+        return False
+    return True
 
 
 def _task_rule_keys(task):
@@ -115,12 +127,48 @@ CLI_PROVIDERS = ("codex_cli", "claude_cli")
 def _rule_batch_size():
     return int(getattr(settings, "REVIEW_RULE_BATCH_SIZE", 8))
 
+
+# Output budgets for grading ONE rule, smallest first. Two rungs, because a
+# single rung has no answer to a rule that cannot fit in it: on a CLI provider
+# the budget becomes CLAUDE_CODE_MAX_OUTPUT_TOKENS, which caps *reasoning as well
+# as the answer* (see llm/exhaustion.py), so a reasoning-heavy rule can spend the
+# lot thinking and return nothing at all. The grade itself is small -- a score, a
+# rationale, a few issues -- so the headroom on the second rung is for thinking,
+# not for a longer verdict.
+#
+# The first rung stays at `invoke_json`'s own default so this changes nothing for
+# a rule that already fits; only a rule that overflows pays for a second call.
+def _rule_budgets():
+    first = int(getattr(settings, "REVIEW_RULE_MAX_TOKENS", 900))
+    retry = int(getattr(settings, "REVIEW_RULE_MAX_TOKENS_RETRY", 4000))
+    return [first, retry] if retry > first else [first]
+
 REVIEW_SYSTEM = (
     "You are a meticulous editorial reviewer for Jawafdehi.org, an open civic "
     "archive of Nepali anti-corruption cases. You grade case quality against a "
     "single explicit rule. You are strict but fair. You understand Nepali and "
     "English. You ALWAYS reply with a single valid JSON object and nothing else."
 )
+
+
+def _invoke_rule(content, tier, usage):
+    """Grade one rule, escalating the output budget if the model runs out of room.
+
+    Escalation is gated on :func:`llm.exhaustion.is_exhaustion` rather than on
+    "did it fail", so a dead credential, a 429 or a bug in our prompt building
+    still fails on the first call instead of buying a second, dearer one to fail
+    in exactly the same way.
+    """
+    budgets = _rule_budgets()
+    last = len(budgets) - 1
+    for i, budget in enumerate(budgets):
+        try:
+            return invoke_json(
+                REVIEW_SYSTEM, content, max_tokens=budget, tier=tier, usage=usage
+            )
+        except Exception as exc:  # noqa: BLE001 - decide by cause, then re-raise
+            if i == last or not is_exhaustion(exc):
+                raise
 
 
 def _rule_context_block(case_summary, source_excerpts, case_type_label):
@@ -449,7 +497,7 @@ def judge_rules(
             return ("batch", parsed)
         _, tier, rule = task
         content = _build_single_rule_content(context_block, rule)
-        parsed = invoke_json(REVIEW_SYSTEM, content, tier=tier, usage=usage)
+        parsed = _invoke_rule(content, tier, usage)
         return ("rule", rule["key"], parsed)
 
     def _drain(pool_tasks):
