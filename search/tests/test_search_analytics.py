@@ -81,6 +81,30 @@ def test_build_event_flags_zero_result_only_for_real_queries():
     assert browse["zero_result"] is False
 
 
+def test_build_event_flags_whether_a_zero_result_was_recoverable():
+    """Design §18 wants the did-you-mean RATE — this flag over ``zero_result``. The
+    FLAG only, never the suggested text: it is derived from ``q_normalized``, which
+    the event already carries."""
+    empty = {"count": 0, "counts": {}, "results": []}
+    recoverable = build_search_event(
+        search_id="x",
+        params=_params(q="coruption"),
+        response={**empty, "did_you_mean": "corruption"},
+        took_ms=1.0,
+    )
+    assert recoverable["zero_result"] is True
+    assert recoverable["did_you_mean"] is True
+    # A miss with nothing to suggest is the residual gap the romanization work owns.
+    dead_end = build_search_event(
+        search_id="x",
+        params=_params(q="melamchee"),
+        response={**empty, "did_you_mean": None},
+        took_ms=1.0,
+    )
+    assert dead_end["zero_result"] is True
+    assert dead_end["did_you_mean"] is False
+
+
 def test_build_event_omits_top_hit_beyond_first_page():
     response = {
         "count": 99,

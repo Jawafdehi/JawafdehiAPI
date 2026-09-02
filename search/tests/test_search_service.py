@@ -8,6 +8,7 @@ and that a transport error becomes ``SearchUnavailable`` (→ HTTP 503).
 
 from __future__ import annotations
 
+import json
 import string
 from unittest.mock import MagicMock
 
@@ -28,8 +29,24 @@ from search.service import (
 
 
 def _recall_multi_match(body):
-    """The required (recall) multi_match clause from the tuned bool query."""
-    return body["query"]["bool"]["must"][0]["multi_match"]
+    """The required (recall) multi_match clause from the tuned bool query.
+
+    Shape-tolerant on purpose. A query carrying a fuzzy-ELIGIBLE token wraps two
+    recall routes in a nested bool, so ``must[0]`` is that bool and the exact
+    clause is its first ``should``; anything else (Devanagari, an identifier, a
+    browse) keeps ``must[0]`` as the clause itself. Every caller here wants the
+    exact route either way, so resolve it rather than making each test know which
+    shape its query produced.
+    """
+    must = body["query"]["bool"]["must"][0]
+    if "multi_match" in must:
+        return must["multi_match"]
+    return must["bool"]["should"][0]["multi_match"]
+
+
+def _fuzzy_multi_match(body):
+    """The damped fuzzy recall clause — the SECOND ``should`` of the nested bool."""
+    return body["query"]["bool"]["must"][0]["bool"]["should"][1]["multi_match"]
 
 
 def _phrase_clause(body):
@@ -1128,3 +1145,644 @@ def test_search_returns_the_extent_as_three_whole_rupee_numbers():
     bigo = SearchService(client=client).search(q="x", types=["case"])["extents"]["bigo"]
     assert bigo == {"min": 45220, "max": 66_000_000_000, "count": 68}
     assert all(isinstance(v, int) for v in bigo.values())
+
+
+# ── bounded fuzzy matching (design §10) ────────────────────────────────────────
+#
+# Romanized Nepali has no fixed spelling, so ``coruption``/``baluwatar`` matched
+# NOTHING and dead-ended on the empty state. The fix is deliberately narrow: a
+# damped second recall route, only for tokens that could plausibly be a
+# misspelling, and invisible on every other query.
+
+
+def test_fuzzy_eligibility_keeps_roman_words_of_four_characters_or_more():
+    """Design §10's eligible shape — and the only one a genuine romanization slip
+    takes, since Devanagari has no safe edit distance and an identifier's edits
+    change WHICH record is meant."""
+    assert svc.fuzzy_eligible_tokens("coruption") == ["coruption"]
+    # Normalized the same way the analytics stream aggregates (lower + trim).
+    assert svc.fuzzy_eligible_tokens("  Baluwatar ") == ["baluwatar"]
+
+
+def test_fuzzy_eligibility_excludes_everything_design_10_excludes():
+    """One ASCII-letters test delivers four of the five exclusions: Devanagari
+    fails ``isascii``, and identifiers/case numbers/numerics fail ``isalpha`` on
+    their digits and separators. The fifth is the length floor."""
+    assert svc.fuzzy_eligible_tokens("देउवा") == []  # not Roman script
+    assert svc.fuzzy_eligible_tokens("082-CR-0154") == []  # a case number
+    assert svc.fuzzy_eligible_tokens("ciaa/press-2081") == []  # an identifier
+    assert svc.fuzzy_eligible_tokens("2024") == []  # entirely numeric
+    assert svc.fuzzy_eligible_tokens("job") == []  # under the length floor
+    assert svc.fuzzy_eligible_tokens("") == []
+    assert svc.fuzzy_eligible_tokens(None) == []
+
+
+def test_fuzzy_eligibility_keeps_only_the_eligible_tokens_of_a_mixed_query():
+    """Ineligible tokens are not dropped from the SEARCH — the exact recall clause
+    still matches them. They just never get fuzzed."""
+    assert svc.fuzzy_eligible_tokens("बालुवाटार coruption 2081 in") == ["coruption"]
+
+
+def test_fuzzy_eligibility_honours_the_denylist(monkeypatch):
+    """The mechanism ships with an EMPTY denylist, to be populated later from the
+    zero-result analytics rather than guessed at — so pin that it is consulted."""
+    assert svc.FUZZY_DENYLIST == frozenset()
+    monkeypatch.setattr(svc, "FUZZY_DENYLIST", frozenset({"case"}))
+    assert svc.fuzzy_eligible_tokens("case files") == ["files"]
+
+
+def test_build_query_adds_a_second_damped_recall_route_for_an_eligible_query():
+    body = build_query(q="coruption")
+    must = body["query"]["bool"]["must"]
+    assert len(must) == 1
+    nested = must[0]["bool"]
+    # Satisfied by EITHER route. This is a nested bool inside ``must``, NOT a
+    # top-level ``should``: a pure misspelling matches neither the exact recall
+    # clause nor the phrase clause, and a top-level should cannot rescue an
+    # unsatisfied must — the query would still return nothing, which is the bug.
+    assert nested["minimum_should_match"] == 1
+    exact, fuzzy = nested["should"]
+    # The exact route rides through untouched — same fields, no fuzziness on it.
+    assert exact["multi_match"]["fields"] == svc._weighted_query_fields("both")
+    assert "fuzziness" not in exact["multi_match"]
+    # ...and the fuzzy one is bounded and damped.
+    mm = fuzzy["multi_match"]
+    assert mm["query"] == "coruption"
+    assert mm["fuzziness"] == "AUTO:4,8"
+    assert mm["prefix_length"] == 1
+    assert mm["boost"] == svc.FUZZY_BOOST
+    # ``most_fields``, never ``cross_fields`` — the latter silently DROPS
+    # fuzziness (docs/shared/research/opensearch-bilingual-nepali.md §5).
+    assert mm["type"] == "most_fields"
+
+
+def test_both_recall_routes_are_named_so_hits_report_which_one_matched():
+    """The did-you-mean weak-match gate READS this rather than inferring it: with
+    both routes named, OpenSearch tags every hit with the route(s) that matched, so
+    ``_result_set_is_wholly_fuzzy`` can ask whether the page has a genuine anchor.
+    """
+    nested = build_query(q="coruption")["query"]["bool"]["must"][0]["bool"]
+    exact, fuzzy = nested["should"]
+    assert exact["multi_match"]["_name"] == svc.EXACT_RECALL_CLAUSE_NAME
+    assert fuzzy["multi_match"]["_name"] == svc.FUZZY_RECALL_CLAUSE_NAME
+    # Distinct, or the gate could not tell the two apart.
+    assert svc.EXACT_RECALL_CLAUSE_NAME != svc.FUZZY_RECALL_CLAUSE_NAME
+
+
+def test_naming_is_confined_to_the_fuzzy_branch():
+    """The no-op guarantee covers the names too: an ineligible query emits no
+    ``_name`` anywhere, so its DSL stays byte-identical to the pre-fuzzy one.
+    ``test_build_query_is_unchanged_when_no_token_is_eligible`` pins the whole
+    clause; this states the reason separately so a future edit cannot quietly
+    reintroduce a name on the plain path."""
+    for ineligible in ("देउवा", "082-CR-0154", "2024", "job", ""):
+        assert "_name" not in json.dumps(build_query(q=ineligible)), ineligible
+
+
+def test_fuzzy_eligibility_is_capped_so_query_size_cannot_drive_cost():
+    """``q`` is an unbounded CharField, so query size is caller-controlled. Matching
+    every token EXACTLY was affordable; fuzzing every token is not — each term walks
+    the dictionary for two-edit neighbours across four fields, and a large enough
+    disjunction is rejected outright by ``max_clause_count``, which this service
+    turns into a 503. The cap truncates, so exact recall still covers the whole
+    query."""
+    # Alphabetic on purpose: a token carrying digits is ineligible anyway, so it
+    # would test the ASCII-letters rule rather than the cap.
+    long_query = " ".join("word" + string.ascii_lowercase[n % 26] for n in range(200))
+    tokens = svc.fuzzy_eligible_tokens(long_query)
+    assert len(tokens) == svc.FUZZY_MAX_TOKENS
+    # Truncated from the FRONT — the leading terms are the ones a reader meant.
+    assert tokens[0] == "worda"
+    # Both consumers read the one capped list, so they cannot disagree.
+    body = build_query(q=long_query)
+    fuzzy = _fuzzy_multi_match(body)
+    assert len(fuzzy["query"].split()) == svc.FUZZY_MAX_TOKENS
+    assert len(body["suggest"]["text"].split()) == svc.FUZZY_MAX_TOKENS
+
+
+def test_fuzzy_clause_bounds_its_term_expansion():
+    """"Bounded" is this route's whole promise, and a default is not a decision."""
+    mm = _fuzzy_multi_match(build_query(q="coruption"))
+    assert mm["max_expansions"] == svc.FUZZY_MAX_EXPANSIONS
+
+
+def test_fuzzy_route_never_queries_the_devanagari_title():
+    """Fuzziness is edit distance over analyzed terms, and a Roman token is never
+    within two edits of a Devanagari one — the field would cost term expansions and
+    match nothing. (Devanagari fuzziness is out of scope per design §10; those
+    queries keep normalization and the translit bridge.)"""
+    fields = _fuzzy_multi_match(build_query(q="coruption"))["fields"]
+    assert not any(f.startswith("title_ne") for f in fields), fields
+    assert any(f.startswith("title_en") for f in fields)
+    assert any(f.startswith("title_translit") for f in fields)
+    assert any(f.startswith("keywords.text") for f in fields)
+    assert any(f.startswith("body") for f in fields)
+
+
+def test_fuzzy_route_queries_only_the_eligible_tokens():
+    """Handing the raw ``q`` back to the fuzzy clause would re-admit the very terms
+    eligibility just excluded, since ``fuzziness`` applies per term."""
+    body = build_query(q="बालुवाटार coruption 2081")
+    assert _fuzzy_multi_match(body)["query"] == "coruption"
+    # The exact route still carries the WHOLE query, Devanagari and year included.
+    assert _recall_multi_match(body)["query"] == "बालुवाटार coruption 2081"
+
+
+def test_fuzzy_boost_stays_below_every_exact_weight():
+    """Design §10: a fuzzy match must never outrank an exact identifier, title,
+    name, alias, phrase or correctly-spelled ordinary match. BM25 cannot make that
+    a HARD guarantee — ``FUZZY_BOOST`` is the knob, so pin it."""
+    exact_weights = [float(f.split("^")[1]) for f in svc._weighted_query_fields("both")]
+    assert svc.FUZZY_BOOST < min(exact_weights)
+    assert svc.FUZZY_BOOST < svc.PHRASE_BOOST
+    # And the fuzzy route reuses the exact route's weights rather than inventing a
+    # second scheme that could silently drift out of step with it.
+    assert svc.FUZZY_FIELDS == [
+        f"title_en^{svc._TITLE_EN_BOOST:g}",
+        f"title_translit^{svc._TITLE_TRANSLIT_BOOST:g}",
+        f"keywords.text^{svc._KEYWORDS_BOOST:g}",
+        f"body^{svc._BODY_BOOST:g}",
+    ]
+
+
+def test_fuzziness_is_capped_at_two_edits():
+    """``AUTO:4,8`` — under 4 chars exact, 4–7 one edit, 8+ two. Two is design
+    §10's ceiling. Raising it is NOT how the remaining audit queries
+    (``melamchee``, ``bhrastachaar``, ``kathmandu`` — 3–4 edits from their indexed
+    romanizations) get fixed; that is the romanization card's job. Past two edits
+    ``duba``/``deuba``-class collisions arrive faster than real corrections."""
+    assert svc.FUZZINESS == "AUTO:4,8"
+    assert svc.SUGGEST_MAX_EDITS == 2
+
+
+# ── the no-op guarantee ───────────────────────────────────────────────────────
+#
+# The mechanism must be INVISIBLE on every query it cannot help. These two pin the
+# emitted DSL as a whole, not just the absence of a fuzziness key.
+
+
+def test_build_query_is_unchanged_when_no_token_is_eligible():
+    for ineligible in ("देउवा", "082-CR-0154", "2024", "job"):
+        body = build_query(q=ineligible)
+        # The whole clause, not merely the absence of a ``fuzziness`` key.
+        assert body["query"]["bool"]["must"] == [
+            {
+                "multi_match": {
+                    "query": ineligible,
+                    "fields": svc._weighted_query_fields("both"),
+                    "type": "most_fields",
+                    "operator": "or",
+                }
+            }
+        ], ineligible
+        assert "suggest" not in body, ineligible
+
+
+def test_browse_carries_neither_a_fuzzy_route_nor_a_suggester():
+    """An empty ``q`` has nothing to misspell, and a ``match_all`` browse is the
+    primary way the case list is paged."""
+    for empty in ("", "   ", None):
+        body = build_query(q=empty)
+        assert body["query"]["bool"]["must"] == [{"match_all": {}}], empty
+        assert "suggest" not in body, empty
+
+
+# ── did-you-mean (design §11) ──────────────────────────────────────────────────
+
+
+def test_build_query_requests_a_term_suggester_for_an_eligible_query():
+    """On the SAME request — no second round trip — and ``suggest_mode: missing``
+    makes it near-free for a query that is spelled correctly."""
+    suggest = build_query(q="coruption")["suggest"]
+    assert suggest["text"] == "coruption"
+    # Two entries, each keyed by the field it suggests from.
+    assert set(suggest) == {"text", "title_translit", "keywords.text"}
+    for field in ("title_translit", "keywords.text"):
+        assert suggest[field]["term"] == {
+            "field": field,
+            "suggest_mode": "missing",
+            "max_edits": 2,
+            "prefix_length": 1,
+            "min_word_length": 4,
+            "size": 1,
+        }, field
+
+
+def test_suggester_avoids_the_stemmed_title_and_the_ocr_body():
+    """``title_en`` is Porter-stemmed, so its term dictionary holds ``corrupt`` —
+    it would suggest THAT for ``coruption``. ``body`` is OCR text, which is exactly
+    the vocabulary a suggestion must not be drawn from. What is left is the curated
+    tags (design §11's "approved aliases") plus the unstemmed title romanizations,
+    in that order — see the authority test below."""
+    assert svc.SUGGEST_FIELDS == ("keywords.text", "title_translit")
+
+
+def test_suggester_text_is_the_eligible_tokens_only():
+    assert build_query(q="बालुवाटार coruption 2081")["suggest"]["text"] == "coruption"
+
+
+def _zero_hit_response(suggest=None):
+    """A real query that matched nothing — the one state did-you-mean is offered in."""
+    response: dict = {"hits": {"total": {"value": 0}, "hits": []}, "aggregations": {}}
+    if suggest is not None:
+        response["suggest"] = suggest
+    return response
+
+
+def _term_suggestion(token, *, options):
+    """One ``term``-suggester entry, shaped as OpenSearch returns it."""
+    return [{"text": token, "offset": 0, "length": len(token), "options": options}]
+
+
+def _matched(response, *names):
+    """Tag every hit with the recall route(s) that matched it.
+
+    This is what OpenSearch returns for NAMED query clauses, and ``build_query``
+    names both routes whenever the fuzzy one is active — so any real
+    fuzzy-eligible search comes back carrying these. The weak-match gate reads
+    them instead of inferring an anchor from the suggester.
+    """
+    for hit in response["hits"]["hits"]:
+        hit["matched_queries"] = list(names)
+    return response
+
+
+def test_did_you_mean_substitutes_the_suggested_token():
+    client = MagicMock()
+    client.search.return_value = _zero_hit_response(
+        {
+            "title_translit": _term_suggestion(
+                "coruption", options=[{"text": "corruption", "score": 0.9, "freq": 12}]
+            ),
+            "keywords.text": _term_suggestion("coruption", options=[]),
+        }
+    )
+    out = SearchService(client=client).search(q="coruption")
+    assert out["count"] == 0
+    assert out["did_you_mean"] == "corruption"
+    # The original (empty) result set is preserved — the suggestion never replaces
+    # the query, it only offers to.
+    assert out["results"] == []
+    assert out["query"] == "coruption"
+
+
+def test_did_you_mean_prefers_the_curated_field_over_a_higher_SCORING_romanization():
+    """The regression that only live data exposed.
+
+    Ranking candidates on score alone picks junk. Measured against the production
+    corpus, ``melamchee`` draws ``melamchi`` (0.75) from the curated
+    ``keywords.text`` and ``maramchee`` (0.78) from the machine-romanized
+    ``title_translit`` — and EVERY candidate comes back ``freq: 1``, so a
+    noisy-channel ``score x log(freq)`` prior still picks the wrong one.
+    ``title_translit`` holds one machine transliteration per title, so its
+    near-neighbours are mostly noise; design §11's "approved aliases" is the
+    tiebreak, and :data:`SUGGEST_FIELDS` order encodes it.
+    """
+    suggest = {
+        "title_translit": _term_suggestion(
+            "melamchee", options=[{"text": "maramchee", "score": 0.78, "freq": 1}]
+        ),
+        "keywords.text": _term_suggestion(
+            "melamchee", options=[{"text": "melamchi", "score": 0.75, "freq": 1}]
+        ),
+    }
+    assert svc._did_you_mean_from_suggest("melamchee", suggest) == "melamchi"
+
+
+def test_did_you_mean_falls_back_to_the_romanization_when_no_tag_matches():
+    """Authority is a tiebreak, not a filter. ``bhrastachar`` has no curated tag
+    within two edits, so the title romanization is the whole of the answer."""
+    suggest = {
+        "keywords.text": _term_suggestion("bhrastachar", options=[]),
+        "title_translit": _term_suggestion(
+            "bhrastachar", options=[{"text": "bhrashtacar", "score": 0.82, "freq": 2771}]
+        ),
+    }
+    assert svc._did_you_mean_from_suggest("bhrastachar", suggest) == "bhrashtacar"
+
+
+def test_did_you_mean_uses_freq_as_the_last_tiebreak_within_one_field():
+    """Within a single field, ``freq`` IS a genuine ``P(correction)`` prior — the
+    commoner of two equally-close candidates is the better guess."""
+    suggest = {
+        "keywords.text": _term_suggestion(
+            "corupt",
+            options=[
+                {"text": "corrupz", "score": 0.8, "freq": 2},
+                {"text": "corrupt", "score": 0.8, "freq": 900},
+            ],
+        )
+    }
+    assert svc._did_you_mean_from_suggest("corupt", suggest) == "corrupt"
+
+
+def test_did_you_mean_ranks_an_unknown_entry_key_below_every_declared_field():
+    """A suggest entry we did not ask for must not win by accident."""
+    suggest = {
+        "mystery_field": _term_suggestion(
+            "melamchee", options=[{"text": "nonsense", "score": 0.99, "freq": 9999}]
+        ),
+        "keywords.text": _term_suggestion(
+            "melamchee", options=[{"text": "melamchi", "score": 0.1, "freq": 1}]
+        ),
+    }
+    assert svc._did_you_mean_from_suggest("melamchee", suggest) == "melamchi"
+
+
+def test_did_you_mean_keeps_the_tokens_the_suggester_never_looked_at():
+    """A mixed query must not be quietly widened into a bare corrected term."""
+    client = MagicMock()
+    client.search.return_value = _zero_hit_response(
+        {
+            "title_translit": _term_suggestion(
+                "coruption", options=[{"text": "corruption", "score": 0.9}]
+            )
+        }
+    )
+    out = SearchService(client=client).search(q="Coruption 2081")
+    assert out["did_you_mean"] == "corruption 2081"
+
+
+def test_did_you_mean_fires_on_a_wholly_fuzzy_result_set():
+    """Design §11's SECOND trigger — "only weak matches" — and the one that makes
+    the feature reachable at all.
+
+    Gating on ``count == 0`` alone made it nearly dead once §10 landed: bounded
+    fuzzy matching rescues most misspellings, so the queries that most need a
+    spelling hint (``coruption`` finds 199 real records) stopped qualifying. The
+    signal is READ, not inferred: every hit here matched only the named fuzzy
+    route, so nothing on the page matched what the reader actually typed.
+    """
+    client = MagicMock()
+    # 3 hits — a NON-empty result set — every one of them a fuzzy rescue.
+    response = _matched(_canned_response(), svc.FUZZY_RECALL_CLAUSE_NAME)
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    client.search.return_value = response
+    out = SearchService(client=client).search(q="coruption")
+    assert out["count"] == 3
+    # Results AND a suggestion — the reader keeps the hits and learns the spelling.
+    assert out["did_you_mean"] == "corruption"
+    assert len(out["results"]) == 3
+
+
+def test_no_did_you_mean_when_an_eligible_token_is_really_indexed():
+    """The quiet-on-a-healthy-search guarantee, now stated as the hits state it:
+    the page carries at least one EXACT-route match, so the results have a real
+    anchor and the suggestion for the neighbouring typo is withheld rather than
+    second-guessing good results."""
+    client = MagicMock()
+    # ``corruption`` matched exactly; the fuzzy route also fired for ``coruption``.
+    response = _matched(
+        _canned_response(),
+        svc.EXACT_RECALL_CLAUSE_NAME,
+        svc.FUZZY_RECALL_CLAUSE_NAME,
+    )
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        ),
+    }
+    client.search.return_value = response
+    out = SearchService(client=client).search(q="corruption coruption")
+    assert out["count"] == 3
+    assert out["did_you_mean"] is None
+
+
+def test_no_did_you_mean_for_a_correctly_spelled_query_with_hits():
+    """The common case: nothing was missing, so nothing is suggested."""
+    client = MagicMock()
+    response = _canned_response()  # 3 hits, no suggest block at all
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="deuba")["did_you_mean"] is None
+
+
+def test_no_did_you_mean_when_the_only_token_matched_exactly_outside_the_suggest_fields():
+    """REGRESSION. The gate used to infer "no exact anchor" from the suggester:
+    every eligible token came back corrected, therefore none of them could be
+    indexed. That inference was unsound, because ``suggest_mode: "missing"`` is
+    evaluated per SUGGEST FIELD and ``SUGGEST_FIELDS`` covers only
+    ``keywords.text`` and ``title_translit`` — while the recall route also searches
+    ``title_en`` and ``body``.
+
+    So a token living in the OCR ``body`` but absent from both suggest fields
+    looked "missing" while matching plenty of documents exactly. Concretely:
+    ``minister`` is not a curated tag (the vocabulary has ``ministry``) and is not
+    in any title romanization, so the suggester offers ``ministry`` — two edits,
+    same first letter, comfortably inside the bounds. It was the only eligible
+    token, so the old ``all(...)`` test passed and a correctly spelled query got a
+    spurious "did you mean" on top of real results.
+
+    The hits say otherwise, and now the gate listens to them.
+    """
+    client = MagicMock()
+    response = _matched(_canned_response(), svc.EXACT_RECALL_CLAUSE_NAME)
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "minister", options=[{"text": "ministry", "score": 0.81, "freq": 40}]
+        )
+    }
+    client.search.return_value = response
+    out = SearchService(client=client).search(q="minister")
+    assert out["count"] == 3
+    assert out["did_you_mean"] is None
+
+
+def test_no_did_you_mean_when_an_ineligible_devanagari_token_anchors_the_results():
+    """The mixed-script rough edge the inference could not see, now closed.
+
+    ``देउवा`` is fuzzy-INELIGIBLE, so it never appeared in the eligible-token list
+    the old gate quantified over — only ``coruption`` did, and it was corrected, so
+    "every eligible token was corrected" held and the offer fired even though the
+    Devanagari term was anchoring strong exact results. Reading ``matched_queries``
+    sees the anchor regardless of which script produced it.
+    """
+    client = MagicMock()
+    response = _matched(
+        _canned_response(),
+        svc.EXACT_RECALL_CLAUSE_NAME,
+        svc.FUZZY_RECALL_CLAUSE_NAME,
+    )
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="देउवा coruption")["did_you_mean"] is None
+
+
+def test_weak_match_gate_stays_quiet_when_it_cannot_tell():
+    """No names, an unexpected shape, or no hits at all — every one of them means
+    the question cannot be answered, and silence is the safe direction. An absent
+    suggestion is invisible; a wrong one argues with results already on screen."""
+    suggest = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    for tag in (None, "exact_recall", 42, {"matched": True}):
+        client = MagicMock()
+        response = _canned_response()
+        for hit in response["hits"]["hits"]:
+            if tag is not None:
+                hit["matched_queries"] = tag
+        response["suggest"] = suggest
+        client.search.return_value = response
+        out = SearchService(client=client).search(q="coruption")
+        assert out["did_you_mean"] is None, tag
+
+
+def test_weak_match_gate_reads_the_dict_shape_of_matched_queries():
+    """OpenSearch returns ``matched_queries`` as a name list, but as a
+    ``name -> score`` MAP when match scores are requested. The keys are the same
+    names, so the gate must not care which shape arrived."""
+    client = MagicMock()
+    response = _canned_response()
+    for hit in response["hits"]["hits"]:
+        hit["matched_queries"] = {svc.FUZZY_RECALL_CLAUSE_NAME: 0.31}
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="coruption")["did_you_mean"] == "corruption"
+
+
+def _wholly_fuzzy_response():
+    """A non-empty page on which every hit was rescued by the fuzzy route."""
+    response = _matched(_canned_response(), svc.FUZZY_RECALL_CLAUSE_NAME)
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    return response
+
+
+def test_weak_match_trigger_is_confined_to_the_first_page():
+    """``matched_queries`` describes the PAGE, and relevance puts the exact matches
+    first — so paging INTO a healthy result set eventually reaches hits only the
+    fuzzy route rescued. Offering there would make the suggestion absent on page 1
+    and present on page 4 of the same search, which reads as a glitch. The page-1
+    result is the control: same payload, offer made."""
+    client = MagicMock()
+    client.search.return_value = _wholly_fuzzy_response()
+    service = SearchService(client=client)
+    assert service.search(q="coruption")["did_you_mean"] == "corruption"
+    assert service.search(q="coruption", page=4)["did_you_mean"] is None
+    cursor = encode_cursor([1.0, "https://jawafdehi.org/entity/person/deuba"])
+    assert service.search(q="coruption", cursor=cursor)["did_you_mean"] is None
+
+
+def test_weak_match_trigger_needs_a_relevance_sort():
+    """Under ``newest``/``oldest``/``title``/``featured`` the score orders nothing,
+    so "the exact matches come first" — the property that lets one page speak for
+    the whole result set — does not hold and the page cannot be read."""
+    client = MagicMock()
+    client.search.return_value = _wholly_fuzzy_response()
+    service = SearchService(client=client)
+    for sort in ("newest", "oldest", "title", "featured"):
+        assert service.search(q="coruption", sort=sort)["did_you_mean"] is None, sort
+    assert service.search(q="coruption", sort=svc.SORT_RELEVANCE)["did_you_mean"] == (
+        "corruption"
+    )
+
+
+def test_zero_result_trigger_survives_paging_and_sort():
+    """The other trigger reads the TOTAL, not the page, so neither an offset nor a
+    sort mode can suppress it — an empty result is empty on every page."""
+    client = MagicMock()
+    client.search.return_value = _zero_hit_response(
+        {
+            "keywords.text": _term_suggestion(
+                "coruption", options=[{"text": "corruption", "score": 0.9, "freq": 12}]
+            )
+        }
+    )
+    service = SearchService(client=client)
+    assert service.search(q="coruption", page=3)["did_you_mean"] == "corruption"
+    assert service.search(q="coruption", sort="newest")["did_you_mean"] == "corruption"
+
+
+def test_one_exact_hit_among_fuzzy_ones_is_enough_to_stay_quiet():
+    """"Only weak matches" means NO anchor, not "mostly fuzzy". A single genuine
+    match on the page is enough for the results to stand on their own."""
+    client = MagicMock()
+    response = _matched(_canned_response(), svc.FUZZY_RECALL_CLAUSE_NAME)
+    response["hits"]["hits"][1]["matched_queries"] = [svc.EXACT_RECALL_CLAUSE_NAME]
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="coruption")["did_you_mean"] is None
+
+
+def test_did_you_mean_is_none_when_nothing_was_suggested():
+    """``melamchee`` is three edits from the indexed ``melamci`` — beyond the bound.
+    The empty state stays an empty state rather than inventing a correction."""
+    client = MagicMock()
+    client.search.return_value = _zero_hit_response(
+        {"title_translit": _term_suggestion("melamchee", options=[])}
+    )
+    assert SearchService(client=client).search(q="melamchee")["did_you_mean"] is None
+
+
+def test_did_you_mean_is_none_when_the_suggestion_equals_the_query():
+    """A suggestion identical to what was typed is not a suggestion."""
+    client = MagicMock()
+    client.search.return_value = _zero_hit_response(
+        {
+            "title_translit": _term_suggestion(
+                "deuba", options=[{"text": "deuba", "score": 1.0}]
+            )
+        }
+    )
+    assert SearchService(client=client).search(q="Deuba")["did_you_mean"] is None
+
+
+def test_did_you_mean_key_is_always_present():
+    """Same contract as ``next_cursor``: the key never disappears, so a client can
+    read it without probing the envelope's shape."""
+    client = MagicMock()
+    client.search.return_value = _canned_response()
+    out = SearchService(client=client).search(q="x")  # ineligible, no suggester
+    assert "did_you_mean" in out
+    assert out["did_you_mean"] is None
+    browse = SearchService(client=client).search(q="")
+    assert browse["did_you_mean"] is None
+
+
+def test_did_you_mean_parses_defensively_and_never_raises():
+    """This rides the happy path of a SUCCESSFUL search, so a malformed or absent
+    suggest block must degrade to None rather than turn a 200 into a 500."""
+    for malformed in (
+        None,
+        [],
+        "nonsense",
+        {},
+        {"title_translit": "not-a-list"},
+        {"title_translit": [None, 7]},
+        {"title_translit": [{"text": "coruption"}]},  # no options key
+        {"title_translit": [{"options": [{"text": "x"}]}]},  # no text key
+        {"title_translit": _term_suggestion("coruption", options=["not-a-dict"])},
+        {"title_translit": _term_suggestion("coruption", options=[{"freq": 3}])},
+        {"title_translit": _term_suggestion("coruption", options=[{"text": ""}])},
+    ):
+        assert svc._did_you_mean_from_suggest("coruption", malformed) is None, malformed
+
+
+def test_did_you_mean_survives_an_option_with_no_score():
+    """Defensive parsing must not swing the other way and DROP a usable option."""
+    suggest = {
+        "title_translit": _term_suggestion(
+            "coruption", options=[{"text": "corruption"}]
+        )
+    }
+    assert svc._did_you_mean_from_suggest("coruption", suggest) == "corruption"

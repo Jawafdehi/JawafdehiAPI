@@ -239,7 +239,20 @@ class SearchQuerySerializer(serializers.Serializer):
         "materials, NGM court cases, and PUBLISHED Jawafdehi cases. Results are "
         "ranked across types by relevance and returned in one common envelope "
         "with per-type facet counts. Public read; the index contains only public "
-        "documents. Backed by OpenSearch — returns 503 if the cluster is down."
+        "documents. Backed by OpenSearch — returns 503 if the cluster is down.\n\n"
+        "Roman-script query tokens of four characters or more also get BOUNDED "
+        "fuzzy matching (at most two edits), so a misspelled romanization such as "
+        "'coruption' still reaches 'corruption'. It is a damped last-resort route: "
+        "a fuzzy hit always ranks below a correctly spelled one, and Devanagari, "
+        "case numbers and numeric tokens are matched exactly as before.\n\n"
+        "The envelope's 'did_you_mean' carries a single suggested spelling (drawn "
+        "from curated tags and indexed title romanizations) or null. It is offered "
+        "when the search returned nothing, and also when it returned only fuzzy "
+        "matches — i.e. nothing on the page matched the query as typed, so the "
+        "results have no exactly-matching anchor. A correctly spelled query that "
+        "found real matches never carries one. The key is always present, and the "
+        "suggestion is never applied automatically — re-search only if the reader "
+        "selects it."
     ),
     parameters=[
         OpenApiParameter("q", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True),
