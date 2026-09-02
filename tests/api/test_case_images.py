@@ -21,7 +21,7 @@ from wagtail.images import get_image_model
 from wagtail.images.tests.utils import get_test_image_file
 
 from cases.image_serializers import CARD_SPECS, HERO_SPECS, SrcsetRenditionField
-from cases.image_views import content_addressed_name
+from cases.image_views import unique_upload_name
 from cases.models import Case, CaseState, CaseType
 from cases.search_index import _build_card
 from tests.conftest import create_user_with_role
@@ -199,7 +199,7 @@ def test_same_filename_different_content_does_not_collide(db, media_root):
     """The regression this endpoint exists to prevent.
 
     ``HashedFilenameS3Boto3Storage`` keys objects on a salted hash of the
-    FILENAME and never de-duplicates, so before the content-addressed rename two
+    FILENAME and never de-duplicates, so before uploads were renamed two
     caseworkers uploading ``photo.png`` produced one object and the second
     silently destroyed the first.
     """
@@ -228,31 +228,32 @@ def test_same_filename_different_content_does_not_collide(db, media_root):
     assert image_model.objects.get(pk=first.data["id"]).width == 1200
 
 
-def test_content_addressed_name_is_the_sha256_of_the_bytes():
+def test_upload_name_is_unique_and_keeps_a_lowercased_extension():
     upload = _png_upload("anything.PNG")
-    expected = hashlib.sha256(upload.read()).hexdigest()
-    upload.seek(0)
 
-    name = content_addressed_name(upload)
+    name = unique_upload_name(upload)
 
-    assert name == f"{expected}.png", "extension is normalized to lowercase"
+    assert name.endswith(".png"), "extension is normalized to lowercase"
     assert upload.tell() == 0, "the file must be rewound for the caller to save it"
 
 
-def test_identical_bytes_get_the_same_name_whatever_they_were_called():
-    """The other half of content-addressing: same bytes, same name.
+def test_identical_bytes_still_get_DIFFERENT_names():
+    """The name must NOT be derived from the content.
 
-    Asserted on the naming function rather than end-to-end, because whether two
-    identical uploads then collapse to ONE stored object is a property of the
-    storage backend. ``HashedFilenameS3Boto3Storage`` (production) de-duplicates;
-    ``FileSystemStorage`` (what the suite runs on) appends a suffix instead.
+    This used to be a sha256 of the bytes, which fixed the filename collision
+    but created a worse one: identical bytes meant an identical storage key, so
+    two rows for the same picture shared one object, and Wagtail deletes an
+    image's file with its row. The de-duplication lookup avoids the second row
+    on the sequential path, but it is a check-then-act — two concurrent uploads
+    can both miss it. A unique name makes losing that race cost one redundant
+    object rather than a shared one.
     """
     payload = get_test_image_file(filename="dup.png", size=(800, 600)).file.getvalue()
 
     first = SimpleUploadedFile("a.png", payload, content_type="image/png")
-    second = SimpleUploadedFile("b-totally-different-name.png", payload, "image/png")
+    second = SimpleUploadedFile("a.png", payload, content_type="image/png")
 
-    assert content_addressed_name(first) == content_addressed_name(second)
+    assert unique_upload_name(first) != unique_upload_name(second)
 
 
 def test_upload_requires_the_caseworker_role(db, media_root):
@@ -546,12 +547,11 @@ def test_upload_throttle_has_its_own_bucket():
 def test_reuploading_identical_bytes_reuses_the_existing_image(db, media_root):
     """Two rows for one content hash would share a STORAGE KEY.
 
-    ``content_addressed_name`` gives identical bytes an identical name, and
-    Wagtail deletes an image's file when its row is deleted
-    (``post_delete_file_cleanup``) — so a second row for the same picture would
-    turn "tidy up a duplicate in the image library" into "blank the image on
-    whichever case kept the other row", renditions included, since those are
-    named after the same source stem.
+Reusing the row saves an object in R2 and gives the
+    editor a stable id when a caseworker re-picks the same file. It is an
+    optimisation, not a safety property — ``unique_upload_name`` is what makes
+    two rows for one picture harmless — so this asserts the common sequential
+    path only.
     """
     client = _staff_client(db)
     payload = get_test_image_file(filename="same.png", size=(1400, 900)).file.getvalue()
@@ -592,3 +592,49 @@ def test_upload_populates_the_wagtail_file_metadata(db, media_root):
     image = get_image_model().objects.get(pk=response.data["id"])
     assert image.file_hash == hashlib.sha1(body).hexdigest()
     assert image.file_size == len(body)
+
+
+def test_an_unreadable_source_serializes_to_none_not_an_error_object(image, monkeypatch):
+    """Null, not ``{"error": ...}``.
+
+    Wagtail's own ImageRenditionField emits that string for its admin, which has
+    somewhere to show it. Here the value is declared with five required keys AND
+    is denormalized into the search index, so an error object would both violate
+    the published schema and be PERSISTED as a case's thumbnail — where every
+    consumer reads it as "there is an image" and then finds no src.
+    """
+    from wagtail.images.models import SourceImageIOError
+
+    def boom(*_args, **_kwargs):
+        raise SourceImageIOError("source file is gone")
+
+    monkeypatch.setattr(type(image), "get_renditions", boom)
+
+    assert SrcsetRenditionField(specs=CARD_SPECS).to_representation(image) is None
+
+
+def test_a_case_with_an_unreadable_image_indexes_no_thumbnail(case, image, monkeypatch):
+    """The search-index half of the same finding."""
+    from wagtail.images.models import SourceImageIOError
+
+    case.thumbnail_image = image
+    case.save()
+
+    def boom(*_args, **_kwargs):
+        raise SourceImageIOError("source file is gone")
+
+    monkeypatch.setattr(type(image), "get_renditions", boom)
+
+    card = _build_card(
+        case,
+        slug=case.slug,
+        title=case.title,
+        short=case.short_description,
+        tags=[],
+        case_type=case.case_type,
+        case_status="ongoing",
+        entities=[],
+    )
+
+    # Absent-or-null, never an object the SPA would try to read a src off.
+    assert card["thumbnail"] is None

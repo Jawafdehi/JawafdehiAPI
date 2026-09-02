@@ -20,8 +20,8 @@ created in code without them raises ``IntegrityError``.
 
 from __future__ import annotations
 
-import hashlib
 import os
+import uuid
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from drf_spectacular.utils import OpenApiResponse, extend_schema
@@ -43,10 +43,6 @@ from .image_serializers import (
 )
 from .permissions import IsCaseImageUploader
 
-#: Chunk size for the content hash. Matches Django's own ``UploadedFile.chunks``
-#: default so a large upload is never fully resident in memory here.
-_HASH_CHUNK_BYTES = 64 * 1024
-
 #: The upload response body. Shared by 201 (created) and 200 (these bytes were
 #: already in the library) — same shape either way.
 _UPLOAD_RESPONSE_SCHEMA = {
@@ -62,8 +58,8 @@ _UPLOAD_RESPONSE_SCHEMA = {
 }
 
 
-def content_addressed_name(uploaded_file) -> str:
-    """Rename an upload to ``<sha256 of its bytes><ext>``.
+def unique_upload_name(uploaded_file) -> str:
+    """Rename an upload to ``<uuid4><ext>``, unique per upload.
 
     This is a correctness fix, not a tidiness one. ``default_storage`` is
     ``HashedFilenameS3Boto3Storage``, which derives the object key from a salted
@@ -75,23 +71,24 @@ def content_addressed_name(uploaded_file) -> str:
     data loss for images a person picked off their desktop, where ``photo.jpg``
     and ``IMG_0001.jpg`` are the common case.
 
-    Hashing the bytes here restores the property the storage layer assumes:
-    distinct content gets a distinct name.
-
-    It also makes identical content collapse to ONE key, which is why the caller
-    must not create a second row for bytes it already has: two rows sharing a
-    storage key is a delete-one-blanks-the-other hazard, not a saving. See the
-    ``file_hash`` lookup in :meth:`CaseImageUploadView.post`.
+    The name is random rather than a hash of the CONTENT, which is what this
+    started as. Content-addressing fixed the collision above but introduced a
+    second one: identical bytes get an identical name, so two ``Image`` rows for
+    the same picture share one object — and Wagtail deletes an image's file when
+    its row is deleted (``post_delete_file_cleanup``), so removing either row
+    blanks the other's cases, renditions included. The ``file_hash`` lookup in
+    :meth:`CaseImageUploadView.post` avoids the second row on the common path,
+    but it is a check-then-act: two concurrent uploads of the same file (a
+    double-click on Replace is enough) can both pass it. A unique name means
+    that race costs one redundant object instead of a latent shared one, so
+    safety no longer depends on winning it. De-duplication is left as what it
+    is — an optimisation on the sequential path.
 
     Leaves the file's read position at 0 so the caller can still save it.
     """
-    digest = hashlib.sha256()
-    for chunk in uploaded_file.chunks(_HASH_CHUNK_BYTES):
-        digest.update(chunk)
-    uploaded_file.seek(0)
-
     _stem, extension = os.path.splitext(uploaded_file.name or "")
-    return f"{digest.hexdigest()}{extension.lower()}"
+    uploaded_file.seek(0)
+    return f"{uuid.uuid4().hex}{extension.lower()}"
 
 
 class CaseImageUploadThrottle(UserRateThrottle):
@@ -189,16 +186,21 @@ class CaseImageUploadView(APIView):
         # whichever one the database happened to return.
         existing = image_model.objects.filter(file_hash=file_hash).order_by("pk").first()
         if existing is not None:
-            # These bytes are already in the library, and MUST be reused rather
-            # than added again. Two rows for one content hash would share a
-            # storage key — content_addressed_name gives identical bytes an
-            # identical name — and Wagtail deletes an image's file when the row
-            # is deleted (post_delete_file_cleanup). Deleting either row would
-            # then blank the other's image, and both rows' renditions with it,
-            # since those are named after the same source stem.
+            # These bytes are already in the library, so reuse the row instead of
+            # adding a near-identical one: it saves an object in R2 and gives the
+            # editor a stable id when a caseworker re-picks the same file.
+            #
+            # This is an OPTIMISATION, not a safety check, and deliberately not
+            # locked or made atomic. It is a check-then-act, so two concurrent
+            # uploads of the same file can both miss it — see
+            # ``unique_upload_name`` for why losing that race is harmless now
+            # (two rows, two distinct objects) rather than the shared-object,
+            # delete-one-blanks-the-other hazard it used to be. Serializing it
+            # would mean holding a per-hash lock across the upload to R2, which
+            # costs more than the redundant object it saves.
             return Response(self._payload(existing), status=status.HTTP_200_OK)
 
-        cleaned.name = content_addressed_name(cleaned)
+        cleaned.name = unique_upload_name(cleaned)
         image = image_model(
             title=(request.data.get("title") or original_name).strip()[:255],
             file=cleaned,

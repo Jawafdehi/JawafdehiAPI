@@ -26,6 +26,7 @@ sharp image from the 1600 at 2x.
 
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 
 from drf_spectacular.utils import extend_schema_field
@@ -35,6 +36,8 @@ from wagtail.images import get_image_model
 from wagtail.images.models import SourceImageIOError
 
 from jawafdehi_shared.storage import absolute_media_url
+
+logger = logging.getLogger(__name__)
 
 #: OpenAPI shape of a :class:`SrcsetRenditionField` value. Declared by hand
 #: because the field is a bare ``serializers.Field`` — without this drf-spectacular
@@ -137,9 +140,17 @@ class SrcsetRenditionField(serializers.Field):
     ``alt`` is the image's ``description`` and nothing else — see
     :meth:`_alt_text`.
 
-    Mirrors ``ImageRenditionField``'s failure contract: an unreadable source
-    image serializes to ``{"error": "SourceImageIOError"}`` rather than raising,
-    so one broken upload cannot 500 a whole case list.
+    An unreadable source image serializes to ``None`` rather than raising, so
+    one broken upload cannot 500 a whole case list.
+
+    ``None``, specifically, and NOT Wagtail ``ImageRenditionField``'s
+    ``{"error": "SourceImageIOError"}``. That shape does not satisfy
+    :data:`SRCSET_SCHEMA`, whose five keys are all required, and this field is
+    also what the search indexer denormalizes into a card — so an error object
+    would be PERSISTED into the index, where every consumer expects either a
+    whole image payload or nothing. Wagtail's contract exists for its own admin,
+    which has somewhere to show the string; no client here does. The failure is
+    logged instead, which is where an operator would look for it.
     """
 
     def __init__(self, specs=CARD_SPECS, **kwargs):
@@ -166,7 +177,11 @@ class SrcsetRenditionField(serializers.Field):
         try:
             renditions = value.get_renditions(*self.specs)
         except SourceImageIOError:
-            return OrderedDict([("error", "SourceImageIOError")])
+            logger.warning(
+                "case_image.source_unreadable",
+                extra={"image_id": getattr(value, "pk", None)},
+            )
+            return None
 
         ordered = sorted(renditions.items(), key=lambda item: _width_of(item[0]))
         if not ordered:
