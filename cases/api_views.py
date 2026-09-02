@@ -112,6 +112,11 @@ _PATCH_SCALAR_FIELDS = frozenset(
         "title",
         "short_description",
         "description",
+        # The image FKs, written by their ``_id`` attname. These ARE Case
+        # columns, so the bulk UPDATE persists them like any other scalar —
+        # unlike ``authors`` / ``court_cases`` / ``evidence``, which are joins.
+        "thumbnail_image_id",
+        "banner_image_id",
         "thumbnail_url",
         "banner_url",
         "case_start_date",
@@ -513,7 +518,13 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 ]
                 queryset = queryset.filter(id__in=case_ids_with_tag)
 
-        queryset = queryset.prefetch_related(
+        queryset = queryset.select_related(
+            # ``CaseSerializer.thumbnail``/``banner`` read ``card_image`` /
+            # ``hero_image``, and each of those touches BOTH image FKs when the
+            # first is unset — four lazy fetches per card without this.
+            "thumbnail_image",
+            "banner_image",
+        ).prefetch_related(
             "entity_relationships",
             "courtcase_references",
             # ``CaseSerializer.get_evidence`` iterates ``material_references``;
@@ -522,6 +533,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # Same for ``get_authors``; through to the profile, which the byline
             # resolves every name/photo/description from.
             "author_credits__user__author_profile",
+            # The renditions the two image fields serialize. ``get_renditions``
+            # reads a prefetched ``renditions`` cache in preference to the
+            # database (Image._get_prefetched_renditions), so this collapses two
+            # rendition lookups per card into two queries for the whole page.
+            "thumbnail_image__renditions",
+            "banner_image__renditions",
         )
 
         # Reverse lookup: cases citing a specific NGM court case by its canonical
@@ -647,6 +664,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "title",
             "short_description",
             "description",
+            "thumbnail_image_id",
+            "banner_image_id",
             "thumbnail_url",
             "banner_url",
             "case_start_date",
@@ -1524,6 +1543,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "state": case.state,
             "short_description": case.short_description,
             "description": case.description,
+            # The two case images. The ``*_image_id`` pair is what the editor
+            # writes (an id from POST /api/case-images/); the ``*_url`` pair is
+            # the deprecated free-text fallback, still patchable so the cases
+            # that predate the upload flow stay editable.
+            "thumbnail_image_id": case.thumbnail_image_id,
+            "banner_image_id": case.banner_image_id,
             "thumbnail_url": case.thumbnail_url,
             "banner_url": case.banner_url,
             "case_start_date": (
@@ -1631,6 +1656,13 @@ class AuthorProfileView(RetrieveAPIView):
         profile = self.get_object()
         cases = (
             profile.user.authored_cases.filter(state=CaseState.PUBLISHED)
+            # Same reason as the case list: the summary card serializes a
+            # rendition ladder, which without these is four lazy fetches per
+            # case on an author page that lists every case they have written.
+            .select_related("thumbnail_image", "banner_image")
+            .prefetch_related(
+                "thumbnail_image__renditions", "banner_image__renditions"
+            )
             .order_by(F("case_publish_date").desc(nulls_last=True), "-created_at")
         )
         data = self.get_serializer(profile).data
@@ -2377,12 +2409,32 @@ class OEmbedView(APIView):
         except Case.DoesNotExist:
             return None
 
+        # oEmbed wants ONE thumbnail with declared dimensions, not a srcset, so
+        # this takes a fixed 16:9 crop rather than a width ladder — and matches
+        # the spec _update_oembed uses for articles so both cards look alike in a
+        # consumer's feed. Falls back to the deprecated free-text URL, which has
+        # no dimensions to declare (``_base_oembed`` nulls them when absent).
+        thumbnail_url = case.thumbnail_url or ""
+        thumbnail_width = None
+        thumbnail_height = None
+        image = case.card_image
+        if image is not None:
+            try:
+                rendition = image.get_rendition("fill-800x450|format-webp")
+                thumbnail_url = absolute_media_url(rendition.url)
+                thumbnail_width = rendition.width
+                thumbnail_height = rendition.height
+            except Exception:  # noqa: BLE001 - a rendition failure degrades to the URL fallback
+                thumbnail_url = case.thumbnail_url or ""
+
         return self._base_oembed(
             title=case.title,
             embed_url=f"{EMBED_BASE_URL}/embed/case/{slug}",
             width=width,
             height=height,
-            thumbnail_url=case.thumbnail_url or "",
+            thumbnail_url=thumbnail_url,
+            thumbnail_width=thumbnail_width,
+            thumbnail_height=thumbnail_height,
         )
 
     def _update_oembed(self, slug, width, height):
