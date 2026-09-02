@@ -165,6 +165,32 @@ def test_courtcase_build_doc_shape_and_title_from_case_number():
     assert doc["court_province"] == "NATIONAL"
 
 
+def test_courtcase_parties_fall_back_to_the_case_level_strings():
+    """No DB here, so ``CaseEntity`` cannot be read — the shaping must still
+    attribute a side, using the case's own ``plaintiff``/``defendant``. This is
+    also the live path for a case that was never entity-resolved."""
+    doc = courtcase_index.build_doc(_courtcase_obj())
+    assert doc["raw"]["parties"] == {
+        "plaintiff": {"names": ["नेपाल सरकार"], "total": 1},
+        "defendant": {"names": ["राम बहादुर"], "total": 1},
+    }
+    # The flattened bag is unchanged: it feeds text recall, not the card.
+    assert "नेपाल सरकार" in doc["keywords"]
+
+
+def test_courtcase_parties_empty_side_reports_zero_not_a_missing_key():
+    """A side with nothing on it stays present with total 0, so a client
+    branches on the number rather than on whether a key exists."""
+    obj = _courtcase_obj()
+    obj.plaintiff = None
+    obj.defendant = "   "  # whitespace-only is not a party
+    doc = courtcase_index.build_doc(obj)
+    assert doc["raw"]["parties"] == {
+        "plaintiff": {"names": [], "total": 0},
+        "defendant": {"names": [], "total": 0},
+    }
+
+
 def test_courtcase_title_en_none_without_english_court_name():
     obj = _courtcase_obj()
     obj.court = SimpleNamespace(full_name_english=None)

@@ -512,6 +512,48 @@ def test_serialize_hit_omits_court_geography_before_the_rebuild():
         assert key not in extra, key
 
 
+def test_serialize_hit_surfaces_side_attributed_parties():
+    """A result card names the plaintiff and the defendant, so the side split and
+    the per-side total have to survive into ``extra``. Without it a client can
+    only reach the two free-text party strings, which carry no side and no count
+    — i.e. it cannot render "one name + N others"."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/kathmandudc/081-CR-0081",
+            "raw": {
+                "court": "kathmandudc",
+                "parties": {
+                    "plaintiff": {"names": ["नेपाल सरकार"], "total": 1},
+                    "defendant": {"names": ["राम बहादुर", "सीता देवी"], "total": 4},
+                },
+            },
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    assert extra["parties"]["plaintiff"] == {"names": ["नेपाल सरकार"], "total": 1}
+    # ``total`` exceeds the names shipped, which is the point: the card renders
+    # "राम बहादुर + 3 others" off a capped list.
+    assert extra["parties"]["defendant"]["total"] == 4
+    assert extra["parties"]["defendant"]["names"][0] == "राम बहादुर"
+
+
+def test_serialize_hit_omits_parties_before_the_reindex():
+    """``raw.parties`` is newer than the index, so a doc from an older generation
+    does not carry it. Absent, not None — the same contract as the court
+    geography above, so a client tells "not indexed yet" from "none recorded"."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/kathmandudc/081-CR-0081",
+            "raw": {"court": "kathmandudc", "plaintiff": "नेपाल सरकार"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    assert "parties" not in extra
+    assert extra["court"] == "kathmandudc"
+
+
 def test_serialize_hit_omits_district_for_a_high_court_but_keeps_province():
     """The shape that makes ?district= mean "a district court's own district":
     a high court indexes a province and no district at all."""
