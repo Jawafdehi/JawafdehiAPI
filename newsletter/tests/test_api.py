@@ -53,6 +53,24 @@ def test_subscribe_success_calls_sendpulse(client):
     # Consent metadata is forwarded as SendPulse variables (not dropped).
     assert kwargs["variables"]["consent_source"] == "newsletter_modal"
     assert kwargs["variables"]["privacy_version"] == "2026-07-06"
+    # The given name lands in first_name, which is the variable every newsletter
+    # template greets with. Without it the issue renders "Namaste ,".
+    assert kwargs["variables"]["first_name"] == "राम"
+    # The joined display name still rides along separately for SendPulse's own
+    # Name column, and must not be what first_name picks up.
+    assert kwargs["name"] == "राम बहादुर"
+
+
+def test_subscribe_sets_first_name_without_last_name(client):
+    """lastName is optional; first_name must still be populated without it."""
+    fake = _mock_client()
+    payload = {k: v for k, v in VALID_PAYLOAD.items() if k != "lastName"}
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), payload, format="json")
+    assert resp.status_code == 201
+    _, kwargs = fake.add_subscriber.call_args
+    assert kwargs["variables"]["first_name"] == "राम"
+    assert kwargs["name"] == "राम"
 
 
 def test_subscribe_unconfigured_esp_returns_202(client):
