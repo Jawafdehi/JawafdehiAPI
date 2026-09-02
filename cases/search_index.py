@@ -41,6 +41,7 @@ callers that have a retry budget to spend on the failure.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from jawafdehi_shared.search.indexing import (
@@ -52,7 +53,10 @@ from jawafdehi_shared.search.indexing import (
 )
 from jawafdehi_shared.search.opensearch import CASE_INDEX, make_client
 
+from .image_serializers import CARD_SPECS, SrcsetRenditionField
 from .validators import parse_courtcase_ref
+
+logger = logging.getLogger(__name__)
 
 SOURCE_APP = "jawafdehi"
 TYPE_TOKEN = "Case"
@@ -228,6 +232,30 @@ def _apply_dates(doc: dict[str, Any], case: Any) -> None:
         doc["updated_at"] = _iso(updated)
 
 
+def _card_srcset(case: Any) -> dict[str, Any] | None:
+    """The card image's responsive payload, or ``None`` if there isn't one.
+
+    Indexing is where the card renditions get created, which is deliberate: it
+    is a batch job, so the cost lands on a reindex rather than on the first
+    visitor to a search results page.
+
+    Everything here is defensive because this module is written to shape
+    whatever it is handed — the doc-shape tests pass plain stand-ins with no
+    ``card_image``, and a reindex must not abort because object storage
+    hiccuped on one case. Failure degrades to no image, never to an exception.
+    """
+    image = getattr(case, "card_image", None)
+    if image is None:
+        return None
+    try:
+        return SrcsetRenditionField(specs=CARD_SPECS).to_representation(image)
+    except Exception:  # noqa: BLE001 - a broken image must not fail a reindex
+        logger.warning(
+            "case_search_index.rendition_failed", extra={"case": _case_iri(case)}
+        )
+        return None
+
+
 def _build_card(
     case: Any,
     *,
@@ -256,6 +284,10 @@ def _build_card(
         "case_start_date": _iso(getattr(case, "case_start_date", None)),
         "case_end_date": _iso(getattr(case, "case_end_date", None)),
         "bigo": getattr(case, "bigo", None),
+        # The responsive card image. Denormalized like everything else here: a
+        # search hit renders straight off the doc, so without this the results
+        # page would fetch the full-size original for a 400px card.
+        "thumbnail": _card_srcset(case),
         "thumbnail_url": getattr(case, "thumbnail_url", None),
         "banner_url": getattr(case, "banner_url", None),
         "timeline": [

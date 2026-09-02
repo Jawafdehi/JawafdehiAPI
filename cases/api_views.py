@@ -112,6 +112,11 @@ _PATCH_SCALAR_FIELDS = frozenset(
         "title",
         "short_description",
         "description",
+        # The image FKs, written by their ``_id`` attname. These ARE Case
+        # columns, so the bulk UPDATE persists them like any other scalar —
+        # unlike ``authors`` / ``court_cases`` / ``evidence``, which are joins.
+        "thumbnail_image_id",
+        "banner_image_id",
         "thumbnail_url",
         "banner_url",
         "case_start_date",
@@ -647,6 +652,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "title",
             "short_description",
             "description",
+            "thumbnail_image_id",
+            "banner_image_id",
             "thumbnail_url",
             "banner_url",
             "case_start_date",
@@ -1524,6 +1531,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "state": case.state,
             "short_description": case.short_description,
             "description": case.description,
+            # The two case images. The ``*_image_id`` pair is what the editor
+            # writes (an id from POST /api/cases/images/); the ``*_url`` pair is
+            # the deprecated free-text fallback, still patchable so the cases
+            # that predate the upload flow stay editable.
+            "thumbnail_image_id": case.thumbnail_image_id,
+            "banner_image_id": case.banner_image_id,
             "thumbnail_url": case.thumbnail_url,
             "banner_url": case.banner_url,
             "case_start_date": (
@@ -2377,12 +2390,32 @@ class OEmbedView(APIView):
         except Case.DoesNotExist:
             return None
 
+        # oEmbed wants ONE thumbnail with declared dimensions, not a srcset, so
+        # this takes a fixed 16:9 crop rather than a width ladder — and matches
+        # the spec _update_oembed uses for articles so both cards look alike in a
+        # consumer's feed. Falls back to the deprecated free-text URL, which has
+        # no dimensions to declare (``_base_oembed`` nulls them when absent).
+        thumbnail_url = case.thumbnail_url or ""
+        thumbnail_width = None
+        thumbnail_height = None
+        image = case.card_image
+        if image is not None:
+            try:
+                rendition = image.get_rendition("fill-800x450|format-webp")
+                thumbnail_url = absolute_media_url(rendition.url)
+                thumbnail_width = rendition.width
+                thumbnail_height = rendition.height
+            except Exception:  # noqa: BLE001 - a rendition failure degrades to the URL fallback
+                thumbnail_url = case.thumbnail_url or ""
+
         return self._base_oembed(
             title=case.title,
             embed_url=f"{EMBED_BASE_URL}/embed/case/{slug}",
             width=width,
             height=height,
-            thumbnail_url=case.thumbnail_url or "",
+            thumbnail_url=thumbnail_url,
+            thumbnail_width=thumbnail_width,
+            thumbnail_height=thumbnail_height,
         )
 
     def _update_oembed(self, slug, width, height):

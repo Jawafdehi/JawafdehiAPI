@@ -11,6 +11,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field, inline_serializer
 from rest_framework import serializers
 
+from .image_serializers import CARD_SPECS, HERO_SPECS, SrcsetRenditionField
 from .models import (
     Case,
     CaseEntityRelationship,
@@ -157,6 +158,7 @@ class AuthorCaseSummarySerializer(serializers.Serializer):
     title = serializers.CharField(read_only=True)
     short_description = serializers.CharField(read_only=True, allow_blank=True)
     case_type = serializers.CharField(read_only=True)
+    thumbnail = SrcsetRenditionField(specs=CARD_SPECS, source="card_image")
     thumbnail_url = serializers.CharField(read_only=True, allow_blank=True)
     case_publish_date = serializers.DateField(read_only=True, allow_null=True)
     bigo = serializers.IntegerField(read_only=True, allow_null=True)
@@ -254,6 +256,19 @@ class CaseSerializer(serializers.ModelSerializer):
         "casework roles (Admin/Moderator/Caseworker/ReadOnly); an empty string "
         "for public/anonymous callers (notes are 'not shown publicly')."
     )
+    # The two case images as responsive payloads (src + srcset + intrinsic
+    # dimensions), at the two ladders the two surfaces actually need. ``source``
+    # points at the Case properties, so each falls back to the other image
+    # rather than to a placeholder when only one was uploaded. Null when the
+    # case has no uploaded image at all — in which case the client falls back to
+    # the deprecated ``thumbnail_url`` / ``banner_url`` below.
+    thumbnail = SrcsetRenditionField(specs=CARD_SPECS, source="card_image")
+    banner = SrcsetRenditionField(specs=HERO_SPECS, source="hero_image")
+    # The editor reads these back to render the current selection in the upload
+    # widget, and PATCHes the same names. Read-only here; the write path is
+    # CasePatchSerializer.
+    thumbnail_image_id = serializers.IntegerField(read_only=True, allow_null=True)
+    banner_image_id = serializers.IntegerField(read_only=True, allow_null=True)
 
     @extend_schema_field(serializers.CharField(allow_blank=True))
     def get_notes(self, obj):
@@ -469,6 +484,13 @@ class CaseSerializer(serializers.ModelSerializer):
             # DEPRECATED free-text byline, still returned so the frontend can
             # fall back to it on cases that have no structured authors yet.
             "public_notes",
+            # Responsive image payloads, plus the ids the editor round-trips.
+            "thumbnail",
+            "banner",
+            "thumbnail_image_id",
+            "banner_image_id",
+            # DEPRECATED bare URLs, still returned as the fallback for the cases
+            # that predate the upload flow.
             "thumbnail_url",
             "banner_url",
             "case_start_date",

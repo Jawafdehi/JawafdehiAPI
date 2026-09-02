@@ -558,6 +558,8 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "public_case_url",
                     "title",
                     "short_description",
+                    "thumbnail_image",
+                    "banner_image",
                     "thumbnail_url",
                     "banner_url",
                     "case_type",

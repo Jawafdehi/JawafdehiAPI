@@ -40,6 +40,26 @@ class IsFeedbackTriager(permissions.BasePermission):
         return bool(is_admin_or_moderator(user))
 
 
+class IsCaseImageUploader(permissions.BasePermission):
+    """Content staff, for uploading a case thumbnail or hero image.
+
+    Same principal set as ``IsFeedbackTriager`` / ``IsCaseAuthorPicker``, gating
+    a different thing, so it is a separate class for the same reason they are.
+    An upload here writes a permanent, publicly-readable object to R2 and adds a
+    row to the shared Wagtail image library, which is not something an
+    unauthenticated caller may do. ReadOnly is excluded: it is a read role, and
+    an upload is a write.
+    """
+
+    message = "Uploading a case image requires the Caseworker role."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return bool(is_admin_or_moderator(user))
+
+
 class IsCaseAuthorPicker(permissions.BasePermission):
     """Content staff, for the case-author picker's roster of accounts.
 

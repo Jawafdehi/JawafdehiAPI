@@ -11,6 +11,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
+from wagtail.images import get_image_model_string
 
 from jawafdehi_shared.entities.ids import (
     build_case_iri,
@@ -906,13 +907,41 @@ class Case(models.Model):
     short_description = models.TextField(
         blank=True, help_text="Short description/summary of the case"
     )
+    # The two case images, as Wagtail images rather than URLs. Wagtail owns the
+    # original and generates every display size as a rendition on demand, so a
+    # caseworker uploads once and the card / hero / share-card each get a size
+    # that suits them. SET_NULL rather than CASCADE: deleting an image in the
+    # image library must not take the case with it.
+    thumbnail_image = models.ForeignKey(
+        get_image_model_string(),
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        help_text="Card image, shown on the home page and in search results",
+    )
+    banner_image = models.ForeignKey(
+        get_image_model_string(),
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        help_text="Hero image, shown at the top of the case detail page",
+    )
+    # The pre-Wagtail image fields: a free-text URL to an image hosted anywhere.
+    # Superseded by ``thumbnail_image`` / ``banner_image`` above, which win
+    # whenever they are set (see ``card_image`` / ``hero_image``), and kept only
+    # so the several hundred cases that predate the upload flow keep rendering.
+    # Do not add new writers.
     thumbnail_url = HttpsURLField(
         blank=True,
         max_length=500,
-        help_text="URL to a small thumbnail picture for the case",
+        help_text="DEPRECATED. External URL for the card image; use thumbnail_image",
     )
     banner_url = HttpsURLField(
-        blank=True, max_length=500, help_text="URL to a large banner image for the case"
+        blank=True,
+        max_length=500,
+        help_text="DEPRECATED. External URL for the hero image; use banner_image",
     )
     # Date fields
     case_start_date = models.DateField(
@@ -1231,6 +1260,26 @@ class Case(models.Model):
         if self.state != CaseState.PUBLISHED or not self.slug:
             return None
         return build_case_iri(self.slug)
+
+    @property
+    def card_image(self):
+        """The Wagtail image for the card, or ``None``.
+
+        Falls back to the hero: a case that has only ever had one image should
+        still show it on the card rather than a gradient placeholder. The
+        deprecated ``thumbnail_url`` is NOT consulted here — it is a bare URL
+        with no renditions, so callers that can use it handle it separately.
+        """
+        return self.thumbnail_image or self.banner_image
+
+    @property
+    def hero_image(self):
+        """The Wagtail image for the detail-page hero, or ``None``.
+
+        Mirrors :attr:`card_image` in the other direction: a case with only a
+        card image uses it as the hero rather than showing the placeholder.
+        """
+        return self.banner_image or self.thumbnail_image
 
     def get_entities_by_type(self, relationship_type):
         """
