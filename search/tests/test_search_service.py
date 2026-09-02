@@ -8,6 +8,7 @@ and that a transport error becomes ``SearchUnavailable`` (→ HTTP 503).
 
 from __future__ import annotations
 
+import json
 import string
 from unittest.mock import MagicMock
 
@@ -1215,6 +1216,29 @@ def test_build_query_adds_a_second_damped_recall_route_for_an_eligible_query():
     assert mm["type"] == "most_fields"
 
 
+def test_both_recall_routes_are_named_so_hits_report_which_one_matched():
+    """The did-you-mean weak-match gate READS this rather than inferring it: with
+    both routes named, OpenSearch tags every hit with the route(s) that matched, so
+    ``_result_set_is_wholly_fuzzy`` can ask whether the page has a genuine anchor.
+    """
+    nested = build_query(q="coruption")["query"]["bool"]["must"][0]["bool"]
+    exact, fuzzy = nested["should"]
+    assert exact["multi_match"]["_name"] == svc.EXACT_RECALL_CLAUSE_NAME
+    assert fuzzy["multi_match"]["_name"] == svc.FUZZY_RECALL_CLAUSE_NAME
+    # Distinct, or the gate could not tell the two apart.
+    assert svc.EXACT_RECALL_CLAUSE_NAME != svc.FUZZY_RECALL_CLAUSE_NAME
+
+
+def test_naming_is_confined_to_the_fuzzy_branch():
+    """The no-op guarantee covers the names too: an ineligible query emits no
+    ``_name`` anywhere, so its DSL stays byte-identical to the pre-fuzzy one.
+    ``test_build_query_is_unchanged_when_no_token_is_eligible`` pins the whole
+    clause; this states the reason separately so a future edit cannot quietly
+    reintroduce a name on the plain path."""
+    for ineligible in ("देउवा", "082-CR-0154", "2024", "job", ""):
+        assert "_name" not in json.dumps(build_query(q=ineligible)), ineligible
+
+
 def test_fuzzy_route_never_queries_the_devanagari_title():
     """Fuzziness is edit distance over analyzed terms, and a Roman token is never
     within two edits of a Devanagari one — the field would cost term expansions and
@@ -1343,6 +1367,19 @@ def _term_suggestion(token, *, options):
     return [{"text": token, "offset": 0, "length": len(token), "options": options}]
 
 
+def _matched(response, *names):
+    """Tag every hit with the recall route(s) that matched it.
+
+    This is what OpenSearch returns for NAMED query clauses, and ``build_query``
+    names both routes whenever the fuzzy one is active — so any real
+    fuzzy-eligible search comes back carrying these. The weak-match gate reads
+    them instead of inferring an anchor from the suggester.
+    """
+    for hit in response["hits"]["hits"]:
+        hit["matched_queries"] = list(names)
+    return response
+
+
 def test_did_you_mean_substitutes_the_suggested_token():
     client = MagicMock()
     client.search.return_value = _zero_hit_response(
@@ -1446,12 +1483,12 @@ def test_did_you_mean_fires_on_a_wholly_fuzzy_result_set():
     Gating on ``count == 0`` alone made it nearly dead once §10 landed: bounded
     fuzzy matching rescues most misspellings, so the queries that most need a
     spelling hint (``coruption`` finds 199 real records) stopped qualifying. The
-    signal is free — ``suggest_mode: "missing"`` only returns options for terms
-    ABSENT from the index, so a corrected token cannot be matched exactly by
-    anything in the result set.
+    signal is READ, not inferred: every hit here matched only the named fuzzy
+    route, so nothing on the page matched what the reader actually typed.
     """
     client = MagicMock()
-    response = _canned_response()  # 3 hits — a NON-empty result set
+    # 3 hits — a NON-empty result set — every one of them a fuzzy rescue.
+    response = _matched(_canned_response(), svc.FUZZY_RECALL_CLAUSE_NAME)
     response["suggest"] = {
         "keywords.text": _term_suggestion(
             "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
@@ -1466,17 +1503,21 @@ def test_did_you_mean_fires_on_a_wholly_fuzzy_result_set():
 
 
 def test_no_did_you_mean_when_an_eligible_token_is_really_indexed():
-    """The quiet-on-a-healthy-search guarantee: ALL eligible tokens must have been
-    corrected. Here ``corruption`` is a real indexed term (``missing`` mode returns
-    nothing for it), so the result set has an exact anchor and the suggestion for
-    the neighbouring typo is withheld rather than second-guessing good results."""
+    """The quiet-on-a-healthy-search guarantee, now stated as the hits state it:
+    the page carries at least one EXACT-route match, so the results have a real
+    anchor and the suggestion for the neighbouring typo is withheld rather than
+    second-guessing good results."""
     client = MagicMock()
-    response = _canned_response()  # 3 hits
+    # ``corruption`` matched exactly; the fuzzy route also fired for ``coruption``.
+    response = _matched(
+        _canned_response(),
+        svc.EXACT_RECALL_CLAUSE_NAME,
+        svc.FUZZY_RECALL_CLAUSE_NAME,
+    )
     response["suggest"] = {
         "keywords.text": _term_suggestion(
             "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
         ),
-        # No entry/options for "corruption" — it IS in the index.
     }
     client.search.return_value = response
     out = SearchService(client=client).search(q="corruption coruption")
@@ -1490,6 +1531,114 @@ def test_no_did_you_mean_for_a_correctly_spelled_query_with_hits():
     response = _canned_response()  # 3 hits, no suggest block at all
     client.search.return_value = response
     assert SearchService(client=client).search(q="deuba")["did_you_mean"] is None
+
+
+def test_no_did_you_mean_when_the_only_token_matched_exactly_outside_the_suggest_fields():
+    """REGRESSION. The gate used to infer "no exact anchor" from the suggester:
+    every eligible token came back corrected, therefore none of them could be
+    indexed. That inference was unsound, because ``suggest_mode: "missing"`` is
+    evaluated per SUGGEST FIELD and ``SUGGEST_FIELDS`` covers only
+    ``keywords.text`` and ``title_translit`` — while the recall route also searches
+    ``title_en`` and ``body``.
+
+    So a token living in the OCR ``body`` but absent from both suggest fields
+    looked "missing" while matching plenty of documents exactly. Concretely:
+    ``minister`` is not a curated tag (the vocabulary has ``ministry``) and is not
+    in any title romanization, so the suggester offers ``ministry`` — two edits,
+    same first letter, comfortably inside the bounds. It was the only eligible
+    token, so the old ``all(...)`` test passed and a correctly spelled query got a
+    spurious "did you mean" on top of real results.
+
+    The hits say otherwise, and now the gate listens to them.
+    """
+    client = MagicMock()
+    response = _matched(_canned_response(), svc.EXACT_RECALL_CLAUSE_NAME)
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "minister", options=[{"text": "ministry", "score": 0.81, "freq": 40}]
+        )
+    }
+    client.search.return_value = response
+    out = SearchService(client=client).search(q="minister")
+    assert out["count"] == 3
+    assert out["did_you_mean"] is None
+
+
+def test_no_did_you_mean_when_an_ineligible_devanagari_token_anchors_the_results():
+    """The mixed-script rough edge the inference could not see, now closed.
+
+    ``देउवा`` is fuzzy-INELIGIBLE, so it never appeared in the eligible-token list
+    the old gate quantified over — only ``coruption`` did, and it was corrected, so
+    "every eligible token was corrected" held and the offer fired even though the
+    Devanagari term was anchoring strong exact results. Reading ``matched_queries``
+    sees the anchor regardless of which script produced it.
+    """
+    client = MagicMock()
+    response = _matched(
+        _canned_response(),
+        svc.EXACT_RECALL_CLAUSE_NAME,
+        svc.FUZZY_RECALL_CLAUSE_NAME,
+    )
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="देउवा coruption")["did_you_mean"] is None
+
+
+def test_weak_match_gate_stays_quiet_when_it_cannot_tell():
+    """No names, an unexpected shape, or no hits at all — every one of them means
+    the question cannot be answered, and silence is the safe direction. An absent
+    suggestion is invisible; a wrong one argues with results already on screen."""
+    suggest = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    for tag in (None, "exact_recall", 42, {"matched": True}):
+        client = MagicMock()
+        response = _canned_response()
+        for hit in response["hits"]["hits"]:
+            if tag is not None:
+                hit["matched_queries"] = tag
+        response["suggest"] = suggest
+        client.search.return_value = response
+        out = SearchService(client=client).search(q="coruption")
+        assert out["did_you_mean"] is None, tag
+
+
+def test_weak_match_gate_reads_the_dict_shape_of_matched_queries():
+    """OpenSearch returns ``matched_queries`` as a name list, but as a
+    ``name -> score`` MAP when match scores are requested. The keys are the same
+    names, so the gate must not care which shape arrived."""
+    client = MagicMock()
+    response = _canned_response()
+    for hit in response["hits"]["hits"]:
+        hit["matched_queries"] = {svc.FUZZY_RECALL_CLAUSE_NAME: 0.31}
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="coruption")["did_you_mean"] == "corruption"
+
+
+def test_one_exact_hit_among_fuzzy_ones_is_enough_to_stay_quiet():
+    """"Only weak matches" means NO anchor, not "mostly fuzzy". A single genuine
+    match on the page is enough for the results to stand on their own."""
+    client = MagicMock()
+    response = _matched(_canned_response(), svc.FUZZY_RECALL_CLAUSE_NAME)
+    response["hits"]["hits"][1]["matched_queries"] = [svc.EXACT_RECALL_CLAUSE_NAME]
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    client.search.return_value = response
+    assert SearchService(client=client).search(q="coruption")["did_you_mean"] is None
 
 
 def test_did_you_mean_is_none_when_nothing_was_suggested():

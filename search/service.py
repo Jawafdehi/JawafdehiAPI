@@ -143,6 +143,14 @@ FUZZY_PREFIX_LENGTH = 1
 FUZZY_MIN_TOKEN_LENGTH = 4
 FUZZY_DENYLIST: frozenset[str] = frozenset()
 
+# Named queries on the two recall routes. OpenSearch echoes the names that matched
+# on each hit as ``matched_queries``, which is how ``search`` tells a fuzzy rescue
+# apart from a genuine match WITHOUT inferring it — see
+# :func:`_result_set_is_wholly_fuzzy`. Emitted ONLY when the fuzzy route is active,
+# so the no-op guarantee (byte-identical DSL for an ineligible query) still holds.
+EXACT_RECALL_CLAUSE_NAME = "exact_recall"
+FUZZY_RECALL_CLAUSE_NAME = "fuzzy_recall"
+
 # ── Did-you-mean suggestions (design §11) ───────────────────────────────────────
 #
 # A ``term`` suggester riding on the SAME request as the search — no second round
@@ -521,6 +529,9 @@ def _fuzzy_clause(tokens: list[str]) -> dict[str, Any]:
 
     ``most_fields`` (not ``cross_fields``) because cross_fields silently DROPS
     fuzziness — see ``docs/shared/research/opensearch-bilingual-nepali.md`` §5.
+
+    Carries ``_name`` so each hit reports whether it arrived via this route; the
+    did-you-mean gate reads that rather than guessing.
     """
     return {
         "multi_match": {
@@ -531,6 +542,7 @@ def _fuzzy_clause(tokens: list[str]) -> dict[str, Any]:
             "fuzziness": FUZZINESS,
             "prefix_length": FUZZY_PREFIX_LENGTH,
             "boost": FUZZY_BOOST,
+            "_name": FUZZY_RECALL_CLAUSE_NAME,
         }
     }
 
@@ -676,10 +688,25 @@ def build_query(
         # query would still return nothing, which is the whole bug. Wrapping the
         # two routes in one satisfied-by-either clause is what makes ``coruption``
         # reach ``corruption`` at all.
+        #
+        # Both routes are NAMED, and only on this branch. Each hit then reports the
+        # route(s) that matched it as ``matched_queries``, which is what lets the
+        # did-you-mean gate in ``SearchService.search`` ASK whether the result set
+        # has a genuine (non-fuzzy) anchor instead of inferring it from the
+        # suggester. Naming only here keeps the ineligible-query DSL byte-identical.
+        named_exact_recall_clause: dict[str, Any] = {
+            "multi_match": {
+                **exact_recall_clause["multi_match"],
+                "_name": EXACT_RECALL_CLAUSE_NAME,
+            }
+        }
         must_clauses = [
             {
                 "bool": {
-                    "should": [exact_recall_clause, _fuzzy_clause(fuzzy_tokens)],
+                    "should": [
+                        named_exact_recall_clause,
+                        _fuzzy_clause(fuzzy_tokens),
+                    ],
                     "minimum_should_match": 1,
                 }
             }
@@ -1120,6 +1147,62 @@ def _did_you_mean_from_suggest(q: str, suggest: Any) -> str | None:
     return _apply_replacements(q, _suggested_replacements(suggest))
 
 
+def _result_set_is_wholly_fuzzy(hits: list[Any]) -> bool:
+    """True when every hit on this page arrived ONLY via the damped fuzzy route.
+
+    Design §11's second did-you-mean trigger — "the result set contains only weak
+    matches" — MEASURED rather than inferred. :func:`build_query` names both recall
+    routes, so each hit reports the route(s) that matched it in ``matched_queries``;
+    if no hit carries :data:`EXACT_RECALL_CLAUSE_NAME`, then nothing on the page
+    matched what the reader actually typed and the set is a pure fuzzy rescue.
+
+    This REPLACES an inference from the suggester — "every eligible token came back
+    corrected, so none of them can be indexed" — which was unsound. ``suggest_mode:
+    "missing"`` is evaluated per SUGGEST FIELD, and :data:`SUGGEST_FIELDS` covers
+    only ``keywords.text`` and ``title_translit``; the recall route also searches
+    ``title_en`` and ``body``. A token living in the OCR ``body`` but absent from
+    both suggest fields therefore looked "missing" while matching thousands of
+    documents exactly, so a correctly spelled query could draw a spurious
+    suggestion. Naming the clauses removes the inference instead of tightening it.
+
+    SCOPE, deliberately: this reads the CURRENT PAGE, since ``matched_queries``
+    exists only on returned hits. Under the default relevance sort an exact match
+    outranks a damped fuzzy one by construction (:data:`FUZZY_BOOST` sits below
+    every exact field weight), so if an anchor exists it surfaces on page one. On a
+    non-relevance sort that no longer holds, which is a deliberate v1 limit: the
+    consequence is at worst an offered spelling, never a wrong result.
+
+    Returns False whenever the answer cannot be established — no hits, no names
+    emitted (the fuzzy route was not active), or a malformed payload. Silence is
+    the safe direction on uncertainty: an absent suggestion is invisible, whereas a
+    wrong one argues with results already on the reader's screen.
+    """
+    saw_a_hit = False
+    for hit in hits:
+        if not isinstance(hit, dict):
+            return False
+        matched = hit.get("matched_queries")
+        # OpenSearch returns a list of names; the dict shape (name -> score) is
+        # what comes back when match scores are requested, and its KEYS are the
+        # same names. Any other shape means we cannot tell, so we stay quiet.
+        if isinstance(matched, dict):
+            names: Any = matched.keys()
+        elif isinstance(matched, list):
+            names = matched
+        else:
+            return False
+        if EXACT_RECALL_CLAUSE_NAME in names:
+            return False
+        # Neither name present is INCONSISTENT, not evidence of a fuzzy rescue:
+        # the two routes sit in a ``minimum_should_match: 1`` bool, so every hit
+        # must have matched at least one of them. A payload saying otherwise is
+        # not describing the query we sent, so it cannot be reasoned from.
+        if FUZZY_RECALL_CLAUSE_NAME not in names:
+            return False
+        saw_a_hit = True
+    return saw_a_hit
+
+
 def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Range-filter EXTENT from the ``global`` extent agg, keyed by request param
     prefix (``bigo`` covers ``bigo_min``/``bigo_max``).
@@ -1203,9 +1286,9 @@ class SearchService:
         The envelope also carries ``did_you_mean``: a spelling suggestion from the
         suggester requested on the same OpenSearch call by :func:`build_query`.
         Non-null when that suggester offered a correction AND either the search
-        returned nothing or every fuzzy-eligible token was corrected (design §11's
-        two triggers — see the gate below). Always present, never applied
-        automatically.
+        returned nothing or no hit on the page matched the exact recall route
+        (design §11's two triggers — see the gate below). Always present, never
+        applied automatically.
 
         Raises :class:`SearchUnavailable` if the cluster can't be reached (→ 503)
         and :class:`SearchError` on a bad cursor / over-deep offset (→ 400).
@@ -1269,12 +1352,11 @@ class SearchService:
         # reader: it is an offer, not a rewrite.
         #
         # The weak-match half is not a score threshold (BM25 scores are not
-        # comparable across queries, so any cutoff would be a magic number). It
-        # falls out of ``suggest_mode: "missing"`` for free: the suggester only
-        # returns options for terms ABSENT from the index, so a corrected token is
-        # provably not matched exactly by anything in the result set. When EVERY
-        # eligible token was corrected, the whole result set is fuzzy — there is no
-        # exact anchor — and that is precisely "only weak matches".
+        # comparable across queries, so any cutoff would be a magic number). It is
+        # read straight off the hits instead: ``build_query`` NAMES both recall
+        # routes, so every hit says whether it matched the reader's actual spelling
+        # or only the damped fuzzy rescue. See ``_result_set_is_wholly_fuzzy``,
+        # which also records why the earlier suggester-based inference was unsound.
         #
         # This half matters more than the zero-result half, and gating on
         # ``count == 0`` alone made the feature nearly unreachable: bounded fuzzy
@@ -1283,22 +1365,17 @@ class SearchService:
         # qualifying the moment §10 landed. The two features would have
         # cannibalized each other.
         #
-        # Requiring ALL eligible tokens to be corrected is what keeps it quiet on a
-        # healthy search: in ``corruption coruption`` the first token IS indexed, so
-        # the results have a real anchor and no suggestion is offered. The known
-        # rough edge is a mixed-script query — an ineligible Devanagari token can
-        # anchor strong results while the lone Roman token still triggers the offer.
-        # That reads as OpenSearch's own "including results for" behaviour rather
-        # than as a wrong answer, so v1 accepts it.
+        # Measuring rather than inferring is also what keeps it quiet on a healthy
+        # search, and on two searches the inference got wrong: ``corruption
+        # coruption`` (the ``corruption`` hits match the exact route, so the page
+        # has an anchor) and a mixed-script query like ``देउवा coruption``, where the
+        # Devanagari term is fuzzy-INELIGIBLE yet still anchors the result set via
+        # the exact route.
         did_you_mean: str | None = None
-        if q and q.strip():
-            replacements = _suggested_replacements(response.get("suggest"))
-            eligible = fuzzy_eligible_tokens(q)
-            only_weak_matches = bool(eligible) and all(
-                token in replacements for token in eligible
+        if q and q.strip() and (count == 0 or _result_set_is_wholly_fuzzy(hit_list)):
+            did_you_mean = _apply_replacements(
+                q, _suggested_replacements(response.get("suggest"))
             )
-            if count == 0 or only_weak_matches:
-                did_you_mean = _apply_replacements(q, replacements)
 
         return {
             "query": q,
