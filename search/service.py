@@ -143,6 +143,27 @@ FUZZY_PREFIX_LENGTH = 1
 FUZZY_MIN_TOKEN_LENGTH = 4
 FUZZY_DENYLIST: frozenset[str] = frozenset()
 
+# How many eligible tokens one query may fuzz, and how far each may expand. Both
+# bound COST, and the reason they exist is that ``q`` is a plain unbounded
+# ``CharField`` — the serializer sets no max length, so query size is attacker- (or
+# accident-) controlled.
+#
+# That was affordable while every token was matched exactly. Fuzziness changes the
+# shape of the work: each term walks the term dictionary for neighbours within two
+# edits, across four fields. Left unbounded, a pathological query multiplies out to
+# a very large disjunction, and past
+# ``indices.query.bool.max_clause_count`` OpenSearch rejects it outright — which
+# this service turns into a 503, so an over-long query degrades AVAILABILITY rather
+# than just being slow.
+#
+# The cap TRUNCATES rather than disabling the route: a real query needing a
+# spelling rescue is a handful of words, so the first tokens are the ones that
+# matter, and a 40-word paste keeps exact recall on all of it either way.
+FUZZY_MAX_TOKENS = 12
+# Neighbours per term. 50 is also OpenSearch's default; stated explicitly because
+# "bounded" is the whole promise of this route and a default is not a decision.
+FUZZY_MAX_EXPANSIONS = 50
+
 # Named queries on the two recall routes. OpenSearch echoes the names that matched
 # on each hit as ``matched_queries``, which is how ``search`` tells a fuzzy rescue
 # apart from a genuine match WITHOUT inferring it — see
@@ -507,6 +528,10 @@ def fuzzy_eligible_tokens(q: str | None) -> list[str]:
 
     Returns ``[]`` for a browse, a pure-Devanagari query or a bare identifier,
     which is the signal ``build_query`` uses to emit today's DSL untouched.
+
+    Truncated to :data:`FUZZY_MAX_TOKENS`. Both consumers — the fuzzy clause and
+    the suggester — read this ONE list, so the bound applies to each of them and
+    they cannot disagree about which tokens are in play.
     """
     tokens: list[str] = []
     for token in normalize_query(q).split():
@@ -517,6 +542,8 @@ def fuzzy_eligible_tokens(q: str | None) -> list[str]:
         if token in FUZZY_DENYLIST:
             continue
         tokens.append(token)
+        if len(tokens) == FUZZY_MAX_TOKENS:
+            break
     return tokens
 
 
@@ -541,6 +568,7 @@ def _fuzzy_clause(tokens: list[str]) -> dict[str, Any]:
             "operator": "or",
             "fuzziness": FUZZINESS,
             "prefix_length": FUZZY_PREFIX_LENGTH,
+            "max_expansions": FUZZY_MAX_EXPANSIONS,
             "boost": FUZZY_BOOST,
             "_name": FUZZY_RECALL_CLAUSE_NAME,
         }
@@ -554,9 +582,19 @@ def _suggest_block(tokens: list[str]) -> dict[str, Any]:
     eligible tokens). Entries are keyed by their field name so the response parser
     needs no separate name→field map.
 
-    No ``collate`` in v1: the suggestion vocabulary comes from fields the query
-    already searches, so a suggested query is guaranteed at least one hit and there
-    is nothing to verify a candidate against.
+    No ``collate`` in v1, but the reason is narrower than "it cannot miss". The
+    vocabulary comes from fields the query already searches, so an UNFILTERED
+    search on the suggestion does find something. That is not a guarantee for the
+    request actually made: suggestions are drawn from whole-field term
+    dictionaries, while the query also carries ``bool.filter`` clauses (type,
+    facets, ``bigo`` range, court/district), and none of those constrain what the
+    suggester offers. With a filter active a suggestion can therefore lead to a
+    second empty state — the one thing this feature exists to get readers out of.
+
+    Accepted for v1 because the failure is self-correcting (the reader sees an
+    empty result and can widen the filter) and because ``collate`` costs a query
+    per candidate. If analytics show suggestions landing on empty filtered pages,
+    ``collate`` with the live filter clauses is the fix.
     """
     block: dict[str, Any] = {"text": " ".join(tokens)}
     for field in SUGGEST_FIELDS:
@@ -1139,10 +1177,12 @@ def _apply_replacements(q: str, replacements: dict[str, str]) -> str | None:
 def _did_you_mean_from_suggest(q: str, suggest: Any) -> str | None:
     """A single corrected query string from a raw ``suggest`` block, or ``None``.
 
-    The two halves composed: rank the candidates, then substitute. Kept as one
-    entry point because ``SearchService.search`` needs the ranked replacements on
-    their own — the weak-match gate is a question about WHICH tokens were
-    corrected, not about the final string.
+    The two halves composed: rank the candidates, then substitute. This is the ONE
+    entry point ``SearchService.search`` uses. It briefly was not: while the
+    weak-match gate inferred an anchor from the suggester it needed the ranked
+    replacements on their own, so ``search`` called both halves itself and this
+    became production code with only tests behind it. Reading the anchor off
+    ``matched_queries`` instead retired that need.
     """
     return _apply_replacements(q, _suggested_replacements(suggest))
 
@@ -1371,11 +1411,38 @@ class SearchService:
         # has an anchor) and a mixed-script query like ``देउवा coruption``, where the
         # Devanagari term is fuzzy-INELIGIBLE yet still anchors the result set via
         # the exact route.
+        #
+        # ``matched_queries`` describes the PAGE, so the weak-match half is only
+        # asked when the page can stand in for the result set — the FIRST page of a
+        # RELEVANCE-sorted search. Both halves of that matter:
+        #
+        #   * Not the first page. Relevance puts the exact matches first, so paging
+        #     INTO a healthy result set eventually reaches hits the fuzzy route
+        #     alone rescued. Without this guard the suggestion would be absent on
+        #     page 1 and then appear on page 4 of the same search, which reads as a
+        #     glitch rather than an offer.
+        #   * Not a relevance sort. Under ``newest``/``oldest``/``title``/
+        #     ``featured`` the score does not order anything, so "the exact matches
+        #     come first" — the property that lets one page speak for the whole set
+        #     — simply does not hold.
+        #
+        # ``count == 0`` is unaffected: that reads the TOTAL, not the page, and is
+        # true regardless of sort or offset.
+        #
+        # The exact-but-costlier alternative is a ``filter`` agg counting the
+        # documents that match the exact route across the whole result set, which
+        # would answer this for any page and any sort. It buys a narrow case (a
+        # misspelling on a date-sorted search) for an extra aggregation on every
+        # fuzzy-eligible query; v2 if the analytics say the case is common.
+        page_speaks_for_the_result_set = (
+            search_after is None and page == 1 and sort == SORT_RELEVANCE
+        )
         did_you_mean: str | None = None
-        if q and q.strip() and (count == 0 or _result_set_is_wholly_fuzzy(hit_list)):
-            did_you_mean = _apply_replacements(
-                q, _suggested_replacements(response.get("suggest"))
-            )
+        if q and q.strip() and (
+            count == 0
+            or (page_speaks_for_the_result_set and _result_set_is_wholly_fuzzy(hit_list))
+        ):
+            did_you_mean = _did_you_mean_from_suggest(q, response.get("suggest"))
 
         return {
             "query": q,

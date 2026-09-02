@@ -15,8 +15,9 @@ What each event captures:
   (consent-gated to ~a quarter of humans) which only sees a fraction of traffic.
 * **result quality** — the total hit count, a ``zero_result`` flag (the single
   most actionable gap signal — a real query the corpus/analyzers could not
-  answer), a ``did_you_mean`` flag saying whether that miss was recoverable by a
-  spelling suggestion (the two together give design §18's did-you-mean RATE), the
+  answer), a ``did_you_mean`` flag saying whether a spelling correction was
+  offered (design §18's did-you-mean RATE — see the field below for the
+  denominator, which is NOT ``zero_result``), the
   per-type counts (which index satisfied the demand), and the top hit's type/score
   on the first page (a coarse "was the best answer strong" signal, and the join
   target for click-through analysis).
@@ -116,10 +117,18 @@ def build_search_event(
         # The key gap signal: a real query the corpus/analyzers could not answer.
         # A browse (no query term) that returns nothing is NOT a zero-result miss.
         "zero_result": has_query and count == 0,
-        # Whether that miss was recoverable: did the suggester offer a correction
-        # for the empty state (design §18 wants the did-you-mean RATE, i.e. this
-        # over ``zero_result``). A flag, not the text — the suggestion is derived
-        # from ``q_normalized``, which is already captured above.
+        # Whether a spelling correction was offered. A flag, not the text — the
+        # suggestion is derived from ``q_normalized``, which is already captured
+        # above.
+        #
+        # NOT a subset of ``zero_result``, so do not divide the two. This fires on
+        # either of design §11's triggers, and the second one — a result set with
+        # no exactly-matching anchor — is by definition a search that RETURNED
+        # something. Dividing by ``zero_result`` would mix an empty-state recovery
+        # rate with a spelling-hint rate and can exceed 1. For §18's rate, use
+        # queries carrying at least one fuzzy-eligible token as the denominator;
+        # ``q_normalized`` is recorded, so it is recoverable from the stream
+        # without a new field.
         "did_you_mean": bool(response.get("did_you_mean")),
         "counts_by_type": response.get("counts") or {},
         "returned": len(results),

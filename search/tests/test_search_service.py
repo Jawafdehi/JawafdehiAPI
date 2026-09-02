@@ -1239,6 +1239,33 @@ def test_naming_is_confined_to_the_fuzzy_branch():
         assert "_name" not in json.dumps(build_query(q=ineligible)), ineligible
 
 
+def test_fuzzy_eligibility_is_capped_so_query_size_cannot_drive_cost():
+    """``q`` is an unbounded CharField, so query size is caller-controlled. Matching
+    every token EXACTLY was affordable; fuzzing every token is not — each term walks
+    the dictionary for two-edit neighbours across four fields, and a large enough
+    disjunction is rejected outright by ``max_clause_count``, which this service
+    turns into a 503. The cap truncates, so exact recall still covers the whole
+    query."""
+    # Alphabetic on purpose: a token carrying digits is ineligible anyway, so it
+    # would test the ASCII-letters rule rather than the cap.
+    long_query = " ".join("word" + string.ascii_lowercase[n % 26] for n in range(200))
+    tokens = svc.fuzzy_eligible_tokens(long_query)
+    assert len(tokens) == svc.FUZZY_MAX_TOKENS
+    # Truncated from the FRONT — the leading terms are the ones a reader meant.
+    assert tokens[0] == "worda"
+    # Both consumers read the one capped list, so they cannot disagree.
+    body = build_query(q=long_query)
+    fuzzy = _fuzzy_multi_match(body)
+    assert len(fuzzy["query"].split()) == svc.FUZZY_MAX_TOKENS
+    assert len(body["suggest"]["text"].split()) == svc.FUZZY_MAX_TOKENS
+
+
+def test_fuzzy_clause_bounds_its_term_expansion():
+    """"Bounded" is this route's whole promise, and a default is not a decision."""
+    mm = _fuzzy_multi_match(build_query(q="coruption"))
+    assert mm["max_expansions"] == svc.FUZZY_MAX_EXPANSIONS
+
+
 def test_fuzzy_route_never_queries_the_devanagari_title():
     """Fuzziness is edit distance over analyzed terms, and a Roman token is never
     within two edits of a Devanagari one — the field would cost term expansions and
@@ -1624,6 +1651,62 @@ def test_weak_match_gate_reads_the_dict_shape_of_matched_queries():
     }
     client.search.return_value = response
     assert SearchService(client=client).search(q="coruption")["did_you_mean"] == "corruption"
+
+
+def _wholly_fuzzy_response():
+    """A non-empty page on which every hit was rescued by the fuzzy route."""
+    response = _matched(_canned_response(), svc.FUZZY_RECALL_CLAUSE_NAME)
+    response["suggest"] = {
+        "keywords.text": _term_suggestion(
+            "coruption", options=[{"text": "corruption", "score": 0.89, "freq": 82}]
+        )
+    }
+    return response
+
+
+def test_weak_match_trigger_is_confined_to_the_first_page():
+    """``matched_queries`` describes the PAGE, and relevance puts the exact matches
+    first — so paging INTO a healthy result set eventually reaches hits only the
+    fuzzy route rescued. Offering there would make the suggestion absent on page 1
+    and present on page 4 of the same search, which reads as a glitch. The page-1
+    result is the control: same payload, offer made."""
+    client = MagicMock()
+    client.search.return_value = _wholly_fuzzy_response()
+    service = SearchService(client=client)
+    assert service.search(q="coruption")["did_you_mean"] == "corruption"
+    assert service.search(q="coruption", page=4)["did_you_mean"] is None
+    cursor = encode_cursor([1.0, "https://jawafdehi.org/entity/person/deuba"])
+    assert service.search(q="coruption", cursor=cursor)["did_you_mean"] is None
+
+
+def test_weak_match_trigger_needs_a_relevance_sort():
+    """Under ``newest``/``oldest``/``title``/``featured`` the score orders nothing,
+    so "the exact matches come first" — the property that lets one page speak for
+    the whole result set — does not hold and the page cannot be read."""
+    client = MagicMock()
+    client.search.return_value = _wholly_fuzzy_response()
+    service = SearchService(client=client)
+    for sort in ("newest", "oldest", "title", "featured"):
+        assert service.search(q="coruption", sort=sort)["did_you_mean"] is None, sort
+    assert service.search(q="coruption", sort=svc.SORT_RELEVANCE)["did_you_mean"] == (
+        "corruption"
+    )
+
+
+def test_zero_result_trigger_survives_paging_and_sort():
+    """The other trigger reads the TOTAL, not the page, so neither an offset nor a
+    sort mode can suppress it — an empty result is empty on every page."""
+    client = MagicMock()
+    client.search.return_value = _zero_hit_response(
+        {
+            "keywords.text": _term_suggestion(
+                "coruption", options=[{"text": "corruption", "score": 0.9, "freq": 12}]
+            )
+        }
+    )
+    service = SearchService(client=client)
+    assert service.search(q="coruption", page=3)["did_you_mean"] == "corruption"
+    assert service.search(q="coruption", sort="newest")["did_you_mean"] == "corruption"
 
 
 def test_one_exact_hit_among_fuzzy_ones_is_enough_to_stay_quiet():
