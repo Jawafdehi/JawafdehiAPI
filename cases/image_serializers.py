@@ -28,10 +28,30 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from wagtail.images import get_image_model
 from wagtail.images.models import SourceImageIOError
+
+from jawafdehi_shared.storage import absolute_media_url
+
+#: OpenAPI shape of a :class:`SrcsetRenditionField` value. Declared by hand
+#: because the field is a bare ``serializers.Field`` — without this drf-spectacular
+#: types it as a free-form object, and the two image fields are the part of the
+#: case payload a client is most likely to code against.
+SRCSET_SCHEMA = {
+    "type": "object",
+    "nullable": True,
+    "properties": {
+        "src": {"type": "string", "format": "uri"},
+        "srcset": {"type": "string"},
+        "width": {"type": "integer"},
+        "height": {"type": "integer"},
+        "alt": {"type": "string"},
+    },
+    "required": ["src", "srcset", "width", "height", "alt"],
+}
 
 #: Width ladder for the case card (home page, search results, embeds). The card
 #: box tops out around 400 CSS px, so 800 covers it at 2x and 1200 covers a
@@ -96,6 +116,7 @@ class ImageIdField(serializers.PrimaryKeyRelatedField):
         return value
 
 
+@extend_schema_field(SRCSET_SCHEMA)
 class SrcsetRenditionField(serializers.Field):
     """Serialize one image as a full responsive ``srcset`` payload.
 
@@ -113,6 +134,9 @@ class SrcsetRenditionField(serializers.Field):
     (and any consumer that reads the JSON and wants one URL — share cards,
     the search index) still gets a usable image.
 
+    ``alt`` is the image's ``description`` and nothing else — see
+    :meth:`_alt_text`.
+
     Mirrors ``ImageRenditionField``'s failure contract: an unreadable source
     image serializes to ``{"error": "SourceImageIOError"}`` rather than raising,
     so one broken upload cannot 500 a whole case list.
@@ -123,6 +147,19 @@ class SrcsetRenditionField(serializers.Field):
         kwargs.setdefault("read_only", True)
         super().__init__(**kwargs)
 
+    @staticmethod
+    def _alt_text(image) -> str:
+        """Alt text for ``image``, or empty when it has none.
+
+        NOT ``Rendition.alt``, which is Wagtail's ``default_alt_text`` and falls
+        back to the image *title*. The upload endpoint titles an image after the
+        file it arrived as, so that fallback would put ``IMG_0001.jpg`` in front
+        of a screen reader — worse than nothing, because an empty alt lets the
+        consumer supply its own description (the card and the hero both use the
+        case title) while a filename overrides it with noise.
+        """
+        return getattr(image, "description", "") or ""
+
     def to_representation(self, value):
         if value is None:
             return None
@@ -132,16 +169,31 @@ class SrcsetRenditionField(serializers.Field):
             return OrderedDict([("error", "SourceImageIOError")])
 
         ordered = sorted(renditions.items(), key=lambda item: _width_of(item[0]))
+        if not ordered:
+            # No spec survived cleaning, so there is no image to point at. Same
+            # contract as a null image rather than an IndexError on ordered[-1]:
+            # this field renders inside case LISTS, where one odd source must not
+            # take the whole page down.
+            return None
+
+        # absolute_media_url, not ``Rendition.full_url``: full_url absolutizes
+        # against WAGTAILADMIN_BASE_URL (the newsroom), which is the wrong host
+        # for public media and, off S3, points at a machine that does not have
+        # the file. Both are no-ops in production, where MEDIA_URL is already the
+        # absolute R2 domain — this only matters in dev and CI, where getting it
+        # wrong means every case image in the editor is a broken link.
         largest = ordered[-1][1]
         return OrderedDict(
             [
-                ("src", largest.full_url),
+                ("src", absolute_media_url(largest.url)),
                 (
                     "srcset",
-                    ", ".join(f"{r.full_url} {r.width}w" for _spec, r in ordered),
+                    ", ".join(
+                        f"{absolute_media_url(r.url)} {r.width}w" for _spec, r in ordered
+                    ),
                 ),
                 ("width", largest.width),
                 ("height", largest.height),
-                ("alt", largest.alt),
+                ("alt", self._alt_text(value)),
             ]
         )

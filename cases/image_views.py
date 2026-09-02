@@ -24,21 +24,42 @@ import hashlib
 import os
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
 from wagtail.images import get_image_model
 from wagtail.images.fields import WagtailImageField
+from wagtail.utils.file import hash_filelike
 
-from .image_serializers import CARD_SPECS, HERO_SPECS, SrcsetRenditionField
+from .image_serializers import (
+    CARD_SPECS,
+    HERO_SPECS,
+    SRCSET_SCHEMA,
+    SrcsetRenditionField,
+)
 from .permissions import IsCaseImageUploader
 
 #: Chunk size for the content hash. Matches Django's own ``UploadedFile.chunks``
 #: default so a large upload is never fully resident in memory here.
 _HASH_CHUNK_BYTES = 64 * 1024
+
+#: The upload response body. Shared by 201 (created) and 200 (these bytes were
+#: already in the library) — same shape either way.
+_UPLOAD_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "integer"},
+        "title": {"type": "string"},
+        "width": {"type": "integer"},
+        "height": {"type": "integer"},
+        "thumbnail": SRCSET_SCHEMA,
+        "banner": SRCSET_SCHEMA,
+    },
+}
 
 
 def content_addressed_name(uploaded_file) -> str:
@@ -55,8 +76,12 @@ def content_addressed_name(uploaded_file) -> str:
     and ``IMG_0001.jpg`` are the common case.
 
     Hashing the bytes here restores the property the storage layer assumes:
-    distinct content gets a distinct name. Identical content still collapses to
-    one key, which is a free de-duplication rather than a hazard.
+    distinct content gets a distinct name.
+
+    It also makes identical content collapse to ONE key, which is why the caller
+    must not create a second row for bytes it already has: two rows sharing a
+    storage key is a delete-one-blanks-the-other hazard, not a saving. See the
+    ``file_hash`` lookup in :meth:`CaseImageUploadView.post`.
 
     Leaves the file's read position at 0 so the caller can still save it.
     """
@@ -69,6 +94,24 @@ def content_addressed_name(uploaded_file) -> str:
     return f"{digest.hexdigest()}{extension.lower()}"
 
 
+class CaseImageUploadThrottle(UserRateThrottle):
+    """Upload ceiling, in its OWN bucket.
+
+    ``scope`` and ``rate`` are both set explicitly, for the reason spelled out
+    at ``FeedbackRateThrottle``: inheriting ``UserRateThrottle``'s ``"user"``
+    scope would share one history list with the global 5000/hour throttle, so a
+    caseworker's ordinary API traffic would spend this budget.
+
+    A ceiling exists at all because nothing links an upload to a case. An image
+    whose id is never PATCHed onto one is invisible in the app but permanent in
+    R2, so a stuck retry loop in the editor bills storage indefinitely with no
+    surface that would show it. 120/hour is far above any real editing session.
+    """
+
+    scope = "case_image_upload"
+    rate = "120/hour"
+
+
 class CaseImageUploadView(APIView):
     """``POST /api/case-images/`` (multipart) — add an image to the library.
 
@@ -76,16 +119,44 @@ class CaseImageUploadView(APIView):
     to the uploaded filename, which is what makes the image findable later in
     the Wagtail image library).
 
-    Returns 201 with ``{id, title, width, height, thumbnail, banner}``, where the
-    last two are the responsive payloads for the two ladders the case surfaces
-    use. Generating them here rather than lazily on first public request means
-    the caseworker who uploaded the image pays for the renditions, not the first
-    visitor to the case.
+    Returns ``{id, title, width, height, thumbnail, banner}``, where the last two
+    are the responsive payloads for the two ladders the case surfaces use — 201
+    when the image was added, 200 when these exact bytes were already in the
+    library and the existing row is being handed back. The client treats both the
+    same; the distinction is there so the response does not claim to have created
+    something it did not.
     """
 
     permission_classes = [IsCaseImageUploader]
     parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [CaseImageUploadThrottle]
 
+    # Declared by hand: this is a plain APIView with no serializer to introspect,
+    # so drf-spectacular would otherwise drop the endpoint from the published
+    # schema entirely — and a multipart endpoint is exactly the one a client
+    # cannot guess the shape of.
+    @extend_schema(
+        operation_id="case_images_create",
+        request={
+            "multipart/form-data": {
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "format": "binary"},
+                    "title": {
+                        "type": "string",
+                        "description": "Library title. Defaults to the filename.",
+                    },
+                },
+                "required": ["file"],
+            }
+        },
+        responses={
+            200: _UPLOAD_RESPONSE_SCHEMA,
+            201: _UPLOAD_RESPONSE_SCHEMA,
+            400: OpenApiResponse(description="Not an image, too large, or absent."),
+            403: OpenApiResponse(description="Caseworker role required."),
+        },
+    )
     def post(self, request):
         uploaded = request.FILES.get("file")
         if uploaded is None:
@@ -105,31 +176,60 @@ class CaseImageUploadView(APIView):
 
         width, height = cleaned.image.get_size()
         original_name = uploaded.name or "image"
-        cleaned.name = content_addressed_name(cleaned)
+
+        # Wagtail's own content hash, which it indexes but only ever populates
+        # from its admin upload FORMS — an image created in code otherwise
+        # carries an empty one, exactly like width/height.
+        file_hash = hash_filelike(cleaned)
+        cleaned.seek(0)
 
         image_model = get_image_model()
+        # order_by so a library that already holds duplicates from before this
+        # endpoint existed resolves to the SAME row every time, rather than
+        # whichever one the database happened to return.
+        existing = image_model.objects.filter(file_hash=file_hash).order_by("pk").first()
+        if existing is not None:
+            # These bytes are already in the library, and MUST be reused rather
+            # than added again. Two rows for one content hash would share a
+            # storage key — content_addressed_name gives identical bytes an
+            # identical name — and Wagtail deletes an image's file when the row
+            # is deleted (post_delete_file_cleanup). Deleting either row would
+            # then blank the other's image, and both rows' renditions with it,
+            # since those are named after the same source stem.
+            return Response(self._payload(existing), status=status.HTTP_200_OK)
+
+        cleaned.name = content_addressed_name(cleaned)
         image = image_model(
             title=(request.data.get("title") or original_name).strip()[:255],
             file=cleaned,
             width=width,
             height=height,
+            file_size=cleaned.size,
+            file_hash=file_hash,
             uploaded_by_user=request.user,
         )
-        with transaction.atomic():
-            image.save()
+        # No transaction: ``save()`` streams the file to R2 before it INSERTs,
+        # and there is exactly one row, so a transaction would buy no atomicity
+        # while holding a database connection open across the upload.
+        image.save()
 
-        return Response(
-            {
-                "id": image.pk,
-                "title": image.title,
-                "width": image.width,
-                "height": image.height,
-                "thumbnail": SrcsetRenditionField(specs=CARD_SPECS).to_representation(
-                    image
-                ),
-                "banner": SrcsetRenditionField(specs=HERO_SPECS).to_representation(
-                    image
-                ),
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(self._payload(image), status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _payload(image) -> dict:
+        """The upload response: the id to PATCH onto a case, plus both ladders.
+
+        Generating the renditions here rather than lazily on first public
+        request means the caseworker who uploaded the image pays for them, not
+        the first visitor to the case.
+        """
+        return {
+            "id": image.pk,
+            "title": image.title,
+            "width": image.width,
+            "height": image.height,
+            "thumbnail": SrcsetRenditionField(specs=CARD_SPECS).to_representation(
+                image
+            ),
+            "banner": SrcsetRenditionField(specs=HERO_SPECS).to_representation(image),
+        }

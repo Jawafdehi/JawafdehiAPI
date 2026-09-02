@@ -518,7 +518,13 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 ]
                 queryset = queryset.filter(id__in=case_ids_with_tag)
 
-        queryset = queryset.prefetch_related(
+        queryset = queryset.select_related(
+            # ``CaseSerializer.thumbnail``/``banner`` read ``card_image`` /
+            # ``hero_image``, and each of those touches BOTH image FKs when the
+            # first is unset — four lazy fetches per card without this.
+            "thumbnail_image",
+            "banner_image",
+        ).prefetch_related(
             "entity_relationships",
             "courtcase_references",
             # ``CaseSerializer.get_evidence`` iterates ``material_references``;
@@ -527,6 +533,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # Same for ``get_authors``; through to the profile, which the byline
             # resolves every name/photo/description from.
             "author_credits__user__author_profile",
+            # The renditions the two image fields serialize. ``get_renditions``
+            # reads a prefetched ``renditions`` cache in preference to the
+            # database (Image._get_prefetched_renditions), so this collapses two
+            # rendition lookups per card into two queries for the whole page.
+            "thumbnail_image__renditions",
+            "banner_image__renditions",
         )
 
         # Reverse lookup: cases citing a specific NGM court case by its canonical
@@ -1532,7 +1544,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "short_description": case.short_description,
             "description": case.description,
             # The two case images. The ``*_image_id`` pair is what the editor
-            # writes (an id from POST /api/cases/images/); the ``*_url`` pair is
+            # writes (an id from POST /api/case-images/); the ``*_url`` pair is
             # the deprecated free-text fallback, still patchable so the cases
             # that predate the upload flow stay editable.
             "thumbnail_image_id": case.thumbnail_image_id,
@@ -1644,6 +1656,13 @@ class AuthorProfileView(RetrieveAPIView):
         profile = self.get_object()
         cases = (
             profile.user.authored_cases.filter(state=CaseState.PUBLISHED)
+            # Same reason as the case list: the summary card serializes a
+            # rendition ladder, which without these is four lazy fetches per
+            # case on an author page that lists every case they have written.
+            .select_related("thumbnail_image", "banner_image")
+            .prefetch_related(
+                "thumbnail_image__renditions", "banner_image__renditions"
+            )
             .order_by(F("case_publish_date").desc(nulls_last=True), "-created_at")
         )
         data = self.get_serializer(profile).data

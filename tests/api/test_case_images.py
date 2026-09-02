@@ -432,3 +432,163 @@ def test_oembed_falls_back_to_the_free_text_url(case):
     assert data["thumbnail_url"] == "https://example.com/legacy.png"
     # No rendition means no dimensions to declare.
     assert data["thumbnail_width"] is None
+
+
+def test_alt_is_empty_rather_than_the_uploaded_filename(image):
+    """Alt text must not be the filename the image happened to arrive as.
+
+    Wagtail's own ``Rendition.alt`` is ``description or title``, and the upload
+    endpoint titles an image after its file so it stays findable in the library.
+    Passing that through would announce "case-hero.png" to a screen reader —
+    worse than an empty alt, which lets the card and the hero supply the case
+    title instead.
+    """
+    assert image.title, "fixture must have a title for this test to mean anything"
+
+    payload = SrcsetRenditionField(specs=CARD_SPECS).to_representation(image)
+
+    assert payload["alt"] == ""
+
+
+def test_alt_is_the_description_when_the_image_has_one(image):
+    image.description = "पानीजहाज कार्यालयको भवन"
+    image.save()
+
+    payload = SrcsetRenditionField(specs=CARD_SPECS).to_representation(image)
+
+    assert payload["alt"] == "पानीजहाज कार्यालयको भवन"
+
+
+def test_urls_are_absolute_against_the_public_media_base(image, settings):
+    """Not ``Rendition.full_url``, which absolutizes against the NEWSROOM.
+
+    ``full_url`` prefixes ``WAGTAILADMIN_BASE_URL``. That is the Wagtail admin's
+    host, which does not serve public media — off S3 (dev, CI) it points at a
+    machine that does not have the file at all. Every other stored media link in
+    this codebase goes through ``absolute_media_url``.
+    """
+    settings.MEDIA_PUBLIC_BASE = "https://media.example.org"
+    settings.WAGTAILADMIN_BASE_URL = "https://newsroom.example.org"
+
+    payload = SrcsetRenditionField(specs=CARD_SPECS).to_representation(image)
+
+    urls = [payload["src"]] + [
+        entry.rsplit(" ", 1)[0] for entry in payload["srcset"].split(", ")
+    ]
+    assert all(url.startswith("https://media.example.org/") for url in urls), urls
+
+
+def test_case_list_does_not_fan_out_per_case(db, media_root):
+    """One more case with an image must not cost more queries.
+
+    ``thumbnail``/``banner`` read ``card_image``/``hero_image``, each of which
+    touches both image FKs, and then ask for three renditions. Unprefetched that
+    is a per-card fan-out on the busiest endpoint on the site, so assert on the
+    shape (constant in the number of cases) rather than on an absolute count
+    that any unrelated serializer change would churn.
+    """
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    def add_case(index):
+        img = get_image_model().objects.create(
+            title=f"image-{index}",
+            file=get_test_image_file(filename=f"i{index}.png", size=(2000, 1125)),
+        )
+        return Case.objects.create(
+            title=f"मुद्दा {index}",
+            slug=f"n1-case-{index}",
+            state=CaseState.PUBLISHED,
+            case_type=CaseType.CORRUPTION,
+            thumbnail_image=img,
+        )
+
+    def count_list_queries():
+        # Renditions are cached on image pk + spec; clear so both measurements
+        # pay the same lookups rather than the second one riding the first's cache.
+        _isolate_rendition_cache()
+        with CaptureQueriesContext(connection) as ctx:
+            assert APIClient().get("/api/cases/").status_code == 200
+        return len(ctx)
+
+    add_case(1)
+    count_list_queries()  # warm: create the renditions themselves
+    one = count_list_queries()
+
+    add_case(2)
+    count_list_queries()
+    two = count_list_queries()
+
+    assert two == one, f"{two - one} extra queries for one extra case"
+
+
+def test_upload_throttle_has_its_own_bucket():
+    """Not the global ``user`` scope.
+
+    Sharing it would spend this endpoint's budget on a caseworker's ordinary API
+    reads — the same trap ``FeedbackRateThrottle`` documents — and would let a
+    stuck upload loop exhaust their whole 5000/hour allowance.
+    """
+    from rest_framework.throttling import UserRateThrottle
+
+    from cases.image_views import CaseImageUploadThrottle
+
+    throttle = CaseImageUploadThrottle()
+
+    assert throttle.scope == "case_image_upload"
+    assert throttle.scope != UserRateThrottle.scope
+    # DRF derives the cache key from the scope alone, so a distinct scope IS the
+    # separate bucket — and the rate is set on the class, not in settings, which
+    # is what keeps it live under the test runner's empty THROTTLE_RATES.
+    assert throttle.rate == "120/hour"
+
+
+def test_reuploading_identical_bytes_reuses_the_existing_image(db, media_root):
+    """Two rows for one content hash would share a STORAGE KEY.
+
+    ``content_addressed_name`` gives identical bytes an identical name, and
+    Wagtail deletes an image's file when its row is deleted
+    (``post_delete_file_cleanup``) — so a second row for the same picture would
+    turn "tidy up a duplicate in the image library" into "blank the image on
+    whichever case kept the other row", renditions included, since those are
+    named after the same source stem.
+    """
+    client = _staff_client(db)
+    payload = get_test_image_file(filename="same.png", size=(1400, 900)).file.getvalue()
+
+    def upload(name):
+        return client.post(
+            UPLOAD_URL,
+            {"file": SimpleUploadedFile(name, payload, content_type="image/png")},
+            format="multipart",
+        )
+
+    first = upload("uploaded-by-one-caseworker.png")
+    second = upload("uploaded-by-another.png")
+
+    assert first.status_code == 201
+    # 200, not 201: nothing was created, and the response should not say it was.
+    assert second.status_code == 200
+    assert second.data["id"] == first.data["id"]
+    assert get_image_model().objects.count() == 1
+
+
+def test_upload_populates_the_wagtail_file_metadata(db, media_root):
+    """``file_hash`` and ``file_size`` are set by Wagtail's admin FORMS only.
+
+    An image created in code carries an empty hash and a null size unless it
+    sets them — the same trap as width/height. The hash is not cosmetic: it is
+    what the duplicate check above matches on, and it is part of the rendition
+    cache key, so leaving it blank would invalidate every cached rendition the
+    day something did populate it.
+    """
+    client = _staff_client(db)
+    upload = _png_upload("metadata.png")
+    body = upload.read()
+    upload.seek(0)
+
+    response = client.post(UPLOAD_URL, {"file": upload}, format="multipart")
+
+    image = get_image_model().objects.get(pk=response.data["id"])
+    assert image.file_hash == hashlib.sha1(body).hexdigest()
+    assert image.file_size == len(body)

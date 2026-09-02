@@ -380,7 +380,7 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     short_description = serializers.CharField(required=False, allow_blank=True)
     description = serializers.CharField(required=False, allow_blank=True)
     # The two case images, as ids of uploaded Wagtail images (see
-    # ``POST /api/cases/images/``). ``allow_null`` because clearing an image is a
+    # ``POST /api/case-images/``). ``allow_null`` because clearing an image is a
     # normal edit — the editor sends ``null`` and the FK goes to NULL.
     # ImageIdField so an id that names no image 422s here rather than reaching
     # the bulk UPDATE and failing as an IntegrityError.
