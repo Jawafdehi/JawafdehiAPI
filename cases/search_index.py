@@ -239,6 +239,16 @@ def _card_srcset(case: Any) -> dict[str, Any] | None:
     is a batch job, so the cost lands on a reindex rather than on the first
     visitor to a search results page.
 
+    The URLs are ABSOLUTE and frozen at index time (``absolute_media_url``
+    resolves them against ``MEDIA_PUBLIC_BASE`` / ``MEDIA_URL``). So a change of
+    media host does not reach the search results until the next reindex — every
+    indexed card keeps serving the old host, and the cards silently fall through
+    to their placeholder because the old URLs no longer resolve. ``thumbnail_url``
+    below has always had this property; the ladder just multiplies it by four.
+    Treat a media-domain change as requiring ``reindex_cases --rebuild``, and
+    note that the reindex is a separate process — it needs the media settings in
+    its own environment, not just the web server's.
+
     Everything here is defensive because this module is written to shape
     whatever it is handed — the doc-shape tests pass plain stand-ins with no
     ``card_image``, and a reindex must not abort because object storage
