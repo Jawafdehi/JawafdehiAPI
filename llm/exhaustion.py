@@ -36,6 +36,15 @@ budget worth paying for?" With the turn cap raised, a surviving ``error_max_turn
 is more likely to be a genuine budget problem, which is what makes that retry a
 reasonable fallback rather than a guess.
 
+**The output cap also has an explicit form**, and unlike ``error_max_turns`` that
+one is not ambiguous at all: the CLI exits ``rc=1`` with ``API Error: Claude's
+response exceeded the N output token maximum``. It names the cap and the number,
+so a retry at a larger budget is precisely the right move. It went unrecognised
+here for a dull reason — it mentions neither a turn limit nor a stop reason, so
+neither matcher below saw it. The review judge grades a lone rule on the smallest
+budget in the codebase, and therefore read a landed-but-truncated reply as a dead
+call and dead-lettered the entire review over it (2026-09-02).
+
 Telling them apart would need ``num_turns`` from the CLI's result envelope, and
 **no caller can currently reach it**: ``ClaudeCliProvider.invoke_text`` returns
 ``data["result"]`` as stripped text and discards the rest. Distinguishing the two
@@ -65,6 +74,17 @@ EXHAUSTION_MARKERS = ("error_max_turns", "maximum number of turns")
 #: to prevent. Requiring it to be attached to a stop reason keeps the meaning.
 _STOP_REASON_MAX_TOKENS = re.compile(r"""stop[_ ]?reason["']?\s*[:=]\s*["']?max_tokens""", re.I)
 
+#: The CLI side of the same condition, stated outright: ``claude -p`` aborts with
+#: "Claude's response exceeded the 900 output token maximum" when the budget
+#: ``llm.providers.cli`` set via ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` runs out.
+#:
+#: Anchored on the DIGITS, and on "output token maximum" rather than on the env
+#: var name the same message goes on to recommend. Without that anchor this would
+#: match a *configuration* complaint about ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` —
+#: reintroducing, by the back door, the exact over-matching that
+#: ``_STOP_REASON_MAX_TOKENS`` above was tightened to prevent.
+_CLI_OUTPUT_CAP = re.compile(r"exceeded the \d+ output token maximum", re.I)
+
 
 def is_exhaustion(exc: BaseException | str) -> bool:
     """True if ``exc`` looks like the model ran out of room, not out of luck.
@@ -77,5 +97,7 @@ def is_exhaustion(exc: BaseException | str) -> bool:
     """
     message = str(exc).lower()
     if any(marker.lower() in message for marker in EXHAUSTION_MARKERS):
+        return True
+    if _CLI_OUTPUT_CAP.search(message):
         return True
     return bool(_STOP_REASON_MAX_TOKENS.search(message))

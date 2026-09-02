@@ -1142,6 +1142,15 @@ REVIEW_CLI_MAX_RETRIES = int(os.getenv("REVIEW_CLI_MAX_RETRIES", "3"))
 # path; use for A/B vs batched). Only affects codex_cli / claude_cli; bedrock/proxy
 # always use the per-rule + prompt-cache path.
 REVIEW_RULE_BATCH_SIZE = int(os.getenv("REVIEW_RULE_BATCH_SIZE", "8"))
+# Output budget for grading ONE rule in isolation — the per-rule path, and the
+# rescue call for a rule a batch reply omitted. On CLI providers this becomes
+# CLAUDE_CODE_MAX_OUTPUT_TOKENS, which caps reasoning as well as the answer, so a
+# reasoning-heavy rule can spend the whole budget thinking and return nothing.
+# _RETRY is the second and final rung, tried only when the first overflows; the
+# grade itself is small, so that headroom is for thinking rather than a longer
+# verdict. Env-tunable because the right numbers are an empirical question.
+REVIEW_RULE_MAX_TOKENS = int(os.getenv("REVIEW_RULE_MAX_TOKENS", "900"))
+REVIEW_RULE_MAX_TOKENS_RETRY = int(os.getenv("REVIEW_RULE_MAX_TOKENS_RETRY", "4000"))
 
 SOURCE_MARKDOWN_DIR = Path(
     os.getenv("SOURCE_MARKDOWN_DIR", str(BASE_DIR / "review_source_markdown"))
