@@ -1335,12 +1335,15 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     no role can drift onto a different guard.
 
     `strict=False` (the default) binds the best-scoring candidate whenever one
-    cleared the threshold, even if a veto fired -- with ONE exception, which the
-    fail-closed branch below spells out: an unreadable entity document is never
-    promoted. The cross-script refusal that used to be the second exception was
-    removed on 2026-08-05, so `कमल थापा` can now bind a `Kamala Thapa` entity.
-    `strict=True` restores the conservative behaviour: a veto means REVIEW and a
-    human decides.
+    cleared the threshold, even if a veto fired -- with TWO exceptions, both
+    spelled out at the promotion below: an unreadable entity document, and an
+    election-candidate record. The cross-script refusal that used to be one of
+    them was removed on 2026-08-05, so `कमल थापा` can now bind a `Kamala Thapa`
+    entity. `strict=True` restores the conservative behaviour: a veto means
+    REVIEW and a human decides.
+
+    ONE NAME IN, ONE `Decision` OUT. `qualifying_binds` is what fans a promoted
+    ambiguity out into several binds; this function never returns more than one.
 
     Completeness goes IN, so `resolve` applies the truncation veto itself
     alongside the ambiguity check it protects. `search_entities` knows whether it
@@ -2272,10 +2275,12 @@ def main(argv=None):
         "--strict", action="store_true",
         help="Bind only when exactly one NES entity matched and no veto fired; "
              "send ambiguities and vetoed matches to review instead. Off by "
-             "default: the default binds the best-scoring match for every name, "
-             "including a match that exists only across scripts -- that refusal "
-             "was removed on 2026-08-05, so a case charging कमल थापा can bind a "
-             "Kamala Thapa entity.")
+             "default: the default promotes a vetoed match and binds EVERY "
+             "candidate that cleared the threshold, not just the best one, so "
+             "one name can produce several binds -- including a match that "
+             "exists only across scripts, a refusal removed on 2026-08-05, so a "
+             "case charging कमल थापा can bind a Kamala Thapa entity. An "
+             "election-candidate record is refused either way.")
     ap.add_argument(
         "--verdicts", action="store_true",
         help="Also read each bound judgment for per-defendant outcomes. OFF by "
