@@ -547,6 +547,12 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "version_info_display",
         "public_case_url",
         "weight",
+        # The pre-canonicalisation tag snapshot. ``editable=False`` already keeps it
+        # out of CaseAdminForm (so ``fields = "__all__"`` cannot render it as a
+        # writable JSON textarea); listing it here is what makes it VISIBLE, which is
+        # the point of an audit trail -- "what was this case tagged before?" is a
+        # question a caseworker will ask.
+        "tags_source",
     ]
 
     fieldsets = (
@@ -588,6 +594,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "timeline",
                     "description",
                     "tags",
+                    "tags_source",
                     "court_cases",
                     "missing_details",
                     "notes",
