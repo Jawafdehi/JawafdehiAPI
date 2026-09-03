@@ -14,6 +14,14 @@ of the inputs: order-independent, re-runnable, and reproducible from the repo.
 
 `tags_source` is written only when NULL, so the pre-cleanup snapshot survives every
 re-run — that is what makes this reversible.
+
+SCOPE: published cases only, unless ``--all``. The vocabulary and its aliases were
+measured against the 82 PUBLISHED cases (``00-inventory.md``: 144 distinct raw values).
+The rest of the table is ~2950 bulk-imported CIAA Special Court cases carrying a
+different, mostly-Nepali tag set that no alias covers — ``भ्रष्टाचार`` alone is on 2685
+of them. Running unscoped strips tags from those cases rather than canonicalising them,
+so the default matches the corpus the vocabulary was actually built for. ``--all`` stays
+available for when the vocabulary has grown to cover them.
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db import transaction
 
 from case_tags.models import Resolution, Tag, TagStatus, resolve
-from cases.models import Case
+from cases.models import Case, CaseState
 
 DEFAULT_CURATION = pathlib.Path("case_tags/curation.yml")
 
@@ -44,17 +52,29 @@ class Command(BaseCommand):
             help="Report only. The default — --apply is required to write.",
         )
         parser.add_argument("--slug", help="Restrict to one case, for spot checks.")
+        parser.add_argument(
+            "--all",
+            action="store_true",
+            dest="all_states",
+            help=(
+                "Every case, not just published ones. The vocabulary does not cover "
+                "the unpublished CIAA corpus — see the module docstring."
+            ),
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         curation = self._load_curation(pathlib.Path(options["curation"]))
+        scoped = not options["all_states"]
         cases = Case.objects.all()
+        if scoped:
+            cases = cases.filter(state=CaseState.PUBLISHED)
         if options["slug"]:
             cases = cases.filter(slug=options["slug"])
             if not cases.exists():
-                raise CommandError(f"No case with slug {options['slug']!r}")
+                raise CommandError(self._slug_error(options["slug"], scoped=scoped))
 
         plans = [self._plan(case, curation) for case in cases]
-        self._report(plans, curation)
+        self._report(plans, curation, scoped=scoped)
 
         if not options["apply"]:
             self.stdout.write(self.style.WARNING("\ndry run — nothing written"))
@@ -72,6 +92,22 @@ class Command(BaseCommand):
                 case.save(update_fields=["tags", "tags_source", "updated_at"])
         self._reindex(changed)
         self.stdout.write(self.style.SUCCESS(f"\napplied to {len(changed)} cases"))
+
+    def _slug_error(self, slug: str, *, scoped: bool) -> str:
+        """Distinguish "no such case" from "excluded by the published-only default".
+
+        Without this the two are the same message, and the obvious reading of it —
+        that the slug is wrong — sends you looking for a typo that isn't there.
+        """
+        case = Case.objects.filter(slug=slug).first()
+        if case is None:
+            return f"No case with slug {slug!r}"
+        if scoped and case.state != CaseState.PUBLISHED:
+            return (
+                f"Case {slug!r} is {case.state}, and this command is scoped to "
+                f"published cases. Pass --all to include it."
+            )
+        return f"No case with slug {slug!r}"
 
     # -- planning ---------------------------------------------------------
 
@@ -169,7 +205,9 @@ class Command(BaseCommand):
 
     # -- reporting --------------------------------------------------------
 
-    def _report(self, plans: list[_Plan], curation: Mapping[str, object]) -> None:
+    def _report(
+        self, plans: list[_Plan], curation: Mapping[str, object], *, scoped: bool
+    ) -> None:
         changed = [p for p in plans if p.changed]
         before = sum(len(p.source) for p in plans)
         after = sum(len(p.result) for p in plans)
@@ -179,6 +217,8 @@ class Command(BaseCommand):
             for raw in plan.unknown:
                 unknown[raw] = unknown.get(raw, 0) + 1
 
+        scope = "published only" if scoped else "ALL states (--all)"
+        self.stdout.write(f"scope:            {scope}")
         self.stdout.write(f"cases:            {len(plans)}")
         self.stdout.write(f"cases changing:   {len(changed)}")
         self.stdout.write(f"tags per case:    {before / max(len(plans), 1):.1f} -> "

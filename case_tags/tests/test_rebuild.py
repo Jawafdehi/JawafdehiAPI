@@ -56,12 +56,14 @@ def vocabulary() -> None:
     )
 
 
-def _case(slug: str, tags: list[str]) -> Case:
+def _case(
+    slug: str, tags: list[str], state: str = CaseState.PUBLISHED
+) -> Case:
     return Case.objects.create(
         title=slug,
         slug=slug,
         case_type=CaseType.CORRUPTION,
-        state=CaseState.PUBLISHED,
+        state=state,
         tags=tags,
     )
 
@@ -214,3 +216,51 @@ class TestCuration:
         )
         case.refresh_from_db()
         assert case.tags == ["land"]
+
+
+class TestScope:
+    """Published-only by default.
+
+    The vocabulary was measured against the published corpus. The rest of the table
+    is ~2950 bulk-imported CIAA cases whose mostly-Nepali tags no alias covers, so an
+    unscoped run does not canonicalise them — it empties them. That is a data-loss
+    shape, so the safe scope is the default and the wide one is explicit.
+    """
+
+    def test_unpublished_is_untouched_by_default(self) -> None:
+        draft = _case("d1", ["Land Management"], state=CaseState.DRAFT)
+        call_command("rebuild_case_tags", apply=True)
+        draft.refresh_from_db()
+        assert draft.tags == ["Land Management"]
+        assert draft.tags_source is None, "no snapshot for a case never rebuilt"
+
+    def test_all_opts_into_every_state(self) -> None:
+        draft = _case("d1", ["Land Management"], state=CaseState.DRAFT)
+        call_command("rebuild_case_tags", apply=True, all_states=True)
+        draft.refresh_from_db()
+        assert draft.tags == ["land"]
+
+    @pytest.mark.parametrize(
+        "state", [CaseState.DRAFT, CaseState.IN_REVIEW, CaseState.CLOSED]
+    )
+    def test_only_published_counts_as_in_scope(self, state: str) -> None:
+        case = _case("c1", ["Land Management"], state=state)
+        call_command("rebuild_case_tags", apply=True)
+        case.refresh_from_db()
+        assert case.tags == ["Land Management"]
+
+    def test_slug_outside_scope_says_why(self) -> None:
+        """"No case with slug X" would read as a typo and send you hunting for one."""
+        _case("d1", ["Land Management"], state=CaseState.DRAFT)
+        with pytest.raises(CommandError, match=r"is DRAFT.*Pass --all"):
+            call_command("rebuild_case_tags", apply=True, slug="d1")
+
+    def test_slug_that_really_is_missing_still_says_so(self) -> None:
+        with pytest.raises(CommandError, match="No case with slug 'nope'"):
+            call_command("rebuild_case_tags", apply=True, slug="nope")
+
+    def test_slug_outside_scope_works_with_all(self) -> None:
+        draft = _case("d1", ["Land Management"], state=CaseState.DRAFT)
+        call_command("rebuild_case_tags", apply=True, slug="d1", all_states=True)
+        draft.refresh_from_db()
+        assert draft.tags == ["land"]
