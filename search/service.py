@@ -1046,7 +1046,13 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     # ``extra.court`` keeps working on docs indexed before the top-level field
     # existed (i.e. before the --rebuild this change needs). One source, no
     # precedence question, no window where the response loses the court.
-    for key in ("case_type", "case_status", "court", "case_number"):
+    #
+    # ``parties`` joins them for the same reason, and is the one entry here that
+    # is NOT on every doc: it was added later, so a court case indexed before
+    # that only gains it on reindex. The ``is not None`` guard is what makes
+    # that a missing key rather than a null, and a client that wants parties on
+    # every hit needs the rebuild.
+    for key in ("case_type", "case_status", "court", "case_number", "parties"):
         if raw.get(key) is not None:
             extra[key] = raw[key]
 
