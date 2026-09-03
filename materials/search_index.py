@@ -3,9 +3,9 @@
 Projects a ``Material`` (schema.org JSON-LD document keyed by its ``@id`` IRI)
 into the common index doc. Mirrors the NES entity indexer; the material doc adds
 ``text`` (OCR/full-text body), the material ``identifier``/``ident`` to the
-``identifiers`` field, and the dates (``dateCreated``/``datePublished`` and the
+``identifiers`` field, the dates (``dateCreated``/``datePublished`` and the
 Bikram Sambat ``jawafdehi:registrationDateBS`` carried verbatim into
-``date_bs``).
+``date_bs``), and ``material_type`` promoted from the column of that name.
 
 Best-effort: an OpenSearch error is logged and swallowed.
 """
@@ -68,6 +68,14 @@ def build_doc(obj: Any) -> dict[str, Any]:
         "identifiers": identifiers,
         "raw": data,
     }
+
+    # The document-form facet, straight off the promoted column rather than
+    # re-parsed from the IRI — ``Material.clean`` already guarantees the two
+    # agree. Omitted when blank so a doc missing it is excluded by a filter on
+    # it, rather than matching an "" bucket (a nameless option in the facet).
+    material_type = getattr(obj, "material_type", None)
+    if material_type:
+        doc["material_type"] = str(material_type)
 
     # Gregorian dates (ISO). Carry Bikram Sambat verbatim (never coerced).
     date = data.get("datePublished") or data.get("dateCreated")

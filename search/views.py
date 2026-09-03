@@ -28,6 +28,7 @@ from courts.geography import ALL_COURT_IDENTIFIERS
 from .analytics import emit_search_click_event, emit_search_event
 from .service import (
     ALL_COURT_TYPES,
+    ALL_MATERIAL_TYPES,
     ALL_SORTS,
     ALL_TYPES,
     FACET_FIELDS,
@@ -126,6 +127,19 @@ class SearchQuerySerializer(serializers.Serializer):
     )
     province = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
+    # The material refine facet (NGM materials only) — what KIND of record a
+    # document is. CLOSED against the ``MaterialType`` vocabulary, so a typo is
+    # a 400 rather than a confident empty page.
+    #
+    # Date narrowing for the same tab needs nothing here: ``date_from`` /
+    # ``date_to`` below already bound the shared ``date`` field, which a
+    # material fills from ``datePublished``/``dateCreated`` (93% of the live
+    # material corpus carries one).
+    material_type = serializers.ListField(
+        child=serializers.ChoiceField(choices=list(ALL_MATERIAL_TYPES)),
+        required=False,
+        default=list,
     )
     # Facet-VALUE search: ``facet_q=<facet>:<text>`` recomputes only the named
     # facet's bucket list to the buckets whose key contains <text> (matched over
@@ -376,6 +390,24 @@ class SearchQuerySerializer(serializers.Serializer):
                 "resolving to the province it serves (its additional benches "
                 "included). 'NATIONAL' selects supreme + special-court cases. "
                 "Same court-case scoping and rebuild caveat as court."
+            ),
+        ),
+        OpenApiParameter(
+            "material_type",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            enum=list(ALL_MATERIAL_TYPES),
+            description=(
+                "Refine facet: what KIND of material a document is — the "
+                "closed Material.material_type vocabulary. MATERIAL-SCOPED: "
+                "only NGM materials carry one, so any value also excludes "
+                "every entity, court-case and case result — pair it with "
+                "?type=material. Repeatable, and it ANDs with date_from/"
+                "date_to, the other narrowing a material tab needs. Same "
+                "rebuild caveat as court: an index predating the field returns "
+                "zero buckets and matches nothing."
             ),
         ),
         OpenApiParameter(
