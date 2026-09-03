@@ -28,6 +28,7 @@ from courts.geography import ALL_COURT_IDENTIFIERS
 from .analytics import emit_search_click_event, emit_search_event
 from .service import (
     ALL_COURT_TYPES,
+    ALL_MATERIAL_TYPES,
     ALL_SORTS,
     ALL_TYPES,
     FACET_FIELDS,
@@ -125,6 +126,25 @@ class SearchQuerySerializer(serializers.Serializer):
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
     province = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
+    # The two material refine facets (NGM materials only). They are separate
+    # axes, not a value and its restatement: the CIAA publishes two types (press
+    # releases AND annual reports), while one type spans several sources (press
+    # releases come from ciaa_press_release, cib and dmli). So neither can be
+    # derived from the other, and both AND together like court_type/district.
+    #
+    # material_type is CLOSED (the MaterialType vocabulary is a fixed set of
+    # record kinds, so a typo should 400 rather than return a confident empty
+    # page); material_source is OPEN like ``tags``, because sources are minted
+    # by ingest — the canonical values are whatever facets.material_source
+    # returns, and a closed list would go stale on the next new feed.
+    material_type = serializers.ListField(
+        child=serializers.ChoiceField(choices=list(ALL_MATERIAL_TYPES)),
+        required=False,
+        default=list,
+    )
+    material_source = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
     # Facet-VALUE search: ``facet_q=<facet>:<text>`` recomputes only the named
@@ -376,6 +396,41 @@ class SearchQuerySerializer(serializers.Serializer):
                 "resolving to the province it serves (its additional benches "
                 "included). 'NATIONAL' selects supreme + special-court cases. "
                 "Same court-case scoping and rebuild caveat as court."
+            ),
+        ),
+        OpenApiParameter(
+            "material_type",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            enum=list(ALL_MATERIAL_TYPES),
+            description=(
+                "Refine facet: what KIND of material a document is — the "
+                "closed Material.material_type vocabulary. MATERIAL-SCOPED: "
+                "only NGM materials carry one, so any value also excludes "
+                "every entity, court-case and case result — pair it with "
+                "?type=material. Repeatable, and it ANDs with material_source. "
+                "Same rebuild caveat as court: an index predating the field "
+                "returns zero buckets and matches nothing."
+            ),
+        ),
+        OpenApiParameter(
+            "material_source",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Refine facet: WHICH office or feed published a material — the "
+                "ingest source token ('ag', 'ciaa_press_release', 'bolpatra'). "
+                "Open-ended like tags: list the values with "
+                "?facet_q=material_source:<text> or read facets.material_source. "
+                "A separate axis from material_type, not a restatement of it — "
+                "one office publishes several types (the CIAA issues press "
+                "releases and annual reports) and one type comes from several "
+                "offices (press releases from ciaa_press_release, cib, dmli). "
+                "Same material scoping and rebuild caveat as material_type."
             ),
         ),
         OpenApiParameter(

@@ -296,7 +296,35 @@ FACET_FIELDS: dict[str, str] = {
     "court_type": "court_type",
     "district": "court_district",
     "province": "court_province",
+    "material_type": "material_type",
+    "material_source": "material_source",
 }
+
+# The closed vocabulary behind the ``material_type`` facet — every
+# ``Material.material_type`` token.
+#
+# A LITERAL, not a comprehension over ``MaterialType``, for the same reason
+# ``ALL_COURT_TYPES`` above is one: three consumers must agree (the
+# serializer's ``ChoiceField``, which is what 400s; the OpenAPI enum, which is
+# what the SPA reads; the MCP tool's schema, which is what a model reads), and
+# ``search/service.py`` deliberately imports from no sibling app. Pinned to
+# ``materials.jsonld.MaterialType`` by
+# ``test_material_type_enum_tracks_material_types`` — add a type there and that
+# test fails here until this list catches up.
+ALL_MATERIAL_TYPES: tuple[str, ...] = (
+    "charge_sheet",
+    "court_case",
+    "court_order",
+    "document",
+    "legal_corpus",
+    "manuscript",
+    "news",
+    "official_report",
+    "precedent",
+    "press_release",
+    "procurement_notice",
+    "social_media",
+)
 
 # The closed vocabulary behind the ``court_type`` facet: Nepal's constitutional
 # court tiers, and the only four values ``Court.court_type`` holds (verified
@@ -325,6 +353,12 @@ FACET_AGG_SIZES: dict[str, int] = {
     "district": 100,
     # 7 provinces + NATIONAL.
     "province": 10,
+    # Sources are minted by ingest, not from a closed vocabulary: production
+    # carries 30 today, several of them one-off outlet or bureau tokens, and the
+    # count only grows. Held well clear of the default so a new feed appears in
+    # the facet on its first document instead of being silently pushed out —
+    # this is the facet a source picker is built from.
+    "material_source": 200,
 }
 
 

@@ -105,6 +105,49 @@ def test_material_build_doc_shape_with_dates():
     assert "081-CR-0081" in doc["identifiers"]
 
 
+def test_material_build_doc_promotes_the_provenance_facets():
+    """``material_type``/``source`` become top-level facet fields.
+
+    ``source`` is indexed as ``material_source``: the doc already carries
+    ``source_app`` (the owning application, "ngm"), and two keys a letter apart
+    meaning different things would be a trap for whoever writes the next query.
+    """
+    iri = "https://jawafdehi.org/material/ciaa_press_release/1701"
+    obj = SimpleNamespace(
+        iri=iri,
+        ident="1701",
+        source="ciaa_press_release",
+        material_type="press_release",
+        data={"@id": iri, "@type": "CreativeWork", "name": {"ne": "प्रेस विज्ञप्ति"}},
+    )
+    doc = material_index.build_doc(obj)
+    assert doc["material_type"] == "press_release"
+    assert doc["material_source"] == "ciaa_press_release"
+    # The application tag is a separate field and keeps its own value.
+    assert doc["source_app"] == "ngm"
+    assert "source" not in doc
+
+
+def test_material_build_doc_omits_blank_provenance():
+    """A blank column is left OUT, not written as "".
+
+    A ``terms`` filter excludes a doc that lacks the field, which is what an
+    unrecorded source should do — an "" bucket would otherwise show up in the
+    facet as a nameless option a reader could select.
+    """
+    iri = "https://jawafdehi.org/material/x/1"
+    obj = SimpleNamespace(
+        iri=iri,
+        ident="1",
+        source="",
+        material_type=None,
+        data={"@id": iri, "@type": "CreativeWork"},
+    )
+    doc = material_index.build_doc(obj)
+    assert "material_type" not in doc
+    assert "material_source" not in doc
+
+
 # ── courtcase ──────────────────────────────────────────────────────────────────
 
 

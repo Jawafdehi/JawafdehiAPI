@@ -451,6 +451,54 @@ def test_search_api_400_on_unknown_court_identifier():
 
 
 @pytest.mark.django_db
+def test_search_api_threads_the_material_facets_through():
+    """?material_type/?material_source reach the DSL as terms filters and AND
+    together — which is what selecting one office's one document type needs,
+    since the CIAA publishes two types and press releases come from three
+    offices."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {
+                "q": "",
+                "type": "material",
+                "material_type": "press_release",
+                "material_source": "ciaa_press_release",
+            },
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert {"terms": {"material_type": ["press_release"]}} in clauses
+    assert {"terms": {"material_source": ["ciaa_press_release"]}} in clauses
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_unknown_material_type():
+    """material_type is a CLOSED vocabulary, so a typo is a 400 rather than a
+    confident empty page."""
+    resp = APIClient().get("/api/search/", {"q": "x", "material_type": "presrelease"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_search_api_accepts_an_unknown_material_source():
+    """material_source is OPEN, unlike material_type: sources are minted by
+    ingest, so a token this build has never seen must stay filterable rather
+    than 400 — it simply matches nothing."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "material_source": "some_new_feed"}
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert {"terms": {"material_source": ["some_new_feed"]}} in clauses
+
+
+@pytest.mark.django_db
 def test_search_api_threads_district_and_province_through():
     """?district/?province reach the DSL as terms filters on the court_* fields."""
     client = MagicMock()

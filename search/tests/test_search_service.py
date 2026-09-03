@@ -707,6 +707,54 @@ def test_build_query_district_and_province_filters_target_court_fields():
     assert {"terms": {"court_province": ["Bagmati"]}} in clauses
 
 
+def test_build_query_material_facets_are_two_independent_axes():
+    """``material_type`` (what kind of record) and ``material_source`` (which
+    office published it) are separate fields that AND together.
+
+    Neither can stand in for the other: the CIAA publishes press releases AND
+    annual reports, while press releases come from ``ciaa_press_release``,
+    ``cib`` and ``dmli``. So one office's one document type needs both clauses.
+    """
+    assert svc.FACET_FIELDS["material_type"] == "material_type"
+    assert svc.FACET_FIELDS["material_source"] == "material_source"
+    body = build_query(
+        q="x",
+        filters={
+            "material_type": ["press_release"],
+            "material_source": ["ciaa_press_release"],
+        },
+    )
+    assert body["aggs"]["material_type"]["terms"]["field"] == "material_type"
+    assert body["aggs"]["material_source"]["terms"]["field"] == "material_source"
+    clauses = body["query"]["bool"]["filter"]
+    assert {"terms": {"material_type": ["press_release"]}} in clauses
+    assert {"terms": {"material_source": ["ciaa_press_release"]}} in clauses
+
+
+def test_material_source_facet_agg_holds_every_source_at_once():
+    """Sources are minted by ingest, not drawn from a closed vocabulary —
+    production carries 30 and only gains more. At the 50 default a new one-off
+    outlet token would be pushed out of the facet a source picker is built
+    from, its count silently zeroed."""
+    body = build_query(q="x")
+    assert body["aggs"]["material_source"]["terms"]["size"] >= 100
+
+
+def test_material_type_enum_tracks_material_types():
+    """``ALL_MATERIAL_TYPES`` is a literal (``search.service`` imports from no
+    sibling app), so nothing makes it follow the model. This does: add a token
+    to ``MaterialType`` and this fails until the facet vocabulary catches up —
+    otherwise the new type would be unaskable, and asking for it a 400."""
+    from materials.jsonld import MaterialType
+
+    declared = {
+        value
+        for name, value in vars(MaterialType).items()
+        if not name.startswith("_") and isinstance(value, str)
+    }
+    assert set(svc.ALL_MATERIAL_TYPES) == declared
+
+
 def test_district_facet_agg_holds_every_district_at_once():
     """All 77 districts: at the 50 default, the least-frequent districts would be
     silently pushed out of the facet."""

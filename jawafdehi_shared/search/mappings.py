@@ -242,6 +242,27 @@ def common_mappings() -> dict[str, Any]:
                 # caveat as ``court_type``/``weight``.
                 "court_district": {"type": "keyword"},
                 "court_province": {"type": "keyword"},
+                # NGM material provenance, promoted from the ``Material`` columns
+                # of the same names so both can be faceted and filtered.
+                # Materials-only; other doc types leave them absent.
+                #
+                # BOTH, because neither implies the other: ``material_type`` is
+                # what KIND of record it is (the closed ``MaterialType``
+                # vocabulary), ``material_source`` is WHICH office or feed
+                # published it. The CIAA publishes two types (press releases AND
+                # annual reports), while one type spans several sources (press
+                # releases come from ciaa_press_release, cib and dmli).
+                #
+                # ``material_source``, not ``source``: ``source_app`` above is
+                # the owning APPLICATION (nes/ngm/jawafdehi) — a different thing,
+                # and two keys a letter apart in one doc would be a trap.
+                #
+                # Same rebuild caveat as ``court``/``court_type``/``weight``: an
+                # existing index only gains the declared mapping on the next
+                # --rebuild generation. Until then the facet returns zero buckets
+                # and a filter matches nothing — safe degradation, no errors.
+                "material_type": {"type": "keyword"},
+                "material_source": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get
                 # this declared type — an existing one picks the field up by dynamic
