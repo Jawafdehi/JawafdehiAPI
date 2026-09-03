@@ -22,6 +22,25 @@ pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture(autouse=True)
+def _ignore_the_shipped_curation(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point `--curation`'s default at nothing.
+
+    The command defaults to the SHIPPED ``case_tags/curation.yml``, whose entries
+    name real cases and real vocabulary tags. This module seeds a four-tag stand-in
+    vocabulary and no cases, so without this every test that does not pass an
+    explicit ``curation=`` fails on the shipped file instead of exercising what it
+    is about. Curation behaviour is covered by tests that pass a file deliberately;
+    the shipped file's own contents are covered by ``test_curation.py``.
+    """
+    monkeypatch.setattr(
+        "case_tags.management.commands.rebuild_case_tags.DEFAULT_CURATION",
+        tmp_path / "absent-curation.yml",
+    )
+
+
+@pytest.fixture(autouse=True)
 def vocabulary() -> None:
     """A small stand-in for the real file — enough shape to exercise the command."""
     land = Tag.objects.create(
