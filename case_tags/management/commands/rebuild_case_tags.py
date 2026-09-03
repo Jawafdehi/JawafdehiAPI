@@ -164,10 +164,22 @@ class Command(BaseCommand):
             # Curation names canonical IDS, not raw values — so check the Tag table
             # directly. Going through the alias table would be the raw-value path and
             # would accept `Land Management` here, which reads as a tag id but is not.
-            for tag_id in [*entry.get("add", []), *entry.get("remove", [])]:
+            #
+            # `add` must be active: putting a deprecated tag onto a case is how the
+            # deprecation gets undone. `remove` only has to EXIST — requiring active
+            # there would forbid removing a deprecated tag, which is the main thing
+            # anyone removes. Nine of the first curation file's entries strip
+            # `kathmandu-valley`, which is seeded deprecated precisely because it is
+            # wrong and has to come off.
+            for tag_id in entry.get("add", []):
                 if not Tag.objects.filter(pk=tag_id, status=TagStatus.ACTIVE).exists():
                     raise CommandError(
-                        f"{path}: {slug!r} names {tag_id!r}, which is not an active tag."
+                        f"{path}: {slug!r} adds {tag_id!r}, which is not an active tag."
+                    )
+            for tag_id in entry.get("remove", []):
+                if not Tag.objects.filter(pk=tag_id).exists():
+                    raise CommandError(
+                        f"{path}: {slug!r} removes {tag_id!r}, which is not a tag."
                     )
             entries[slug] = {
                 "add": list(entry.get("add", [])),

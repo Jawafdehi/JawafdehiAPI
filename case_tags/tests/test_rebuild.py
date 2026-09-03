@@ -184,6 +184,52 @@ class TestCuration:
         with pytest.raises(CommandError, match="no `why`"):
             call_command("rebuild_case_tags", apply=True, curation=path)
 
+    def test_can_remove_a_deprecated_tag(self, tmp_path: pathlib.Path) -> None:
+        """`remove` is mostly used ON deprecated tags — that is the point of it.
+
+        Requiring active here would forbid removing exactly the tags that most need
+        removing; the first curation file strips `kathmandu-valley` from 9 cases.
+        """
+        Tag.objects.create(
+            id="kathmandu-valley",
+            label_ne="काठमाडौं उपत्यका",
+            label_en="Kathmandu Valley",
+            status=TagStatus.DEPRECATED,
+        )
+        TagAlias.objects.create(key="kathmandu valley", tag_id="kathmandu-valley")
+        case = _case("c1", ["Kathmandu Valley", "Lalitpur"])
+        path = _curation(
+            tmp_path,
+            [{"slug": "c1", "remove": ["kathmandu-valley"], "why": "not in the valley"}],
+        )
+        call_command("rebuild_case_tags", apply=True, curation=path)
+        case.refresh_from_db()
+        assert case.tags == ["lalitpur"]
+
+    def test_cannot_add_a_deprecated_tag(self, tmp_path: pathlib.Path) -> None:
+        """Adding one is how a deprecation quietly gets undone."""
+        Tag.objects.create(
+            id="kathmandu-valley",
+            label_ne="काठमाडौं उपत्यका",
+            label_en="Kathmandu Valley",
+            status=TagStatus.DEPRECATED,
+        )
+        _case("c1", [])
+        path = _curation(
+            tmp_path, [{"slug": "c1", "add": ["kathmandu-valley"], "why": "x"}]
+        )
+        with pytest.raises(CommandError, match="not an active tag"):
+            call_command("rebuild_case_tags", apply=True, curation=path)
+
+    def test_removing_a_nonexistent_tag_is_an_error(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Relaxing `remove` to "exists" must not relax it to "anything"."""
+        _case("c1", [])
+        path = _curation(tmp_path, [{"slug": "c1", "remove": ["nope"], "why": "x"}])
+        with pytest.raises(CommandError, match="which is not a tag"):
+            call_command("rebuild_case_tags", apply=True, curation=path)
+
     def test_unknown_tag_is_an_error(self, tmp_path: pathlib.Path) -> None:
         _case("c1", [])
         path = _curation(tmp_path, [{"slug": "c1", "add": ["not-a-tag"], "why": "x"}])
