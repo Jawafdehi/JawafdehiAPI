@@ -59,6 +59,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 
@@ -103,6 +104,7 @@ from casework.common.select import court_number, select_for_run
 from casework.common.court_order import (
     VERDICT_SUMMARY_TARGET,
     VERDICT_SUMMARY_TRIGGER,
+    court_order_bookends,
     summarize_verdict,
 )
 
@@ -220,6 +222,52 @@ establishes a legal principle — ideally one published in the Nepal Kanoon Patr
 if no qualifying Supreme Court principle is in the sources, OMIT this section
 entirely. State only the key principle.
 
+REVIEW RULES — each of these is a defect found in published descriptions on
+2026-08-13, not a style preference:
+
+VERDICT METADATA. Open section ग with the order's own header fields: इजलास नं.,
+फैसला मिति, नि.नं./निर्णय नं., and every न्यायाधीश by name. They are in the ORDER
+HEADER block below, which is the order's own opening and closing pages verbatim.
+NEVER write "स्रोत कागजातमा खुल्न आएको छैन" about a field that is sitting in that
+block — that claim has been published about orders that name all four on page one.
+
+VERDICT DATE. Take it ONLY from the फैसला मितिः header line, or, where the order has
+no such field, from the "इति सम्वत् … साल … महिना … गते" line in the closing block.
+Never from the nearest surrounding date: the लिखित बहसनोट date sits beside it in the
+document and has been published as the verdict date before. A trailing weekday group
+(२०८१।०१।२०।5, 2081/02/06/01) is the रोज, not part of the date.
+
+अन्तिमता. Close section ग with a standalone "**अन्तिमता:**" line about finality. It is
+NOT section घ, and it does not make the appeal म्याद part of the substantive फैसला — it
+reports only what the record shows. Where the order grants the ३५-दिन म्याद (विशेष
+अदालत ऐन, २०५९ को दफा १७), say so, and then that no record of an appeal within the
+हदम्याद has been found: "उपलब्ध स्रोत कागजातबाट हदम्यादभित्र सर्वोच्च अदालतमा पुनरावेदन
+परे/नपरेको यकिन हुन सकेको छैन।" State the absence of a RECORD, never the absence of an
+appeal. OMIT the line when the judgment does not settle every defendant — where मतैक्य
+नभएको and the matter goes to another इजलास under दफा ६(४), state instead that those
+defendants' outcome is not settled by this judgment.
+
+NAMED NON-DEFENDANTS. A named natural person who is not an accused entity gets
+"(निज यस मुद्दाका/की प्रतिवादी होइनन्)" at first mention, or the role the order gives
+them. Check the प्रतिवादी list in the ORDER HEADER block first: spouses and children
+are frequently co-defendants for जफत प्रयोजन only, and marking such a person a
+non-defendant is simply wrong. Do not invent a legal basis for their appearance. Never
+drop the amounts to protect a name — the figures are load-bearing in the आय–व्यय
+reconciliation, so mark the person instead.
+
+UNTESTED ALLEGATIONS AGAINST THIRD PARTIES. When a defendant's बयान accuses someone
+who is not on trial, keep the passage — it is part of the defence record — and say in
+the same sentence that it is that defendant's own जिकिर, that फैसलामा यस जिकिरको परीक्षण
+भएको देखिँदैन, and that the person named is not a defendant in this case.
+
+PERSONAL IDENTIFIERS. Never reproduce a full बैंक खाता नं., चेक नं., बीमा/पोलिसी नं.,
+ना.प्र.प. (नागरिकता) नं., सम्पर्क/मोबाइल नं. or vehicle plate — the accused's or anyone
+else's. Mask an account to its last five digits (खाता नं. ...००४२६); where the holder is
+not a defendant, name only the institution ("माछापुच्छ्रे बैंकको खाता मार्फत"); drop cheque
+and policy numbers; give a vehicle by class ("एक मोटरसाइकल"). CASE identifiers are not
+personal and must stay exactly as written: मुद्दा नं., नि.नं., उ.द.नं., च.नं., कि.नं., दफा.
+Every rupee amount stays.
+
 QUALITY RULES:
 - Ground every sentence in the provided sources/case data. Do NOT fabricate
   names, amounts, section numbers, dates, benches, or outcomes. If the verdict is
@@ -308,6 +356,13 @@ DOCUMENTS WE ALREADY HOLD (our complete evidence for this case — anything the
 sources reference that is NOT here is what `missing_documents` must report; never
 list one of these):
 {held_documents}
+
+ORDER HEADER (the court order's own opening and closing pages, VERBATIM: the
+caption with the bench, इजलास नं., फैसला मिति, नि.नं. and the प्रतिवादी list, and the
+closing block with the इति सम्वत् date and any appeal म्याद). The SOURCE DOCUMENTS below
+may carry a SUMMARY of this order rather than its text; where the two disagree about a
+header field, this block is the record:
+{order_header}
 
 SOURCE DOCUMENTS (press release, charge sheet, verdict — the factual basis for
 the description; quote specifics from here):
@@ -415,8 +470,51 @@ def _assemble_source_text(chunks, invoke_text, usage):
     return "\n\n---\n\n".join(parts), fed
 
 
+# `description.mask_account_identifiers` and its third-party sibling in
+# work/slug-fix/enricher-fix-rules.json. Anchored on the KEYWORD, never on digit
+# length: the rules' own "9+ digit run" test misses the 8-digit cheque number and
+# the hyphen-grouped account (longest run 6) that are two of their three cases.
+# The prompt asks for the better form -- institution only for a non-defendant,
+# cheque numbers dropped -- and this is the floor under it, not a substitute.
+_NUMBER_WORD = r"(?:नं\.?|नम्बर|नम्वर)"
+_PERSONAL_ID = re.compile(
+    r"(खाता|चेक|बीमा|पोलिसी|ना\.प्र\.प\.|नागरिकता|सम्पर्क|मोबाइल|फोन)"
+    rf"((?:\s*{_NUMBER_WORD})?[\s:\-–(]*(?:\.{{3}})?\s*)"
+    r"([०-९0-9][०-९0-9\u2013\-/]*)"
+)
+_MASK_MIN_DIGITS = 6
+_MASK_KEEP_DIGITS = 5
+
+
+def _mask_identifiers(text):
+    """Cut personal identifiers down to their last five digits.
+
+    Case identifiers (मुद्दा नं., नि.नं., उ.द.नं., च.नं., कि.नं., दफा) and every
+    rupee amount are untouched -- they are not personal, and the reconciliation
+    stops being checkable without them. Idempotent: a masked number is five
+    digits long, which is below the threshold that fires.
+    """
+    if not text:
+        return text
+
+    def _mask(m):
+        keyword, gap, number = m.group(1), m.group(2), m.group(3)
+        digits = [c for c in number if c.isdigit()]
+        if len(digits) < _MASK_MIN_DIGITS:
+            return m.group(0)
+        gap = gap.replace("...", "")
+        # "खाता नं." + "..." reads as a four-dot typo, so the abbreviation dot
+        # and the ellipsis are kept apart.
+        if gap.rstrip().endswith(("नं.", "नं", "नम्बर", "नम्वर", ":")):
+            gap = gap.rstrip() + " "
+        return f"{keyword}{gap}...{''.join(digits[-_MASK_KEEP_DIGITS:])}"
+
+    return _PERSONAL_ID.sub(_mask, text)
+
+
+
 def _generate_description(detail, court_number, source_text, invoke_text, usage,
-                          max_tokens=DESCRIPTION_MAX_TOKENS):
+                          max_tokens=DESCRIPTION_MAX_TOKENS, order_header=""):
     """One premium-tier call. Returns `(description, documents)`.
 
     `documents` is raw model output, unvalidated on purpose --
@@ -439,6 +537,7 @@ def _generate_description(detail, court_number, source_text, invoke_text, usage,
         entities=format_entities(detail.get("entities")),
         held_documents=held_summary(detail),
         source_text=source_text,
+        order_header=order_header or "(कुनै अदालती आदेश छैन)",
     )
     response_text = invoke_text(
         system=EXTRACTION_SYSTEM_PROMPT,
@@ -703,6 +802,14 @@ def main(argv=None):
                   detail=f"{len(chunks)} source(s): "
                          + ", ".join(f"{t}({len(x):,})" for t, _, x in chunks))
 
+        # Off the RAW order, before `_assemble_source_text` can replace it with a
+        # summary. Both prompts have asked for the bench and the नि.नं. since
+        # 2026-06-17 and 14 of the 16 descriptions reviewed on 2026-08-13 still
+        # had no judge named in them, so the header is fed rather than requested.
+        order_header = next(
+            (court_order_bookends(text) for mtype, _, text in chunks
+             if mtype in COURT_TYPES and text), "")
+
         try:
             source_block, fed = _assemble_source_text(chunks, invoke_text, usage)
         except Exception as exc:  # noqa: BLE001 - source assembly is per-case; the run continues
@@ -722,6 +829,7 @@ def main(argv=None):
                 invoke_text=invoke_text,
                 usage=usage,
                 max_tokens=max_tokens,
+                order_header=order_header,
             )
         except Exception as exc:  # noqa: BLE001 - an LLM failure is recorded per-case and the run continues
             report.record(slug, "description", "error", f"LLM generation failed: {exc}")
@@ -737,6 +845,7 @@ def main(argv=None):
                 traceback.print_exc()
             continue
 
+        description = _mask_identifiers(description)
         if not description:
             report.record(slug, "description", "skipped", "LLM returned no description")
             review.add(ReviewRow(slug=slug, status="skipped", before=before, sources=fed,

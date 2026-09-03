@@ -801,6 +801,163 @@ class TestHasSubstantialDescription:
 _PRESS_MD = "https://x/press.md"
 _COURT_MD = "https://x/court.md"
 
+# --------------------------------------------------------------------------
+# The 2026-08-13 review rules (work/slug-fix/enricher-fix-rules.json)
+# --------------------------------------------------------------------------
+
+
+class TestMaskIdentifiers:
+    """`description.mask_account_identifiers` / `..._third_party_...`.
+
+    Every string here is a real one: the three account numbers and the cheque
+    number are what the 2026-08-13 hand fix stripped out of production
+    (work/slug-fix/desc-fixes.jsonl), and the hyphen-grouped account belongs to
+    a NON-ACCUSED land seller in 079-CR-0160, which is still live.
+
+    The rules' own stated test -- "a 9+ digit run" -- misses two of these: the
+    cheque number is 8 digits and the grouped account's longest run is 6. So the
+    match is anchored on the KEYWORD, never on length.
+    """
+
+    def test_an_account_number_keeps_only_its_last_five_digits(self):
+        out = ed._mask_identifiers(
+            "नबिल बैंक, कान्तिपथ शाखाको खाता नं. ०२०१०१७५०१०३१ मा रु.३५,४८,७८७।– जम्मा गरेको")
+        assert "खाता नं. ...०१०३१" in out
+        assert "०२०१०१७५०१०३१" not in out
+
+    def test_the_rupee_amount_beside_it_survives(self):
+        out = ed._mask_identifiers(
+            "खाता नं. ०२०१०१७५०१०३१ मा रु.३५,४८,७८७।– जम्मा गरेको")
+        assert "रु.३५,४८,७८७।–" in out
+
+    def test_the_proven_production_form_is_reproduced(self):
+        # 079-CR-0116 was patched to exactly this in prod.
+        out = ed._mask_identifiers("एभरेष्ट बैंक खाता नं. ०१२००५१६२००४२६ मा जम्मा")
+        assert "एभरेष्ट बैंक खाता नं. ...००४२६ मा जम्मा" == out
+
+    def test_a_hyphen_grouped_account_is_masked_too(self):
+        # 079-CR-0160, a non-accused third party. Longest digit run is 6, so a
+        # length-based rule never fires here.
+        out = ed._mask_identifiers(
+            "माछापुच्छ्रे बैंकको खाता (१९-३६५२४-१५९३४८-०१-३) मार्फत रकम प्राप्त गरेको")
+        assert "१९-३६५२४-१५९३४८-०१-३" not in out
+        assert "..." in out
+        assert "माछापुच्छ्रे बैंकको" in out
+
+    def test_an_eight_digit_cheque_number_is_masked(self):
+        out = ed._mask_identifiers("ग्लोबल आई.एम.ई. चेक नं. २८४९७७४२ बाट भुक्तानी")
+        assert "२८४९७७४२" not in out
+        assert "चेक नं. ...९७७४२" in out
+
+    def test_latin_digits_are_masked_as_well_as_devanagari(self):
+        out = ed._mask_identifiers("खाता नं. 02010175010 मा")
+        assert "02010175010" not in out
+        assert "...75010" in out
+
+    def test_a_citizenship_number_is_masked(self):
+        # The order caption carries these, and the caption is now fed verbatim.
+        out = ed._mask_identifiers("(ना.प्र.प.नं. ९१५/२२९१, अर्घाखाँची) को रघुनाथ घिमिरे")
+        assert "९१५/२२९१" not in out
+        assert "अर्घाखाँची" in out
+
+    def test_a_phone_number_is_masked(self):
+        out = ed._mask_identifiers("कौशलेन्द्र मिश्र, सम्पर्क नं. 9851108812")
+        assert "9851108812" not in out
+
+    @pytest.mark.parametrize("keep", [
+        "च.नं. १९२, मिति २०७९।०९।११ को पत्र",
+        "कि.नं. ५४४ को जग्गा",
+        "नि.नं. 127 को फैसला",
+        "मुद्दा नं. 079-CR-0116",
+        "उ.द.नं. ३५२७, मिति २०७२।०८।१६ को उजुरी",
+        "विशेष अदालत ऐन, २०५९ को दफा १७ बमोजिम ३५ दिनभित्र",
+        "रु.१,२४,१४१।६७ र रु.३०,८१,५४०।७३",
+        "बीमा प्रिमियममा रु.४,९४,९८४ खर्च गरेको",
+    ])
+    def test_a_case_identifier_or_an_amount_is_never_touched(self, keep):
+        assert ed._mask_identifiers(keep) == keep
+
+    def test_masking_is_idempotent(self):
+        once = ed._mask_identifiers("खाता नं. ०१२००५१६२००४२६ मा")
+        assert ed._mask_identifiers(once) == once
+
+    def test_every_occurrence_is_masked_not_just_the_first(self):
+        out = ed._mask_identifiers(
+            "खाता नं. ०२०१०१७५०१०३१ र खाता नं. ०१४०५०५००१२८७६ दुवै")
+        assert "०२०१०१७५०१०३१" not in out
+        assert "०१४०५०५००१२८७६" not in out
+
+    def test_a_keyword_with_no_number_after_it_is_left_alone(self):
+        text = "कर्जा खाताको रकमलाई बैंक मौज्दात मान्न नमिल्ने"
+        assert ed._mask_identifiers(text) == text
+
+    def test_a_short_number_after_a_keyword_is_left_alone(self):
+        # Not an identifier: masking "खाता २" would be noise, not privacy.
+        text = "खाता २ वटा रहेको"
+        assert ed._mask_identifiers(text) == text
+
+    def test_the_nepali_word_for_number_is_matched_too(self):
+        out = ed._mask_identifiers("बैंक खाता नम्बर ०१२००५१६२००४२६ मा")
+        assert "०१२००५१६२००४२६" not in out
+
+    def test_a_colon_between_the_keyword_and_the_number_still_matches(self):
+        out = ed._mask_identifiers("बैंक खाता: ०१२००५१६२००४२६")
+        assert "०१२००५१६२००४२६" not in out
+
+    def test_the_ellipsis_does_not_run_into_the_abbreviation_dot(self):
+        # "खाता नं....००४२६" is four dots and reads as a typo.
+        out = ed._mask_identifiers("खाता नं.०१२००५१६२००४२६ मा")
+        assert "नं...." not in out
+        assert "खाता नं. ...००४२६ मा" == out
+
+    def test_empty_and_none_survive(self):
+        assert ed._mask_identifiers("") == ""
+        assert ed._mask_identifiers(None) is None
+
+
+class TestReviewRulePromptCoverage:
+    """Each rule that can only live in the prompt, pinned by its own marker so a
+    prompt rewrite cannot quietly drop one."""
+
+    def test_the_order_header_block_is_offered_to_the_model(self):
+        assert "{order_header}" in ed.EXTRACTION_USER_PROMPT
+
+    def test_section_ga_is_told_to_open_with_the_bench_and_the_numbers(self):
+        p = ed.EXTRACTION_SYSTEM_PROMPT
+        assert "इजलास नं." in p and "नि.नं." in p and "फैसला मिति" in p
+
+    def test_the_absent_field_claim_is_forbidden_without_checking_the_header(self):
+        assert "स्रोत कागजातमा खुल्न आएको छैन" in ed.EXTRACTION_SYSTEM_PROMPT
+
+    def test_the_verdict_date_is_pinned_to_the_header_not_the_nearest_date(self):
+        p = ed.EXTRACTION_SYSTEM_PROMPT
+        assert "बहसनोट" in p, "the 079-CR-0160 slip was a बहसनोट date read as the verdict"
+        assert "इति सम्वत्" in p, "the fallback for an order with no header date"
+
+    def test_the_finality_line_is_specified_with_its_skip(self):
+        p = ed.EXTRACTION_SYSTEM_PROMPT
+        assert "**अन्तिमता:**" in p
+        assert "मतैक्य" in p, "the दफा ६(४) split is the case that must NOT get the line"
+        assert "दफा १७" in p
+
+    def test_the_finality_line_states_absence_of_a_record_not_of_an_appeal(self):
+        assert "यकिन हुन सकेको छैन" in ed.EXTRACTION_SYSTEM_PROMPT
+
+    def test_named_non_defendants_must_be_marked(self):
+        p = ed.EXTRACTION_SYSTEM_PROMPT
+        assert "प्रतिवादी होइनन्" in p
+        assert "जफत" in p, "spouses are often co-defendants for जफत only (079-CR-0143)"
+
+    def test_an_untested_third_party_allegation_must_be_marked_not_deleted(self):
+        p = ed.EXTRACTION_SYSTEM_PROMPT
+        assert "बयान" in p and "परीक्षण" in p
+
+    def test_personal_identifiers_are_forbidden_and_case_identifiers_are_not(self):
+        p = ed.EXTRACTION_SYSTEM_PROMPT
+        assert "खाता नं." in p and "ना.प्र.प." in p
+        assert "मुद्दा नं." in p and "कि.नं." in p
+
+
 CASE_READY = {
     "slug": "case-ready",
     "title": "काठमाडौं महानगरपालिका ठेक्का अनियमितता",
@@ -1676,3 +1833,111 @@ def test_nothing_left_to_write_when_both_fields_are_satisfied(monkeypatch,
     assert api.patch_calls == []
     assert report.rows[-1]["status"] == "already"
     assert report.rows[-1]["reason"] == "nothing left to write"
+
+
+# --------------------------------------------------------------------------
+# The review rules, end to end through main()
+# --------------------------------------------------------------------------
+
+# A caption of the shape every one of the 24 cached FY078/079 orders has, and a
+# closing block of the shape 23 of them have, with 40k of filler between -- long
+# enough that `_assemble_source_text` replaces the order with a SUMMARY, which is
+# exactly the path that used to lose the header.
+_ORDER_CAPTION = (
+    "विशेष अदालत, काठमाडौँ\nइजलास नं.२\n"
+    "सदस्य माननीय न्यायाधीश श्री तेज नारायण सिंह राई\n"
+    "फैसला\nमुद्दा नं. 079-CR-0116\nफैसला मितिः 2081।01।20।5\nनिर्णय नं. 127\n"
+)
+_ORDER_CLOSING = (
+    "\nप्रस्तुत फैसला उपर चित्त नबुझे विशेष अदालत ऐन, २०५९ को दफा १७ बमोजिम ३५ "
+    "दिनभित्र श्री सर्वोच्च अदालतमा पुनरावेदन गर्नु।\n"
+    "इति सम्वत् २०७९ साल माघ महिना १० गते रोज ३ मा शुभम्।\n"
+)
+LONG_ORDER = _ORDER_CAPTION + ("म" * 40_000) + _ORDER_CLOSING
+
+
+@pytest.fixture
+def patched_fetch_long_order(monkeypatch):
+    import casework.common.materials as m
+
+    def fake_fetch(link, timeout=60):
+        return {_PRESS_MD: "अख्तियारले ठेक्कामा भ्रष्टाचार भएको जनाएको।",
+                _COURT_MD: LONG_ORDER}.get(link, "")
+
+    monkeypatch.setattr(m, "fetch_markdown", fake_fetch)
+
+
+def _capture_prompt(response):
+    seen = {}
+
+    def stub(**kw):
+        # The verdict summariser shares this stub; only the description call
+        # carries the system prompt, so key off that.
+        if kw.get("system") == ed.EXTRACTION_SYSTEM_PROMPT:
+            seen["content"] = kw["content"]
+            return response
+        return "फैसलाको सारांश।"
+
+    return stub, seen
+
+
+def test_the_order_header_survives_summarisation_and_reaches_the_prompt(
+    monkeypatch, patched_fetch_long_order
+):
+    """The whole point of the block: a 40k order is summarised, and a summary is
+    not trusted to carry the caption. Both prompts have ASKED for the bench since
+    2026-06-17 and 14 of 16 published descriptions still had no judge in them."""
+    stub, seen = _capture_prompt(json.dumps({"description": "क" * 900}))
+    _run_main(monkeypatch, _StubApi([CASE_READY]), invoke_text_stub=stub,
+              argv=["--apply"])
+    content = seen["content"]
+    assert "इजलास नं.२" in content
+    assert "तेज नारायण सिंह राई" in content
+    assert "फैसला मितिः 2081।01।20।5" in content
+    assert "निर्णय नं. 127" in content
+    # ...and the closing block, which is where an order with no फैसला मिति field
+    # keeps its date and where the appeal म्याद lives.
+    assert "इति सम्वत् २०७९ साल माघ महिना १० गते" in content
+    assert "दफा १७" in content
+    # The middle is NOT duplicated into the header block.
+    assert content.count("म" * 5_000) <= 1
+
+
+def test_a_case_with_no_court_order_says_so_instead_of_crashing(
+    monkeypatch, patched_fetch_markdown
+):
+    stub, seen = _capture_prompt(json.dumps({"description": "क" * 900}))
+    _run_main(monkeypatch, _StubApi([CASE_PRESS_ONLY]), invoke_text_stub=stub,
+              argv=["--apply"])
+    assert "(कुनै अदालती आदेश छैन)" in seen["content"]
+
+
+def test_an_account_number_the_model_leaves_in_is_masked_before_the_patch(
+    monkeypatch, patched_fetch_markdown
+):
+    leaky = ("### ग) विशेष अदालतको फैसलाको सार\n\nप्रतिवादीको एभरेष्ट बैंक "
+             "खाता नं. ०१२००५१६२००४२६ मा रु.८,८८,०००।– जम्मा भएको।" + "क" * 800)
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: json.dumps(
+        {"description": leaky}), argv=["--apply"])
+    patched = [v for _, f, v, _ in api.patched if f == "description"]
+    assert patched, "the description must still be written"
+    assert "०१२००५१६२००४२६" not in patched[0]
+    assert "खाता नं. ...००४२६" in patched[0]
+    # The amount beside it is load-bearing and stays.
+    assert "रु.८,८८,०००।–" in patched[0]
+
+
+def test_the_dry_run_shows_the_masked_text_not_the_raw_one(
+    monkeypatch, patched_fetch_markdown
+):
+    # The review file is what a human signs off before --apply, so it has to show
+    # what would actually be written.
+    leaky = ("प्रतिवादीको खाता नं. ०१२००५१६२००४२६ मा जम्मा भएको।" + "क" * 800)
+    api = _StubApi([CASE_READY])
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: json.dumps(
+        {"description": leaky}), argv=["--dry-run"])
+    assert api.patched == []
+    row = report.rows[0]
+    assert row["status"] == "would-enrich"
+
