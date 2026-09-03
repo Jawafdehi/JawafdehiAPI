@@ -17,6 +17,9 @@ import logging
 log = logging.getLogger("casework.court_order")
 
 HEAD_CHARS: int = 6_000
+# The closing block: the इति सम्वत् … गते date an order carries when it has no
+# `फैसला मितिः` header field, and the दफा १७ appeal म्याद.
+BOOKEND_TAIL_CHARS: int = 4_000
 THAHAR_CHARS: int = 15_500
 THAHAR_MARKER = "ठहर खण्ड"
 
@@ -49,6 +52,22 @@ def court_order_tail(text: str, limit: int, label: bool = True) -> str:
         return text
     tail = text[-limit:]
     return _TAIL_LABEL + tail if label else tail
+
+
+def court_order_bookends(text: str, head: int = HEAD_CHARS,
+                         tail: int = BOOKEND_TAIL_CHARS) -> str:
+    """Return an order's head and tail together, the middle dropped.
+
+    Both ends verbatim, because both carry facts no summary is trusted to keep:
+    the caption (bench, इजलास नं., फैसला मिति, नि.नं., the प्रतिवादी list) and the
+    closing block (the इति सम्वत् date, the appeal म्याद, any दफा ६(४) referral).
+    An order short enough to fit in both windows is returned once, unlabelled.
+    """
+    if not text:
+        return ""
+    if len(text) <= head + tail:
+        return text
+    return court_order_head(text, head) + court_order_tail(text, tail)
 
 
 def court_order_thahar(text: str, limit: int = THAHAR_CHARS, label: bool = True) -> str:

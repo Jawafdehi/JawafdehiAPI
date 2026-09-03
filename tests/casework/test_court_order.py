@@ -293,3 +293,44 @@ class TestSummariseVerdictLivesHere:
             raise RuntimeError("provider down")
 
         assert co.summarize_verdict("क" * 20_000, always_fails, usage=None) is None
+
+
+class TestCourtOrderBookends:
+    """The verbatim head+tail block the description prompt gets alongside the
+    summary. Measured over the 24 cached FY078/079 orders: the head carries
+    इजलास 24/24, the judges 24/24, नि.नं. 23/24 and फैसला मिति 21/24; the tail
+    carries the इति सम्वत् fallback date 23/24 and the दफा १७ appeal म्याद
+    17/24. Summarising is what used to lose all of it."""
+
+    def test_empty_text_is_empty(self):
+        assert co.court_order_bookends("") == ""
+        assert co.court_order_bookends(None) == ""
+
+    def test_a_short_order_is_returned_once_not_twice(self):
+        # Head and tail would otherwise overlap and the model would read the
+        # same order twice, paying for it twice.
+        order = "क" * 500
+        assert co.court_order_bookends(order) == order
+
+    def test_a_long_order_gives_both_ends(self):
+        order = "शुरु" + ("म" * 40_000) + "अन्त्य"
+        out = co.court_order_bookends(order, head=1_000, tail=800)
+        assert out.startswith(co._HEAD_LABEL)
+        assert "शुरु" in out
+        assert "अन्त्य" in out
+        assert len(out) < 3_000
+
+    def test_the_two_ends_are_separately_labelled(self):
+        out = co.court_order_bookends("क" * 40_000, head=1_000, tail=800)
+        assert co._HEAD_LABEL in out
+        assert co._TAIL_LABEL in out
+        assert out.index(co._HEAD_LABEL) < out.index(co._TAIL_LABEL)
+
+    def test_the_middle_is_dropped_not_summarised(self):
+        order = "सुरु" + ("म" * 40_000) + "बीचको-गोप्य-अंश" + ("म" * 40_000) + "अन्त्य"
+        out = co.court_order_bookends(order, head=1_000, tail=800)
+        assert "बीचको-गोप्य-अंश" not in out
+
+    def test_the_defaults_are_the_measured_ones(self):
+        assert co.HEAD_CHARS == 6_000
+        assert co.BOOKEND_TAIL_CHARS == 4_000
