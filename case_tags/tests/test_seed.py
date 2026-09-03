@@ -159,3 +159,67 @@ def test_empty_vocabulary_is_an_error(tmp_path: pathlib.Path) -> None:
     """An empty file would otherwise wipe every alias — the destructive no-op."""
     with pytest.raises(CommandError, match="no tags"):
         call_command("seed_case_tags", path=str(_write(tmp_path, {"version": 1})))
+
+
+def test_labels_alias_their_own_tag(tmp_path: pathlib.Path) -> None:
+    """A tag's own Nepali and English labels resolve to it.
+
+    Without this `स्थानीय तह` — the `label_ne` of `local-government` — landed in the
+    "matches no alias" bucket: the vocabulary knew the word and still could not
+    resolve it. On Nepali-first content the Nepali label is the likeliest thing
+    anyone types, so it has to be the one thing guaranteed to work.
+    """
+    call_command("seed_case_tags", path=str(_write(tmp_path, VOCAB)))
+    assert TagAlias.objects.get(key="भूमि").tag_id == "land"
+    assert TagAlias.objects.get(key="land").tag_id == "land"
+    assert TagAlias.objects.get(key="सरकारी जग्गा हडप").tag_id == "land-grab"
+    # label_en folds through the normalizer like any other value
+    assert TagAlias.objects.get(key="province government").tag_id == "province-government"
+
+
+def test_two_tags_cannot_claim_one_label(tmp_path: pathlib.Path) -> None:
+    """Silent last-wins would leave one tag unreachable and report success.
+
+    Only reachable now that labels are seeded automatically — an author adding a
+    tag has no reason to check every other tag's labels for a clash.
+    """
+    document = {
+        "version": 1,
+        "tags": [
+            {
+                "id": "land",
+                "label_ne": "भूमि",
+                "label_en": "Land",
+                "status": "active",
+                "aliases": [],
+            },
+            {
+                "id": "terrain",
+                "label_ne": "भूमि",
+                "label_en": "Terrain",
+                "status": "active",
+                "aliases": [],
+            },
+        ],
+    }
+    with pytest.raises(CommandError, match="claimed by both"):
+        call_command("seed_case_tags", path=str(_write(tmp_path, document)))
+
+
+def test_a_label_may_not_also_be_dropped(tmp_path: pathlib.Path) -> None:
+    """The existing alias/dropped contradiction check must see labels too."""
+    document = {
+        "version": 1,
+        "tags": [
+            {
+                "id": "land",
+                "label_ne": "भूमि",
+                "label_en": "Land",
+                "status": "active",
+                "aliases": [],
+            }
+        ],
+        "dropped": [{"reason": "editorial-or-too-vague", "values": ["भूमि"]}],
+    }
+    with pytest.raises(CommandError, match="dropped but also aliases"):
+        call_command("seed_case_tags", path=str(_write(tmp_path, document)))
