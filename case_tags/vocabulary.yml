@@ -71,7 +71,7 @@ tags:
     label_ne: स्रोत नखुलेको सम्पत्ति आर्जन
     label_en: Illicit Enrichment
     status: active
-    aliases: [illegal property acquisition, assets beyond known income, illegal enrichment, illicit enrichment, illegal property, illegal wealth]
+    aliases: [illegal property acquisition, assets beyond known income, illegal enrichment, illicit enrichment, illegal property, illegal wealth, गैरकानुनी सम्पत्ति]
     note: Seven spellings of one concept in live data — the single worst duplicate cluster.
 
   - id: abuse-of-public-office
@@ -84,13 +84,13 @@ tags:
     label_ne: हिनामिना तथा अपचलन
     label_en: Embezzlement
     status: active
-    aliases: [embezzlement, embezzled, misappropriation]
+    aliases: [embezzlement, embezzled, misappropriation, अपचय]
 
   - id: forged-documents
     label_ne: कीर्ते कागजात
     label_en: Forged Documents
     status: active
-    aliases: [forged documents]
+    aliases: [forged documents, झुठा कागज]
 
   - id: revenue
     label_ne: राजस्व
@@ -126,7 +126,7 @@ tags:
     label_ne: घुस रिसवत
     label_en: Bribery
     status: active
-    aliases: [bribery, kickbacks]
+    aliases: [bribery, kickbacks, घूस]
 
   - id: conflict-of-interest
     label_ne: स्वार्थ बाझिने अवस्था
@@ -177,7 +177,7 @@ tags:
     label_ne: भूमि
     label_en: Land
     status: active
-    aliases: [land, land deal]
+    aliases: [land, land deal, सार्वजनिक जग्गा]
     note: >-
       Umbrella for every land case, as §12's own example list suggests (`LAND`).
       Bare `Land` and `land-deal` assert only that a case concerns land, so they map
@@ -195,7 +195,7 @@ tags:
     label_en: Land Grab
     status: active
     broader: land
-    aliases: [land grab, land scandel]
+    aliases: [land grab, land scandel, जग्गा हडप]
 
   # --- domain / sector ----------------------------------------------------
   - id: telecommunications
@@ -222,7 +222,7 @@ tags:
     label_ne: वित्त
     label_en: Finance
     status: active
-    aliases: [finance]
+    aliases: [finance, अर्थ]
 
   - id: forestry
     label_ne: वन
@@ -241,7 +241,7 @@ tags:
     label_ne: खानेपानी
     label_en: Water Supply
     status: active
-    aliases: [water supply]
+    aliases: [water supply, melamchi water supply]
 
   - id: education
     label_ne: शिक्षा
@@ -265,13 +265,13 @@ tags:
     label_ne: ऊर्जा
     label_en: Energy
     status: active
-    aliases: [hydropower, budhigandaki hydropower project]
+    aliases: [hydropower, budhigandaki hydropower project, विद्युत्]
 
   - id: postal-services
     label_ne: हुलाक सेवा
     label_en: Postal Services
     status: active
-    aliases: [hulak saving bank case]
+    aliases: [hulak saving bank case, हुलाक]
     note: Catches the double space in the raw value via the whitespace rule.
 
   # --- level of government ------------------------------------------------
@@ -310,7 +310,7 @@ tags:
     label_ne: मधेश प्रदेश
     label_en: Madhesh Province
     status: active
-    aliases: [madhesh, madesh province, madhes]
+    aliases: [madhesh, madesh province, madhes, madhesh province]
 
   - id: bagmati
     label_ne: बागमती प्रदेश
@@ -912,7 +912,7 @@ dropped:
        "~26 Lakh 82 Hazar", "~3 Crore 15 Lakh", "~3 Crore 21 Lakh", "~3 Crore 29 Lakh",
        "~3 Lakh 20 Hazar", "~34 Crore 66 Lakh", "~4 Crore 67 Lakh", "~45 Hazar",
        "~5 Crore 33 Lakh", "~5 Crore 5 Lakh", "~6 Arab 21 Crore", "~85 Lakh 18 Hazar",
-       "~9 Lakh 13 Hazar"]
+       "~9 Lakh 13 Hazar", "~1 Arab 47 Crore", "~2 Arab 37 Crore"]
 
   - reason: not-a-tag-case-number
     note: Already carried by the court-case reference, and normalized there (§6.3).
@@ -924,7 +924,15 @@ dropped:
       filer in 53 of 82 cases and `Special Court`/`Supreme Court` are the venue — all
       three come from the court-case reference and discriminate almost nothing as
       facets. 110 of the 462 live assignments, removed with no loss.
-    values: ["Corruption", "Corruption Allegation", "CIAA", "Special Court", "Supreme Court"]
+
+      `भ्रष्टाचार` is the same call in Nepali, and by volume it is the bigger one: it
+      sits on 2685 of the unpublished CIAA cases, where it is the *only* tag on most
+      of them. Dropping it is consistent — it restates a CORRUPTION case_type — but it
+      is why those cases cannot be canonicalised into a useful state by the alias map
+      alone, and why the rebuild is scoped to published cases until they have real
+      offence tags.
+    values: ["Corruption", "Corruption Allegation", "CIAA", "Special Court", "Supreme Court",
+             "भ्रष्टाचार"]
 
   - reason: named-person-or-organisation
     note: >-
@@ -954,3 +962,51 @@ dropped:
       case, or a locality inside Damak; its case is the Damak land case, so neither
       reading is safe. `माछापाेखरी` is an unresolvable pond/locality name.
     values: ["baluwatar", "माछापाेखरी"]
+
+  - reason: not-a-tag-test-data
+    note: >-
+      Test artefacts that reached the production cases table and are sitting in
+      `Case.tags` today: `bugbash` and `practice` on 14 cases each, plus one `Test`
+      and one `MCP-Verification`. Recorded here so the rebuild reports them as
+      deliberately retired rather than as vocabulary gaps — but the tags are the
+      symptom, not the problem. The cases themselves want deleting.
+    values: ["bugbash", "practice", "Test", "MCP-Verification"]
+
+  - reason: not-a-tag-case-name
+    note: >-
+      A label for one specific case, not a class of cases. `wide body` and `aircraft`
+      are the Nepal Airlines wide-body procurement case; a tag that matches exactly
+      one case is a worse version of a link to it. Distinct from
+      `named-person-or-organisation`: nobody is being named here, so the guilt-implication
+      argument does not apply — these are simply not facets.
+    values: ["Bhatta-Agrawal Syndicate", "Reinsurance Share Rigging", "wide body", "aircraft"]
+
+# ---------------------------------------------------------------------------
+# NOT DECIDED — 15 raw values, 1124 assignments, all in the unpublished CIAA
+# corpus. Deliberately absent from both `tags:` and `dropped:`: they are not
+# known-not-tags, they are undecided, and the rebuild reports them as gaps.
+#
+# Each needs a Nepali-speaking reviewer, not a better guess. Grouped by why.
+#
+# Too generic to map without the case in front of you — each could land on two
+# or three different existing tags, and the wrong one is worse than none:
+#   नक्कली (714)          fake/counterfeit — forged-documents? fake-employees?
+#   दुरुपयोग (131)        misuse — abuse-of-public-office? budget-misuse?
+#   अनियमितता (128)       irregularity — procurement-irregularity? or generic
+#   गैरकानुनी लाभ (91)     illegal gain — illicit-enrichment? abuse-of-public-office?
+#   गलत रिपोर्ट (15)       false report — forged-documents? or an audit finding
+#   Substandard Goods (1) quality failure; no offence tag covers it
+#
+# Real classes with no tag yet. Each is a vocabulary ADDITION, not an alias:
+#   परीक्षा धाँधली (24)    exam rigging
+#   राहदानी दुरुपयोग (10)   passport misuse
+#   नदीजन्य पदार्थ (2)     river-bed material extraction
+#
+# Sectors with no tag yet. Cheap to add, but adding a sector nothing filters by
+# is how the district list got long — decide against real usage:
+#   भन्सार (3) customs · संस्कृति (1) culture · सिँचाइ (1) irrigation
+#   आपूर्ति (1) supply · गृह प्रशासन (1) home administration · प्रहरी (1) police
+#
+# सिँचाइ is the sharp one: irrigation is neither खानेपानी (water-supply, which is
+# drinking water) nor agriculture, so it cannot be aliased to either.
+# ---------------------------------------------------------------------------

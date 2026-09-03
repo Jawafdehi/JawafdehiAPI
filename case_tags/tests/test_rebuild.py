@@ -22,6 +22,25 @@ pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture(autouse=True)
+def _ignore_the_shipped_curation(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point `--curation`'s default at nothing.
+
+    The command defaults to the SHIPPED ``case_tags/curation.yml``, whose entries
+    name real cases and real vocabulary tags. This module seeds a four-tag stand-in
+    vocabulary and no cases, so without this every test that does not pass an
+    explicit ``curation=`` fails on the shipped file instead of exercising what it
+    is about. Curation behaviour is covered by tests that pass a file deliberately;
+    the shipped file's own contents are covered by ``test_curation.py``.
+    """
+    monkeypatch.setattr(
+        "case_tags.management.commands.rebuild_case_tags.DEFAULT_CURATION",
+        tmp_path / "absent-curation.yml",
+    )
+
+
+@pytest.fixture(autouse=True)
 def vocabulary() -> None:
     """A small stand-in for the real file — enough shape to exercise the command."""
     land = Tag.objects.create(
@@ -56,12 +75,14 @@ def vocabulary() -> None:
     )
 
 
-def _case(slug: str, tags: list[str]) -> Case:
+def _case(
+    slug: str, tags: list[str], state: str = CaseState.PUBLISHED
+) -> Case:
     return Case.objects.create(
         title=slug,
         slug=slug,
         case_type=CaseType.CORRUPTION,
-        state=CaseState.PUBLISHED,
+        state=state,
         tags=tags,
     )
 
@@ -182,6 +203,52 @@ class TestCuration:
         with pytest.raises(CommandError, match="no `why`"):
             call_command("rebuild_case_tags", apply=True, curation=path)
 
+    def test_can_remove_a_deprecated_tag(self, tmp_path: pathlib.Path) -> None:
+        """`remove` is mostly used ON deprecated tags — that is the point of it.
+
+        Requiring active here would forbid removing exactly the tags that most need
+        removing; the first curation file strips `kathmandu-valley` from 9 cases.
+        """
+        Tag.objects.create(
+            id="kathmandu-valley",
+            label_ne="काठमाडौं उपत्यका",
+            label_en="Kathmandu Valley",
+            status=TagStatus.DEPRECATED,
+        )
+        TagAlias.objects.create(key="kathmandu valley", tag_id="kathmandu-valley")
+        case = _case("c1", ["Kathmandu Valley", "Lalitpur"])
+        path = _curation(
+            tmp_path,
+            [{"slug": "c1", "remove": ["kathmandu-valley"], "why": "not in the valley"}],
+        )
+        call_command("rebuild_case_tags", apply=True, curation=path)
+        case.refresh_from_db()
+        assert case.tags == ["lalitpur"]
+
+    def test_cannot_add_a_deprecated_tag(self, tmp_path: pathlib.Path) -> None:
+        """Adding one is how a deprecation quietly gets undone."""
+        Tag.objects.create(
+            id="kathmandu-valley",
+            label_ne="काठमाडौं उपत्यका",
+            label_en="Kathmandu Valley",
+            status=TagStatus.DEPRECATED,
+        )
+        _case("c1", [])
+        path = _curation(
+            tmp_path, [{"slug": "c1", "add": ["kathmandu-valley"], "why": "x"}]
+        )
+        with pytest.raises(CommandError, match="not an active tag"):
+            call_command("rebuild_case_tags", apply=True, curation=path)
+
+    def test_removing_a_nonexistent_tag_is_an_error(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Relaxing `remove` to "exists" must not relax it to "anything"."""
+        _case("c1", [])
+        path = _curation(tmp_path, [{"slug": "c1", "remove": ["nope"], "why": "x"}])
+        with pytest.raises(CommandError, match="which is not a tag"):
+            call_command("rebuild_case_tags", apply=True, curation=path)
+
     def test_unknown_tag_is_an_error(self, tmp_path: pathlib.Path) -> None:
         _case("c1", [])
         path = _curation(tmp_path, [{"slug": "c1", "add": ["not-a-tag"], "why": "x"}])
@@ -214,3 +281,51 @@ class TestCuration:
         )
         case.refresh_from_db()
         assert case.tags == ["land"]
+
+
+class TestScope:
+    """Published-only by default.
+
+    The vocabulary was measured against the published corpus. The rest of the table
+    is ~2950 bulk-imported CIAA cases whose mostly-Nepali tags no alias covers, so an
+    unscoped run does not canonicalise them — it empties them. That is a data-loss
+    shape, so the safe scope is the default and the wide one is explicit.
+    """
+
+    def test_unpublished_is_untouched_by_default(self) -> None:
+        draft = _case("d1", ["Land Management"], state=CaseState.DRAFT)
+        call_command("rebuild_case_tags", apply=True)
+        draft.refresh_from_db()
+        assert draft.tags == ["Land Management"]
+        assert draft.tags_source is None, "no snapshot for a case never rebuilt"
+
+    def test_all_opts_into_every_state(self) -> None:
+        draft = _case("d1", ["Land Management"], state=CaseState.DRAFT)
+        call_command("rebuild_case_tags", apply=True, all_states=True)
+        draft.refresh_from_db()
+        assert draft.tags == ["land"]
+
+    @pytest.mark.parametrize(
+        "state", [CaseState.DRAFT, CaseState.IN_REVIEW, CaseState.CLOSED]
+    )
+    def test_only_published_counts_as_in_scope(self, state: str) -> None:
+        case = _case("c1", ["Land Management"], state=state)
+        call_command("rebuild_case_tags", apply=True)
+        case.refresh_from_db()
+        assert case.tags == ["Land Management"]
+
+    def test_slug_outside_scope_says_why(self) -> None:
+        """"No case with slug X" would read as a typo and send you hunting for one."""
+        _case("d1", ["Land Management"], state=CaseState.DRAFT)
+        with pytest.raises(CommandError, match=r"is DRAFT.*Pass --all"):
+            call_command("rebuild_case_tags", apply=True, slug="d1")
+
+    def test_slug_that_really_is_missing_still_says_so(self) -> None:
+        with pytest.raises(CommandError, match="No case with slug 'nope'"):
+            call_command("rebuild_case_tags", apply=True, slug="nope")
+
+    def test_slug_outside_scope_works_with_all(self) -> None:
+        draft = _case("d1", ["Land Management"], state=CaseState.DRAFT)
+        call_command("rebuild_case_tags", apply=True, slug="d1", all_states=True)
+        draft.refresh_from_db()
+        assert draft.tags == ["land"]
