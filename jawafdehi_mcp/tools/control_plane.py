@@ -140,6 +140,8 @@ _FACET_Q_FACETS: tuple[str, ...] = (
     "court_type",
     "district",
     "province",
+    "material_type",
+    "material_source",
 )
 
 #: Mirror of ``search.service.MAX_FACET_Q_TEXT``, pinned by
@@ -168,6 +170,8 @@ class SearchControlPlaneTool(_ControlPlaneTool):
         "court_type",
         "district",
         "province",
+        "material_type",
+        "material_source",
         "bigo_min",
         "bigo_max",
         "date_from",
@@ -297,6 +301,54 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                         "courts, a high court resolving to the province it "
                         "serves (its additional benches included). "
                         "Courtcase-only."
+                    ),
+                },
+                # The two material provenance facets (material-only, and they
+                # AND together). Separate axes: one office publishes several
+                # types, one type comes from several offices.
+                "material_type": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "charge_sheet",
+                            "court_case",
+                            "court_order",
+                            "document",
+                            "legal_corpus",
+                            "manuscript",
+                            "news",
+                            "official_report",
+                            "precedent",
+                            "press_release",
+                            "procurement_notice",
+                            "social_media",
+                        ],
+                    },
+                    "uniqueItems": True,
+                    "description": (
+                        "What KIND of material a document is. A closed "
+                        "vocabulary, so an unlisted value is a 400 rather than "
+                        "an empty page. Material-only: any value also excludes "
+                        "every entity, court-case and case result, so pair it "
+                        "with type: [\"material\"]."
+                    ),
+                },
+                "material_source": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "WHICH office or feed published a material — the ingest "
+                        "source token, lower_snake_case ('ag', "
+                        "'ciaa_press_release', 'bolpatra'). Open-ended, so take "
+                        "values from the response's facets.material_source "
+                        "buckets or list them with "
+                        "facet_q: [\"material_source:<text>\"]; an unknown token "
+                        "returns an empty result set rather than an error. A "
+                        "SEPARATE axis from material_type, not a restatement: "
+                        "the CIAA publishes press releases AND annual reports, "
+                        "while press releases come from ciaa_press_release, cib "
+                        "and dmli. Material-only."
                     ),
                 },
                 # बिगो (alleged embezzled amount, whole NPR) range bounds,
