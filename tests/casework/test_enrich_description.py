@@ -1934,10 +1934,103 @@ def test_the_dry_run_shows_the_masked_text_not_the_raw_one(
     # The review file is what a human signs off before --apply, so it has to show
     # what would actually be written.
     leaky = ("प्रतिवादीको खाता नं. ०१२००५१६२००४२६ मा जम्मा भएको।" + "क" * 800)
+    rows = _captured_review_rows(monkeypatch)
     api = _StubApi([CASE_READY])
     report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: json.dumps(
         {"description": leaky}), argv=["--dry-run"])
     assert api.patched == []
-    row = report.rows[0]
-    assert row["status"] == "would-enrich"
+    assert report.rows[0]["status"] == "would-enrich"
+    # The point of the test: the row a human signs off carries the MASKED text.
+    review_row = rows[-1]
+    assert "०१२००५१६२००४२६" not in review_row.generated
+    assert "खाता नं. ...००४२६" in review_row.generated
 
+
+def _captured_review_rows(monkeypatch):
+    """Every `ReviewRow` the run adds, in order.
+
+    The review FILE is what a human signs off before `--apply`, and `main()`
+    returns only the report, so the rows are intercepted at `ReviewFile.add`.
+    """
+    from casework.common.review import ReviewFile
+
+    rows = []
+    monkeypatch.setattr(ReviewFile, "add", lambda self, row: rows.append(row))
+    return rows
+
+
+class TestResidualIdentifiers:
+    """`description.mask_account_identifiers`, the one clause with no mechanical
+    fix: a plate must become an asset class, and only the model knows the class.
+
+    The three plates below are live in production today -- they are in the
+    description of the ministry vehicle-purchase case, which is why this reports
+    rather than assumes the prompt was obeyed.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "साविक कृषि मन्त्री चढ्ने स्कार्पियो नम्बर ग १ झ ६१६ को गाडी खरिद",
+        "बा १ झ ९१८२ नं. को गाडी मर्मत गराउँदा अनियमितता",
+        "बा.१२ प ३४५६ नम्बरको मोटरसाइकल जफत गर्ने ठहर",
+        "ना ५ च ८९०१ को स्कुटर",
+        "बा १२ प 3456 को सवारी साधन",          # Latin serial
+    ])
+    def test_a_plate_is_reported(self, text):
+        assert ed.residual_identifiers(text)
+
+    @pytest.mark.parametrize("text", [
+        "नि.नं. १२७ मिति २०८१।०१।२०",
+        "कि.नं. २८४९ को जग्गा",
+        "मुद्दा नं. ०७९-CR-०१६० को फैसला मिति २०८१।०२।०६",
+        "दफा १७ बमोजिम ३५ दिने म्याद",
+        "रु.७,४९,८४० बिगो कायम गरिएको",
+        "एक मोटरसाइकल र एक कार जफत गर्ने ठहर",   # the form the rule asks for
+        "खाता नं. ...००४२६ मा जम्मा",
+    ])
+    def test_a_case_identifier_an_amount_or_an_asset_class_is_not(self, text):
+        assert ed.residual_identifiers(text) == []
+
+    def test_it_is_measured_against_production_not_guessed(self):
+        # Run over all 213 populated descriptions in the 2026-09-01 snapshot the
+        # detector fired on ONE case, and all three hits were real plates. The
+        # regression that matters is a false positive on ordinary prose.
+        prose = ("प्रतिवादीले सरकारी जग्गा आफ्नो नाममा दर्ता गराई रु.२ करोड "
+                 "गैरकानूनी लाभ लिएको र निजको आय स्रोत नखुलेको भन्ने आरोप छ। "
+                 "विशेष अदालतले नि.नं. २८३, फैसला मिति २०८१।०२।०६ मा सफाइ दिएको।")
+        assert ed.residual_identifiers(prose) == []
+
+    def test_none_and_empty_survive(self):
+        assert ed.residual_identifiers("") == []
+        assert ed.residual_identifiers(None) == []
+
+    def test_each_plate_is_reported_once_sorted(self):
+        text = "बा.१२ प ३४५६ र ना ५ च ८९०१ र फेरि बा.१२ प ३४५६"
+        assert ed.residual_identifiers(text) == ["ना ५ च ८९०१", "बा.१२ प ३४५६"]
+
+
+def test_a_plate_the_model_left_in_is_flagged_on_the_review_row(
+    monkeypatch, patched_fetch_markdown
+):
+    # Reported, NOT edited: masking the digits would satisfy the rule's letter
+    # and lose its action, which is to name the asset class instead.
+    leaky = ("### ग) विशेष अदालतको फैसलाको सार\n\nबा.१२ प ३४५६ नम्बरको "
+             "मोटरसाइकल जफत गर्ने ठहर।" + "क" * 800)
+    rows = _captured_review_rows(monkeypatch)
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: json.dumps(
+        {"description": leaky}), argv=["--dry-run"])
+    row = rows[-1]
+    assert "बा.१२ प ३४५६" in row.note
+    assert "बा.१२ प ३४५६" in row.generated, "the plate is reported, never edited out"
+
+
+def test_a_clean_description_carries_no_privacy_note(
+    monkeypatch, patched_fetch_markdown
+):
+    clean = ("### ग) विशेष अदालतको फैसलाको सार\n\nएक मोटरसाइकल जफत गर्ने "
+             "ठहर।" + "क" * 800)
+    rows = _captured_review_rows(monkeypatch)
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: json.dumps(
+        {"description": clean}), argv=["--dry-run"])
+    assert "vehicle plate" not in rows[-1].note

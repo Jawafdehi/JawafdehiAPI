@@ -512,6 +512,34 @@ def _mask_identifiers(text):
     return _PERSONAL_ID.sub(_mask, text)
 
 
+# The one identifier in `description.mask_account_identifiers` that has no
+# mechanical fix. Its action is "replace a plate with the asset class ('एक
+# मोटरसाइकल')" and nothing here knows whether the vehicle is a motorcycle or a
+# tipper, so masking digits would satisfy the letter and lose the rule. The
+# prompt asks for the substitution; this reports when the model did not make it,
+# because the alternative is publishing a plate that nobody was told about.
+#
+# Zone + (Devanagari or Latin) number + class letter + serial, the standard
+# Nepali form: बा.१२ प ३४५६, ना ५ च ८९०१, को.१ ख ७७७७. Anchored on the class
+# letter between two number groups, which is what a plate has and a case
+# citation does not.
+_PLATE = re.compile(
+    r"(?:बा|ना|लु|ग|को|भे|म|से|प्र|सु|मे|क)"
+    r"[\s.]*[०-९0-9]{1,2}[\s.]*"
+    r"(?:प|च|ख|ज|झ|य|ग|घ|ङ|ट|ठ|ड|ढ|ण|त|थ|द|ध|न|ब|भ|म|ह|ल|व|स)"
+    r"[\s.]*[०-९0-9]{3,4}(?![०-९0-9])"
+)
+
+
+def residual_identifiers(text):
+    """Personal identifiers left in `text` that `_mask_identifiers` cannot fix.
+
+    Reported on the review row and as a warning, never edited away: a plate
+    needs the asset class the model was asked for, and a silent partial mask
+    would read as compliance.
+    """
+    return sorted({m.group(0).strip() for m in _PLATE.finditer(text or "")})
+
 
 def _generate_description(detail, court_number, source_text, invoke_text, usage,
                           max_tokens=DESCRIPTION_MAX_TOKENS, order_header=""):
@@ -846,6 +874,18 @@ def main(argv=None):
             continue
 
         description = _mask_identifiers(description)
+        # What the mask could not fix. Warned, never edited: see
+        # `residual_identifiers`. Logged before the empty-description branch so
+        # the finding cannot be lost with the case.
+        plates = residual_identifiers(description)
+        plate_note = ""
+        if plates:
+            plate_note = ("vehicle plate(s) the model did not replace with an "
+                          "asset class: " + ", ".join(plates))
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="privacy", status="residual",
+                      detail=plate_note, level=logging.WARNING)
+
         if not description:
             report.record(slug, "description", "skipped", "LLM returned no description")
             review.add(ReviewRow(slug=slug, status="skipped", before=before, sources=fed,
@@ -972,7 +1012,7 @@ def main(argv=None):
                        + " · ".join(kept))
         elif blocked:
             md_note = f"missing_details NOT written ({blocked})"
-        note = "; ".join(filter(None, (source_note, md_note)))
+        note = "; ".join(filter(None, (source_note, md_note, plate_note)))
 
         if args.dry_run:
             report.record(slug, "description", "would-enrich", detail_msg)
