@@ -5384,8 +5384,8 @@ class TestAGazetteerTwinIsNotBoundAlongsideItsCodedRecord:
         assert KANCHANPUR_BARE in {c[1] for c in decision.candidates}
 
     def test_a_person_with_two_candidates_still_binds_both(self):
-        # The narrowing keys on the winner being a coded place, so it must not
-        # touch the person fan-out that `qualifying_binds` exists for.
+        # The narrowing must not touch the person fan-out that
+        # `qualifying_binds` exists for.
         a = "https://jawafdehi.org/entity/person/anish-shrestha-1"
         b = "https://jawafdehi.org/entity/person/anish-shrestha-2"
         case = {"slug": "case-person-fanout", "state": "DRAFT", "entities": []}
@@ -5397,6 +5397,88 @@ class TestAGazetteerTwinIsNotBoundAlongsideItsCodedRecord:
              "entity_prefix": "person", "entity_type": "Person",
              "is_named_entity": True, "name_en": "", "notes": "क"}])
         assert {i["nes_id"] for i in plan.patch_items} == {a, b}
+
+
+# कञ्चनपुर MASKS THE BUG BELOW, which is why the class above passes. The
+# narrowing used to key on `decision.nes_id`, and `_promote_top_candidate`
+# re-derives that from `Decision.candidates` -- a tuple `resolve` captured
+# BEFORE its own narrowing. Which twin sorts first is pure lexicography:
+# `location/district/kanchanpur-np0772` beats `location/kanchanpur` because
+# `d` < `k`. It goes the other way for every district whose slug sorts before
+# the literal `district/` -- achham, baglung, banke, bara, chitwan, dailekh,
+# dhading -- and for six of the seven provinces against `province/`.
+ACHHAM_CODED = "https://jawafdehi.org/entity/location/district/achham-np0901"
+ACHHAM_BARE = "https://jawafdehi.org/entity/location/achham"
+
+
+class _TruncatedCandidates(list):
+    """A search result the API stopped early on -- `resolve`'s truncation veto."""
+
+    complete = False
+
+
+class TestTheGazetteerNarrowingSurvivesAPromotedReview:
+    """The narrowing has to hold on every path that reaches a bind, not only
+    the one where `resolve` returns a clean BIND."""
+
+    @staticmethod
+    def _candidates():
+        return [{"id": ACHHAM_BARE, "title": {"ne": "अछाम"}, "score": 180.0},
+                {"id": ACHHAM_CODED, "title": {"ne": "अछाम"}, "score": 180.0}]
+
+    def _bind(self, slug, rel_type="location", complete=True):
+        case = {"slug": slug, "state": "DRAFT", "entities": []}
+        found = (list(self._candidates()) if complete
+                 else _TruncatedCandidates(self._candidates()))
+        api = _SearchStubApi([case], {"अछाम": found})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अछाम", "relationship_type": rel_type,
+             "entity_prefix": "location/district", "entity_type": "Place",
+             "is_named_entity": True, "name_en": "Achham",
+             "notes": "कसुर भएको जिल्ला"}])
+        return {i["nes_id"] for i in plan.patch_items}
+
+    def test_a_truncated_candidate_window_still_drops_the_bare_twin(self):
+        # Routine for a common district name: the search stopped early, so
+        # `resolve` REVIEWs on the truncation veto and the promotion re-derives
+        # the winner from the un-narrowed tuple -- the bare twin, here.
+        assert self._bind("case-achham-truncated", complete=False) == {
+            ACHHAM_CODED}
+
+    def test_a_place_filed_under_another_section_still_drops_the_bare_twin(self):
+        # `prefer_gazetteer` is only on for the location section, so this one
+        # REVIEWs as an ambiguity and is then promoted. `bind_section`'s
+        # coercion to `related` makes this easy for the extraction to produce.
+        assert self._bind("case-achham-related", rel_type="related") == {
+            ACHHAM_CODED}
+
+    def test_the_clean_location_path_is_unchanged(self):
+        # The one path the previous tests exercised, and the one that already
+        # worked. It must keep working.
+        assert self._bind("case-achham-clean") == {ACHHAM_CODED}
+
+    def test_the_dropped_twin_still_reaches_the_report_on_a_promotion(self):
+        case = {"slug": "case-achham-report", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अछाम": self._candidates()})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अछाम", "relationship_type": "related",
+             "notes": "कसुर भएको जिल्ला"}])
+        _name, decision, _notes, _section = plan.bound[0]
+        assert ACHHAM_BARE in {c[1] for c in decision.candidates}
+
+    def test_a_place_beside_a_non_location_candidate_is_left_alone(self):
+        # The narrowing may only fire when EVERY qualifying candidate is a
+        # location. A coded district scoring alongside an organisation is a real
+        # ambiguity, and dropping the organisation would decide it silently.
+        org = "https://jawafdehi.org/entity/organization/achham"
+        case = {"slug": "case-achham-mixed", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अछाम": [
+            {"id": ACHHAM_CODED, "title": {"ne": "अछाम"}, "score": 180.0},
+            {"id": org, "title": {"ne": "अछाम"}, "score": 180.0}]})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अछाम", "relationship_type": "related",
+             "notes": "क"}])
+        assert {i["nes_id"] for i in plan.patch_items} == {ACHHAM_CODED, org}
 
 
 class TestElectionRecordsAreNeverPromoted:

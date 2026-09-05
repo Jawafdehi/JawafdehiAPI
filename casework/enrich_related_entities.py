@@ -1374,11 +1374,28 @@ def qualifying_binds(decision):
     # tuple put the twin straight back, and 079-CR-0122 and 079-CR-0156 each
     # carried कञ्चनपुर twice in production because of it.
     #
-    # Keyed on the WINNER being coded, which is the same condition `resolve`
-    # narrowed under, and false for every person and organisation IRI. Two coded
-    # entries never reach here: `resolve` calls that ambiguous and reviews it,
-    # which is what the two Miklajung rural municipalities need.
-    if names_a_gazetteer_place(decision.nes_id):
+    # KEYED ON THE CANDIDATE SET, NOT ON THE WINNER. `resolve` captures
+    # `Decision.candidates` BEFORE its own narrowing, and
+    # `_promote_top_candidate` re-derives the winner from that un-narrowed
+    # tuple -- so whenever a location REVIEWs for any reason and is promoted,
+    # `decision.nes_id` can be the bare twin, and a winner-keyed test then does
+    # not fire. Which twin sorts first is pure lexicography:
+    # `location/district/kanchanpur-np0772` beats `location/kanchanpur` because
+    # `d` < `k`, and it goes the other way for achham, baglung, banke, bara,
+    # chitwan, dailekh, dhading and six of the seven provinces. The two live
+    # paths were a truncated candidate window (routine for a common district
+    # name) and a place the extraction filed under a section other than
+    # `location`, which `bind_section`'s coercion makes easy.
+    #
+    # `all(...location...)` as well as `any(...gazetteer...)`: a coded district
+    # scoring alongside an ORGANISATION of the same name is a real ambiguity and
+    # both should bind, but the district sorts first (`l` < `o`) so keying on
+    # the winner silently dropped the organisation. Two coded entries still
+    # never reach here -- `resolve` calls that ambiguous and reviews it, which
+    # is what the two Miklajung rural municipalities need. False for every
+    # person fan-out, which is what `qualifying_binds` exists for.
+    if (any(names_a_gazetteer_place(c[1]) for c in qualifying)
+            and all("/entity/location/" in c[1] for c in qualifying)):
         qualifying = [c for c in qualifying if names_a_gazetteer_place(c[1])]
     if not qualifying:
         return [decision]
