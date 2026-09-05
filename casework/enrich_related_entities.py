@@ -1329,6 +1329,52 @@ def qualifying_binds(decision):
             for score, nes_id, matched in qualifying]
 
 
+def veto_against_own_document(api, name, decision, overridden=""):
+    """`decision` re-checked against ITS OWN entity document: `(decision, promotable)`.
+
+    Split out of `_resolve_with_vetoes` so the FAN-OUT can reuse it. That
+    function reads exactly one document -- the winner's -- and
+    `qualifying_binds` then turns one decision into one bind per qualifying
+    candidate. Every runner-up used to reach the case unread, so the
+    election-record veto fired only when the ECN record happened to sort first
+    under `(-score, nes_id)`; a clean record with a lower slug hid every
+    namesake behind it. That is the FY078/079 shape: one CIAA investigating
+    officer bound to five defeated local candidates.
+
+    `promotable` is "the document came back and is not an election record" --
+    the two conditions permissive mode may NOT override. Returned rather than
+    re-derived by the caller, because it is read from the document and the
+    document does not leave this function.
+
+    Fails closed: ANY exception maps to an unreadable document, which the veto
+    downgrades to REVIEW.
+    """
+    read_error = None
+    try:
+        document = api.get_entity(decision.nes_id)
+    except Exception as exc:  # noqa: BLE001 - unreadable == unverified, which is a valid verdict
+        document = None  # unreadable == unverified
+        read_error = str(exc)
+    readable = isinstance(document, dict) and bool(document)
+    decision = apply_document_veto(decision, document)
+    if overridden and decision.reason != f"{PROMOTED_PREFIX}{overridden}":
+        # The veto (or the unreadable-document branch) wrote over the reason.
+        decision = Decision(
+            decision.verdict, decision.nes_id, decision.score,
+            decision.matched_name, f"{decision.reason}; also {overridden}",
+            decision.candidates)
+    if read_error:
+        log.warning("get_entity(%s) failed while veto-checking %r: %s",
+                    decision.nes_id if decision.nes_id else "<downgraded>",
+                    name, read_error)
+        decision = Decision(
+            decision.verdict, decision.nes_id, decision.score,
+            decision.matched_name,
+            f"{decision.reason} (read error: {read_error!r})",
+            decision.candidates)
+    return decision, readable and not is_election_candidate_record(document)
+
+
 def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     """One name -> one `Decision`. THE ONLY resolution path in this module: every
     extracted name and every court-record `accused` name comes through here, so
@@ -1384,29 +1430,7 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     # mode -- would under-report how uncertain the bind actually was.
     overridden = decision.reason[len(PROMOTED_PREFIX):] if is_promoted(decision) else ""
 
-    read_error = None
-    try:
-        document = api.get_entity(decision.nes_id)
-    except Exception as exc:  # noqa: BLE001 - unreadable == unverified, which is a valid verdict
-        document = None  # unreadable == unverified
-        read_error = str(exc)
-    readable = isinstance(document, dict) and bool(document)
-    decision = apply_document_veto(decision, document)
-    if overridden and decision.reason != f"{PROMOTED_PREFIX}{overridden}":
-        # The veto (or the unreadable-document branch) wrote over the reason.
-        decision = Decision(
-            decision.verdict, decision.nes_id, decision.score,
-            decision.matched_name, f"{decision.reason}; also {overridden}",
-            decision.candidates)
-    if read_error:
-        log.warning("get_entity(%s) failed while veto-checking %r: %s",
-                    decision.nes_id if decision.nes_id else "<downgraded>",
-                    name, read_error)
-        decision = Decision(
-            decision.verdict, decision.nes_id, decision.score,
-            decision.matched_name,
-            f"{decision.reason} (read error: {read_error!r})",
-            decision.candidates)
+    decision, promotable = veto_against_own_document(api, name, decision, overridden)
     # An UNREADABLE document stays REVIEW even in permissive mode. Promoting a
     # judgement veto ("this looks like an election-candidate record") is the
     # uncertainty this mode was asked to accept; promoting a failed HTTP read is
@@ -1425,8 +1449,7 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     #
     # Read from the document, never from the veto's reason text, for the same
     # reason the unreadable branch is: reason strings are for humans.
-    election_record = readable and is_election_candidate_record(document)
-    if not strict and readable and not election_record:
+    if not strict and promotable:
         decision = _promote_top_candidate(decision)
     return decision
 
@@ -1619,6 +1642,33 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
         notes = (item.get("notes") or "").strip()
         # One name, possibly several binds -- see `qualifying_binds`.
         for bind_decision in qualifying_binds(decision):
+            # EVERY RUNNER-UP GETS ITS OWN DOCUMENT VETO. `_resolve_with_vetoes`
+            # read one document, the winner's; the rest of the fan-out reached
+            # the case unread, so an Election Commission record sitting behind a
+            # clean top candidate bound untouched -- see
+            # `veto_against_own_document`.
+            #
+            # `promotable` is deliberately ignored here. This candidate is
+            # already a BIND that `qualifying_binds` chose; re-promoting it
+            # would run `_promote_top_candidate`, which re-derives the winner
+            # from `candidates[0]` and would replace the runner-up with the
+            # top candidate.
+            #
+            # One extra read per runner-up, and only on an ambiguity. NOT
+            # cached: the whole point of this read is that it is authoritative,
+            # and a run-lifetime cache would answer a later case from a snapshot
+            # taken before an operator fixed the entity.
+            if bind_decision.nes_id != decision.nes_id:
+                bind_decision, _promotable = veto_against_own_document(
+                    api, name, bind_decision)
+                if not bind_decision.is_bind:
+                    # A refused runner-up is REPORTED, not dropped. Its
+                    # `nes_id` is None -- `apply_document_veto` blanks it by
+                    # contract -- but both veto reasons name the IRI they
+                    # refused, so the rows one fan-out produces stay tellable
+                    # apart in `*.review.jsonl`.
+                    plan.review.append((name, bind_decision, rel_type))
+                    continue
             _bind_one(plan, name, bind_decision, rel_type, notes, have,
                       additions, accused_ids)
 

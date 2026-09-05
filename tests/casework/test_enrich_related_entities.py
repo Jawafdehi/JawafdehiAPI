@@ -5323,6 +5323,94 @@ class TestElectionRecordsAreNeverPromoted:
              "notes": "क"}])
         assert plan.bound, "a clean ambiguity must still promote"
 
+    # The fan-out, not the winner. `_resolve_with_vetoes` reads ONE document --
+    # `decision.nes_id` -- and `qualifying_binds` then turns that decision into
+    # one bind per qualifying candidate. Without a per-candidate re-check the
+    # veto only ever fires when the election record happens to sort first, and
+    # the sort is `(-score, nes_id)`, so a clean record with a lower slug hides
+    # every namesake behind it. This is the shape the FY078/079 batch produced:
+    # one CIAA investigating officer bound to five defeated local candidates.
+    CLEAN_ANISH = "https://jawafdehi.org/entity/person/anish-shrestha-000001"
+
+    def _tied_candidates(self):
+        return [{"id": nes_id, "title": {"ne": "अनिष श्रेष्ठ"}, "score": 180.0}
+                for nes_id in (self.CLEAN_ANISH, ANISH_A["id"], ANISH_B["id"])]
+
+    def test_an_election_runner_up_is_not_bound_behind_a_clean_winner(self):
+        case = {"slug": "case-ecn-fanout", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi(
+            [case], {"अनिष श्रेष्ठ": self._tied_candidates()},
+            documents={ANISH_A["id"]: self.ELECTION_DOC,
+                       ANISH_B["id"]: self.ELECTION_DOC})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        bound = {decision.nes_id for _n, decision, _no, _s in plan.bound}
+        assert bound == {self.CLEAN_ANISH}, "an ECN record was bound as a runner-up"
+
+    def test_a_vetoed_runner_up_is_reported_for_review_not_dropped(self):
+        # Refused is not the same as unseen. The runner-up must reach
+        # `*.review.jsonl` carrying the veto, or a bind this run declined
+        # appears in no artefact at all.
+        case = {"slug": "case-ecn-fanout-review", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi(
+            [case], {"अनिष श्रेष्ठ": self._tied_candidates()},
+            documents={ANISH_A["id"]: self.ELECTION_DOC,
+                       ANISH_B["id"]: self.ELECTION_DOC})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        reasons = [decision.reason for _n, decision, _s in plan.review]
+        assert len(reasons) == 2
+        assert all("Election Commission record" in reason for reason in reasons)
+        # `apply_document_veto` blanks `nes_id` on a downgrade by contract, so
+        # the only place the refused candidate is named is the reason. Without
+        # that the two rows one fan-out produces are indistinguishable.
+        assert all(decision.nes_id is None for _n, decision, _s in plan.review)
+        assert {ANISH_A["id"], ANISH_B["id"]} == {
+            iri for iri in (ANISH_A["id"], ANISH_B["id"])
+            if any(iri in reason for reason in reasons)}
+
+    def test_every_fanned_out_candidate_is_read_exactly_once(self):
+        # The re-check costs one `get_entity` per runner-up and must not cost
+        # two: the winner's document is already read by `_resolve_with_vetoes`.
+        case = {"slug": "case-ecn-fanout-reads", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi(
+            [case], {"अनिष श्रेष्ठ": self._tied_candidates()},
+            documents={ANISH_A["id"]: self.ELECTION_DOC,
+                       ANISH_B["id"]: self.ELECTION_DOC})
+        plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        assert sorted(api.get_entity_calls) == sorted(
+            [self.CLEAN_ANISH, ANISH_A["id"], ANISH_B["id"]])
+
+    def test_an_unreadable_runner_up_document_refuses_the_bind(self):
+        # Fail closed on the fan-out exactly as `_resolve_with_vetoes` does on
+        # the winner: a transient read failure must never leave a bind standing.
+        case = {"slug": "case-ecn-fanout-unreadable", "state": "DRAFT",
+                "entities": []}
+        api = _SearchStubApi(
+            [case], {"अनिष श्रेष्ठ": self._tied_candidates()},
+            documents={ANISH_A["id"]: RuntimeError("502 Bad Gateway")})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        bound = {decision.nes_id for _n, decision, _no, _s in plan.bound}
+        assert ANISH_A["id"] not in bound
+        assert ANISH_B["id"] in bound, "a clean runner-up must still bind"
+
+    def test_a_clean_fan_out_still_binds_every_candidate(self):
+        # The re-check must not become a second ambiguity veto: three clean
+        # records still produce three binds and read three documents.
+        case = {"slug": "case-clean-fanout", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अनिष श्रेष्ठ": self._tied_candidates()})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        bound = {decision.nes_id for _n, decision, _no, _s in plan.bound}
+        assert bound == {self.CLEAN_ANISH, ANISH_A["id"], ANISH_B["id"]}
+
 
 class TestTheVerdictPromptCarriesItsGuardrails:
     """enricher-fix-rules.json `entity.outcome_from_verdict`. Each marker below
