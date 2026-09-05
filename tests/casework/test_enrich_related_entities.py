@@ -5217,12 +5217,15 @@ class TestNoteVariantFolding:
                 SECOND_ACCUSED_IRI: {"notes": ROLE_NOTE}}
 
     def test_two_near_candidates_are_refused_not_guessed_between(self):
-        # वोहोरा and वोहारा are the same length and each is one matra away from
-        # वोहरा, so the queried name has two candidates and may pick neither.
+        # वोहोरा and वोहेरा are the same length and each is one INSERTED matra
+        # away from वोहरा, so the queried name has two candidates and may pick
+        # neither. (The pair was वोहोरा/वोहारा until `ा` stopped being
+        # insertable -- see `is_matra_variant`; वोहारा is no longer a candidate
+        # at all, which left one and defeated the refusal this pins.)
         case = _accused_case(outcome="acquitted", display_name="वोहोरा")
         case["entities"].append(
             {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
-             "display_name": "वोहारा", "outcome": "acquitted", "notes": ""})
+             "display_name": "वोहेरा", "outcome": "acquitted", "notes": ""})
         assert ere.accused_note_updates(
             case, [{"name": "वोहरा", "notes": ROLE_NOTE}]) == {}
 
@@ -5288,6 +5291,41 @@ class TestNoteVariantFolding:
             {"name": "बिकास", "notes": "वडा अध्यक्ष"},
             {"name": "विकाास", "notes": "सचिव"},
         ]) == {}
+
+    # A TRAILING `ा` IS THE FEMININE MARKER, not an ordinary inserted matra.
+    # कमल/कमला are one insertion apart and are different people, usually of
+    # different gender -- and the module docstring already names कमल थापा /
+    # Kamala Thapa as a known hazard on the cross-script side. Rejecting an
+    # insertion "at the end of the string" does NOT catch these: `note_match_key`
+    # strips spaces, so on कमलाथापा the inserted `ा` sits mid-key.
+    FEMININE_PAIRS = [
+        ("कमल थापा", "कमला थापा"),
+        ("सुनिल", "सुनिला"),
+        ("गोपाल", "गोपाला"),
+        ("बिमल", "बिमला"),
+        ("रमेश", "रमेशा"),
+    ]
+
+    @pytest.mark.parametrize("masculine,feminine", FEMININE_PAIRS)
+    def test_the_feminine_marker_is_not_an_insertable_matra(self, masculine,
+                                                            feminine):
+        assert not ere.is_matra_variant(ere.note_match_key(masculine),
+                                        ere.note_match_key(feminine))
+
+    @pytest.mark.parametrize("masculine,feminine", FEMININE_PAIRS)
+    def test_a_masculine_note_never_lands_on_a_feminine_bind(self, masculine,
+                                                             feminine):
+        # End to end, with the feminine name as the case's ONLY accused bind --
+        # the single-candidate shape the relaxed pass accepts.
+        case = _accused_case(outcome="acquitted", display_name=feminine)
+        assert ere.accused_note_updates(
+            case, [{"name": masculine, "notes": ROLE_NOTE}]) == {}
+
+    def test_the_motivating_insertion_still_matches(self):
+        # The fold exists for बोहरा -> बोहोरा, which inserts `ो`, not `ा`.
+        # Excluding the feminine marker must not cost this.
+        assert ere.is_matra_variant(ere.note_match_key("बोहरा"),
+                                    ere.note_match_key("बोहोरा"))
 
 
 def test_the_variant_fold_collides_no_two_accused_on_any_production_case():

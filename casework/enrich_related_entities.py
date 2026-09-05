@@ -867,7 +867,22 @@ def is_matra_variant(a, b):
     if abs(len(a) - len(b)) != 1:
         return False
     longer, shorter = (a, b) if len(a) > len(b) else (b, a)
-    return any(longer[i] in MATRAS and longer[:i] + longer[i + 1:] == shorter
+    # `ा` IS NOT INSERTABLE. A trailing `ा` is the feminine marker, so
+    # कमल/कमला, सुनिल/सुनिला, गोपाल/गोपाला, बिमल/बिमला and रमेश/रमेशा each sit
+    # one insertion apart and are different people -- usually of different
+    # gender. The module docstring already names कमल थापा / Kamala Thapa as a
+    # hazard on the cross-script side; without this the fold reintroduces it in
+    # Devanagari.
+    #
+    # A "not at the end of the string" test does NOT catch them: `note_match_key`
+    # strips spaces, which puts the difference mid-key on any multi-token name --
+    # on कमलाथापा the inserted `ा` is at index 3 of 8.
+    #
+    # It costs nothing the fold was built for: one inserted char has only one
+    # possible identity, so excluding `ा` can never hide a different matra, and
+    # the motivating case बोहरा -> बोहोरा inserts `ो`.
+    return any(longer[i] in MATRAS and longer[i] != "ा"
+               and longer[:i] + longer[i + 1:] == shorter
                for i in range(len(longer)))
 
 
