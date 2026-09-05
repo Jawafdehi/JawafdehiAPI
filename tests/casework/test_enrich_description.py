@@ -299,6 +299,24 @@ class TestMaxTokensConfig:
             ed._max_tokens_from_env()
         assert self.VAR in str(exc.value) and raw in str(exc.value)
 
+    def test_an_unset_variable_warns_that_the_default_is_now_short(
+            self, monkeypatch, caplog):
+        # The ORDER HEADER block makes the reply ~40% longer and 079-CR-0116
+        # failed outright on 8000. Nothing truncates silently -- the reply comes
+        # back as unbalanced JSON and the case is recorded `skipped` -- so the
+        # cost is a wasted premium call per case, discovered at the END of a run.
+        monkeypatch.delenv(self.VAR, raising=False)
+        with caplog.at_level(logging.WARNING, logger="casework.enrich_description"):
+            assert ed._max_tokens_from_env() == ed.DONOR_MAX_TOKENS
+        assert self.VAR in caplog.text
+        assert "24000" in caplog.text, "the warning must name a value that worked"
+
+    def test_a_set_variable_warns_about_nothing(self, monkeypatch, caplog):
+        monkeypatch.setenv(self.VAR, "24000")
+        with caplog.at_level(logging.WARNING, logger="casework.enrich_description"):
+            assert ed._max_tokens_from_env() == 24000
+        assert caplog.text == ""
+
     def test_the_ceiling_is_the_one_the_cli_reports(self):
         assert ed.MODEL_MAX_OUTPUT_TOKENS == 64000
 
@@ -996,8 +1014,13 @@ class TestReviewRulePromptCoverage:
         assert "जफत" in p, "spouses are often co-defendants for जफत only (079-CR-0143)"
 
     def test_an_untested_third_party_allegation_must_be_marked_not_deleted(self):
+        # `बयान` and `परीक्षण` were BOTH in the pre-rule prompt already -- the
+        # first from the section-ख heading, the second inside `लेखापरीक्षण` in the
+        # Good examples -- so asserting on them pinned nothing and the whole rule
+        # could have been deleted green. These three are new with the rule.
         p = ed.EXTRACTION_SYSTEM_PROMPT
-        assert "बयान" in p and "परीक्षण" in p
+        assert "जिकिर" in p, "the passage must be attributed to the defendant"
+        assert "यस जिकिरको परीक्षण" in p and "देखिँदैन" in p
 
     def test_personal_identifiers_are_forbidden_and_case_identifiers_are_not(self):
         p = ed.EXTRACTION_SYSTEM_PROMPT
@@ -1908,17 +1931,77 @@ _ORDER_CLOSING = (
     "इति सम्वत् २०७९ साल माघ महिना १० गते रोज ३ मा शुभम्।\n"
 )
 LONG_ORDER = _ORDER_CAPTION + ("म" * 40_000) + _ORDER_CLOSING
+# The same order under `VERDICT_SUMMARY_TRIGGER`, which is the path
+# `_assemble_source_text` passes through VERBATIM.
+SHORT_ORDER = _ORDER_CAPTION + ("म" * 8_000) + _ORDER_CLOSING
+# A तारेख order, not the फैसला: the second court_order a case can carry, and the
+# one that comes first in evidence order.
+PROCEDURAL_ORDER = (
+    "विशेष अदालत, काठमाडौँ\nइजलास नं.१\n"
+    "आदेश\nमुद्दा नं. 079-CR-0116\nतारेख तोक्ने आदेश\n" + "स" * 600
+)
+_COURT_MD_PROCEDURAL = "https://x/court-procedural.md"
+
+# A procedural order bound AHEAD of the judgment -- what `next(...)` over the
+# chunks picked up.
+CASE_TWO_ORDERS = dict(
+    CASE_READY, slug="case-two-orders",
+    evidence=[
+        {"material_iri": "https://jawafdehi.org/material/court/special.079-cr-0116-a",
+         "additional_details": "",
+         "material": {"material_type": "court_order",
+                      "urls": [{"link": _COURT_MD_PROCEDURAL, "role": "MARKDOWN"}]}},
+        {"material_iri": "https://jawafdehi.org/material/ciaa/12345",
+         "additional_details": "",
+         "material": {"material_type": "press_release",
+                      "urls": [{"link": _PRESS_MD, "role": "MARKDOWN"}]}},
+        {"material_iri": "https://jawafdehi.org/material/court/special.079-cr-0116",
+         "additional_details": "",
+         "material": {"material_type": "court_order",
+                      "urls": [{"link": _COURT_MD, "role": "MARKDOWN"}]}},
+    ],
+)
+
+
+def _fetch_fixture(monkeypatch, mapping):
+    import casework.common.materials as m
+
+    monkeypatch.setattr(m, "fetch_markdown",
+                        lambda link, timeout=60: mapping.get(link, ""))
 
 
 @pytest.fixture
 def patched_fetch_long_order(monkeypatch):
-    import casework.common.materials as m
+    _fetch_fixture(monkeypatch, {
+        _PRESS_MD: "अख्तियारले ठेक्कामा भ्रष्टाचार भएको जनाएको।",
+        _COURT_MD: LONG_ORDER})
 
-    def fake_fetch(link, timeout=60):
-        return {_PRESS_MD: "अख्तियारले ठेक्कामा भ्रष्टाचार भएको जनाएको।",
-                _COURT_MD: LONG_ORDER}.get(link, "")
 
-    monkeypatch.setattr(m, "fetch_markdown", fake_fetch)
+@pytest.fixture
+def patched_fetch_short_order(monkeypatch):
+    _fetch_fixture(monkeypatch, {
+        _PRESS_MD: "अख्तियारले ठेक्कामा भ्रष्टाचार भएको जनाएको।",
+        _COURT_MD: SHORT_ORDER})
+
+
+@pytest.fixture
+def patched_fetch_two_orders(monkeypatch):
+    _fetch_fixture(monkeypatch, {
+        _PRESS_MD: "अख्तियारले ठेक्कामा भ्रष्टाचार भएको जनाएको।",
+        _COURT_MD_PROCEDURAL: PROCEDURAL_ORDER,
+        _COURT_MD: LONG_ORDER})
+
+
+def _order_header_block(content):
+    """The rendered ORDER HEADER slot alone.
+
+    The SOURCE DOCUMENTS block below it carries the same order, so a
+    whole-prompt substring test cannot tell the two apart. Split on the slot's
+    own delimiters -- both the block's instructions and the "it is below in
+    full" note mention SOURCE DOCUMENTS, so the bare heading is not a boundary.
+    """
+    after = content.split("header field, this block is the record:")[1]
+    return after.split("SOURCE DOCUMENTS (press release")[0]
 
 
 def _capture_prompt(response):
@@ -1955,6 +2038,53 @@ def test_the_order_header_survives_summarisation_and_reaches_the_prompt(
     assert "दफा १७" in content
     # The middle is NOT duplicated into the header block.
     assert content.count("म" * 5_000) <= 1
+
+
+def test_an_order_below_the_summary_trigger_is_not_sent_twice(
+    monkeypatch, patched_fetch_short_order
+):
+    """Under `VERDICT_SUMMARY_TRIGGER` the order reaches SOURCE DOCUMENTS
+    VERBATIM, so the header block repeated the whole document under a second
+    label -- and the block's claim to outrank the summary means nothing when
+    there is no summary. Measured at 8,127 chars: caption twice, prompt 17,950."""
+    stub, seen = _capture_prompt(json.dumps({"description": "क" * 900}))
+    _run_main(monkeypatch, _StubApi([CASE_READY]), invoke_text_stub=stub,
+              argv=["--apply"])
+    content = seen["content"]
+    assert content.count("इजलास नं.२") == 1
+    assert content.count("इति सम्वत् २०७९ साल माघ महिना १० गते") == 1
+    assert content.count("म" * 5_000) == 1
+
+
+def test_an_order_below_the_trigger_is_not_reported_as_absent(
+    monkeypatch, patched_fetch_short_order
+):
+    """Dropping the block must not make the prompt claim the case has no court
+    order. The NAMED NON-DEFENDANTS rule sends the model to this block for the
+    प्रतिवादी list, and "there is none" is the answer that gets a co-defendant
+    marked a non-defendant."""
+    stub, seen = _capture_prompt(json.dumps({"description": "क" * 900}))
+    _run_main(monkeypatch, _StubApi([CASE_READY]), invoke_text_stub=stub,
+              argv=["--apply"])
+    header = _order_header_block(seen["content"])
+    assert "(कुनै अदालती आदेश छैन)" not in header
+    assert ed.ORDER_IN_SOURCES_NOTE in header
+
+
+def test_the_order_header_comes_from_the_judgment_not_the_first_bound_order(
+    monkeypatch, patched_fetch_two_orders
+):
+    """`next(...)` took the FIRST court_order in evidence order. Two orders on
+    one case is a shape this module already knows -- see the `verdict_read` note
+    -- and a तारेख order's caption handed over as "the record" is then trusted
+    over the summary for फैसला मिति, नि.नं. and the प्रतिवादी list."""
+    stub, seen = _capture_prompt(json.dumps({"description": "क" * 900}))
+    _run_main(monkeypatch, _StubApi([CASE_TWO_ORDERS]), invoke_text_stub=stub,
+              argv=["--apply"])
+    header = _order_header_block(seen["content"])
+    assert "इजलास नं.२" in header, "the judgment's bench, not the तारेख order's"
+    assert "फैसला मितिः 2081।01।20।5" in header
+    assert "तारेख तोक्ने आदेश" not in header
 
 
 def test_a_case_with_no_court_order_says_so_instead_of_crashing(

@@ -145,6 +145,17 @@ def _max_tokens_from_env() -> int:
     """
     raw = (os.getenv("CASEWORK_DESCRIPTION_MAX_TOKENS") or "").strip()
     if not raw:
+        # The default is knowingly short since the ORDER HEADER block landed, and
+        # the failure is silent until the end of an expensive run: an over-long
+        # reply comes back as unbalanced JSON, `parse_object_response` returns
+        # None, and the case is recorded `skipped`. Nothing truncates and nothing
+        # partial publishes -- it just costs a premium call per case. The default
+        # stays where it is because every existing caller inherits it.
+        log.warning(
+            "CASEWORK_DESCRIPTION_MAX_TOKENS unset; the %d default is below what a "
+            "description with the ORDER HEADER block needs -- 24000 covered the 3 "
+            "measured cases. Over the cap a case is recorded 'skipped', after the "
+            "call is paid for.", DONOR_MAX_TOKENS)
         return DONOR_MAX_TOKENS
     try:
         value = int(raw)
@@ -378,6 +389,16 @@ the description; quote specifics from here):
 Return ONLY the JSON object described in the system prompt.
 """
 
+# The two things the ORDER HEADER slot says when there is no head/tail block to
+# put there. They are NOT interchangeable: an order below
+# `VERDICT_SUMMARY_TRIGGER` reaches SOURCE DOCUMENTS whole, and telling the model
+# no order exists is then a false statement about a case that has one -- the
+# NAMED NON-DEFENDANTS rule reads this block for the प्रतिवादी list, and "there is
+# none" is the answer that gets a co-defendant marked a non-defendant.
+NO_ORDER_NOTE = "(कुनै अदालती आदेश छैन)"
+ORDER_IN_SOURCES_NOTE = ("(अदालती आदेश तल SOURCE DOCUMENTS खण्डमा पूरै छ — हेडरका "
+                         "विवरण त्यहीँबाट पढ्नुहोस्।)")
+
 
 def _clamp(text: str, limit: int, label: str = "source") -> str:
     """Truncate `text` to `limit` chars (<=0 = no limit) and PRINT total vs sent,
@@ -608,7 +629,7 @@ def _generate_description(detail, court_number, source_text, invoke_text, usage,
         entities=format_entities(detail.get("entities")),
         held_documents=held_summary(detail),
         source_text=source_text,
-        order_header=order_header or "(कुनै अदालती आदेश छैन)",
+        order_header=order_header or NO_ORDER_NOTE,
     )
     response_text = invoke_text(
         system=EXTRACTION_SYSTEM_PROMPT,
@@ -877,9 +898,25 @@ def main(argv=None):
         # summary. Both prompts have asked for the bench and the नि.नं. since
         # 2026-06-17 and 14 of the 16 descriptions reviewed on 2026-08-13 still
         # had no judge named in them, so the header is fed rather than requested.
-        order_header = next(
-            (court_order_bookends(text) for mtype, _, text in chunks
-             if mtype in COURT_TYPES and text), "")
+        #
+        # THE LONGEST order, not the first one bound. `COURT_TYPES` is a single
+        # type and a case can carry two -- a तारेख or other procedural order
+        # alongside the फैसला, the shape the `verdict_read` note below records --
+        # so `next()` over evidence order could hand the prompt a procedural
+        # caption under a block the prompt says outranks the summary for
+        # फैसला मिति, नि.नं. and the प्रतिवादी list. Length is the discriminator
+        # because it is also what `_assemble_source_text` summarises on: the
+        # order this picks is exactly the one whose text is about to be replaced.
+        orders = [text for mtype, _, text in chunks if mtype in COURT_TYPES and text]
+        verdict = max(orders, key=len) if orders else ""
+        if not verdict:
+            order_header = ""
+        elif len(verdict) > VERDICT_SUMMARY_TRIGGER:
+            order_header = court_order_bookends(verdict)
+        else:
+            # Below the trigger the order reaches SOURCE DOCUMENTS verbatim, so a
+            # header block would send the same document twice under two labels.
+            order_header = ORDER_IN_SOURCES_NOTE
 
         try:
             source_block, fed = _assemble_source_text(chunks, invoke_text, usage)
