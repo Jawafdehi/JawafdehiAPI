@@ -897,7 +897,17 @@ def accused_note_updates(case, accused_notes):
     # drops a shared display name for, one fold later -- so drop it the same way
     # rather than letting the fold introduce a collision the caller never saw.
     index = {key: ids[0] for key, ids in by_key.items() if len(ids) == 1}
-    updates = {}
+    slug = case.get("slug") or "<no slug>"
+    # THE TWO PASSES RUN IN SEQUENCE, NEVER INTERLEAVED. Run together in one
+    # loop, a later row that found no exact key ran the relaxed match against
+    # the WHOLE index -- including keys an earlier row had already claimed --
+    # and the assignment was unconditional, so it overwrote a note an exact
+    # match had placed. The dangerous row is a note for someone who is not an
+    # accused bind at all: the court order names plenty of them, दिल बहादुर and
+    # दल बहादुर are one matra apart, and the wrong job title landed on the
+    # defendant purely because the model emitted it second.
+    exact: dict = {}
+    unmatched: list = []
     for note in (accused_notes or []):
         if not isinstance(note, dict):
             continue
@@ -908,14 +918,47 @@ def accused_note_updates(case, accused_notes):
         key = note_match_key(name)
         nes_id = index.get(key)
         if nes_id is None:
-            # SECOND PASS, and only ever second. See `is_matra_variant` for why
-            # it may not run first and why a tie is refused rather than broken.
-            near = [i for k, i in index.items() if is_matra_variant(key, k)]
-            if len(near) != 1:
-                continue
-            nes_id = near[0]
-        updates[nes_id] = {"notes": role}
+            unmatched.append((key, role))
+            continue
+        exact.setdefault(nes_id, set()).add(role)
+    updates = _settle_note_claims(slug, exact, "exact name match")
+    # SECOND PASS, and only ever second -- and only once EVERY exact match is
+    # in, so a near match can never take a bind an exact one already claimed.
+    # See `is_matra_variant` for why it may not run first and why a tie is
+    # refused rather than broken.
+    #
+    # Keyed on `exact` rather than on `updates`: a bind whose exact rows
+    # CONTRADICTED each other is spoken for too, and letting a near match fill
+    # it would route straight round that refusal.
+    relaxed: dict = {}
+    for key, role in unmatched:
+        near = [i for k, i in index.items() if is_matra_variant(key, k)]
+        if len(near) != 1 or near[0] in exact:
+            continue
+        relaxed.setdefault(near[0], set()).add(role)
+    updates.update(_settle_note_claims(slug, relaxed, "relaxed matra match"))
     return updates
+
+
+def _settle_note_claims(slug, claims, how):
+    """`{nes_id: {"notes": role}}` for every bind exactly one role note claimed.
+
+    Two notes reaching one bind with DIFFERENT roles is refused, not resolved:
+    whichever way it is broken -- first-wins or last-wins -- the answer is the
+    order the model happened to emit its rows in, and the losing role is a real
+    job title stapled onto the wrong defendant. Same refusal
+    `accused_binds_by_name` makes when two binds share a display name, one fold
+    later. Two rows carrying the SAME role contradict nothing and are kept.
+    """
+    settled = {}
+    for nes_id, roles in claims.items():
+        if len(roles) == 1:
+            settled[nes_id] = {"notes": next(iter(roles))}
+            continue
+        log.warning("%s: refusing the role note on %s -- %d notes reached it by "
+                    "%s with different roles: %s", slug, nes_id, len(roles), how,
+                    "; ".join(sorted(roles)))
+    return settled
 
 
 def case_state(case):

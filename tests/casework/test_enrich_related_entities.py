@@ -5226,6 +5226,69 @@ class TestNoteVariantFolding:
         assert ere.accused_note_updates(
             case, [{"name": "वोहरा", "notes": ROLE_NOTE}]) == {}
 
+    def test_a_near_name_that_is_not_a_bind_cannot_take_an_exact_match(self):
+        # THE DANGEROUS SHAPE, and the one the two passes being interleaved got
+        # wrong. The case holds ONE accused, दिल बहादुर. The court order also
+        # names दल बहादुर, who is not a bind at all, so the model returns a note
+        # for each. The दल row finds no exact key, falls into the relaxed pass,
+        # matches the one bind on the case -- and used to overwrite the note the
+        # दिल row had already placed there, purely because it came second.
+        case = _accused_case(outcome="acquitted", display_name="दिल बहादुर")
+        assert ere.accused_note_updates(case, [
+            {"name": "दिल बहादुर", "notes": ROLE_NOTE},
+            {"name": "दल बहादुर", "notes": "वडा अध्यक्ष"},
+        ]) == {ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_the_exact_match_wins_whichever_order_the_notes_arrive_in(self):
+        # The same two rows the other way round. An extraction's row order is
+        # not a contract, so the answer may not depend on it.
+        case = _accused_case(outcome="acquitted", display_name="दिल बहादुर")
+        assert ere.accused_note_updates(case, [
+            {"name": "दल बहादुर", "notes": "वडा अध्यक्ष"},
+            {"name": "दिल बहादुर", "notes": ROLE_NOTE},
+        ]) == {ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_two_notes_folding_to_one_exact_key_are_refused(self):
+        # विकास and बिकास fold to the same `note_match_key`, so both rows claim
+        # the one bind. Last-wins silently staples whichever the model happened
+        # to emit second onto the defendant; refuse instead, the way
+        # `accused_binds_by_name` drops a shared display name.
+        case = _accused_case(outcome="acquitted", display_name="विकास शर्मा")
+        assert ere.accused_note_updates(case, [
+            {"name": "विकास शर्मा", "notes": ROLE_NOTE},
+            {"name": "बिकास शर्मा", "notes": "वडा अध्यक्ष"},
+        ]) == {}
+
+    def test_one_key_claimed_twice_with_the_SAME_role_is_not_a_conflict(self):
+        # A duplicated row says nothing contradictory, so refusing it would cost
+        # a real note for no gain.
+        case = _accused_case(outcome="acquitted", display_name="विकास शर्मा")
+        assert ere.accused_note_updates(case, [
+            {"name": "विकास शर्मा", "notes": ROLE_NOTE},
+            {"name": "बिकास शर्मा", "notes": ROLE_NOTE},
+        ]) == {ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_two_relaxed_notes_claiming_one_bind_are_refused(self):
+        # The relaxed pass has the same collision. `वोहरा` and `वहोरा` each drop
+        # a different `ो` from the single bind `वोहोरा`, so both are one
+        # insertion away, neither is an exact key, and both reach it --
+        # first-wins is as much a guess as last-wins.
+        case = _accused_case(outcome="acquitted", display_name="वोहोरा")
+        assert ere.accused_note_updates(case, [
+            {"name": "वोहरा", "notes": ROLE_NOTE},
+            {"name": "वहोरा", "notes": "वडा अध्यक्ष"},
+        ]) == {}
+
+    def test_a_relaxed_note_may_not_take_a_bind_an_exact_row_refused(self):
+        # A key the exact pass REFUSED is spoken for, not free. Letting the
+        # relaxed pass fill it would route round the refusal.
+        case = _accused_case(outcome="acquitted", display_name="विकास")
+        assert ere.accused_note_updates(case, [
+            {"name": "विकास", "notes": ROLE_NOTE},
+            {"name": "बिकास", "notes": "वडा अध्यक्ष"},
+            {"name": "विकाास", "notes": "सचिव"},
+        ]) == {}
+
 
 def test_the_variant_fold_collides_no_two_accused_on_any_production_case():
     """The measurement the fold's safety rests on, pinned as a test.
