@@ -176,9 +176,42 @@ class TestHedge:
         already = "यो अभियोग दाबी विशेष अदालतमा पेस भएको छ।"
         assert _hedge(already) == already
 
+    def test_a_space_before_the_danda_does_not_defeat_the_match(self):
+        assert _hedge("रकम हिनामिना गरेको ।") == (
+            "रकम हिनामिना गरेको भन्ने आरोप छ।")
+
+    def test_an_ascii_full_stop_is_also_a_terminator(self):
+        assert _hedge("रकम हिनामिना गरेको.") == (
+            "रकम हिनामिना गरेको भन्ने आरोप छ।")
+
+    def test_an_unterminated_participle_is_still_hedged(self):
+        assert _hedge("रकम हिनामिना गरेको") == (
+            "रकम हिनामिना गरेको भन्ने आरोप छ।")
+
+    def test_a_guilt_asserting_perfect_is_hedged(self):
+        # "निजले घुस लिएको छ।" asserts guilt as plainly as "…लिएको।" does. The
+        # copula is absorbed rather than kept -- HEDGE carries its own छ.
+        assert _hedge("निजले घुस लिएको छ।") == (
+            "निजले घुस लिएको भन्ने आरोप छ।")
+
+    def test_a_neutral_perfect_is_hedged_too(self):
+        # The deliberate cost of hedging the perfect: a neutral statement about
+        # the charge sheet is marked as a claim as well. It stays TRUE (the
+        # बिगो is the CIAA's own figure), and the alternative leaves the
+        # guilt-asserting perfect above unqualified -- the exact harm the rule
+        # exists to prevent. A regex cannot tell the two apart.
+        assert _hedge("बिगो रु. ५ करोड कायम भएको छ।") == (
+            "बिगो रु. ५ करोड कायम भएको भन्ने आरोप छ।")
+
+    def test_a_genitive_ko_is_not_mistaken_for_a_participle(self):
+        # "सरकारको" is a genitive, not a participle; suffixing it yields
+        # "…सरकारको भन्ने आरोप छ।", which is not Nepali.
+        plain = "सो रकम नेपाल सरकारको।"
+        assert _hedge(plain) == plain
+
     def test_non_participle_ending_is_skipped_not_force_suffixed(self):
         # Force-suffixing a non-participle produces ungrammatical Nepali.
-        plain = "बिगो रु. ५ करोड कायम भएको छ।"
+        plain = "यो रकम नेपाल सरकारको सम्पत्ति हो।"
         assert _hedge(plain) == plain
 
     def test_trailing_whitespace_does_not_defeat_the_match(self):
@@ -191,17 +224,27 @@ def _accused(name, outcome):
             "display_name": name, "type": "accused", "outcome": outcome}
 
 
+# Canonical court-case @id IRIs, the only reference form Case.court_cases holds
+# (cases.validators.validate_court_cases).
+SPECIAL_IRI = "https://jawafdehi.org/courtcase/special/080-cr-0111"
+SUPREME_IRI = "https://jawafdehi.org/courtcase/supreme/080-cr-0111"
+HIGH_COURT_IRI = "https://jawafdehi.org/courtcase/janakpurhc/080-cr-0111"
+
+
 class TestAppendAcquittalLine:
     """`tone.append_acquittal_line` -- key_allegations renders standalone on some
-    surfaces, so on a case where the court cleared everyone the field alone reads
-    as an unqualified guilt narrative. The verdict is read from the accused binds'
-    `outcome`, never from the title or the prose."""
+    surfaces, so on a case where the court cleared every BOUND accused the field
+    alone reads as an unqualified guilt narrative. The verdict is read from the
+    accused binds' `outcome`, never from the title or the prose. Binds are not
+    guaranteed complete, so the run ledger carries the bind count the decision
+    was made on."""
 
     ALLEGATIONS = ["गैरकानूनी सम्पत्ति आर्जन गरेको भन्ने आरोप छ।"]
 
     def test_sole_acquitted_defendant_gets_the_singular_line(self):
         detail = {"entities": [_accused("राम", "acquitted")]}
-        out = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        out, reason = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        assert reason == "appended"
         assert len(out) == 2
         assert out[:1] == self.ALLEGATIONS
         assert "प्रतिवादीलाई आरोपित कसुरबाट सफाइ दिने ठहर गरेको छ।" in out[1]
@@ -210,12 +253,12 @@ class TestAppendAcquittalLine:
     def test_several_acquitted_defendants_get_the_plural_line(self):
         detail = {"entities": [_accused("राम", "acquitted"),
                                _accused("श्याम", "acquitted")]}
-        out = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        out, _ = _append_acquittal_line(detail, list(self.ALLEGATIONS))
         assert "प्रतिवादीहरूलाई आरोपित कसुरबाट सफाइ दिने ठहर गरेको छ।" in out[1]
 
     def test_the_line_names_the_ciaa_claim_and_the_special_court(self):
         detail = {"entities": [_accused("राम", "acquitted")]}
-        line = _append_acquittal_line(detail, list(self.ALLEGATIONS))[1]
+        line = _append_acquittal_line(detail, list(self.ALLEGATIONS))[0][1]
         assert line.startswith("माथि उल्लिखित कुराहरू अख्तियार दुरुपयोग अनुसन्धान आयोगको अभियोग दाबी हुन्;")
         assert "विशेष अदालतले उक्त दाबी पुग्न नसकी" in line
 
@@ -223,56 +266,103 @@ class TestAppendAcquittalLine:
         # A partial conviction: appending a blanket acquittal would be false.
         detail = {"entities": [_accused("राम", "acquitted"),
                                _accused("श्याम", "convicted")]}
-        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "not-unanimous")
 
     def test_an_undecided_case_is_left_alone(self):
         # 4 of the 10 cases the rule was proven on sat at `charged`.
         detail = {"entities": [_accused("राम", "charged")]}
-        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "not-unanimous")
 
     def test_a_missing_outcome_is_left_alone(self):
         detail = {"entities": [{"display_name": "राम", "type": "accused"}]}
-        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "not-unanimous")
 
     def test_an_abated_co_defendant_blocks_the_line(self):
         detail = {"entities": [_accused("राम", "acquitted"),
                                _accused("श्याम", "abated")]}
-        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "not-unanimous")
 
     def test_a_case_with_no_accused_bind_is_left_alone(self):
         detail = {"entities": [{"display_name": "झापा", "type": "location"}]}
-        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "no-accused-bind")
 
     def test_an_outcome_on_a_non_accused_row_does_not_count(self):
         # `outcome` is meaningful only on an accused bind (cases.models
         # RelationshipOutcome); a stray value elsewhere must not decide a verdict.
         detail = {"entities": [_accused("राम", "charged"),
                                dict(_accused("संस्था", "acquitted"), type="related")]}
-        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "not-unanimous")
 
     def test_list_shaped_detail_without_entities_is_left_alone(self):
-        # The donor-preserved get_case-failure fallback hands main() a LIST-shaped
-        # case, which carries no entity binds. No binds, no verdict, no line.
-        assert _append_acquittal_line({}, list(self.ALLEGATIONS)) == self.ALLEGATIONS
+        # No binds, no verdict, no line -- whatever shape the case arrived in.
+        assert _append_acquittal_line({}, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "no-accused-bind")
 
     def test_an_existing_safai_entry_is_not_duplicated(self):
         detail = {"entities": [_accused("राम", "acquitted")]}
         already = list(self.ALLEGATIONS) + ["अदालतले सफाइ दिएको छ।"]
-        assert _append_acquittal_line(detail, list(already)) == already
+        assert _append_acquittal_line(detail, list(already)) == (
+            already, "already-stated")
 
     def test_the_other_safai_spelling_also_blocks_the_line(self):
         detail = {"entities": [_accused("राम", "acquitted")]}
         already = list(self.ALLEGATIONS) + ["अदालतले सफाई दिएको छ।"]
-        assert _append_acquittal_line(detail, list(already)) == already
+        assert _append_acquittal_line(detail, list(already)) == (
+            already, "already-stated")
+
+    def test_a_sanitation_contract_does_not_block_the_line(self):
+        # `सफाइ` is a substring of `सरसफाइ` (sanitation), a routine CIAA
+        # contract subject. A bare-morpheme guard silently suppressed the line
+        # on exactly the acquitted cases the rule was written for.
+        detail = {"entities": [_accused("राम", "acquitted")]}
+        allegations = ["नगरपालिकाको सरसफाइ ठेक्कामा अनियमितता गरेको भन्ने आरोप छ।"]
+        out, reason = _append_acquittal_line(detail, list(allegations))
+        assert reason == "appended"
+        assert len(out) == 2
 
     def test_running_twice_appends_only_once(self):
         detail = {"entities": [_accused("राम", "acquitted")]}
-        once = _append_acquittal_line(detail, list(self.ALLEGATIONS))
-        assert _append_acquittal_line(detail, list(once)) == once
+        once, _ = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        assert _append_acquittal_line(detail, list(once)) == (once, "already-stated")
+
+    def test_a_supreme_court_reference_blocks_the_special_court_line(self):
+        # `outcome` is set from *a* primary court order, which on an appealed
+        # case can be the Supreme Court's. Naming विशेष अदालत would then state
+        # the opposite of what that court ruled.
+        detail = {"entities": [_accused("राम", "acquitted")],
+                  "court_cases": [SPECIAL_IRI, SUPREME_IRI]}
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "other-court:supreme")
+
+    def test_a_high_court_reference_blocks_the_line_too(self):
+        detail = {"entities": [_accused("राम", "acquitted")],
+                  "court_cases": [HIGH_COURT_IRI]}
+        assert _append_acquittal_line(detail, list(self.ALLEGATIONS)) == (
+            self.ALLEGATIONS, "other-court:janakpurhc")
+
+    def test_a_special_court_only_reference_still_gets_the_line(self):
+        detail = {"entities": [_accused("राम", "acquitted")],
+                  "court_cases": [SPECIAL_IRI]}
+        out, reason = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        assert reason == "appended"
+        assert len(out) == 2
+
+    def test_a_malformed_court_reference_is_ignored(self):
+        detail = {"entities": [_accused("राम", "acquitted")],
+                  "court_cases": ["special:080-CR-0111", None, 7]}
+        out, reason = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        assert reason == "appended"
+        assert len(out) == 2
 
     def test_a_malformed_entity_row_does_not_crash_the_case(self):
         detail = {"entities": ["not-a-dict", _accused("राम", "acquitted")]}
-        out = _append_acquittal_line(detail, list(self.ALLEGATIONS))
+        out, _ = _append_acquittal_line(detail, list(self.ALLEGATIONS))
         assert len(out) == 2
 
     def test_the_input_list_is_not_mutated(self):
@@ -657,6 +747,14 @@ PRESS_CASE_CONVICTED_DETAIL = dict(
     ],
 )
 
+# The same acquittal, on a case that also reached the Supreme Court: `outcome`
+# may have been set from the appeal order, so the Special Court line is refused.
+PRESS_CASE_APPEALED_DETAIL = dict(
+    PRESS_CASE_ACQUITTED_DETAIL,
+    court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0111",
+                 "https://jawafdehi.org/courtcase/supreme/080-cr-0111"],
+)
+
 
 def test_apply_appends_the_acquittal_line_when_the_court_cleared_everyone(
     monkeypatch, patched_fetch_markdown
@@ -893,3 +991,40 @@ def test_events_file_records_would_enrich_under_dry_run(
     steps_and_statuses = {(r["step"], r["status"]) for r in rows}
     assert ("write", "would-enrich") in steps_and_statuses
     assert ("write", "enriched") not in steps_and_statuses
+
+
+def test_extract_event_records_the_bind_count_the_verdict_was_read_from(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    # Accused binds are not guaranteed complete -- a case can carry fewer binds
+    # than it has defendants (unresolved or held names never get bound). The
+    # unanimity test can only see the binds, so the ledger records how many it
+    # saw, and an operator auditing a dry run can spot the gap.
+    response = json.dumps({"allegations": ["पहिलो आरोप गरेको।"]})
+    api = _StubApi(
+        [PRESS_CASE_READY],
+        detail_overrides={"case-ready": PRESS_CASE_ACQUITTED_DETAIL},
+    )
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+              argv=["--dry-run"])
+
+    extract, = [r for r in _read_events(_events_path()) if r["step"] == "extract"]
+    assert "accused_binds=1" in extract["detail"]
+    assert "acquittal_line=appended" in extract["detail"]
+
+
+def test_extract_event_names_the_reason_a_suppressed_line_was_suppressed(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    # A skipped acquittal line must not be silent -- the ledger names the reason.
+    response = json.dumps({"allegations": ["पहिलो आरोप गरेको।"]})
+    api = _StubApi(
+        [PRESS_CASE_READY],
+        detail_overrides={"case-ready": PRESS_CASE_APPEALED_DETAIL},
+    )
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+              argv=["--dry-run"])
+
+    extract, = [r for r in _read_events(_events_path()) if r["step"] == "extract"]
+    assert "acquittal_line=other-court:supreme" in extract["detail"]
+    assert "सफाइ दिने" not in extract["detail"]

@@ -42,6 +42,7 @@ from casework.common.materials import source_text
 from casework.common.parse import parse_extraction_response
 from casework.common.pipeline import PRESS_TYPES, STAGES, RunReport, unmet_prerequisites
 from casework.common.select import select_for_run
+from jawafdehi_shared.entities.ids import parse_courtcase_iri
 
 log = logging.getLogger("casework.enrich_allegations")
 
@@ -193,20 +194,27 @@ def _extract_allegations(
 # proven on had ended in acquittal. The prompt asks for the marker; this enforces it.
 HEDGE = " भन्ने आरोप छ।"
 _ALREADY_HEDGED = ("भन्ने आरोप", "अभियोग दाबी")
-_PARTICIPLE_END = re.compile(r"को।\s*$")
+# The participle ending, and only that: `ेको` (गरेको) plus the independent-vowel
+# `एको` (लुकाएको, पुर्‍याएको). A bare `को` also matches the genitive (`सरकारको।`),
+# where the marker is not Nepali. The terminator is optional and may be a danda,
+# an ASCII full stop, or absent, and a trailing perfect copula (`गरेको छ।`) is
+# absorbed -- HEDGE supplies its own छ.
+_PARTICIPLE_END = re.compile(r"([ेए]को)(?:\s*छ)?\s*[।.]?\s*$")
 
 
 def _hedge(text: str) -> str:
     """Close a participle allegation with the CIAA charge marker.
 
     Idempotent. A non-participle ending is left alone -- force-suffixing one
-    produces ungrammatical Nepali. The match is on `को।`, not `ेको।`, which
-    would miss the independent-vowel forms (लुकाएको, पुर्‍याएको).
+    produces ungrammatical Nepali. A perfect (`…गरेको छ।`) asserts guilt as
+    plainly as the bare participle, so it is hedged too; the cost is that a
+    neutral perfect (`…कायम भएको छ।`) is marked as a claim as well, which stays
+    true because the sentence is the CIAA's in the first place.
     """
     t = text.rstrip()
     if any(m in t for m in _ALREADY_HEDGED) or not _PARTICIPLE_END.search(t):
         return t
-    return _PARTICIPLE_END.sub(lambda m: m.group(0).rstrip()[:-1] + HEDGE, t)
+    return _PARTICIPLE_END.sub(r"\1" + HEDGE, t)
 
 
 # `tone.append_acquittal_line` in work/slug-fix/enricher-fix-rules.json:
@@ -217,29 +225,61 @@ ACQUITTAL_LINE = (
     "विशेष अदालतले उक्त दाबी पुग्न नसकी {defendants} आरोपित कसुरबाट सफाइ दिने "
     "ठहर गरेको छ।"
 )
-_ACQUITTAL_MARKERS = ("सफाइ", "सफाई")
+# Phrases, not the bare morpheme: `सफाइ` is a substring of `सरसफाइ`
+# (sanitation), a routine CIAA contract subject, so a morpheme guard suppressed
+# the line on exactly the acquitted cases the rule was written for.
+_ACQUITTAL_MARKERS = ("सफाइ दिने", "सफाइ दिएको", "सफाइ पाएको",
+                      "सफाई दिने", "सफाई दिएको", "सफाई पाएको")
+_SPECIAL_COURT = "special"
 
 
-def _append_acquittal_line(detail: dict, allegations: list) -> list:
-    """Close the allegations with the acquittal when the court cleared everyone.
-
-    The verdict comes from the accused binds' `outcome` and nothing else -- not
-    the title, not the prose. Anything short of a unanimous `acquitted` is left
-    alone: a partial conviction, an abatement or a still-`charged` defendant all
-    make a blanket acquittal line false.
-    """
-    accused = [
+def _accused_binds(detail: dict) -> list:
+    """The case's accused binds -- `outcome` is meaningful only on those."""
+    return [
         e for e in (detail.get("entities") or [])
         if isinstance(e, dict) and (e.get("type") or "").strip() == "accused"
     ]
+
+
+def _other_courts(detail: dict) -> list:
+    """Courts the case reached that are not the Special Court, from `court_cases`."""
+    others = []
+    for ref in detail.get("court_cases") or []:
+        try:
+            court = parse_courtcase_iri(ref).court
+        except (ValueError, TypeError):
+            continue
+        if court != _SPECIAL_COURT:
+            others.append(court)
+    return others
+
+
+def _append_acquittal_line(detail: dict, allegations: list) -> tuple:
+    """Close the allegations with the acquittal when the court cleared every bound accused.
+
+    Returns the (possibly unchanged) list and a reason for the run ledger. The
+    verdict comes from the accused binds' `outcome` and nothing else -- not the
+    title, not the prose. Anything short of a unanimous `acquitted` is left
+    alone: a partial conviction, an abatement or a still-`charged` defendant all
+    make a blanket acquittal line false. Binds are curator-created and are NOT
+    guaranteed to cover every defendant, which is why `main()` logs the count.
+    """
+    accused = _accused_binds(detail)
     if not accused:
-        return allegations
+        return allegations, "no-accused-bind"
     if {(e.get("outcome") or "").strip() for e in accused} != {"acquitted"}:
-        return allegations
+        return allegations, "not-unanimous"
+    others = _other_courts(detail)
+    if others:
+        # `RelationshipOutcome`'s terminal values are set from *a* primary court
+        # order, which on an appealed case can be the appeal court's. The
+        # enricher cannot tell which order set the outcome, so it refuses rather
+        # than risk stating the opposite of what the Special Court ruled.
+        return allegations, "other-court:" + ",".join(sorted(set(others)))
     if any(m in a for a in allegations for m in _ACQUITTAL_MARKERS):
-        return allegations
+        return allegations, "already-stated"
     defendants = "प्रतिवादीलाई" if len(accused) == 1 else "प्रतिवादीहरूलाई"
-    return [*allegations, ACQUITTAL_LINE.format(defendants=defendants)]
+    return [*allegations, ACQUITTAL_LINE.format(defendants=defendants)], "appended"
 
 
 def _parse_allegations_response(response_text: str) -> Optional[list]:
@@ -408,10 +448,13 @@ def main(argv=None):
                       detail="LLM returned no allegations", level=logging.WARNING)
             continue
 
-        allegations = _append_acquittal_line(detail, allegations)
+        allegations, acquittal = _append_acquittal_line(detail, allegations)
 
         log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
-                  step="extract", status="ok", detail=f"key_allegations={allegations}")
+                  step="extract", status="ok",
+                  detail=(f"key_allegations={allegations} "
+                          f"accused_binds={len(_accused_binds(detail))} "
+                          f"acquittal_line={acquittal}"))
 
         if args.dry_run:
             report.record(
