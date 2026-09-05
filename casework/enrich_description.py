@@ -262,9 +262,10 @@ the same sentence that it is that defendant's own जिकिर, that फै�
 
 PERSONAL IDENTIFIERS. Never reproduce a full बैंक खाता नं., चेक नं., बीमा/पोलिसी नं.,
 ना.प्र.प. (नागरिकता) नं., सम्पर्क/मोबाइल नं. or vehicle plate — the accused's or anyone
-else's. Mask an account to its last five digits (खाता नं. ...००४२६); where the holder is
-not a defendant, name only the institution ("माछापुच्छ्रे बैंकको खाता मार्फत"); drop cheque
-and policy numbers; give a vehicle by class ("एक मोटरसाइकल"). CASE identifiers are not
+else's. Mask an account to AT MOST its last five digits, always hiding at least three
+(खाता नं. ...००४२६); where the holder is not a defendant, name only the institution
+("माछापुच्छ्रे बैंकको खाता मार्फत"); drop cheque and policy numbers; give a vehicle by
+class ("एक मोटरसाइकल"). CASE identifiers are not
 personal and must stay exactly as written: मुद्दा नं., नि.नं., उ.द.नं., च.नं., कि.नं., दफा.
 Every rupee amount stays.
 
@@ -308,6 +309,11 @@ Rules:
   (पुनरावेदन) was filed. Both are already handled.
 - Do not criticise the court's reasoning or the CIAA's investigation. This output
   is about our archive's completeness, not the case's merits.
+- NO PERSONAL IDENTIFIERS here either — this list is published beside the
+  description. Name the record, not the number: "खाता नं. ...००४२६ को लेनदेन
+  विवरण", never a full बैंक खाता नं., चेक नं., ना.प्र.प. नं., सम्पर्क नं. or vehicle
+  plate ("एक मोटरसाइकलको दर्ता प्रमाणपत्र"). CASE identifiers stay in full: मुद्दा नं.,
+  नि.नं., च.नं., कि.नं., and every date.
 - Return [] when the sources reference nothing beyond what we hold. An empty list
   is a perfectly good answer; padding it with vague items is not.
 
@@ -477,22 +483,49 @@ def _assemble_source_text(chunks, invoke_text, usage):
 # The prompt asks for the better form -- institution only for a non-defendant,
 # cheque numbers dropped -- and this is the floor under it, not a substitute.
 _NUMBER_WORD = r"(?:नं\.?|नम्बर|नम्वर)"
+# Something that says "a reference follows, not a sum": the number word, or a
+# bare separator.
+_ID_ANCHOR = rf"(?:\s*{_NUMBER_WORD}[\s:\-–(]*|\s*[:(\-–]\s*)"
+# One run (hyphen- or slash-grouped), or space-separated groups -- a bank prints
+# an account either way, and only the hyphen form used to match. The grouped
+# branch caps its FIRST group at 6 digits, so a complete run followed by a
+# SEPARATE number (`खाता नं. <14 digits> २०८१ सालमा`) cannot absorb the year.
+_ID_NUMBER = (r"(?:[०-९0-9]{1,6}(?![०-९0-9])(?:\s[०-९0-9]{3,6}(?![०-९0-9]))+"
+              r"|[०-९0-9][०-९0-9\u2013\-/]*)")
+# Every keyword, with the anchor REQUIRED.
 _PERSONAL_ID = re.compile(
     r"(खाता|चेक|बीमा|पोलिसी|ना\.प्र\.प\.|नागरिकता|सम्पर्क|मोबाइल|फोन)"
-    rf"((?:\s*{_NUMBER_WORD})?[\s:\-–(]*(?:\.{{3}})?\s*)"
-    r"([०-९0-9][०-९0-9\u2013\-/]*)"
+    rf"({_ID_ANCHOR}(?:\.{{3}})?\s*)"
+    rf"({_ID_NUMBER})"
+)
+# The same seven again with the anchor OPTIONAL, which is how the whole class
+# used to be read. `बीमा` and `पोलिसी` are held back from this pass and ONLY
+# this pass: a bare figure after those two is a sum assured, not a reference
+# (`बीमा ४९४९८४`, `जीवन बीमा १०००००० को पोलिसी`), and destroying it breaks the
+# आय–व्यय reconciliation this stage promises to keep checkable. The other seven
+# are never followed by a rupee figure, so demanding `नं.` of them too would
+# only trade the destroyed amount for a leaked phone or citizenship number.
+# Same three groups, so both patterns share `_mask`.
+_PERSONAL_ID_BARE = re.compile(
+    r"(खाता|चेक|ना\.प्र\.प\.|नागरिकता|सम्पर्क|मोबाइल|फोन)"
+    r"(\s*(?:\.{3})?\s*)"
+    rf"({_ID_NUMBER})"
 )
 _MASK_MIN_DIGITS = 6
 _MASK_KEEP_DIGITS = 5
+# At least this many digits must GO, or the mask is theatre: at a flat keep-5,
+# a 7-digit citizenship number published 5 of its digits plus the issuing
+# district while reading as handled, which is worse than not masking.
+_MASK_HIDE_DIGITS = 3
 
 
 def _mask_identifiers(text):
-    """Cut personal identifiers down to their last five digits.
+    """Cut personal identifiers down to their last few digits.
 
     Case identifiers (मुद्दा नं., नि.नं., उ.द.नं., च.नं., कि.नं., दफा) and every
     rupee amount are untouched -- they are not personal, and the reconciliation
-    stops being checkable without them. Idempotent: a masked number is five
-    digits long, which is below the threshold that fires.
+    stops being checkable without them. Idempotent: a masked number keeps at
+    most five digits, which is below the threshold that fires.
     """
     if not text:
         return text
@@ -502,14 +535,15 @@ def _mask_identifiers(text):
         digits = [c for c in number if c.isdigit()]
         if len(digits) < _MASK_MIN_DIGITS:
             return m.group(0)
+        keep = min(_MASK_KEEP_DIGITS, len(digits) - _MASK_HIDE_DIGITS)
         gap = gap.replace("...", "")
         # "खाता नं." + "..." reads as a four-dot typo, so the abbreviation dot
         # and the ellipsis are kept apart.
         if gap.rstrip().endswith(("नं.", "नं", "नम्बर", "नम्वर", ":")):
             gap = gap.rstrip() + " "
-        return f"{keyword}{gap}...{''.join(digits[-_MASK_KEEP_DIGITS:])}"
+        return f"{keyword}{gap}...{''.join(digits[-keep:])}"
 
-    return _PERSONAL_ID.sub(_mask, text)
+    return _PERSONAL_ID_BARE.sub(_mask, _PERSONAL_ID.sub(_mask, text))
 
 
 # The one identifier in `description.mask_account_identifiers` that has no
@@ -539,6 +573,15 @@ def residual_identifiers(text):
     would read as compliance.
     """
     return sorted({m.group(0).strip() for m in _PLATE.finditer(text or "")})
+
+
+def _plate_note(text, field):
+    """Review-note wording for the plates left in `field`, or "" when clean."""
+    plates = residual_identifiers(text)
+    if not plates:
+        return ""
+    return (f"vehicle plate(s) in {field} the model did not replace with an "
+            "asset class: " + ", ".join(plates))
 
 
 def _generate_description(detail, court_number, source_text, invoke_text, usage,
@@ -877,11 +920,8 @@ def main(argv=None):
         # What the mask could not fix. Warned, never edited: see
         # `residual_identifiers`. Logged before the empty-description branch so
         # the finding cannot be lost with the case.
-        plates = residual_identifiers(description)
-        plate_note = ""
-        if plates:
-            plate_note = ("vehicle plate(s) the model did not replace with an "
-                          "asset class: " + ", ".join(plates))
+        plate_note = _plate_note(description, "description")
+        if plate_note:
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="privacy", status="residual",
                       detail=plate_note, level=logging.WARNING)
@@ -935,6 +975,12 @@ def main(argv=None):
         # opposite follow-up (prompt problem vs sourcing problem). Rejections
         # never block the write -- the floor alone is a publishable value.
         kept, rejected = accept_items(documents, detail)
+        # THE OTHER PUBLIC FIELD OF THIS PATCH. `missing_details` is
+        # model-authored Nepali whose whole value is naming a specific record, so
+        # it is the output most likely to carry an account number -- and only
+        # `description` used to pass through the mask. Masked here, before the
+        # logs and the review file, so no path downstream carries the raw form.
+        kept = [_mask_identifiers(item) for item in kept]
         for item, reason in rejected:
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="documents", status="rejected",
@@ -957,6 +1003,17 @@ def main(argv=None):
                       level=logging.WARNING)
 
         missing = build_missing_details(detail, [] if verdict_lost else kept)
+
+        # The same residual check the description gets, on the value actually
+        # about to be written. Separate from the one above because that one must
+        # run before the empty-description branch, where `missing` does not exist
+        # yet.
+        md_plate_note = _plate_note(missing or "", "missing_details")
+        if md_plate_note:
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="privacy", status="residual",
+                      detail=md_plate_note, level=logging.WARNING)
+            plate_note = "; ".join(filter(None, (plate_note, md_plate_note)))
 
         # NEVER TOUCH A NON-EMPTY VALUE -- not even with --force. Two things share
         # this field and neither can be safely merged into:

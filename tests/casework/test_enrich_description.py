@@ -877,6 +877,53 @@ class TestMaskIdentifiers:
     def test_a_case_identifier_or_an_amount_is_never_touched(self, keep):
         assert ed._mask_identifiers(keep) == keep
 
+    @pytest.mark.parametrize("keep", [
+        "बीमा ४९४९८४ भुक्तानी",
+        "जीवन बीमा १०००००० को पोलिसी",
+    ])
+    def test_a_bare_sum_after_a_keyword_is_not_masked(self, keep):
+        # Sums assured, not policy numbers: the keyword is there but nothing says
+        # "a reference follows". Destroying the figure breaks the आय–व्यय
+        # reconciliation, which is the same defect as leaking the identifier
+        # pointing the other way.
+        assert ed._mask_identifiers(keep) == keep
+
+    @pytest.mark.parametrize("text,expected", [
+        ("खाता नं. ०२०१ ०१७५ ०१०३१ मा जम्मा", "खाता नं. ...०१०३१ मा जम्मा"),
+        ("बैंक खाता नं. 0201 0175 01031 मा", "बैंक खाता नं. ...01031 मा"),
+    ])
+    def test_a_space_grouped_account_number_is_masked(self, text, expected):
+        # A bank prints an account grouped by spaces as often as by hyphens, and
+        # the hyphen form is already pinned above.
+        assert ed._mask_identifiers(text) == expected
+
+    @pytest.mark.parametrize("text", [
+        "मोबाइल ९८४११२३४५६ मा सम्पर्क",
+        "नागरिकता ९१५२२९१ को",
+        "चेक ११९७७४२ बाट",
+        "खाता ०१२००५१६२००४२६ मा",
+    ])
+    def test_a_bare_identifier_is_still_masked(self, text):
+        # The anchor demanded of बीमा/पोलिसी must NOT be demanded of the other
+        # seven keywords: none of them is ever followed by a rupee figure, so a
+        # blanket requirement would trade the destroyed amount for a leak.
+        assert "..." in ed._mask_identifiers(text)
+
+    def test_a_separate_number_beside_the_identifier_is_not_absorbed(self):
+        # The space-grouped branch must stop at the identifier rather than run on
+        # into the year next to it.
+        assert (ed._mask_identifiers("खाता नं. ०१२००५१६२००४२६ २०८१ सालमा")
+                == "खाता नं. ...००४२६ २०८१ सालमा")
+
+    @pytest.mark.parametrize("text,expected", [
+        # 7 digits kept 5, so 5 of the citizenship number plus the issuing
+        # district were published under something that reads as masked.
+        ("(ना.प्र.प.नं. ९१५/२२९१, अर्घाखाँची)", "(ना.प्र.प.नं. ...२२९१, अर्घाखाँची)"),
+        ("चेक नं. १२३४५६", "चेक नं. ...४५६"),
+    ])
+    def test_a_short_identifier_hides_at_least_three_digits(self, text, expected):
+        assert ed._mask_identifiers(text) == expected
+
     def test_masking_is_idempotent(self):
         once = ed._mask_identifiers("खाता नं. ०१२००५१६२००४२६ मा")
         assert ed._mask_identifiers(once) == once
@@ -956,6 +1003,13 @@ class TestReviewRulePromptCoverage:
         p = ed.EXTRACTION_SYSTEM_PROMPT
         assert "खाता नं." in p and "ना.प्र.प." in p
         assert "मुद्दा नं." in p and "कि.नं." in p
+
+    def test_the_missing_documents_half_carries_the_identifier_rule_too(self):
+        # `missing_details` rides in the SAME conditional PATCH and is just as
+        # public, but the rule lived only in the description half -- and this is
+        # the output whose whole value is naming a specific record.
+        half = ed.EXTRACTION_SYSTEM_PROMPT.split("MISSING DOCUMENTS")[-1]
+        assert "खाता नं." in half and "ना.प्र.प." in half
 
 
 CASE_READY = {
@@ -1926,6 +1980,42 @@ def test_an_account_number_the_model_leaves_in_is_masked_before_the_patch(
     assert "खाता नं. ...००४२६" in patched[0]
     # The amount beside it is load-bearing and stays.
     assert "रु.८,८८,०००।–" in patched[0]
+
+
+def test_an_account_number_in_missing_details_is_masked_before_the_patch(
+    monkeypatch, patched_fetch_markdown
+):
+    """The SAME conditional PATCH writes two public fields and only
+    `description` went through the mask. `missing_details` is model-authored
+    Nepali whose whole value is naming a specific record, so it is the output
+    most likely to carry an account number -- and it carried it in full."""
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api, _stub_with_documents(
+        "क" * 900,
+        ["सुनिल पौडेलको एभरेष्ट बैंक खाता नं. ०१२००५१६२००४२६ को लेनदेन विवरण"]),
+        BASE_ARGV + ["--apply"])
+    written = {f: v for _, f, v, _ in api.patched}
+    assert "०१२००५१६२००४२६" not in written["missing_details"]
+    assert "खाता नं. ...००४२६" in written["missing_details"]
+
+
+def test_a_plate_in_missing_details_is_flagged_like_one_in_the_description(
+    monkeypatch, patched_fetch_markdown
+):
+    """`residual_identifiers` ran over the description only, so a plate in the
+    second field published with nothing raised. Reported, never edited: only the
+    model knows the asset class the rule asks for."""
+    rows = _captured_review_rows(monkeypatch)
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api, _stub_with_documents(
+        "क" * 900, ["बा.१२ प ३४५६ नम्बरको सवारी दर्ता प्रमाणपत्र"]),
+        BASE_ARGV + ["--apply"])
+    written = {f: v for _, f, v, _ in api.patched}
+    assert "बा.१२ प ३४५६" in written["missing_details"], "reported, never edited"
+    # The PRIVACY note, not the `missing_details →` echo -- that one repeats the
+    # whole field and would carry the plate whether or not anything detected it.
+    assert "vehicle plate" in rows[-1].note
+    assert "बा.१२ प ३४५६" in rows[-1].note.split("vehicle plate")[1]
 
 
 def test_the_dry_run_shows_the_masked_text_not_the_raw_one(
