@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import logging
+import re
 import sys
 import time
 from typing import Optional
@@ -41,6 +42,7 @@ from casework.common.materials import source_text
 from casework.common.parse import parse_extraction_response
 from casework.common.pipeline import PRESS_TYPES, STAGES, RunReport, unmet_prerequisites
 from casework.common.select import select_for_run
+from jawafdehi_shared.entities.ids import parse_courtcase_iri
 
 log = logging.getLogger("casework.enrich_allegations")
 
@@ -67,6 +69,7 @@ Every allegation MUST:
 8. Include the time period (date range or fiscal year) when specified
 9. Be self-contained — understandable without additional context
 10. Follow the established Jawafdehi allegation style (see examples below)
+11. End with the charge marker "भन्ने आरोप छ।" — a participle clause closed by that phrase, so the sentence reads as the CIAA's claim and not as a finding of fact
 
 Return 2-3 allegations. Each allegation MUST be exactly one sentence.
 The first allegation MUST be the most descriptive overview of the primary allegation.
@@ -83,7 +86,7 @@ DO NOT:
 - Start with a long comma-separated list of accused names when a role group can carry the allegation
 - Produce near-duplicate allegations that repeat the same accused list and same misconduct
 - Write remedies, requests, or procedural outcomes as allegations, such as asset-return demands, confiscation requests, charge filing, or punishment requests
-- End allegations with attribution phrases such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"
+- End allegations with source-attribution phrases such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", or "देखिन्छ" — these attribute the sentence to the document rather than to the charge
 - Include multiple sentences in one allegation
 - List related entity names when a descriptive role is enough
 - Use long comma-formatted Nepali amounts when a readable crore/lakh approximation is clearer
@@ -101,21 +104,21 @@ REFERENCE EXAMPLES from published Jawafdehi cases:
 Example 1 (Illegal property accumulation):
 "कमल राज गौतमले मिति २०५५/०१/०७ देखि २०७९/१२/२४ सम्म सार्वजनिक पद धारण
 गर्दा वैध आयभन्दा रु. २,५१,७८,६८७.७१ बढी सम्पत्ति खर्च तथा लगानी गरी
-गैरकानूनी रूपमा सम्पत्ति आर्जन गरेको।"
+गैरकानूनी रूपमा सम्पत्ति आर्जन गरेको भन्ने आरोप छ।"
 
 Example 2 (Procurement fraud):
 "प्रतिवादीहरूको मिलेमतोमा काठमाडौं महानगरपालिकाको NCBW-KMC को ठेक्कामा
 Pending Litigation नहुने विषयलाई Pending Litigation रहेको भनी गलत मूल्याङ्कन
-प्रतिवेदन खडा गरी सार्वजनिक सम्पत्ति बदनियतपूर्वक हानि नोक्सानी पुर्याएको।"
+प्रतिवेदन खडा गरी सार्वजनिक सम्पत्ति बदनियतपूर्वक हानि नोक्सानी पुर्याएको भन्ने आरोप छ।"
 
 Example 3 (Bribery and money laundering):
 "मोहनबहादुर बस्नेतले नगर प्रमुख पदको दुरुपयोग गरी पद्मा कम्पनीहरू र राजु
 प्रसाद कँडेललाई कर छुट र जग्गा उपलब्धता लगायत अनुचित लाभ पुर्याई सो बापत
-करिब रु. ९.२२ करोड घुस/रिसवत लिएको।"
+करिब रु. ९.२२ करोड घुस/रिसवत लिएको भन्ने आरोप छ।"
 
 Example 4 (Embezzlement):
 "प्रतिवादीहरूको मिलेमतोमा हुलाक बचत बैङ्कमा बचतकर्ताहरूको निक्षेप रकम
-बैङ्क दाखिला नगरी अपचलन गरी हिनामिना गरेको।"
+बैङ्क दाखिला नगरी अपचलन गरी हिनामिना गरेको भन्ने आरोप छ।"
 """
 
 USER_PROMPT_TEMPLATE = """Extract 2-3 key allegation statements from this CIAA press release.
@@ -125,7 +128,8 @@ Bigo amount: {bigo}
 
 Instructions:
 - Each allegation must be exactly one complete, self-contained sentence in Nepali
-- Do not end any allegation with attribution wording such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"
+- End every allegation with "भन्ने आरोप छ।" — write the act as a participle clause and close with that phrase, as in "…गरेको भन्ने आरोप छ।"
+- Do not use source-attribution wording such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", or "देखिन्छ"
 - Make the first allegation a descriptive overview of the primary allegation
 - Make the first allegation about substance: institution/property/transaction, alleged scheme, mechanism, amount or harm, and period when available
 - Make the second and third allegations shorter supporting allegations
@@ -185,12 +189,109 @@ def _extract_allegations(
     return _parse_allegations_response(response_text)
 
 
+# `tone.hedge_key_allegations` in work/slug-fix/enricher-fix-rules.json: a bare
+# declarative reads as an established fact, and six of the ten cases the rule was
+# proven on had ended in acquittal. The prompt asks for the marker; this enforces it.
+HEDGE = " भन्ने आरोप छ।"
+_ALREADY_HEDGED = ("भन्ने आरोप", "अभियोग दाबी")
+# The participle ending, and only that: `ेको` (गरेको) plus the independent-vowel
+# `एको` (लुकाएको, पुर्‍याएको). A bare `को` also matches the genitive (`सरकारको।`),
+# where the marker is not Nepali. The terminator is optional and may be a danda,
+# an ASCII full stop, or absent, and a trailing perfect copula (`गरेको छ।`) is
+# absorbed -- HEDGE supplies its own छ.
+_PARTICIPLE_END = re.compile(r"([ेए]को)(?:\s*छ)?\s*[।.]?\s*$")
+
+
+def _hedge(text: str) -> str:
+    """Close a participle allegation with the CIAA charge marker.
+
+    Idempotent. A non-participle ending is left alone -- force-suffixing one
+    produces ungrammatical Nepali. A perfect (`…गरेको छ।`) asserts guilt as
+    plainly as the bare participle, so it is hedged too; the cost is that a
+    neutral perfect (`…कायम भएको छ।`) is marked as a claim as well, which stays
+    true because the sentence is the CIAA's in the first place.
+    """
+    t = text.rstrip()
+    if any(m in t for m in _ALREADY_HEDGED) or not _PARTICIPLE_END.search(t):
+        return t
+    return _PARTICIPLE_END.sub(r"\1" + HEDGE, t)
+
+
+# `tone.append_acquittal_line` in work/slug-fix/enricher-fix-rules.json:
+# key_allegations renders standalone on some surfaces, so on a case the court
+# cleared it reads as an unqualified guilt narrative on its own.
+ACQUITTAL_LINE = (
+    "माथि उल्लिखित कुराहरू अख्तियार दुरुपयोग अनुसन्धान आयोगको अभियोग दाबी हुन्; "
+    "विशेष अदालतले उक्त दाबी पुग्न नसकी {defendants} आरोपित कसुरबाट सफाइ दिने "
+    "ठहर गरेको छ।"
+)
+# Phrases, not the bare morpheme: `सफाइ` is a substring of `सरसफाइ`
+# (sanitation), a routine CIAA contract subject, so a morpheme guard suppressed
+# the line on exactly the acquitted cases the rule was written for.
+_ACQUITTAL_MARKERS = ("सफाइ दिने", "सफाइ दिएको", "सफाइ पाएको",
+                      "सफाई दिने", "सफाई दिएको", "सफाई पाएको")
+_SPECIAL_COURT = "special"
+
+
+def _accused_binds(detail: dict) -> list:
+    """The case's accused binds -- `outcome` is meaningful only on those."""
+    return [
+        e for e in (detail.get("entities") or [])
+        if isinstance(e, dict) and (e.get("type") or "").strip() == "accused"
+    ]
+
+
+def _other_courts(detail: dict) -> list:
+    """Courts the case reached that are not the Special Court, from `court_cases`."""
+    others = []
+    for ref in detail.get("court_cases") or []:
+        try:
+            court = parse_courtcase_iri(ref).court
+        except (ValueError, TypeError):
+            continue
+        if court != _SPECIAL_COURT:
+            others.append(court)
+    return others
+
+
+def _append_acquittal_line(detail: dict, allegations: list) -> tuple:
+    """Close the allegations with the acquittal when the court cleared every bound accused.
+
+    Returns the (possibly unchanged) list and a reason for the run ledger. The
+    verdict comes from the accused binds' `outcome` and nothing else -- not the
+    title, not the prose. Anything short of a unanimous `acquitted` is left
+    alone: a partial conviction, an abatement or a still-`charged` defendant all
+    make a blanket acquittal line false. Binds are curator-created and are NOT
+    guaranteed to cover every defendant, which is why `main()` logs the count.
+    """
+    accused = _accused_binds(detail)
+    if not accused:
+        return allegations, "no-accused-bind"
+    if {(e.get("outcome") or "").strip() for e in accused} != {"acquitted"}:
+        return allegations, "not-unanimous"
+    others = _other_courts(detail)
+    if others:
+        # `RelationshipOutcome`'s terminal values are set from *a* primary court
+        # order, which on an appealed case can be the appeal court's. The
+        # enricher cannot tell which order set the outcome, so it refuses rather
+        # than risk stating the opposite of what the Special Court ruled.
+        return allegations, "other-court:" + ",".join(sorted(set(others)))
+    if any(m in a for a in allegations for m in _ACQUITTAL_MARKERS):
+        return allegations, "already-stated"
+    defendants = "प्रतिवादीलाई" if len(accused) == 1 else "प्रतिवादीहरूलाई"
+    return [*allegations, ACQUITTAL_LINE.format(defendants=defendants)], "appended"
+
+
 def _parse_allegations_response(response_text: str) -> Optional[list]:
     """Parse the LLM response into clean allegations (at most 3)."""
     entries = parse_extraction_response(response_text, {"allegations"})
     if not entries:
         return None
-    clean = [str(a).strip() for a in entries if isinstance(a, str) and a.strip()]
+    clean = [
+        _hedge(str(a).strip())
+        for a in entries
+        if isinstance(a, str) and a.strip()
+    ]
     return clean[:3] if clean else None
 
 
@@ -347,8 +448,13 @@ def main(argv=None):
                       detail="LLM returned no allegations", level=logging.WARNING)
             continue
 
+        allegations, acquittal = _append_acquittal_line(detail, allegations)
+
         log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
-                  step="extract", status="ok", detail=f"key_allegations={allegations}")
+                  step="extract", status="ok",
+                  detail=(f"key_allegations={allegations} "
+                          f"accused_binds={len(_accused_binds(detail))} "
+                          f"acquittal_line={acquittal}"))
 
         if args.dry_run:
             report.record(
