@@ -5069,6 +5069,64 @@ class TestNotesReachASettledCase:
             entity_response=_notes_response()), argv=["--apply"])
         assert api.replace_list_calls == []
 
+    def test_a_note_only_write_lands_in_the_binds_audit_file(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # A NOTE-ONLY WRITE IS STILL A WRITE. `changed_ids` is derived from
+        # VERDICT rows, and a note-only update makes none, so this run sent a
+        # real `replace_list` while reporting `0 bound, 0 verdict update(s)`
+        # and an epilogue reading "bound zero entities because it extracted
+        # none". This module's own docstrings call `*.binds.jsonl` the sole
+        # audit trail, and a name-matched note is exactly the judgement call it
+        # exists to record.
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls, "the fixture must actually write"
+
+        binds = [json.loads(line) for line in Path(_report_files()["binds"])
+                 .read_text(encoding="utf-8").splitlines()]
+        note_rows = [b for b in binds if b["nes_id"] == ACCUSED_IRI]
+        assert len(note_rows) == 1
+        assert note_rows[0]["notes"] == ROLE_NOTE
+        assert note_rows[0]["written"] is True
+        assert note_rows[0]["role"] == "accused"
+        # Same shape as `verdict_bind_row`, so the file stays readable as one.
+        assert set(note_rows[0]) == {
+            "slug", "extracted", "role", "nes_id", "score", "matched_name",
+            "notes", "reason", "written"}
+        assert "SET (accused) राम बहादुर " in capsys.readouterr().out
+
+    def test_a_dry_run_says_it_would_set_the_note(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--dry-run"])
+        out = capsys.readouterr().out
+        assert "WOULD SET (accused)" in out and "note only" in out
+        binds = [json.loads(line) for line in Path(_report_files()["binds"])
+                 .read_text(encoding="utf-8").splitlines()]
+        assert [b["written"] for b in binds if b["nes_id"] == ACCUSED_IRI] == [False]
+
+    def test_the_epilogue_no_longer_claims_the_run_wrote_nothing(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "bound zero entities because it extracted none" not in out
+        assert "TOTAL accused bind(s) given a role note" in out
+
+    def test_a_refused_note_produces_no_bind_row(
+            self, monkeypatch, patched_fetch_markdown):
+        # `apply_accused_updates` leaves a human-written note alone, so nothing
+        # is written and nothing may be claimed. The row is keyed on the
+        # base -> updated DIFF, never on what the merge intended.
+        human = "यो मानिसको भूमिका हातले लेखिएको"
+        api = _SearchStubApi([_accused_case(outcome="acquitted", notes=human)])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply"])
+        assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
+
     def test_a_verdict_role_note_wins_over_an_extracted_one(
             self, monkeypatch, patched_fetch_markdown):
         # The judgment's own wording is the better source; the extraction's job

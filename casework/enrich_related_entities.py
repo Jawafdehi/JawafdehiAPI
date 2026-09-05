@@ -1177,6 +1177,44 @@ def verdict_bind_row(slug, row, written):
             "written": written}
 
 
+def note_only_bind_rows(slug, case, before, after, noted, changed_ids):
+    """One `*.binds.jsonl` row per accused bind this run changed with a role note ALONE.
+
+    `changed_ids` is derived from the VERDICT rows, and a note-only update makes
+    none of those -- so the bind changed, the whole-list replace went out, and
+    the run reported `0 bound, 0 verdict update(s)` beside a real write. This
+    module's own docstrings call `*.binds.jsonl` the sole audit trail and "the
+    file a caseworker filters to find the judgement calls"; a role note is
+    name-matched, so it is exactly such a call.
+
+    Keyed on the base -> updated DIFF, never on what the merge intended:
+    `apply_accused_updates` refuses to overwrite a human's note, and a row for
+    a write that did not happen is the one thing this artefact exists to
+    prevent. Binds already in `changed_ids` are left to `verdict_bind_row` so
+    one bind never produces two rows.
+
+    Same row shape as `verdict_bind_row`, so the file stays readable as one.
+    """
+    names = {(entity.get("nes_id") or "").strip():
+             (entity.get("display_name") or "").strip()
+             for entity in (case.get("entities") or [])
+             if bind_relationship_type(entity) == ACCUSED_SECTION}
+    rows = []
+    for nes_id, role in noted.items():
+        if nes_id in changed_ids:
+            continue
+        old = before.get(nes_id)
+        if old is None or after.get(nes_id) == old:
+            continue
+        rows.append({"slug": slug, "extracted": names.get(nes_id, ""),
+                     "role": ACCUSED_SECTION, "nes_id": nes_id, "score": None,
+                     "matched_name": names.get(nes_id, ""), "notes": role,
+                     "reason": "role note from the extraction; the judgment was "
+                               "not read for this bind, so no verdict was written",
+                     "written": False})
+    return rows
+
+
 def validate_bind_item(item):
     """Local mirror of `EntityPatchItemSerializer`'s rules, applied BEFORE the
     request body is built so a bad item never reaches the API. Raises ValueError.
@@ -2470,6 +2508,7 @@ def main(argv=None):
 
     total_entities_extracted = 0
     total_accused_notes_extracted = 0
+    total_notes_written = 0
     total_already_accused = 0
     total_bound = total_review = total_nomatch = total_already_bound = 0
     # Binds that only exist because permissive mode overrode a veto. Counted
@@ -2879,10 +2918,12 @@ def main(argv=None):
         #
         # A verdict's own role note wins: it is read from the judgment's
         # operative section, where this one is a job title from the extraction.
+        noted = {}
         for nes_id, note_update in accused_note_updates(
                 fresh, case_accused_notes).items():
             if not (updates.get(nes_id) or {}).get("notes"):
                 updates.setdefault(nes_id, {}).update(note_update)
+                noted[nes_id] = note_update["notes"]
 
         # THE LAST MERGE, and the only one that rewrites a row rather than
         # appending one. It goes into the same `patch_items` the binds above
@@ -2891,12 +2932,19 @@ def main(argv=None):
         # destructive replace stays exactly as safe as it was.
         base = plan.patch_items or current_entity_binds(fresh)
         updated = apply_accused_updates(base, updates) if updates else base
+        accused_before = {b["nes_id"]: b for b in base
+                          if bind_relationship_type(b) == ACCUSED_SECTION}
+        accused_after = {b["nes_id"]: b for b in updated
+                         if bind_relationship_type(b) == ACCUSED_SECTION}
         changed_ids = settle_verdict_rows(
-            case_verdict_rows,
-            {b["nes_id"]: b for b in base
-             if bind_relationship_type(b) == ACCUSED_SECTION},
-            {b["nes_id"]: b for b in updated
-             if bind_relationship_type(b) == ACCUSED_SECTION})
+            case_verdict_rows, accused_before, accused_after)
+        # A NOTE-ONLY WRITE IS STILL A WRITE, and `changed_ids` cannot see it --
+        # see `note_only_bind_rows`. Appended to `bind_rows` beside the verdict
+        # rows below, and only once the write has actually happened.
+        case_note_rows = note_only_bind_rows(
+            slug, fresh, accused_before, accused_after, noted, changed_ids)
+        note_detail = (f", {len(case_note_rows)} role note(s)"
+                       if case_note_rows else "")
         verdict_rows.extend(case_verdict_rows)
         total_verdicts_undecided += sum(
             1 for row in case_verdict_rows if row["nes_id"] not in changed_ids)
@@ -2994,9 +3042,14 @@ def main(argv=None):
                     bind_rows.append(verdict_bind_row(slug, row, False))
                     print(f"  WOULD SET ({ACCUSED_SECTION}) {row['name']}  ->  "
                           f"{row['new_outcome'] or 'note only'}")
+            total_notes_written += len(case_note_rows)
+            for row in case_note_rows:
+                bind_rows.append(row)
+                print(f"  WOULD SET ({ACCUSED_SECTION}) {row['extracted']}  ->  "
+                      "note only")
             report.record(slug, "entities", "would-bind",
                           f"{len(plan.bound)} would bind, "
-                          f"{len(changed_ids)} verdict update(s)")
+                          f"{len(changed_ids)} verdict update(s){note_detail}")
             continue
 
         try:
@@ -3023,11 +3076,20 @@ def main(argv=None):
                 bind_rows.append(verdict_bind_row(slug, row, True))
                 print(f"  SET ({ACCUSED_SECTION}) {row['name']}  ->  "
                       f"{row['new_outcome'] or 'note only'}")
+        total_notes_written += len(case_note_rows)
+        for row in case_note_rows:
+            # Flipped only here: the write above succeeded, so the row may now
+            # claim it. Same order as the bind rows for the same reason.
+            row["written"] = True
+            bind_rows.append(row)
+            print(f"  SET ({ACCUSED_SECTION}) {row['extracted']}  ->  note only")
         report.record(slug, "entities", "bound",
-                      f"{len(plan.bound)} bound, {len(changed_ids)} verdict update(s)")
+                      f"{len(plan.bound)} bound, "
+                      f"{len(changed_ids)} verdict update(s){note_detail}")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="write", status="ok",
-                  detail=f"{len(plan.bound)} bound, {len(changed_ids)} verdict update(s)")
+                  detail=(f"{len(plan.bound)} bound, "
+                          f"{len(changed_ids)} verdict update(s){note_detail}"))
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Related-entity extraction")
@@ -3083,6 +3145,10 @@ def main(argv=None):
             # all cases a human still has to settle.
             print(f"    {total_verdicts_undecided} accused bind(s) were left exactly "
                   "as they were -- each is a row in that file carrying the reason.")
+    if total_notes_written:
+        verb = "WOULD be given" if args.dry_run else "given"
+        print(f"  TOTAL accused bind(s) {verb} a role note and nothing else: "
+              f"{total_notes_written}  -> {reports['binds']}")
     cases_seen = sum(verdict_coverage.values())
     if cases_seen:
         projected = "  Projected -- this dry run wrote nothing." if args.dry_run else ""
@@ -3122,7 +3188,14 @@ def main(argv=None):
               f"carries a 'promoted over:' reason in {reports['binds']}. These "
               "are the ones to spot-check first.")
     if total_bound == 0:
-        if total_entities_extracted == 0:
+        # Checked FIRST. A note-only run binds no entity and writes anyway, so
+        # every branch below -- "extracted none" most of all -- describes a run
+        # that did nothing while a whole-list replace went to production.
+        if total_notes_written:
+            print("  This run bound zero NEW entities, but wrote a role note onto "
+                  f"{total_notes_written} accused bind(s) already on their "
+                  f"case(s) -- see {reports['binds']}.")
+        elif total_entities_extracted == 0:
             # Reachable from three separate skip gates -- the idempotency skip,
             # the prerequisite gate and the no-source gate -- plus an LLM that
             # returns nothing. Without this branch the `else` below fires and
