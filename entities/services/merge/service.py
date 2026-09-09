@@ -76,6 +76,7 @@ class EntityMergeService:
                 else self._reindex(
                     references.case_ids_touched(duplicate_iris, survivor_iri),
                     "already-merged",
+                    entity_iris=[survivor_iri, *duplicate_iris],
                 )
             )
             return self._response(
@@ -169,7 +170,12 @@ class EntityMergeService:
                 "Send the same request again to finish.",
                 500, merge_id=merge_id,
             ) from exc
-        warnings = [*warnings, *self._reindex(case_ids, merge_id)]
+        warnings = [
+            *warnings,
+            *self._reindex(
+                case_ids, merge_id, entity_iris=[survivor_iri, *retired]
+            ),
+        ]
 
         return self._response(
             merge_id=merge_id, status="complete", dry_run=False,
@@ -309,12 +315,23 @@ class EntityMergeService:
                 # leaving the duplicate's ``data`` and ``version`` as they stand.
                 row.save(update_fields=["is_deleted", "merged_into", "updated_at"])
 
-    def _reindex(self, case_ids, merge_id) -> List[str]:
-        """Re-index the cases this merge touched, warning rather than failing on an outage.
+    def _reindex(self, case_ids, merge_id, entity_iris=()) -> List[str]:
+        """Re-index the cases AND entities this merge touched, warning rather than
+        failing on an outage.
 
         Every row has moved and every duplicate is retired by now, so a search outage
         must not present as a failed merge. The spec's ``warnings`` array is advisory
         and never blocks.
+
+        The ENTITY half exists because a merge moves public visibility between two
+        entity documents without either ``StoredEntity`` row's own signal being able
+        to notice. ``merge.references`` repoints ``CaseEntityRelationship.nes_id``
+        from each retired IRI onto the survivor, so the survivor's ``case_count``
+        rises from 0 and the retired IRIs' fall to 0 (see
+        ``entities.search_visibility``). Repointing a bind is a plain
+        ``QuerySet.update()``/``save()`` on the CASES side, and the survivor's own
+        document is untouched, so without this the survivor would stay archived out
+        of public search while its retired tombstones stayed visible.
         """
         from cases.models import Case
         from cases import search_index as case_search
@@ -331,12 +348,40 @@ class EntityMergeService:
             except Exception:
                 logger.exception("merge %s could not re-index case %s", merge_id, case_id)
                 stale += 1
+        stale += self._reindex_entities(entity_iris, merge_id)
         if not stale:
             return []
         return [
-            f"{stale} case(s) could not be re-indexed for search. The merge is "
+            f"{stale} record(s) could not be re-indexed for search. The merge is "
             "complete; re-index them to refresh search results."
         ]
+
+    def _reindex_entities(self, entity_iris, merge_id) -> int:
+        """Re-index the survivor + retired entity documents. Returns the failure count.
+
+        Best-effort and non-blocking, exactly like the case leg above:
+        ``reconcile_entity_visibility`` repairs anything that fails here.
+        """
+        iris = [iri for iri in dict.fromkeys(entity_iris) if iri]
+        if not iris:
+            return 0
+        try:
+            from entities import search_index as entity_search
+            from entities.search_visibility import clear_cache, entity_case_count
+        except Exception:  # noqa: BLE001 — opensearch stack optional in some contexts
+            return 0
+        # The published-bind set moved between two IRIs → drop the cached copy.
+        clear_cache()
+        stale = 0
+        for iri in iris:
+            try:
+                entity_search.index_by_iri(iri, case_count=entity_case_count(iri))
+            except Exception:
+                logger.exception(
+                    "merge %s could not re-index entity %s", merge_id, iri
+                )
+                stale += 1
+        return stale
 
     # --- validation -----------------------------------------------------
 

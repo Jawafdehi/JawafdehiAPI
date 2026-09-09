@@ -19,6 +19,7 @@ from search.service import (
     SearchError,
     SearchService,
     SearchUnavailable,
+    _visibility_clauses,
     build_query,
     decode_cursor,
     encode_cursor,
@@ -26,6 +27,19 @@ from search.service import (
 
 
 # ── query DSL ──────────────────────────────────────────────────────────────────
+
+
+#: The entity visibility clause ``build_query`` now ANDs into every filter list
+#: (see ``search.service._visibility_clauses``). Imported from the implementation
+#: rather than restated, so a change to the clause shape does not silently make
+#: these assertions test nothing. ``_narrowing`` strips it, which lets each test
+#: below keep asserting on the CALLER's own narrowing and nothing else.
+VISIBILITY_CLAUSE = _visibility_clauses(False)[0]
+
+
+def _narrowing(body):
+    """The filter clauses a caller asked for, minus the always-on visibility gate."""
+    return [c for c in body["query"]["bool"]["filter"] if c != VISIBILITY_CLAUSE]
 
 
 def _recall_multi_match(body):
@@ -576,7 +590,7 @@ def test_serialize_hit_omits_district_for_a_high_court_but_keeps_province():
 
 def test_build_query_no_filter_clause_by_default():
     body = build_query(q="x")
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 def test_build_query_entity_type_filter_targets_type_field():
@@ -597,7 +611,7 @@ def test_build_query_case_type_and_tags_filters():
 
 def test_build_query_ignores_unknown_filter_and_empty_values():
     body = build_query(q="x", filters={"bogus": ["v"], "tags": []})
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 def test_build_query_empty_q_is_match_all_browse():
@@ -861,23 +875,22 @@ def test_build_query_bigo_max_emits_an_upper_bound():
 def test_build_query_merges_both_bounds_into_a_single_range_clause():
     """One bounded interval, not two clauses that read as unrelated constraints."""
     body = build_query(q="x", ranges={"bigo_min": 10_000_000, "bigo_max": 10**11})
-    clauses = body["query"]["bool"]["filter"]
-    assert clauses == [{"range": {"bigo": {"gte": 10_000_000, "lte": 10**11}}}]
+    assert _narrowing(body) == [{"range": {"bigo": {"gte": 10_000_000, "lte": 10**11}}}]
 
 
 def test_build_query_range_clause_targets_the_promoted_field_not_the_card_copy():
     """``raw`` is mapped ``enabled: false``, so a clause on ``raw.card.bigo`` would
     match nothing. The filter must name the promoted top-level field."""
     body = build_query(q="x", ranges={"bigo_min": 1})
-    (clause,) = body["query"]["bool"]["filter"]
+    (clause,) = _narrowing(body)
     assert set(clause["range"]) == {"bigo"}
 
 
 def test_build_query_no_range_clause_by_default():
     """No bound requested → no clause. An implicit ``bigo >= 0`` would drop every
     non-case result from an ordinary search."""
-    assert build_query(q="x")["query"]["bool"]["filter"] == []
-    assert build_query(q="x", ranges={})["query"]["bool"]["filter"] == []
+    assert _narrowing(build_query(q="x")) == []
+    assert _narrowing(build_query(q="x", ranges={})) == []
 
 
 def test_build_query_ignores_unknown_range_param_and_none_bounds():
@@ -886,7 +899,7 @@ def test_build_query_ignores_unknown_range_param_and_none_bounds():
     body = build_query(
         q="x", ranges={"bogus_min": 5, "bigo_min": None, "bigo_max": None}
     )
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 # ── range filters (date) ────────────────────────────────────────────────────────
@@ -912,8 +925,7 @@ def test_build_query_merges_date_bounds_into_a_single_range_clause():
     body = build_query(
         q="x", ranges={"date_from": "2020-01-01", "date_to": "2021-12-31"}
     )
-    clauses = body["query"]["bool"]["filter"]
-    assert clauses == [
+    assert _narrowing(body) == [
         {"range": {"date": {"gte": "2020-01-01", "lte": "2021-12-31"}}}
     ]
 
@@ -923,7 +935,7 @@ def test_build_query_date_and_bigo_ranges_are_separate_clauses():
     body = build_query(
         q="x", ranges={"bigo_min": 500, "date_from": "2020-01-01"}
     )
-    clauses = body["query"]["bool"]["filter"]
+    clauses = _narrowing(body)
     assert {"range": {"bigo": {"gte": 500}}} in clauses
     assert {"range": {"date": {"gte": "2020-01-01"}}} in clauses
     assert len(clauses) == 2

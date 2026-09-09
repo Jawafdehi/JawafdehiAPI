@@ -426,6 +426,55 @@ RANGE_FIELDS: dict[str, tuple[str, str]] = {
 }
 
 
+# ``source_app`` value carried by every NES entity document (entities.search_index
+# SOURCE_APP). The visibility clause below keys on this rather than on ``_index``
+# because ENTITY_INDEX is an ALIAS over numbered generations
+# (jawafdehi_shared.search.aliases): a ``term`` on ``_index`` would have to match
+# whichever concrete generation is live, which changes on every ``--rebuild``.
+# ``source_app`` is a mapped keyword on the document itself and cannot drift.
+_ENTITY_SOURCE_APP = "nes"
+
+
+def _visibility_clauses(include_unreferenced: bool) -> list[dict[str, Any]]:
+    """The entity public-visibility filter: hide entities no PUBLISHED case cites.
+
+    Returns an empty list when ``include_unreferenced`` is set (an authorized
+    caseworker asking for the whole registry — see ``search.views``), so the
+    caller's clause list is byte-identical to the pre-gate DSL in that case.
+
+    NOT a bare ``range`` on ``case_count``. Only entity documents carry that
+    field, and a ``range`` clause EXCLUDES a document that is missing the field
+    — the documented behaviour of the ``bigo`` bound above, which is acceptable
+    there (a बिगो filter is case-scoped by intent) and would be catastrophic
+    here: the default "All records" tab would lose every case, material and
+    court case at once. So the clause reads "not an entity, OR an entity a
+    published case cites", which leaves non-entity documents untouched.
+
+    ``must_not`` on a term is also true for a document MISSING ``source_app``,
+    which is the right direction: an unlabelled document is not an entity, and
+    failing open for non-entities beats blanking the tab.
+    """
+    if include_unreferenced:
+        return []
+    return [
+        {
+            "bool": {
+                "should": [
+                    {
+                        "bool": {
+                            "must_not": {
+                                "term": {"source_app": _ENTITY_SOURCE_APP}
+                            }
+                        }
+                    },
+                    {"range": {"case_count": {"gte": 1}}},
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+    ]
+
+
 def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
     """``range`` filter clauses for the given bounds (one clause per field).
 
@@ -635,6 +684,7 @@ def build_query(
     page: int = 1,
     page_size: int = 10,
     search_after: list[Any] | None = None,
+    include_unreferenced: bool = False,
 ) -> dict[str, Any]:
     """Build the OpenSearch request body for query ``q`` (bilingual, tuned).
 
@@ -677,6 +727,11 @@ def build_query(
     case-insensitive ``include`` regex to the named facet's terms agg so only
     buckets whose key contains the text come back — the query, hits, count and
     every other facet are untouched.
+
+    ``include_unreferenced`` lifts the entity visibility gate (see
+    :func:`_visibility_clauses`). Default False, so every caller that does not
+    ask is gated; ``search.views`` only honours the request from a caller
+    holding the ``Caseworker`` role.
     """
     page = max(1, page)
     page_size = max(1, min(page_size, MAX_PAGE_SIZE))
@@ -695,7 +750,15 @@ def build_query(
     # Range filters (bigo_min/bigo_max) narrow the same way — ANDed alongside the
     # exact-match ones, and equally inert for scoring.
     range_clauses = _range_clauses(ranges)
-    filter_clauses: list[dict[str, Any]] = [*terms_clauses, *range_clauses]
+    # Entity visibility gate — ANDed alongside the caller's own narrowing, and
+    # applied at EVERY type selection (an entity must stay hidden on the default
+    # "All records" tab too, not only on ?type=entity).
+    visibility_clauses = _visibility_clauses(include_unreferenced)
+    filter_clauses: list[dict[str, Any]] = [
+        *terms_clauses,
+        *range_clauses,
+        *visibility_clauses,
+    ]
 
     # ``q`` is OPTIONAL. With a term, build the tuned recall+precision bool query;
     # with an empty/blank ``q`` it's a BROWSE — ``match_all`` so the facet filters,
@@ -1316,6 +1379,7 @@ class SearchService:
         page: int = 1,
         page_size: int = 10,
         cursor: str | None = None,
+        include_unreferenced: bool = False,
     ) -> dict[str, Any]:
         """Execute the unified search and return the response envelope.
 
@@ -1361,6 +1425,7 @@ class SearchService:
             page=page,
             page_size=page_size,
             search_after=search_after,
+            include_unreferenced=include_unreferenced,
         )
         index = _index_for_types(types)
 

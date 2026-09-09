@@ -493,7 +493,16 @@ class CaseworkApi:
         results, top_score, complete = CandidateList(), None, False
         for page in range(1, pages + 1):
             data = self.get("/search/", {"q": query, "type": "entity",
-                                         "page_size": page_size, "page": page},
+                                         "page_size": page_size, "page": page,
+                                         # The resolver needs the WHOLE registry,
+                                         # not the case-referenced slice the
+                                         # endpoint serves by default: its job is
+                                         # to find the entity a new case should
+                                         # bind, which by definition no case cites
+                                         # yet. Honoured only for the Caseworker
+                                         # role; the ambiguity veto above would be
+                                         # meaningless against a 1.5k-doc corpus.
+                                         "include_unreferenced": "true"},
                             timeout=timeout)
             batch = data.get("results") or []
             results.extend(batch)

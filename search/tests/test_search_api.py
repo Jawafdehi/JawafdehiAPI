@@ -13,6 +13,22 @@ import pytest
 from rest_framework.test import APIClient
 
 
+def _narrowing(client):
+    """Filter clauses from the last query, minus the always-on visibility gate.
+
+    ``build_query`` ANDs an entity-visibility clause into every filter list (see
+    ``search.service._visibility_clauses``), so a bare equality assertion on
+    ``filter`` now tests that clause as much as the caller's own narrowing.
+    Stripping it keeps each assertion below about the thing it names. The clause
+    itself is imported from the implementation, never restated.
+    """
+    from search.service import _visibility_clauses
+
+    visibility = _visibility_clauses(False)[0]
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    return [c for c in clauses if c != visibility]
+
+
 def _canned():
     return {
         "hits": {
@@ -277,8 +293,7 @@ def test_search_api_bigo_min_alone_is_an_open_ended_lower_bound():
     with patch("search.service.make_client", return_value=client):
         resp = APIClient().get("/api/search/", {"q": "", "bigo_min": "10000000"})
     assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
-    assert clauses == [{"range": {"bigo": {"gte": 10_000_000}}}]
+    assert _narrowing(client) == [{"range": {"bigo": {"gte": 10_000_000}}}]
 
 
 @pytest.mark.django_db
@@ -290,7 +305,7 @@ def test_search_api_no_range_clause_when_no_bound_given():
     with patch("search.service.make_client", return_value=client):
         resp = APIClient().get("/api/search/", {"q": "x"})
     assert resp.status_code == 200
-    assert client.search.call_args.kwargs["body"]["query"]["bool"]["filter"] == []
+    assert _narrowing(client) == []
 
 
 @pytest.mark.django_db
@@ -332,7 +347,7 @@ def test_search_api_equal_bigo_bounds_are_allowed():
             "/api/search/", {"q": "x", "bigo_min": "500", "bigo_max": "500"}
         )
     assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    clauses = _narrowing(client)
     assert clauses == [{"range": {"bigo": {"gte": 500, "lte": 500}}}]
 
 
@@ -352,7 +367,7 @@ def test_search_api_passes_date_bounds_as_iso_strings():
             {"q": "", "date_from": "2020-01-01", "date_to": "2021-12-31"},
         )
     assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    clauses = _narrowing(client)
     assert clauses == [
         {"range": {"date": {"gte": "2020-01-01", "lte": "2021-12-31"}}}
     ]
@@ -392,7 +407,7 @@ def test_search_api_equal_date_bounds_are_allowed():
             {"q": "x", "date_from": "2020-06-15", "date_to": "2020-06-15"},
         )
     assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    clauses = _narrowing(client)
     assert clauses == [
         {"range": {"date": {"gte": "2020-06-15", "lte": "2020-06-15"}}}
     ]
@@ -466,7 +481,7 @@ def test_search_api_threads_district_and_province_through():
             },
         )
     assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    clauses = _narrowing(client)
     assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
     assert {"terms": {"court_province": ["Bagmati"]}} in clauses
 
@@ -485,7 +500,8 @@ def test_search_api_threads_facet_q_through():
     body = client.search.call_args.kwargs["body"]
     assert body["aggs"]["tags"]["terms"]["include"] == ".*घुस.*"
     assert "include" not in body["aggs"]["case_type"]["terms"]
-    assert body["query"]["bool"]["filter"] == []
+    # A facet-VALUE search narrows only the agg, never the result set.
+    assert _narrowing(client) == []
 
 
 @pytest.mark.django_db
@@ -704,3 +720,119 @@ def test_search_click_beacon_swallows_invalid_payload():
     assert r1.status_code == 204
     assert r2.status_code == 204
     emit.assert_not_called()
+
+
+# ── entity visibility gate ──────────────────────────────────────────────────────
+#
+# An NES entity is publicly searchable iff a PUBLISHED Jawafdehi case cites it
+# (entities.search_visibility). The endpoint applies that gate by default and
+# lifts it only for a caller holding the Caseworker role — which is what keeps
+# the caseworker entity picker able to find an entity nothing cites yet, the
+# entity a NEW case is about to bind.
+
+
+def _visibility_clause():
+    from search.service import _visibility_clauses
+
+    return _visibility_clauses(False)[0]
+
+
+@pytest.mark.django_db
+def test_search_api_gates_unreferenced_entities_by_default():
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "x"})
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert _visibility_clause() in clauses
+
+
+@pytest.mark.django_db
+def test_search_api_gate_spares_non_entity_documents():
+    """The clause must read "not an entity OR a cited entity", never a bare range
+    on ``case_count``. Only entity docs carry that field, and a bare range
+    EXCLUDES a doc that is missing it — which would empty the default "All
+    records" tab of every case, material and court case at once."""
+    clause = _visibility_clause()
+    shoulds = clause["bool"]["should"]
+    assert clause["bool"]["minimum_should_match"] == 1
+    assert {"bool": {"must_not": {"term": {"source_app": "nes"}}}} in shoulds
+    assert {"range": {"case_count": {"gte": 1}}} in shoulds
+
+
+@pytest.mark.django_db
+def test_search_api_gate_applies_to_every_type_selection():
+    """Including the default (no ``type``) tab: an archived entity must not
+    reappear just because the caller did not narrow to entities."""
+    for params in ({"q": "x"}, {"q": "x", "type": "entity"}, {"q": "x", "type": "case"}):
+        client = MagicMock()
+        client.search.return_value = _canned()
+        with patch("search.service.make_client", return_value=client):
+            resp = APIClient().get("/api/search/", params)
+        assert resp.status_code == 200
+        clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+        assert _visibility_clause() in clauses, params
+
+
+@pytest.mark.django_db
+def test_search_api_ignores_the_opt_out_for_an_anonymous_caller():
+    """Ignored, not rejected: /api/search/ is AllowAny and its contract is "one
+    query over public documents", so an anonymous caller passing the flag gets
+    the normal gated page rather than a 403 reading as a broken endpoint. This is
+    also what lets the SPA and the MCP tool send it unconditionally."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "include_unreferenced": "true"}
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert _visibility_clause() in clauses
+
+
+@pytest.mark.django_db
+def test_search_api_honours_the_opt_out_for_a_caseworker():
+    from django.contrib.auth import get_user_model
+    from django.contrib.auth.models import Group
+
+    caseworker = get_user_model().objects.create_user(
+        username="gate-caseworker", password="x"
+    )
+    group, _ = Group.objects.get_or_create(name="Caseworker")
+    caseworker.groups.add(group)
+
+    client = MagicMock()
+    client.search.return_value = _canned()
+    api = APIClient()
+    api.force_authenticate(user=caseworker)
+    with patch("search.service.make_client", return_value=client):
+        resp = api.get("/api/search/", {"q": "x", "include_unreferenced": "true"})
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert _visibility_clause() not in clauses
+
+
+@pytest.mark.django_db
+def test_search_api_gates_a_caseworker_who_does_not_ask():
+    """The role lifts the gate only on request, so a caseworker browsing the
+    public search sees the same corpus a reader does."""
+    from django.contrib.auth import get_user_model
+    from django.contrib.auth.models import Group
+
+    caseworker = get_user_model().objects.create_user(
+        username="gate-caseworker-2", password="x"
+    )
+    group, _ = Group.objects.get_or_create(name="Caseworker")
+    caseworker.groups.add(group)
+
+    client = MagicMock()
+    client.search.return_value = _canned()
+    api = APIClient()
+    api.force_authenticate(user=caseworker)
+    with patch("search.service.make_client", return_value=client):
+        resp = api.get("/api/search/", {"q": "x"})
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert _visibility_clause() in clauses
