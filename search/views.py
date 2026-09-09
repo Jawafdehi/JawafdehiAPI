@@ -24,6 +24,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from courts.geography import ALL_COURT_IDENTIFIERS
+from entities.permissions import HasEntityWriteRole
 
 from .analytics import emit_search_click_event, emit_search_event
 from .service import (
@@ -230,6 +231,11 @@ class SearchQuerySerializer(serializers.Serializer):
     # Opaque deep-paging cursor (the ``next_cursor`` from a prior response). When
     # given, ``page`` is ignored and results resume after that point (search_after).
     cursor = serializers.CharField(required=False, allow_blank=False)
+    # Lift the entity visibility gate: return NES entities that no PUBLISHED case
+    # cites (see ``entities.search_visibility``). Honoured ONLY for a caller
+    # holding the Caseworker role; see the view below for why it is ignored rather
+    # than rejected for everyone else.
+    include_unreferenced = serializers.BooleanField(required=False, default=False)
 
 
 @extend_schema(
@@ -461,6 +467,23 @@ class SearchQuerySerializer(serializers.Serializer):
                 "the previous page. Use for paging beyond 10,000 results."
             ),
         ),
+        OpenApiParameter(
+            "include_unreferenced",
+            OpenApiTypes.BOOL,
+            OpenApiParameter.QUERY,
+            required=False,
+            description=(
+                "Include NES entities that no PUBLISHED Jawafdehi case cites. "
+                "By default they are hidden: the entity registry holds ~187k "
+                "records against ~1.5k that a published case names, and the "
+                "remainder is bulk-imported reference data that crowded out the "
+                "curated corpus. Requires the Caseworker role; from any other "
+                "caller the flag is IGNORED (the response is a normal gated one, "
+                "not a 403). Entity detail remains publicly readable at "
+                "/api/entities/{iri} either way — this is a default browse scope, "
+                "not an access control."
+            ),
+        ),
     ],
     tags=["search"],
 )
@@ -496,6 +519,18 @@ class UnifiedSearchView(APIView):
             for param in RANGE_FIELDS
             if (value := data.get(param)) is not None
         }
+        # Entity visibility gate. The flag is only honoured for content staff, and
+        # is IGNORED rather than rejected otherwise: /api/search/ is AllowAny and
+        # its whole contract is "one query, public documents", so an anonymous
+        # caller passing it has asked for something reasonable and should get the
+        # normal gated page, not a 403 that reads like the endpoint is broken.
+        # Ignoring also keeps the SPA and the MCP tool able to send the flag
+        # unconditionally and let this decide, which is what keeps the anonymous
+        # MCP catalog honest (jawafdehi_mcp.identity.ANONYMOUS_TOOL_NAMES promises
+        # its tools expose nothing /api/ withholds from an anonymous caller).
+        include_unreferenced = bool(
+            data["include_unreferenced"]
+        ) and HasEntityWriteRole().has_permission(request, self)
         # Ephemeral per-response id: it join-keys the server-side analytics event to
         # a future client result-click beacon (query -> shown -> clicked) WITHOUT
         # attaching any identity. Echoed in the envelope so the SPA can send it back.
@@ -513,6 +548,7 @@ class UnifiedSearchView(APIView):
                 page=data["page"],
                 page_size=data["page_size"],
                 cursor=data.get("cursor"),
+                include_unreferenced=include_unreferenced,
             )
         except SearchError as exc:
             # Bad cursor / over-deep offset — a client error, not a 503.

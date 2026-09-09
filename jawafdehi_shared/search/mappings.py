@@ -257,6 +257,24 @@ def common_mappings() -> dict[str, Any]:
                 # absent (and a ``range`` clause excludes a doc missing the field,
                 # which is the behaviour we want for an unrecorded amount).
                 "bigo": {"type": "long"},
+                # How many PUBLISHED Jawafdehi cases cite this NES entity. ENTITIES
+                # ONLY — the same single-type pattern as ``case_status``/``bigo``
+                # above; every other doc type leaves it absent, which is why the
+                # visibility filter is written as "not an entity OR case_count >= 1"
+                # rather than a bare range (a bare range excludes docs MISSING the
+                # field, i.e. every case, material and court case — see
+                # ``search.service._visibility_clauses``).
+                #
+                # It is the public-search gate for entities (see
+                # ``entities.search_visibility``): 0 means "cited by no published
+                # case", which anonymous callers do not see. Also usable for
+                # ranking and an "in N cases" badge.
+                #
+                # Same rebuild caveat as ``weight``/``court_type``: an existing
+                # generation only gains the declared mapping on the next
+                # ``--rebuild``, until which an integer is picked up by dynamic
+                # mapping (safe — the values ARE integers).
+                "case_count": {"type": "integer"},
                 # Full serialized JSON-LD / record, return-only (not searchable).
                 "raw": {"type": "object", "enabled": False},
             }

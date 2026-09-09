@@ -176,6 +176,7 @@ class SearchControlPlaneTool(_ControlPlaneTool):
         "page",
         "page_size",
         "cursor",
+        "include_unreferenced",
     )
 
     @property
@@ -343,12 +344,29 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     "default": 10,
                 },
                 "cursor": {"type": "string"},
+                # Include NES entities that no PUBLISHED Jawafdehi case cites.
+                # DEFAULTS TO TRUE here, unlike the endpoint (which defaults to
+                # False), because this tool's caller is usually a caseworker in
+                # chat who needs the whole registry to pick an entity to bind.
+                #
+                # Sending it is safe from any caller and is NOT a bypass: the
+                # endpoint honours the flag only for the Caseworker role and
+                # ignores it otherwise. That matters here specifically —
+                # search_control_plane is in identity.ANONYMOUS_TOOL_NAMES, whose
+                # invariant is that every tool in it exposes nothing /api/ would
+                # withhold from an anonymous caller. Hard-coding the unfiltered
+                # corpus instead of letting the API decide would break that.
+                "include_unreferenced": {"type": "boolean", "default": True},
             },
             "required": [],
         }
 
     async def execute(self, arguments: dict[str, Any]) -> list[TextContent]:
         params = _query_params(arguments, self.PARAMS)
+        # Default ON (see the schema note): _query_params drops absent keys, so an
+        # unspecified flag has to be supplied here rather than relying on the
+        # endpoint's own default, which is the opposite.
+        params.setdefault("include_unreferenced", True)
         return await self._call("GET", "/api/search/", params=params)
 
 
