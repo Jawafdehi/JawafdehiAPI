@@ -98,11 +98,33 @@ class Command(BaseCommand):
 
         The ``dropped:`` groups land here too, as rows with a null tag. That is what
         lets a retired filter value answer "this was removed" instead of "unknown".
+
+        A tag's own labels alias it. `स्थानीय तह` is the `label_ne` of
+        `local-government` and was landing in the "matches no alias" bucket — the
+        vocabulary knew the word and still could not resolve it. Nepali-first content
+        means the Nepali label is the *likeliest* thing a caseworker types, so making
+        it resolve is not a convenience, it is the point. Same for `label_en`.
         """
         wanted: dict[str, tuple[str | None, str, str]] = {}
+        claimed_by: dict[str, str] = {}
         for entry in entries:
-            for raw in [*(entry.get("aliases") or []), entry["id"]]:
-                wanted[normalize(str(raw))] = (entry["id"], "", str(raw))
+            aliases = [
+                *(entry.get("aliases") or []),
+                entry["id"],
+                entry["label_ne"],
+                entry["label_en"],
+            ]
+            for raw in aliases:
+                key = normalize(str(raw))
+                # Silent last-wins would make one tag unreachable and say nothing.
+                # Only possible now that labels are seeded, so guard it here.
+                if claimed_by.get(key, entry["id"]) != entry["id"]:
+                    raise CommandError(
+                        f"{raw!r} normalises to {key!r}, claimed by both "
+                        f"{claimed_by[key]!r} and {entry['id']!r}"
+                    )
+                claimed_by[key] = entry["id"]
+                wanted[key] = (entry["id"], "", str(raw))
         for group in dropped:
             reason = group["reason"]
             for raw in group.get("values") or []:

@@ -1,0 +1,251 @@
+# Per-case tag corrections, applied by `rebuild_case_tags` on top of the alias map.
+#
+# The alias map is mechanical: it can only say what a raw string means. It cannot
+# add a tag the case never carried, and it cannot fix one case without changing
+# every case that shares the alias. This file is where those two things happen.
+#
+# EVERY entry needs a `why` naming the evidence — the command rejects a blank one.
+# The evidence is the case's own title in almost every case here; where it is not,
+# the `why` says so.
+#
+# `add` is not "a tag that seems right". It is a fact stated in the record:
+#   थाहा नगरपालिका in the title  ->  local-government
+#   गण्डकी प्रदेश ... मन्त्रालय   ->  province-government
+# Two systematic gaps account for nearly all of it: of the 31 cases that end with
+# fewer than 3 tags, 28 lack a governance level and 22 lack geography. Almost none
+# lack an offence or a sector.
+#
+# NOT curated to hit a tag count. Curated because a reader currently cannot filter
+# half the corpus by province.
+
+cases:
+
+  # ---------------------------------------------------------------------------
+  # kathmandu-valley is deprecated and demonstrably wrong. Every case carrying it
+  # gets a real district instead, or nothing.
+  # ---------------------------------------------------------------------------
+
+  - slug: anup-mehra-nawalparasi-land-080-cr-0064
+    add: [nawalparasi]
+    remove: [kathmandu-valley]
+    why: >-
+      Title says नवलपरासी हदबन्दी जग्गा प्रकरण. This case is the proof that
+      kathmandu-valley had to go — Nawalparasi is not in the valley or even the
+      province. The title does not say which post-2017 half, which is why
+      `nawalparasi` is one tag.
+
+  - slug: yam-kumar-karki-080-cr-0136-illegal-assets
+    add: [kathmandu]
+    remove: [kathmandu-valley]
+    why: Title names काठमाडौं उपत्यका विकास प्राधिकरण; the office sits in Kathmandu district.
+
+  - slug: case-080-cr-0141-nta-mdms-procurement-fraud
+    add: [kathmandu, federal-government]
+    remove: [kathmandu-valley]
+    why: >-
+      Title names नेपाल दूरसञ्चार प्राधिकरण — the federal telecom regulator, based
+      in Kathmandu.
+
+  - slug: security-printing-vikal-poudel-080-cr-0172
+    add: [state-owned-entity]
+    remove: [kathmandu-valley]
+    why: >-
+      सुरक्षण मुद्रण केन्द्र is a government-owned company, not a ministry or a
+      municipality. Already tagged kathmandu, so only the valley tag is dropped.
+
+  - slug: vikal-paudel-080-cr-0174-illegal-assets
+    add: [kathmandu, state-owned-entity]
+    remove: [kathmandu-valley]
+    why: Same body as 080-CR-0172 — सुरक्षण मुद्रण केन्द्र, its executive director.
+
+  - slug: case-080-cr-0196-baikuntha-aryal-procurement-fraud
+    add: [kathmandu, state-owned-entity]
+    remove: [kathmandu-valley]
+    why: >-
+      सुरक्षण मुद्रण केन्द्र again. The title also names a तत्कालीन सचिव, so
+      federal-government is arguably a second governance level here — left off
+      because the alleged conduct sits with the centre, not the ministry.
+
+  - slug: gajendra-maharjan-revenue-080-cr-0181-fy2075
+    remove: [kathmandu-valley]
+    why: Godavari Municipality, already correctly tagged lalitpur + local-government.
+
+  - slug: case-080-cr-0182-gajendra-maharjan-revenue-fy2076
+    remove: [kathmandu-valley]
+    why: Godavari Municipality, already correctly tagged lalitpur + local-government.
+
+  - slug: gajendra-maharjan-revenue-080-cr-0183-fy2077
+    remove: [kathmandu-valley]
+    why: Godavari Municipality, already correctly tagged lalitpur + local-government.
+
+  # ---------------------------------------------------------------------------
+  # Local government — the title names a municipality or rural municipality.
+  # ---------------------------------------------------------------------------
+
+  - slug: case-99ca8d124afa-dbd7c3
+    add: [kathmandu, local-government]
+    why: Title names काठमाडौँ महानगरपालिका and its then engineer.
+
+  - slug: case-081-cr-0136-oxygen-plant
+    add: [local-government, makwanpur]
+    why: Title names थाहा नगरपालिका, which is in Makwanpur.
+
+  - slug: case-081-cr-0097-d8f6d5b2
+    add: [local-government, sarlahi]
+    why: >-
+      भरत ताल is in बागमती नगरपालिका — the MUNICIPALITY in Sarlahi, not Bagmati
+      province. Already tagged madhesh, which is consistent.
+
+  # ---------------------------------------------------------------------------
+  # Province government — the title names a provincial ministry or office-holder.
+  # ---------------------------------------------------------------------------
+
+  - slug: case-081-cr-0079-539b729d
+    add: [madhesh, province-government]
+    why: Title says मधेश प्रदेश स्वास्थ्य उपकरण खरिद.
+
+  - slug: case-081-cr-0080-82b7d966
+    add: [madhesh, province-government]
+    why: Title says मधेश प्रदेश स्वास्थ्य उपकरण खरिद.
+
+  - slug: madhesh-pathology-lab-081-CR-0081
+    add: [madhesh, province-government]
+    why: Title says मधेश प्रदेश स्वास्थ्य उपकरण खरिद.
+
+  - slug: case-081-cr-0082-0070ab5b
+    add: [madhesh, province-government]
+    why: Title says मधेश प्रदेश स्वास्थ्य उपकरण खरिद.
+
+  - slug: jhalak-poudel-illegal-assets-081-cr-0138
+    add: [province-government]
+    why: Title names गण्डकी प्रदेश भौतिक पूर्वाधार मन्त्रालय. Already tagged gandaki.
+
+  - slug: case-081-cr-0104-6653add6
+    add: [province-government]
+    why: >-
+      Title names a सुदूरपश्चिम प्रदेशका पूर्वमुख्यमन्त्री. Already tagged
+      sudurpashchim.
+
+  # ---------------------------------------------------------------------------
+  # Federal government — the title names a department, national centre or
+  # federal office.
+  # ---------------------------------------------------------------------------
+
+  - slug: case-081-cr-0048-bishnu-pumar-shrestha
+    add: [federal-government, water-supply]
+    why: >-
+      Title names जलश्रोत तथा सिँचाइ विभाग, a federal department. No district is
+      named, so geography is left empty rather than guessed.
+
+  - slug: bara-hulak-081-CR-0091
+    add: [bara, federal-government]
+    why: Title says बारा हुलाक बचत बैंक — Bara district, and the postal service is federal.
+
+  - slug: case-081-cr-0127-b807df
+    add: [parsa, federal-government]
+    why: Title names यातायात व्यवस्था कार्यालय, पर्सा — a federal office in Parsa.
+
+  - slug: raju-puri-080-cr-0007-illegal-assets
+    add: [kathmandu, federal-government]
+    why: Title names नापी कार्यालय चाबहिल — the Survey Department, in Kathmandu.
+
+  - slug: ram-ranabhat-illegal-assets-080-cr-0051
+    add: [dang, federal-government]
+    why: >-
+      Title names जल उत्पन्न प्रकोप नियन्त्रण कार्यालय लमही. Lamahi is in Dang,
+      and the office is federal.
+
+  - slug: dirgha-narayan-koirala-080-cr-0085-illegal-assets
+    add: [federal-government]
+    why: >-
+      Title names a डिभिजन वन अधिकृत — the Department of Forests is federal.
+      Already tagged bagmati + forestry.
+
+  - slug: nitc-081-cr-0058-12d94f
+    add: [federal-government, kathmandu]
+    why: >-
+      एन. आई. टी. सी. is the राष्ट्रिय सूचना प्रविधि केन्द्र, a federal centre based
+      in Kathmandu.
+
+  - slug: high-compute-infrastructure-08-d53cf7
+    add: [federal-government, kathmandu]
+    why: Title names राष्ट्रिय सूचना प्रविधि केन्द्र.
+
+  - slug: risc-hci-081-cr-0098-ad208a
+    add: [federal-government, kathmandu]
+    why: >-
+      Same NITC server-procurement programme as 081-CR-0142. The title alone does
+      not name the body; NITC was in this case's own original tags.
+
+  - slug: teramocs-081-cr-0095-32c84510
+    add: [federal-government, kathmandu]
+    why: >-
+      TERAMOCS is the telecom traffic monitoring system procured by the federal
+      telecom regulator, based in Kathmandu.
+
+  - slug: case-081-cr-0090-389ad1
+    add: [federal-government]
+    why: >-
+      दिव्येश्वरी जग्गा एकीकरण आयोजना is a Kathmandu Valley Development Authority
+      project, and KVDA sits under the federal urban-development ministry. Which
+      district the project land is in is not stated, so geography is left empty.
+
+  - slug: budhigandaki-hydropower-projec-77f597
+    add: [federal-government]
+    why: >-
+      A national hydropower project. The dam spans Dhading and Gorkha, so no single
+      district is assigned.
+
+  - slug: maoist-combatant-cantonment-co-9095fa
+    add: [federal-government]
+    why: >-
+      Cantonment management sat with the federal peace process. The cantonments were
+      spread across seven sites, so no district is assigned.
+
+  # ---------------------------------------------------------------------------
+  # State-owned entities and other bodies.
+  # ---------------------------------------------------------------------------
+
+  - slug: ntc-081-cr-0111-82b9028f
+    add: [state-owned-entity, kathmandu]
+    why: NTC (Nepal Telecom) is a state-owned company headquartered in Kathmandu.
+
+  - slug: case-080-cr-0047-arun-kumar-shrestha-embezzlement
+    add: [embezzlement, kathmandu, state-owned-entity]
+    why: >-
+      The only case the alias map leaves completely untagged — its two raw values
+      were `Corruption` (restates case_type) and `Pashupati Jalahari` (a case name).
+      The title states हिनामिना of 1,491.718g of gold at Pashupatinath, which the
+      Pashupati Area Development Trust administers, in Kathmandu.
+
+  - slug: case-081-cr-0129-50904188
+    add: [state-owned-entity]
+    why: >-
+      पशुपति शवदाह गृह is run by the Pashupati Area Development Trust. Already
+      tagged kathmandu.
+
+# ---------------------------------------------------------------------------
+# NOT curated — 6 cases where the record does not support a confident call.
+# Listed so they are visibly outstanding rather than quietly thin. Each needs a
+# human who knows the case, not a better guess.
+#
+#   case-081-cr-0046-240817ce
+#     कृषि, पशुपक्षी तथा मत्स्य विकास कार्यक्रम. Programmes of this name run at
+#     all three tiers of government and the title names no office or district.
+#
+#   rabi-lamichhane-cooperative-fr-11ccd7
+#     The cooperatives involved sit in several districts, and cooperative
+#     regulation is split across tiers. Picking one of either would be invention.
+#
+#   case-081-cr-0107-patanjali
+#     पतञ्जली योगपीठ जग्गा खिचोला. The land cannot be placed from the title, and
+#     the accused is a private company, so governance level may not apply at all.
+#
+#   case-ncell-capital-gains-tax-dispute-part1
+#   case-ncell-capital-gains-tax-dispute-part2
+#   case-ncell-tax-dispute-icsid-arbitration-part3
+#     Ncell is a private telecom company. `governance_level` describes which tier
+#     of the state a case concerns; for a private taxpayer the honest answer is
+#     that the axis does not apply, not that some value is missing. Part 3 is an
+#     ICSID arbitration, so it is not domestically located either.
+# ---------------------------------------------------------------------------
