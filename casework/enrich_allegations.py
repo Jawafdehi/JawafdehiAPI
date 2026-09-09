@@ -69,7 +69,6 @@ Every allegation MUST:
 8. Include the time period (date range or fiscal year) when specified
 9. Be self-contained — understandable without additional context
 10. Follow the established Jawafdehi allegation style (see examples below)
-11. End with the charge marker "भन्ने आरोप छ।" — a participle clause closed by that phrase, so the sentence reads as the CIAA's claim and not as a finding of fact
 
 Return 2-3 allegations. Each allegation MUST be exactly one sentence.
 The first allegation MUST be the most descriptive overview of the primary allegation.
@@ -86,7 +85,8 @@ DO NOT:
 - Start with a long comma-separated list of accused names when a role group can carry the allegation
 - Produce near-duplicate allegations that repeat the same accused list and same misconduct
 - Write remedies, requests, or procedural outcomes as allegations, such as asset-return demands, confiscation requests, charge filing, or punishment requests
-- End allegations with source-attribution phrases such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", or "देखिन्छ" — these attribute the sentence to the document rather than to the charge
+- End allegations with attribution phrases such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"
+- Close each allegation with the plain participle and a danda, as in "…गरेको।" — do NOT append a charge marker such as "भन्ने आरोप छ।" or "भन्ने आरोप।", which only repeats what the field itself already states
 - Include multiple sentences in one allegation
 - List related entity names when a descriptive role is enough
 - Use long comma-formatted Nepali amounts when a readable crore/lakh approximation is clearer
@@ -104,21 +104,21 @@ REFERENCE EXAMPLES from published Jawafdehi cases:
 Example 1 (Illegal property accumulation):
 "कमल राज गौतमले मिति २०५५/०१/०७ देखि २०७९/१२/२४ सम्म सार्वजनिक पद धारण
 गर्दा वैध आयभन्दा रु. २,५१,७८,६८७.७१ बढी सम्पत्ति खर्च तथा लगानी गरी
-गैरकानूनी रूपमा सम्पत्ति आर्जन गरेको भन्ने आरोप छ।"
+गैरकानूनी रूपमा सम्पत्ति आर्जन गरेको।"
 
 Example 2 (Procurement fraud):
 "प्रतिवादीहरूको मिलेमतोमा काठमाडौं महानगरपालिकाको NCBW-KMC को ठेक्कामा
 Pending Litigation नहुने विषयलाई Pending Litigation रहेको भनी गलत मूल्याङ्कन
-प्रतिवेदन खडा गरी सार्वजनिक सम्पत्ति बदनियतपूर्वक हानि नोक्सानी पुर्याएको भन्ने आरोप छ।"
+प्रतिवेदन खडा गरी सार्वजनिक सम्पत्ति बदनियतपूर्वक हानि नोक्सानी पुर्याएको।"
 
 Example 3 (Bribery and money laundering):
 "मोहनबहादुर बस्नेतले नगर प्रमुख पदको दुरुपयोग गरी पद्मा कम्पनीहरू र राजु
 प्रसाद कँडेललाई कर छुट र जग्गा उपलब्धता लगायत अनुचित लाभ पुर्याई सो बापत
-करिब रु. ९.२२ करोड घुस/रिसवत लिएको भन्ने आरोप छ।"
+करिब रु. ९.२२ करोड घुस/रिसवत लिएको।"
 
 Example 4 (Embezzlement):
 "प्रतिवादीहरूको मिलेमतोमा हुलाक बचत बैङ्कमा बचतकर्ताहरूको निक्षेप रकम
-बैङ्क दाखिला नगरी अपचलन गरी हिनामिना गरेको भन्ने आरोप छ।"
+बैङ्क दाखिला नगरी अपचलन गरी हिनामिना गरेको।"
 """
 
 USER_PROMPT_TEMPLATE = """Extract 2-3 key allegation statements from this CIAA press release.
@@ -128,8 +128,8 @@ Bigo amount: {bigo}
 
 Instructions:
 - Each allegation must be exactly one complete, self-contained sentence in Nepali
-- End every allegation with "भन्ने आरोप छ।" — write the act as a participle clause and close with that phrase, as in "…गरेको भन्ने आरोप छ।"
-- Do not use source-attribution wording such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", or "देखिन्छ"
+- Do not end any allegation with attribution wording such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"
+- Close each allegation with the plain participle and a danda, as in "…गरेको।" — do NOT append a charge marker such as "भन्ने आरोप छ।" or "भन्ने आरोप।", which only repeats what the field itself already states
 - Make the first allegation a descriptive overview of the primary allegation
 - Make the first allegation about substance: institution/property/transaction, alleged scheme, mechanism, amount or harm, and period when available
 - Make the second and third allegations shorter supporting allegations
@@ -189,32 +189,35 @@ def _extract_allegations(
     return _parse_allegations_response(response_text)
 
 
-# `tone.hedge_key_allegations` in work/slug-fix/enricher-fix-rules.json: a bare
-# declarative reads as an established fact, and six of the ten cases the rule was
-# proven on had ended in acquittal. The prompt asks for the marker; this enforces it.
-HEDGE = " भन्ने आरोप छ।"
-_ALREADY_HEDGED = ("भन्ने आरोप", "अभियोग दाबी")
-# The participle ending, and only that: `ेको` (गरेको) plus the independent-vowel
-# `एको` (लुकाएको, पुर्‍याएको). A bare `को` also matches the genitive (`सरकारको।`),
-# where the marker is not Nepali. The terminator is optional and may be a danda,
-# an ASCII full stop, or absent, and a trailing perfect copula (`गरेको छ।`) is
-# absorbed -- HEDGE supplies its own छ.
-_PARTICIPLE_END = re.compile(r"([ेए]को)(?:\s*छ)?\s*[।.]?\s*$")
+# The PR #475 review: `key_allegations` renders under the heading
+# `मुख्य आरोपहरू`, so closing every entry with `भन्ने आरोप छ।` states twice what the
+# field states once. The published cases the reviewer scores 95-100 on
+# `tonal_neutrality` carry the hedge in the title and description, or once for the
+# whole list -- never on every sentence. The prompt bans the marker; this strips
+# it, because the prompt alone does not hold: under the donor prompt, which
+# banned "आरोप छ", the model still closed 27 of 27 allegations with it.
+_CHARGE_MARKER_END = re.compile(r"\s*भन्ने\s+आरोप(?:\s+छ)?\s*[।.]?\s*$")
+# The clause the marker was glued to has to be a participle -- `ेको` (गरेको) or
+# the independent-vowel `एको` (लुकाएको, पुर्‍याएको) -- or it is carrying the
+# sentence's only predicate and removing it leaves broken Nepali.
+_PARTICIPLE_END = re.compile(r"[ेए]को$")
 
 
-def _hedge(text: str) -> str:
-    """Close a participle allegation with the CIAA charge marker.
+def _strip_charge_marker(text: str) -> str:
+    """Drop a trailing `भन्ने आरोप छ।` and close the participle with a danda.
 
-    Idempotent. A non-participle ending is left alone -- force-suffixing one
-    produces ungrammatical Nepali. A perfect (`…गरेको छ।`) asserts guilt as
-    plainly as the bare participle, so it is hedged too; the cost is that a
-    neutral perfect (`…कायम भएको छ।`) is marked as a claim as well, which stays
-    true because the sentence is the CIAA's in the first place.
+    Tail-anchored and idempotent. A mid-sentence mention is the sentence's own
+    subject, not a marker, and is left alone; so is a marker that follows
+    anything but a participle.
     """
     t = text.rstrip()
-    if any(m in t for m in _ALREADY_HEDGED) or not _PARTICIPLE_END.search(t):
+    m = _CHARGE_MARKER_END.search(t)
+    if not m:
         return t
-    return _PARTICIPLE_END.sub(r"\1" + HEDGE, t)
+    head = t[: m.start()].rstrip()
+    if not _PARTICIPLE_END.search(head):
+        return t
+    return head + "।"
 
 
 # `tone.append_acquittal_line` in work/slug-fix/enricher-fix-rules.json:
@@ -288,7 +291,7 @@ def _parse_allegations_response(response_text: str) -> Optional[list]:
     if not entries:
         return None
     clean = [
-        _hedge(str(a).strip())
+        _strip_charge_marker(str(a).strip())
         for a in entries
         if isinstance(a, str) and a.strip()
     ]

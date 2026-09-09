@@ -30,7 +30,7 @@ from casework.enrich_allegations import (
     _append_acquittal_line,
     _clamp,
     _extract_allegations,
-    _hedge,
+    _strip_charge_marker,
     _parse_allegations_response,
 )
 from tests.casework.fakes import FakeUsage
@@ -38,38 +38,31 @@ from tests.casework.fakes import FakeUsage
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DONOR_COMMIT = "0321a85"
 
-# The only intended divergence from the donor prompts: the reviewer's
-# `tone.hedge_key_allegations` rule (work/slug-fix/enricher-fix-rules.json).
-# Stated as substitutions so the byte-pin above still catches every OTHER drift.
+# The only intended divergence from the donor prompts: the ban on the
+# `भन्ने आरोप छ।` charge marker (the PR #475 review -- the field is the
+# case's allegations already, so the marker repeats the section heading on every
+# line). Stated as substitutions so the byte-pin above still catches every OTHER
+# drift.
+DONOR_ATTRIBUTION_BAN_SYSTEM = (
+    '- End allegations with attribution phrases such as "उल्लेख छ", '
+    '"भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"'
+)
+DONOR_ATTRIBUTION_BAN_USER = (
+    '- Do not end any allegation with attribution wording such as "उल्लेख छ", '
+    '"भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"'
+)
+MARKER_BAN = (
+    '- Close each allegation with the plain participle and a danda, as in '
+    '"…गरेको।" — do NOT append a charge marker such as "भन्ने आरोप छ।" or '
+    '"भन्ने आरोप।", which only repeats what the field itself already states'
+)
+
 SYSTEM_SUBS = [
-    (
-        "10. Follow the established Jawafdehi allegation style (see examples below)",
-        "10. Follow the established Jawafdehi allegation style (see examples below)\n"
-        '11. End with the charge marker "भन्ने आरोप छ।" — a participle clause closed'
-        " by that phrase, so the sentence reads as the CIAA's claim and not as a"
-        " finding of fact",
-    ),
-    (
-        '- End allegations with attribution phrases such as "उल्लेख छ", '
-        '"भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"',
-        '- End allegations with source-attribution phrases such as "उल्लेख छ", '
-        '"भनिएको छ", "जनाइएको छ", or "देखिन्छ" — these attribute the sentence to '
-        "the document rather than to the charge",
-    ),
-    ('गरेको।"', 'गरेको भन्ने आरोप छ।"'),
-    ('पुर्याएको।"', 'पुर्याएको भन्ने आरोप छ।"'),
-    ('लिएको।"', 'लिएको भन्ने आरोप छ।"'),
+    (DONOR_ATTRIBUTION_BAN_SYSTEM, DONOR_ATTRIBUTION_BAN_SYSTEM + "\n" + MARKER_BAN),
 ]
 
 USER_SUBS = [
-    (
-        '- Do not end any allegation with attribution wording such as "उल्लेख छ", '
-        '"भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"',
-        '- End every allegation with "भन्ने आरोप छ।" — write the act as a participle '
-        'clause and close with that phrase, as in "…गरेको भन्ने आरोप छ।"\n'
-        '- Do not use source-attribution wording such as "उल्लेख छ", "भनिएको छ", '
-        '"जनाइएको छ", or "देखिन्छ"',
-    ),
+    (DONOR_ATTRIBUTION_BAN_USER, DONOR_ATTRIBUTION_BAN_USER + "\n" + MARKER_BAN),
 ]
 
 
@@ -118,26 +111,34 @@ class TestDonorFidelity:
     silent failure available in these files: it changes LLM behavior with
     zero test failures anywhere else."""
 
-    def test_system_prompt_is_donor_plus_the_charge_marker_rule(self, donor):
+    def test_system_prompt_is_donor_plus_the_marker_ban(self, donor):
         assert ea.SYSTEM_PROMPT == _apply(donor["SYSTEM_PROMPT"], SYSTEM_SUBS)
 
-    def test_user_prompt_is_donor_plus_the_charge_marker_rule(self, donor):
+    def test_user_prompt_is_donor_plus_the_marker_ban(self, donor):
         assert ea.USER_PROMPT_TEMPLATE == _apply(
             donor["USER_PROMPT_TEMPLATE"], USER_SUBS)
 
-    def test_every_reference_example_carries_the_charge_marker(self):
+    def test_no_reference_example_carries_a_charge_marker(self):
+        # The examples are what the model actually imitates, so the donor's
+        # bare participle has to survive here or the ban below is cosmetic.
         block = ea.SYSTEM_PROMPT.split("REFERENCE EXAMPLES", 1)[1]
         examples = re.findall(r'"([^"]+)"', block, re.S)
         assert len(examples) == 4
         for text in examples:
-            assert text.rstrip().endswith(ea.HEDGE.strip())
+            assert "भन्ने आरोप" not in text
+            assert text.rstrip().endswith("को।")
 
-    def test_the_charge_marker_is_not_banned_as_attribution_wording(self):
+    def test_both_prompts_ban_the_charge_marker_by_name(self):
+        # A bare "आरोप छ" ban is not enough on its own: under the donor prompt,
+        # which carried exactly that ban, the model still closed 27 of 27
+        # allegations with the marker (2026-08-24 run, FY078/079 1cr-9). The
+        # ban names the phrase.
         for prompt in (ea.SYSTEM_PROMPT, ea.USER_PROMPT_TEMPLATE):
+            assert "भन्ने आरोप छ।" in prompt
             banlines = [ln for ln in prompt.splitlines() if "उल्लेख छ" in ln]
             assert banlines
             for line in banlines:
-                assert '"आरोप छ"' not in line
+                assert '"आरोप छ"' in line
 
     def test_donor_never_mentions_missing_details(self):
         # Pins the brief-vs-donor finding: the donor source itself never
@@ -155,68 +156,79 @@ class TestDonorFidelity:
 # --------------------------------------------------------------------------
 
 
-class TestHedge:
-    """`tone.hedge_key_allegations` -- a bare declarative ('…गरेको।') reads as an
-    established fact, so it closes with the CIAA's charge instead. Proven on 10
-    cases / 30 allegations, 2026-08-13 (work/slug-fix/tone-fixes.jsonl)."""
+class TestStripChargeMarker:
+    """The PR #475 review: `key_allegations` renders under the heading
+    `मुख्य आरोपहरू`, so closing every entry with `भन्ने आरोप छ।` states twice what
+    the field states once. The prompt bans the marker; this is the floor, because
+    the model emits it whether or not the prompt asks (27 of 27 allegations on the
+    2026-08-24 FY078/079 run, under a prompt that banned "आरोप छ").
 
-    def test_matra_participle_gets_the_charge_marker(self):
-        assert _hedge("गैरकानूनी सम्पत्ति आर्जन गरेको।") == (
-            "गैरकानूनी सम्पत्ति आर्जन गरेको भन्ने आरोप छ।")
+    Measured against production: of the 66 live allegations carrying the marker,
+    this strips 65 and leaves the one that only mentions it mid-sentence."""
 
-    def test_independent_vowel_participle_gets_the_charge_marker(self):
-        # A /ेको।$/ pattern misses this form and 6 others like it.
-        assert _hedge("राजस्व लुकाएको।") == "राजस्व लुकाएको भन्ने आरोप छ।"
+    def test_marker_is_stripped_after_a_matra_participle(self):
+        assert _strip_charge_marker(
+            "गैरकानूनी सम्पत्ति आर्जन गरेको भन्ने आरोप छ।"
+        ) == "गैरकानूनी सम्पत्ति आर्जन गरेको।"
 
-    def test_marker_is_not_applied_twice(self):
-        already = "रकम हिनामिना गरेको भन्ने आरोप छ।"
-        assert _hedge(already) == already
+    def test_marker_is_stripped_after_an_independent_vowel_participle(self):
+        # `एको` (लुकाएको, पुर्‍याएको) -- a /ेको$/ guard misses this form.
+        assert _strip_charge_marker("राजस्व लुकाएको भन्ने आरोप छ।") == (
+            "राजस्व लुकाएको।")
 
-    def test_an_existing_abhiyog_dabi_phrasing_is_left_alone(self):
-        already = "यो अभियोग दाबी विशेष अदालतमा पेस भएको छ।"
-        assert _hedge(already) == already
+    def test_the_copula_less_form_is_stripped_too(self):
+        # `…भन्ने आरोप।` carries the same redundancy as `…भन्ने आरोप छ।`;
+        # 2 of the 66 live marked allegations end this way.
+        assert _strip_charge_marker("प्रतिस्पर्धा सीमित गरेको भन्ने आरोप।") == (
+            "प्रतिस्पर्धा सीमित गरेको।")
+
+    def test_an_already_bare_allegation_is_unchanged(self):
+        plain = "रकम हिनामिना गरेको।"
+        assert _strip_charge_marker(plain) == plain
+
+    def test_stripping_is_idempotent(self):
+        once = _strip_charge_marker("रकम हिनामिना गरेको भन्ने आरोप छ।")
+        assert _strip_charge_marker(once) == once
 
     def test_a_space_before_the_danda_does_not_defeat_the_match(self):
-        assert _hedge("रकम हिनामिना गरेको ।") == (
-            "रकम हिनामिना गरेको भन्ने आरोप छ।")
+        assert _strip_charge_marker("रकम हिनामिना गरेको भन्ने आरोप छ ।") == (
+            "रकम हिनामिना गरेको।")
 
     def test_an_ascii_full_stop_is_also_a_terminator(self):
-        assert _hedge("रकम हिनामिना गरेको.") == (
-            "रकम हिनामिना गरेको भन्ने आरोप छ।")
+        assert _strip_charge_marker("रकम हिनामिना गरेको भन्ने आरोप छ.") == (
+            "रकम हिनामिना गरेको।")
 
-    def test_an_unterminated_participle_is_still_hedged(self):
-        assert _hedge("रकम हिनामिना गरेको") == (
-            "रकम हिनामिना गरेको भन्ने आरोप छ।")
-
-    def test_a_guilt_asserting_perfect_is_hedged(self):
-        # "निजले घुस लिएको छ।" asserts guilt as plainly as "…लिएको।" does. The
-        # copula is absorbed rather than kept -- HEDGE carries its own छ.
-        assert _hedge("निजले घुस लिएको छ।") == (
-            "निजले घुस लिएको भन्ने आरोप छ।")
-
-    def test_a_neutral_perfect_is_hedged_too(self):
-        # The deliberate cost of hedging the perfect: a neutral statement about
-        # the charge sheet is marked as a claim as well. It stays TRUE (the
-        # बिगो is the CIAA's own figure), and the alternative leaves the
-        # guilt-asserting perfect above unqualified -- the exact harm the rule
-        # exists to prevent. A regex cannot tell the two apart.
-        assert _hedge("बिगो रु. ५ करोड कायम भएको छ।") == (
-            "बिगो रु. ५ करोड कायम भएको भन्ने आरोप छ।")
-
-    def test_a_genitive_ko_is_not_mistaken_for_a_participle(self):
-        # "सरकारको" is a genitive, not a participle; suffixing it yields
-        # "…सरकारको भन्ने आरोप छ।", which is not Nepali.
-        plain = "सो रकम नेपाल सरकारको।"
-        assert _hedge(plain) == plain
-
-    def test_non_participle_ending_is_skipped_not_force_suffixed(self):
-        # Force-suffixing a non-participle produces ungrammatical Nepali.
-        plain = "यो रकम नेपाल सरकारको सम्पत्ति हो।"
-        assert _hedge(plain) == plain
+    def test_an_unterminated_marker_is_stripped_and_closed(self):
+        # 1 of the 66 live marked allegations ends without any terminator.
+        assert _strip_charge_marker("रकम दिएको भन्ने आरोप") == "रकम दिएको।"
 
     def test_trailing_whitespace_does_not_defeat_the_match(self):
-        assert _hedge("पद दुरुपयोग गरेको।  \n") == (
-            "पद दुरुपयोग गरेको भन्ने आरोप छ।")
+        assert _strip_charge_marker("पद दुरुपयोग गरेको भन्ने आरोप छ।  \n") == (
+            "पद दुरुपयोग गरेको।")
+
+    def test_a_mid_sentence_mention_is_left_alone(self):
+        # Tail-anchored on purpose: mid-sentence the phrase is the sentence's
+        # own subject, not a marker glued to the end.
+        plain = "घुस लिएको भन्ने आरोप सम्बन्धमा कागजात नष्ट गरेको।"
+        assert _strip_charge_marker(plain) == plain
+
+    def test_only_the_trailing_marker_goes_when_both_occur(self):
+        assert _strip_charge_marker(
+            "घुस लिएको भन्ने आरोप लुकाउन कागजात नष्ट गरेको भन्ने आरोप छ।"
+        ) == "घुस लिएको भन्ने आरोप लुकाउन कागजात नष्ट गरेको।"
+
+    def test_a_non_participle_before_the_marker_is_left_alone(self):
+        # Without a participle to close, dropping the marker leaves the sentence
+        # with no predicate -- worse Nepali than the redundancy it removes.
+        plain = "यो रकम नेपाल सरकारको सम्पत्ति हो भन्ने आरोप छ।"
+        assert _strip_charge_marker(plain) == plain
+
+    def test_the_acquittal_line_is_not_stripped(self):
+        # ACQUITTAL_LINE says `अभियोग दाबी`, not the banned marker, and it is
+        # appended in main() after this runs -- but pin it anyway, because a
+        # widened pattern here would silently truncate a court's ruling.
+        line = ea.ACQUITTAL_LINE.format(defendants="प्रतिवादीहरूलाई")
+        assert _strip_charge_marker(line) == line
 
 
 def _accused(name, outcome):
@@ -239,7 +251,7 @@ class TestAppendAcquittalLine:
     guaranteed complete, so the run ledger carries the bind count the decision
     was made on."""
 
-    ALLEGATIONS = ["गैरकानूनी सम्पत्ति आर्जन गरेको भन्ने आरोप छ।"]
+    ALLEGATIONS = ["गैरकानूनी सम्पत्ति आर्जन गरेको।"]
 
     def test_sole_acquitted_defendant_gets_the_singular_line(self):
         detail = {"entities": [_accused("राम", "acquitted")]}
@@ -321,7 +333,7 @@ class TestAppendAcquittalLine:
         # contract subject. A bare-morpheme guard silently suppressed the line
         # on exactly the acquitted cases the rule was written for.
         detail = {"entities": [_accused("राम", "acquitted")]}
-        allegations = ["नगरपालिकाको सरसफाइ ठेक्कामा अनियमितता गरेको भन्ने आरोप छ।"]
+        allegations = ["नगरपालिकाको सरसफाइ ठेक्कामा अनियमितता गरेको।"]
         out, reason = _append_acquittal_line(detail, list(allegations))
         assert reason == "appended"
         assert len(out) == 2
@@ -402,10 +414,16 @@ class TestParseAllegationsResponse:
         body = json.dumps({"allegations": ["  आरोप एक  "]})
         assert _parse_allegations_response(body) == ["आरोप एक"]
 
-    def test_bare_declarative_allegations_are_hedged_on_the_way_out(self):
+    def test_a_model_added_charge_marker_is_stripped_on_the_way_out(self):
+        body = json.dumps({"allegations":
+                           ["सार्वजनिक सम्पत्ति हानि नोक्सानी पुर्याएको भन्ने आरोप छ।"]})
+        assert _parse_allegations_response(body) == [
+            "सार्वजनिक सम्पत्ति हानि नोक्सानी पुर्याएको।"]
+
+    def test_a_bare_declarative_passes_through_untouched(self):
         body = json.dumps({"allegations": ["सार्वजनिक सम्पत्ति हानि नोक्सानी पुर्याएको।"]})
         assert _parse_allegations_response(body) == [
-            "सार्वजनिक सम्पत्ति हानि नोक्सानी पुर्याएको भन्ने आरोप छ।"]
+            "सार्वजनिक सम्पत्ति हानि नोक्सानी पुर्याएको।"]
 
     def test_fenced_json_is_parsed(self):
         body = (
@@ -769,7 +787,7 @@ def test_apply_appends_the_acquittal_line_when_the_court_cleared_everyone(
     )
     (_, _, patched), = api.patched
     assert patched == [
-        "पहिलो आरोप गरेको भन्ने आरोप छ।",
+        "पहिलो आरोप गरेको।",
         "माथि उल्लिखित कुराहरू अख्तियार दुरुपयोग अनुसन्धान आयोगको अभियोग दाबी हुन्; "
         "विशेष अदालतले उक्त दाबी पुग्न नसकी प्रतिवादीलाई आरोपित कसुरबाट सफाइ दिने "
         "ठहर गरेको छ।",
@@ -788,7 +806,45 @@ def test_apply_does_not_append_the_acquittal_line_on_a_conviction(
         monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--apply"],
     )
     (_, _, patched), = api.patched
-    assert patched == ["पहिलो आरोप गरेको भन्ने आरोप छ।"]
+    assert patched == ["पहिलो आरोप गरेको।"]
+
+
+def test_apply_strips_a_marker_the_model_added_on_its_own(
+    monkeypatch, patched_fetch_markdown
+):
+    # The end-to-end shape of the whole change: the model closes with the marker
+    # even when told not to (27 of 27 on the 2026-08-24 run), and what lands in
+    # key_allegations is the bare participle.
+    response = json.dumps({"allegations": [
+        "पहिलो आरोप गरेको भन्ने आरोप छ।",
+        "दोस्रो रकम लुकाएको भन्ने आरोप।",
+    ]})
+    api = _StubApi([PRESS_CASE_READY])
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--apply"],
+    )
+    (_, _, patched), = api.patched
+    assert patched == ["पहिलो आरोप गरेको।", "दोस्रो रकम लुकाएको।"]
+
+
+def test_the_acquittal_line_survives_the_marker_strip(
+    monkeypatch, patched_fetch_markdown
+):
+    # The strip runs per-entry in _parse_allegations_response and the acquittal
+    # line is appended after, in main(). Pinned end-to-end so a future widening
+    # of the strip pattern cannot truncate the court's ruling.
+    response = json.dumps({"allegations": ["पहिलो आरोप गरेको भन्ने आरोप छ।"]})
+    api = _StubApi(
+        [PRESS_CASE_READY],
+        detail_overrides={"case-ready": PRESS_CASE_ACQUITTED_DETAIL},
+    )
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--apply"],
+    )
+    (_, _, patched), = api.patched
+    assert patched[0] == "पहिलो आरोप गरेको।"
+    assert patched[-1].endswith("सफाइ दिने ठहर गरेको छ।")
+    assert "अभियोग दाबी हुन्" in patched[-1]
 
 
 def test_dry_run_reports_the_acquittal_line_it_would_write(
