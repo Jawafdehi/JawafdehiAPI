@@ -105,6 +105,49 @@ def test_material_build_doc_shape_with_dates():
     assert "081-CR-0081" in doc["identifiers"]
 
 
+def test_material_build_doc_promotes_the_document_form():
+    """``material_type`` becomes a top-level facet field.
+
+    The sibling ``source`` column is deliberately NOT promoted: it conflates
+    the publishing office with the document form (10 of its 30 production
+    tokens just restate the form, and the CIAA is split across two), so it is
+    not faceted until the column is normalised. ``source_app`` — the owning
+    APPLICATION — is a different field and keeps its own value.
+    """
+    iri = "https://jawafdehi.org/material/ciaa_press_release/1701"
+    obj = SimpleNamespace(
+        iri=iri,
+        ident="1701",
+        source="ciaa_press_release",
+        material_type="press_release",
+        data={"@id": iri, "@type": "CreativeWork", "name": {"ne": "प्रेस विज्ञप्ति"}},
+    )
+    doc = material_index.build_doc(obj)
+    assert doc["material_type"] == "press_release"
+    assert doc["source_app"] == "ngm"
+    assert "source" not in doc
+    assert "material_source" not in doc
+
+
+def test_material_build_doc_omits_a_blank_document_form():
+    """A blank column is left OUT, not written as "".
+
+    A ``terms`` filter excludes a doc that lacks the field, which is what an
+    unrecorded type should do — an "" bucket would otherwise show up in the
+    facet as a nameless option a reader could select.
+    """
+    iri = "https://jawafdehi.org/material/x/1"
+    obj = SimpleNamespace(
+        iri=iri,
+        ident="1",
+        source="",
+        material_type=None,
+        data={"@id": iri, "@type": "CreativeWork"},
+    )
+    doc = material_index.build_doc(obj)
+    assert "material_type" not in doc
+
+
 # ── courtcase ──────────────────────────────────────────────────────────────────
 
 

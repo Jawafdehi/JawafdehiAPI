@@ -707,6 +707,59 @@ def test_build_query_district_and_province_filters_target_court_fields():
     assert {"terms": {"court_province": ["Bagmati"]}} in clauses
 
 
+def test_build_query_material_type_aggregates_and_filters():
+    """``material_type`` is registered on the facet field, so it both
+    aggregates (the sidebar's option list) and filters (a ticked box)."""
+    assert svc.FACET_FIELDS["material_type"] == "material_type"
+    body = build_query(q="x", filters={"material_type": ["press_release"]})
+    assert body["aggs"]["material_type"]["terms"]["field"] == "material_type"
+    clauses = body["query"]["bool"]["filter"]
+    assert {"terms": {"material_type": ["press_release"]}} in clauses
+
+
+def test_material_type_agg_holds_the_whole_vocabulary():
+    """All 12 tokens fit under the 50 default, so the facet needs no
+    ``FACET_AGG_SIZES`` override — but it must still hold every one at once, or
+    the rarest types (``social_media`` at 10 documents, ``legal_corpus`` at 13)
+    would be pushed out with their counts silently zeroed."""
+    body = build_query(q="x")
+    assert body["aggs"]["material_type"]["terms"]["size"] >= len(
+        svc.ALL_MATERIAL_TYPES
+    )
+
+
+def test_material_source_is_not_a_facet():
+    """``Material.source`` is deliberately unfaceted and unfiltered.
+
+    It conflates the publishing office with the document form: 11 of its 30
+    production tokens name an office, 10 just restate the form ("court_order",
+    23,399 rows — the third largest), one is a province, and the CIAA is split
+    across ``ciaa_press_release`` and ``ciaa_annual_report`` so the one office
+    a reader would ask for cannot be selected at all. Faceting it would list
+    "Court order" as a publisher. Reinstating it is a data change (normalise
+    the column), not a registry line — this test is the reminder."""
+    assert "material_source" not in svc.FACET_FIELDS
+    body = build_query(q="x", filters={"material_source": ["ciaa_press_release"]})
+    assert "material_source" not in body["aggs"]
+    clauses = body["query"]["bool"]["filter"]
+    assert not any("material_source" in str(clause) for clause in clauses)
+
+
+def test_material_type_enum_tracks_material_types():
+    """``ALL_MATERIAL_TYPES`` is a literal (``search.service`` imports from no
+    sibling app), so nothing makes it follow the model. This does: add a token
+    to ``MaterialType`` and this fails until the facet vocabulary catches up —
+    otherwise the new type would be unaskable, and asking for it a 400."""
+    from materials.jsonld import MaterialType
+
+    declared = {
+        value
+        for name, value in vars(MaterialType).items()
+        if not name.startswith("_") and isinstance(value, str)
+    }
+    assert set(svc.ALL_MATERIAL_TYPES) == declared
+
+
 def test_district_facet_agg_holds_every_district_at_once():
     """All 77 districts: at the 50 default, the least-frequent districts would be
     silently pushed out of the facet."""

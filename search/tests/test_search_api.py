@@ -451,6 +451,88 @@ def test_search_api_400_on_unknown_court_identifier():
 
 
 @pytest.mark.django_db
+def test_search_api_threads_material_type_through():
+    """?material_type reaches the DSL as a terms filter, and repeats as an OR
+    within the one clause (a reader ticking two boxes wants either)."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {
+                "q": "",
+                "type": "material",
+                "material_type": ["press_release", "official_report"],
+            },
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert {
+        "terms": {"material_type": ["press_release", "official_report"]}
+    } in clauses
+
+
+@pytest.mark.django_db
+def test_search_api_material_type_ands_with_the_date_bounds():
+    """The two controls the materials tab ships — document type and a date
+    range — narrow TOGETHER, as separate clauses on the same bool filter.
+
+    Dates need no material-specific param: date_from/date_to already bound the
+    shared ``date`` field, which a material fills from datePublished/
+    dateCreated. Pinned here so the tab's one request shape cannot regress to
+    dropping a clause silently."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {
+                "q": "",
+                "type": "material",
+                "material_type": "charge_sheet",
+                "date_from": "2020-01-01",
+                "date_to": "2024-12-31",
+            },
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert {"terms": {"material_type": ["charge_sheet"]}} in clauses
+    # Both bounds collapse into ONE range clause on the shared date field.
+    assert {
+        "range": {"date": {"gte": "2020-01-01", "lte": "2024-12-31"}}
+    } in clauses
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_unknown_material_type():
+    """material_type is a CLOSED vocabulary, so a typo is a 400 rather than a
+    confident empty page."""
+    resp = APIClient().get("/api/search/", {"q": "x", "material_type": "presrelease"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_search_api_rejects_material_source_as_an_unknown_param():
+    """``Material.source`` is NOT a filter. It conflates the publishing office
+    with the document form — 10 of its 30 production tokens just restate the
+    form ("court_order", 23,399 rows), and the CIAA is split across
+    ciaa_press_release and ciaa_annual_report — so faceting it would offer
+    "Court order" as a publisher. Unknown params are ignored, so this asserts
+    the filter is absent rather than expecting a 400."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "material_source": "ciaa_press_release"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    clauses = body["query"]["bool"]["filter"]
+    assert not any("material_source" in str(clause) for clause in clauses)
+    assert "material_source" not in body["aggs"]
+
+
+@pytest.mark.django_db
 def test_search_api_threads_district_and_province_through():
     """?district/?province reach the DSL as terms filters on the court_* fields."""
     client = MagicMock()
