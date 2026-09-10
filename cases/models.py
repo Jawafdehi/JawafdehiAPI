@@ -782,6 +782,18 @@ class CaseAuthor(models.Model):
         AuthorProfile.ensure_for(self.user)
 
 
+from .stages import (  # noqa: E402  (kept beside the model it serves)
+    StageError,
+    derived_proceeding_dates,
+    validate_stages,
+)
+
+
+def _empty_stage_document() -> dict:
+    """Callable default: a shared mutable literal would leak between rows."""
+    return {"stages": []}
+
+
 class CaseType(models.TextChoices):
     """Enum for case types."""
 
@@ -960,6 +972,39 @@ class Case(models.Model):
         help_text="DEPRECATED. External URL for the hero image; use banner_image",
     )
     # Date fields
+    # A case is a container of proceedings, not one proceeding: the published
+    # corpus already holds 12 dockets across 8 courts on one case. Shape and
+    # vocabulary live in ``cases/stages.py``.
+    dates = models.JSONField(
+        default=_empty_stage_document,
+        blank=True,
+        help_text=(
+            "Proceeding stages: {'stages': [{stage, start, end, courtcase_iri, "
+            "body, label, notes}]}. AD dates only; Bikram Sambat is derived on "
+            "display."
+        ),
+    )
+    # Maintained from ``dates`` on every save. A JSONField cannot sort the
+    # archive or drive a facet, so these two carry the sortable surface.
+    proceedings_started_on = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Derived: earliest start among COURT stages. Investigation is "
+            "excluded on purpose -- including it would move every case's "
+            "archive sort position backwards."
+        ),
+    )
+    proceedings_decided_on = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Derived: the last court stage's end, NULL while any court stage "
+            "is still open."
+        ),
+    )
     case_start_date = models.DateField(
         null=True, blank=True, help_text="When the alleged incident began"
     )
@@ -1404,6 +1449,28 @@ class Case(models.Model):
 
         return slug[:50]
 
+    def _validate_and_derive_stages(self):
+        """Validate ``dates`` and refresh the two derived columns.
+
+        The ordering rule stays here rather than becoming a CHECK constraint: a
+        Supreme Court remand restarts first instance after the appeal ended, so
+        a schema-level rule would fire on correct data and need another
+        migration to relax.
+        """
+        if self.dates is None:
+            self.dates = _empty_stage_document()
+        if not isinstance(self.dates, dict) or "stages" not in self.dates:
+            raise ValidationError({"dates": "dates must be {'stages': [...]}"})
+
+        try:
+            validate_stages(self.dates["stages"], binds=self.court_cases)
+        except StageError as exc:
+            raise ValidationError({"dates": str(exc)}) from exc
+
+        started, decided = derived_proceeding_dates(self.dates["stages"])
+        self.proceedings_started_on = started
+        self.proceedings_decided_on = decided
+
     def save(self, *args, **kwargs):
         """Override save; auto-generate the slug (case identity) for new cases."""
         # Normalize empty/whitespace slug to None to avoid unique constraint violations
@@ -1417,6 +1484,8 @@ class Case(models.Model):
         # Auto-generate slug for any case without one (slug-only API addressing).
         if not self.slug or not self.slug.strip():
             self.slug = self._generate_unique_slug()
+
+        self._validate_and_derive_stages()
 
         # Enforce slug immutability (use cached original value to avoid extra query)
         # Allow slug modification for DRAFT cases
