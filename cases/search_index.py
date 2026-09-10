@@ -15,18 +15,27 @@ Field mapping:
 * ``body``           ← ``description`` + ``key_allegations`` (joined),
 * ``keywords``       ← ``tags`` (+ ``offence_type``),
 * ``identifiers``    ← the IRI, the slug, and the ``court_cases`` references,
-* ``date``           ← ``case_start_date`` (else created date),
-* ``case_status``    ← coarse ongoing/closed/others (mirrors the SPA rule); a
-  dedicated keyword (NOT the generic ``status``, which NGM uses for its scraper
-  enrichment flag) so the unified search can facet/filter cases without collision,
+* ``date``           ← ``proceedings_started_on`` (else created date),
+* ``status``         ← ``Case.status``, the full derived lifecycle,
+* ``case_status``    ← the SAME status mapped down to the legacy three values
+  (ongoing/closed/others) the deployed SPA facet knows — see
+  :data:`LEGACY_CASE_STATUS`,
+* ``case_track``     ← ``Case.case_track`` (omitted while unclassified),
+* ``proceedings_started_on`` / ``proceedings_decided_on`` ← the derived stage
+  dates, each omitted when null,
 * ``bigo``           ← ``Case.bigo`` (बिगो, whole NPR) promoted to a top-level
   ``long`` so the unified search can RANGE-filter on it; the card copy under
   ``raw`` is return-only (``raw`` is ``enabled: false``, hence unqueryable),
 * ``raw``            ← a light record PLUS a ``card`` payload (return-only): every
   field the SPA case list/card renders — ``short_description``, ``key_allegations``,
-  ``tags``, dates, ``bigo``, thumbnail/banner, the ``timeline`` (major events), and
-  the resolved entity binds — denormalized so a search hit renders WITHOUT a
-  second fetch to ``/api/cases/{slug}/``.
+  ``tags``, dates, the ``stages`` list, ``bigo``, thumbnail/banner, the ``timeline``
+  (major events), and the resolved entity binds — denormalized so a search hit
+  renders WITHOUT a second fetch to ``/api/cases/{slug}/``.
+
+The stage document lives ONLY under ``raw`` (mapped ``enabled: false``). It is
+display data: promoting it would make the shape of a JSON blob part of the query
+contract and have OpenSearch dynamically map every key inside it. The two
+derived DATES are the queryable surface, which is exactly why they are columns.
 
 Denormalized entity names come from NES at index time, so a case must be
 re-indexed when a referenced entity is renamed (a scheduled ``reindex_cases``
@@ -81,19 +90,91 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _derive_status(case: Any) -> str:
-    """Coarse case lifecycle for the ``case_status`` facet, mirroring the SPA rule.
+#: ``Case.status`` (six values, derived from the stage list plus the accused
+#: outcomes) mapped down to the THREE the deployed SPA's ``case_status`` facet
+#: knows. The SPA sends ``?status=ongoing|closed|others``; a fourth value in
+#: that field would be a bucket no deployed client can select and a filter that
+#: silently matches nothing, so the old vocabulary is held fixed here and the
+#: full one goes to the new ``status`` field alongside.
+#:
+#: The two non-obvious arms:
+#:
+#: * ``withdrawn`` → ``closed``. The prosecution is over. Not ``others``: the
+#:   case is as finished as a convicted one, and burying it in the catch-all
+#:   would drop it out of the "closed" list a reader browses.
+#: * ``dormant`` → ``others``, NOT ``ongoing``. A dormant case has an open stage
+#:   and no decision coming (मिसिल जलेको, a bench never constituted); the
+#:   override exists precisely to stop the open stage reading as live, so
+#:   mapping it back to ``ongoing`` would reinstate the lie. ``closed`` is
+#:   equally wrong — nothing was decided — which leaves the honest catch-all.
+#:
+#: ``under_investigation`` → ``others`` needs no argument: it is what the old
+#: two-date rule already produced for a case with no court dates at all.
+#:
+#: Pinned arm-by-arm in ``search/tests/test_indexers.py`` and guarded against
+#: model drift by ``tests/cases/test_case_status_derivation.py``.
+LEGACY_CASE_STATUS: dict[str, str] = {
+    "ongoing": "ongoing",
+    "under_investigation": "others",
+    "concluded": "closed",
+    "others": "others",
+    "withdrawn": "closed",
+    "dormant": "others",
+}
 
-    ``ongoing`` = a start date but no end date; ``closed`` = both dates present;
-    ``others`` = neither (or only an end date). Kept in lockstep with the frontend
-    ``getCaseStatus`` so the server facet and the client badge agree."""
-    has_start = getattr(case, "case_start_date", None) is not None
-    has_end = getattr(case, "case_end_date", None) is not None
-    if has_start and not has_end:
-        return "ongoing"
-    if has_start and has_end:
-        return "closed"
-    return "others"
+#: Where an unknown or unreadable status lands, in BOTH fields' terms.
+_STATUS_FALLBACK = "others"
+
+
+def _status(case: Any) -> str:
+    """``Case.status`` as a plain string, or ``others``.
+
+    ``status`` is a PROPERTY that reads the case's accused binds, so unlike
+    every other field here it can touch the database and it can raise (an
+    unsaved instance has no primary key to follow the relation from). Guarded
+    for the same reason ``_bigo`` and ``_card_srcset`` are: losing the lifecycle
+    is recoverable, losing a published case from search is not.
+    """
+    try:
+        value = getattr(case, "status", None)
+    except Exception:  # noqa: BLE001 - a broken property must not fail a reindex
+        logger.warning(
+            "case_search_index.status_unreadable", extra={"case": _case_iri(case)}
+        )
+        return _STATUS_FALLBACK
+    if not value or not isinstance(value, str):
+        return _STATUS_FALLBACK
+    return str(value)
+
+
+def _legacy_case_status(status: str) -> str:
+    """The three-value ``case_status`` for a full-vocabulary status."""
+    legacy = LEGACY_CASE_STATUS.get(status)
+    if legacy is None:
+        # A lifecycle the model gained without anyone deciding its legacy
+        # bucket. The drift test should have caught it; say so loudly rather
+        # than teaching the deployed facet a fourth word.
+        logger.warning(
+            "case_search_index.unmapped_status", extra={"status": status}
+        )
+        return _STATUS_FALLBACK
+    return legacy
+
+
+def _stages(case: Any) -> list[dict[str, Any]]:
+    """The stage records for display, or ``[]``.
+
+    Total by design: a legacy row migrated unchanged must still render, exactly
+    as ``derived_proceeding_dates`` tolerates one. Non-dict entries are dropped
+    the way ``timeline`` drops them.
+    """
+    dates = getattr(case, "dates", None)
+    if not isinstance(dates, dict):
+        return []
+    stages = dates.get("stages")
+    if not isinstance(stages, list):
+        return []
+    return [record for record in stages if isinstance(record, dict)]
 
 
 # Signed-64-bit bounds — the domain of the ``bigo`` field's ``long`` mapping (and
@@ -216,10 +297,24 @@ def _build_identifiers(case: Any, iri: str | None, slug: str | None) -> list[str
 def _apply_dates(doc: dict[str, Any], case: Any) -> None:
     """Set ``date``/``created_at``/``updated_at``, each only when available.
 
-    ``date`` prefers the case start date and falls back to the creation date, so
-    a case with no explicit start is still sortable.
+    ``date`` is the archive sort key, and it now follows
+    ``proceedings_started_on`` -- the earliest start among COURT stages.
+
+    This is a rename, not a resort. Measured against NGM on ten published CIAA
+    cases, ``case_start_date`` has always HELD the court registration date
+    (seven exact, three off by one day) whatever its help_text says, and the
+    stage backfill seeds each ``initial`` stage's ``start`` from it. So
+    ``proceedings_started_on`` equals the old sort key on every migrated row:
+    the archive keeps the order it has today, under a name that says what the
+    value is.
+
+    The fallback to the creation date is deliberately kept: a case whose every
+    court stage lacks a start legitimately has no proceeding start (a verdict
+    date is often known from a court order when the registration date is not),
+    and it must still land somewhere in a sorted list rather than dropping to
+    ``missing: _last`` for good.
     """
-    start = getattr(case, "case_start_date", None)
+    start = getattr(case, "proceedings_started_on", None)
     created = getattr(case, "created_at", None)
     if start is not None:
         doc["date"] = _iso(start)
@@ -230,6 +325,29 @@ def _apply_dates(doc: dict[str, Any], case: Any) -> None:
     updated = getattr(case, "updated_at", None)
     if updated is not None:
         doc["updated_at"] = _iso(updated)
+
+
+def _apply_proceedings(doc: dict[str, Any], case: Any) -> None:
+    """Set ``case_track`` and the two derived proceeding dates, when present.
+
+    Each is OMITTED rather than emitted null, for two different reasons that
+    happen to agree. A null against the ``date`` mapping is rejected by
+    OpenSearch, which rejects the whole document with it -- the ``bigo`` lesson.
+    And an absent field is what a ``range`` or ``terms`` clause should skip: a
+    case with no decision yet genuinely does not belong in any decided-between
+    bound, and an unclassified case belongs in no track.
+
+    A blank ``case_track`` is treated as unset for the same reason the stub
+    ``court_type`` is dropped in the courtcase indexer: an empty keyword is a
+    real facet bucket with no name.
+    """
+    track = getattr(case, "case_track", None)
+    if isinstance(track, str) and track.strip():
+        doc["case_track"] = track
+    for field in ("proceedings_started_on", "proceedings_decided_on"):
+        value = getattr(case, field, None)
+        if value is not None:
+            doc[field] = _iso(value)
 
 
 def _card_srcset(case: Any) -> dict[str, Any] | None:
@@ -275,6 +393,7 @@ def _build_card(
     tags: list[str],
     offence_type: Any,
     case_status: str,
+    stages: list[dict[str, Any]],
     entities: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     """Everything the SPA case card/list renders, denormalized.
@@ -293,9 +412,21 @@ def _build_card(
         # The deployed SPA card reads ``case_type``; emitted alongside the new
         # name until the frontend has moved. Drop with the other aliases.
         "case_type": offence_type,
+        # The LEGACY three-value lifecycle: this is the deployed card badge.
+        # The full vocabulary is the top-level ``status`` field.
         "status": case_status,
         "case_start_date": _iso(getattr(case, "case_start_date", None)),
         "case_end_date": _iso(getattr(case, "case_end_date", None)),
+        # The stage list, for the labelled per-stage rows that replace the
+        # single date range. Display only -- ``raw`` is ``enabled: false``, so
+        # nothing in here is queryable; the derived dates on the doc are.
+        "stages": stages,
+        "proceedings_started_on": _iso(
+            getattr(case, "proceedings_started_on", None)
+        ),
+        "proceedings_decided_on": _iso(
+            getattr(case, "proceedings_decided_on", None)
+        ),
         "bigo": getattr(case, "bigo", None),
         # The responsive card image. Denormalized like everything else here: a
         # search hit renders straight off the doc, so without this the results
@@ -376,15 +507,33 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
 
     _apply_dates(doc, case)
 
-    # Coarse lifecycle as a dedicated indexed keyword so the unified search can
-    # facet/filter cases on it. Deliberately NOT the generic ``status`` field —
-    # NGM courtcases write their scraper enrichment flag (pending/enriched/failed)
-    # there, which must not blend into a case lifecycle facet.
-    case_status = _derive_status(case)
+    # ONE source of truth for the lifecycle: the ``Case.status`` property. Two
+    # fields carry it, because the deployed SPA cannot be redeployed in step
+    # with the index:
+    #
+    # * ``case_status`` keeps the OLD three-value vocabulary the SPA filters and
+    #   badges on (``?status=`` is wired to this field in
+    #   ``search.service.FACET_FIELDS``). Teaching it a fourth value would give
+    #   the facet a bucket no deployed client can select.
+    # * ``status`` carries the full new vocabulary so the frontend can migrate
+    #   on its own schedule.
+    #
+    # NB ``status`` is shared with the NGM courtcase docs, which write a scraper
+    # enrichment flag (pending/enriched/failed) into it. Different indices, and
+    # nothing aggregates the field today — but that is why the FACET is still
+    # ``case_status`` and why faceting on ``status`` needs the two vocabularies
+    # separated first.
+    status = _status(case)
+    case_status = _legacy_case_status(status)
+    doc["status"] = status
     doc["case_status"] = case_status
     # Also in ``raw`` so ``_serialize_hit`` surfaces it as ``extra.case_status``
     # (the SPA's non-card fallback for a hit's lifecycle).
     doc["raw"]["case_status"] = case_status
+
+    # The route into court and the two derived stage dates, so both are
+    # filterable. The stage document they come from stays under ``raw``.
+    _apply_proceedings(doc, case)
 
     # बिगो promoted to a top-level ``long`` so the unified search can range-filter
     # on it (?bigo_min/?bigo_max). The card keeps its own copy for rendering; that
@@ -403,6 +552,7 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
         tags=tags,
         offence_type=offence_type,
         case_status=case_status,
+        stages=_stages(case),
         entities=entities,
     )
     return doc

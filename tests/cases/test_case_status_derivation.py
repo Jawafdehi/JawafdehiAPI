@@ -142,3 +142,79 @@ def test_the_track_vocabulary_is_the_six_routes():
         "arbitration",
         "other",
     }
+
+
+# ── the search index reads the property, not a second copy of the rules ──────
+
+
+def test_the_index_down_maps_every_status_the_model_can_produce():
+    """Drift guard. Adding a lifecycle to ``CaseStatus``/``StatusOverride``
+    without deciding its legacy bucket must fail HERE, not silently dump the new
+    value into the deployed SPA's three-value facet."""
+    from cases.search_index import LEGACY_CASE_STATUS
+
+    assert set(LEGACY_CASE_STATUS) == set(CaseStatus.values) | set(
+        StatusOverride.values
+    )
+
+
+@pytest.mark.django_db
+def test_the_index_doc_carries_the_real_derived_status_and_stage_fields():
+    """End-to-end over a real ``Case``: the indexer reads the ``status``
+    PROPERTY (a DB read for the accused binds), not a private re-derivation."""
+    from cases.search_index import build_indexed_doc
+
+    case = _case(
+        state=CaseState.PUBLISHED,
+        case_track=CaseTrack.CIAA,
+        dates={"stages": [{"stage": "initial", "start": "2024-02-25"}]},
+    )
+    doc = build_indexed_doc(case)
+
+    assert doc["status"] == CaseStatus.ONGOING
+    assert doc["case_status"] == "ongoing"
+    assert doc["case_track"] == "ciaa"
+    assert doc["proceedings_started_on"] == "2024-02-25"
+    assert "proceedings_decided_on" not in doc
+    # The archive sort key follows the proceeding start.
+    assert doc["date"] == "2024-02-25"
+    # The stage list is display-only, never an indexed field.
+    assert doc["raw"]["card"]["stages"] == [
+        {"stage": "initial", "start": "2024-02-25"}
+    ]
+    assert "dates" not in doc
+
+
+@pytest.mark.django_db
+def test_a_concluded_case_indexes_as_the_legacy_closed_bucket():
+    from cases.search_index import build_indexed_doc
+
+    case = _case(
+        state=CaseState.PUBLISHED,
+        dates={
+            "stages": [{"stage": "initial", "start": "2024-02-25", "end": "2024-05-22"}]
+        },
+    )
+    _accused(case, RelationshipOutcome.CONVICTED)
+    doc = build_indexed_doc(case)
+
+    assert doc["status"] == CaseStatus.CONCLUDED
+    assert doc["case_status"] == "closed"
+    assert doc["proceedings_decided_on"] == "2024-05-22"
+
+
+@pytest.mark.django_db
+def test_a_dormant_case_indexes_as_others_not_ongoing():
+    """The override exists precisely to stop an abandoned case reading as live;
+    mapping it to the legacy ``ongoing`` would put the lie straight back."""
+    from cases.search_index import build_indexed_doc
+
+    case = _case(
+        state=CaseState.PUBLISHED,
+        status_override=StatusOverride.DORMANT,
+        dates={"stages": [{"stage": "initial", "start": "2019-02-25"}]},
+    )
+    doc = build_indexed_doc(case)
+
+    assert doc["status"] == StatusOverride.DORMANT
+    assert doc["case_status"] == "others"

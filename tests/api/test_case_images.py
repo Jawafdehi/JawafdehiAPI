@@ -380,6 +380,7 @@ def test_search_card_carries_the_rendition(case, image, media_root):
         tags=[],
         offence_type=case.offence_type,
         case_status="ongoing",
+        stages=[],
         entities=[],
     )
 
@@ -402,6 +403,7 @@ def test_search_card_tolerates_a_stand_in_without_an_image():
         tags=[],
         offence_type="CORRUPTION",
         case_status="ongoing",
+        stages=[],
         entities=[],
     )
 
@@ -633,6 +635,7 @@ def test_a_case_with_an_unreadable_image_indexes_no_thumbnail(case, image, monke
         tags=[],
         offence_type=case.offence_type,
         case_status="ongoing",
+        stages=[],
         entities=[],
     )
 
