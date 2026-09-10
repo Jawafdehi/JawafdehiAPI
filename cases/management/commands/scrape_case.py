@@ -63,11 +63,18 @@ class Command(BaseCommand):
             help="Skip confirmation prompt before database import (requires --create-db-entry)",
         )
         parser.add_argument(
+            # Two spellings, one dest. ``Case.case_type`` was renamed to
+            # ``offence_type``; the old flag keeps working because a rename
+            # inside the codebase is no reason to break someone's shell
+            # history. The dest must match what handle() reads -- it did not,
+            # and argparse silently gave the handler a KeyError instead.
+            "--offence-type",
             "--case-type",
+            dest="offence_type",
             type=str,
             default="CORRUPTION",
             choices=["CORRUPTION"],
-            help="Case type for database entry (default: CORRUPTION)",
+            help="Offence charged, for the database entry (default: CORRUPTION)",
         )
         parser.add_argument(
             "--case-state",

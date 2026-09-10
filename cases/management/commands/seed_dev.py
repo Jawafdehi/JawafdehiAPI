@@ -152,7 +152,10 @@ class Command(BaseCommand):
             court=court,
             case_number="075-CR-0123",
             defaults=dict(
-                offence_type="Corruption",
+                # CourtCase.case_type is the COURT's own मुद्दाको किसिम, a free
+                # string off the NGM scrape -- not Case.offence_type, which was
+                # renamed from case_type. Same old name, two different models.
+                case_type="Corruption",
                 case_status="Pending",
                 plaintiff="State",
                 defendant="Ram Bahadur",
@@ -204,7 +207,10 @@ class Command(BaseCommand):
                 status=CaseReview.STATUS_DONE,
                 case_title="Review: procurement fraud Ministry X",
                 case_state=CaseState.IN_REVIEW,
-                offence_type=CaseType.CORRUPTION,
+                # CaseReview.case_type is review's OWN column, a snapshot of
+                # the API payload it graded. Not renamed by this change --
+                # review reads payloads, never the Case ORM.
+                case_type=CaseType.CORRUPTION,
                 source_count=2,
                 sources_converted=2,
                 result={"overall": {"score": 72, "verdict": "revise"}},
