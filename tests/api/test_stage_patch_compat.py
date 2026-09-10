@@ -260,3 +260,54 @@ def test_creating_with_backwards_deprecated_dates_is_refused():
 
     assert not serializer.is_valid()
     assert "case_end_date" in serializer.errors
+
+
+# ── the shape the live court-record enricher actually sends ──────────────────
+#
+# ``casework.enrich_court_record`` writes both dates in ONE conditional PATCH
+# (``CaseworkApi.patch_case`` batches them precisely so the second request
+# cannot 412 on the ETag the first one moved). Both land on the same stage, so
+# the transform is order-sensitive in a way patching one date at a time is not.
+
+
+@pytest.mark.django_db
+def test_both_deprecated_dates_in_one_patch_land_on_one_stage():
+    case = _case()
+
+    response = _patch(case, [
+        {"op": "replace", "path": "/case_start_date", "value": "2023-06-22"},
+        {"op": "replace", "path": "/case_end_date", "value": "2024-06-04"},
+    ])
+
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    stages = case.dates["stages"]
+    assert len(stages) == 1, "one write, one first instance -- not one per date"
+    assert stages[0] == {
+        "stage": "initial", "start": "2023-06-22", "end": "2024-06-04"}
+    assert str(case.proceedings_started_on) == "2023-06-22"
+    assert str(case.proceedings_decided_on) == "2024-06-04"
+
+
+@pytest.mark.django_db
+def test_a_start_that_precedes_an_existing_end_is_validated_after_both_apply():
+    """The enricher fills only what is empty, so this shape is reachable.
+
+    A case migrated from an end date alone (0068 emits a stage with ``end``
+    and no ``start``) gets its start written later. Validating each date as it
+    is applied would reject the batch on the intermediate state -- a start of
+    2023 against a stale end of 2020 -- even though the state the client asked
+    for is ordered and valid. Both apply, then the document is validated once.
+    """
+    case = _case()
+    _patch(case, [{"op": "replace", "path": "/case_end_date", "value": "2020-01-01"}])
+
+    response = _patch(case, [
+        {"op": "replace", "path": "/case_start_date", "value": "2023-06-22"},
+        {"op": "replace", "path": "/case_end_date", "value": "2024-06-04"},
+    ])
+
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.dates["stages"] == [
+        {"stage": "initial", "start": "2023-06-22", "end": "2024-06-04"}]
