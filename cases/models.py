@@ -193,7 +193,7 @@ class RelationshipOutcome(models.TextChoices):
 
     Meaningful ONLY for ``RelationshipType.ACCUSED`` — every other role leaves
     ``outcome`` NULL (enforced by the ``outcome_only_on_accused`` CHECK
-    constraint). ``CHARGED`` = "formally charged, verdict pending"; the terminal
+    constraint). ``CHARGED`` and ``REMANDED`` are non-terminal; the terminal
     outcomes (CONVICTED/ACQUITTED/ABATED) are set only from a primary court
     order — an acquitted defendant must never render as accused.
     """
@@ -202,6 +202,22 @@ class RelationshipOutcome(models.TextChoices):
     CONVICTED = "convicted", "Convicted"
     ACQUITTED = "acquitted", "Acquitted"
     ABATED = "abated", "Abated / discontinued"
+    # बदर गरी पुनः इन्साफ — the appeal court quashed the verdict and sent the
+    # case back for retrial. Non-terminal: without it a remand reads as
+    # concluded, because every other recorded outcome is final, until someone
+    # registers the new first-instance stage months later.
+    REMANDED = "remanded", "Remanded for retrial"
+
+
+#: The outcomes that end a defendant's involvement. Everything not in here
+#: leaves the case live for that person.
+TERMINAL_OUTCOMES = frozenset(
+    {
+        RelationshipOutcome.CONVICTED,
+        RelationshipOutcome.ACQUITTED,
+        RelationshipOutcome.ABATED,
+    }
+)
 
 
 class CaseEntityRelationship(models.Model):

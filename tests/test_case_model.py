@@ -182,12 +182,13 @@ def test_relationship_type_includes_accused_choice():
 
 
 def test_relationship_outcome_choices():
-    """Outcome exposes the four verdict states (role-orthogonal)."""
+    """Outcome exposes the five verdict states (role-orthogonal)."""
     assert set(RelationshipOutcome.values) == {
         "charged",
         "convicted",
         "acquitted",
         "abated",
+        "remanded",
     }
     assert RelationshipOutcome.ACQUITTED == "acquitted"
 
