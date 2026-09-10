@@ -520,7 +520,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
     list_display = [
         "title_with_view_link",
-        "case_type",
+        "offence_type",
         "state_badge",
         "weight",
         "created_at",
@@ -529,7 +529,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
     list_filter = [
         "state",
-        "case_type",
+        "offence_type",
         "created_at",
     ]
 
@@ -568,7 +568,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "banner_image",
                     "thumbnail_url",
                     "banner_url",
-                    "case_type",
+                    "offence_type",
                     "state",
                     "bigo",
                     "weight",

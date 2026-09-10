@@ -20,7 +20,7 @@ URL = "/api/casework/reviews/"
 def _review(slug, **kwargs):
     """Create a CaseReview linked to the Case with ``slug`` (created on demand)."""
     case, _ = Case.objects.get_or_create(
-        slug=slug, defaults=dict(title=slug, case_type=CaseType.CORRUPTION)
+        slug=slug, defaults=dict(title=slug, offence_type=CaseType.CORRUPTION)
     )
     return CaseReview.objects.create(case=case, **kwargs)
 

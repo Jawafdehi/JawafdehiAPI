@@ -790,9 +790,9 @@ class CaseType(models.TextChoices):
 CASE_TYPES_REQUIRING_ACCUSED = frozenset({CaseType.CORRUPTION})
 
 
-def requires_accused(case_type):
+def requires_accused(offence_type):
     """Whether a case of this type must tag at least one ACCUSED entity."""
-    return case_type in CASE_TYPES_REQUIRING_ACCUSED
+    return offence_type in CASE_TYPES_REQUIRING_ACCUSED
 
 
 class CaseState(models.TextChoices):
@@ -891,10 +891,10 @@ class Case(models.Model):
     objects = CaseQuerySet.as_manager()
 
     # Core fields
-    case_type = models.CharField(
+    offence_type = models.CharField(
         max_length=20,
         choices=CaseType.choices,
-        help_text="Type of case",
+        help_text="The offence alleged in this case",
     )
     state = models.CharField(
         max_length=20,

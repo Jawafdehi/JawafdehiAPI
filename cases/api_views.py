@@ -23,6 +23,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.cache import patch_vary_headers
 from django.views import View
+import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
@@ -65,6 +66,7 @@ from .models import (
     CaseSlugHistory,
     CaseState,
     CaseStateChange,
+    CaseType,
     Feedback,
     FeedbackType,
     RelationshipOutcome,
@@ -237,6 +239,23 @@ def _if_match_matches(request, case) -> bool:
     return False
 
 
+
+class CaseFilterSet(django_filters.FilterSet):
+    """``?offence_type=`` plus the deprecated ``?case_type=`` the SPA still sends.
+
+    A plain ``filterset_fields`` list cannot express the alias. Drop
+    ``case_type`` together with the read alias in ``CaseSerializer``.
+    """
+
+    case_type = django_filters.ChoiceFilter(
+        field_name="offence_type", choices=CaseType.choices
+    )
+
+    class Meta:
+        model = Case
+        fields = ["offence_type", "state"]
+
+
 @extend_schema_view(
     create=extend_schema(
         summary="Create a draft case",
@@ -264,7 +283,7 @@ def _if_match_matches(request, case) -> bool:
         Results are ordered by creation date (newest first).
 
         **Filtering:**
-        - `case_type`: Filter by case type (CORRUPTION)
+        - `offence_type`: Filter by case type (CORRUPTION)
         - `state`: Filter by workflow state (DRAFT / IN_REVIEW / PUBLISHED). Applied
           after visibility scoping, so callers only ever see states they may view
           (e.g. `?state=IN_REVIEW` is the moderation queue for casework roles).
@@ -279,7 +298,7 @@ def _if_match_matches(request, case) -> bool:
         """,
         parameters=[
             OpenApiParameter(
-                name="case_type",
+                name="offence_type",
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 description="Filter by case type",
@@ -391,7 +410,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     - Patch endpoint: PATCH /api/cases/{id}/ (authenticated; gated by can_change_case)
 
     Filtering:
-    - case_type: Filter by case type
+    - offence_type: Filter by case type
     - tags: Filter by tags
 
     Search:
@@ -415,7 +434,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     # plan §G1). Filtering runs AFTER get_queryset()'s visibility scoping, so a
     # public caller filtering ?state=IN_REVIEW still gets nothing (the base
     # queryset is PUBLISHED-only) — visibility is preserved.
-    filterset_fields = ["case_type", "state"]
+    filterset_class = CaseFilterSet
     search_fields = ["title", "description", "key_allegations"]
     # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view
     # pin). Unauthenticated reads still work because the actions use
@@ -659,7 +678,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     # handled separately as binds/joins below.
     _CREATE_MODEL_FIELDS = frozenset(
         [
-            "case_type",
+            "offence_type",
             "state",
             "title",
             "short_description",
@@ -1555,7 +1574,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 str(case.case_start_date) if case.case_start_date else None
             ),
             "case_end_date": str(case.case_end_date) if case.case_end_date else None,
-            "case_type": case.case_type,
+            "offence_type": case.offence_type,
             "tags": list(case.tags) if case.tags else [],
             "key_allegations": (
                 list(case.key_allegations) if case.key_allegations else []
@@ -1824,7 +1843,7 @@ class CaseAuthorCandidateView(ListAPIView):
     - `cases_in_review`: Number of cases with state IN_REVIEW (subset of
       under-investigation — cases being prepared for publication)
     - `cases_closed`: Number of cases with state CLOSED
-    - `cases_ciaa`: Number of CIAA corruption cases (case_type CORRUPTION)
+    - `cases_ciaa`: Number of CIAA corruption cases (offence_type CORRUPTION)
     - `cases_non_ciaa`: Number of cases handled outside CIAA (all other types)
     - `entities_tracked`: Number of unique entities involved in published cases
     - `total_bigo`: Sum of the bigo (बिगो — the disputed/embezzled amount, NPR)

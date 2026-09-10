@@ -94,10 +94,10 @@ AUTHOR_ITEM_INPUT_SCHEMA = {
     ]
 }
 CASE_CREATE_PROPERTIES: dict[str, Any] = {
-    "case_type": {
+    "offence_type": {
         "type": "string",
         "enum": CASE_TYPE_VALUES,
-        "description": "Case type.",
+        "description": "The offence: CORRUPTION, BRIBERY, ...",
     },
     "state": {
         "type": "string",
@@ -642,13 +642,13 @@ class CreateJawafdehiCaseTool(BaseTool):
         return {
             "type": "object",
             "properties": deepcopy(CASE_CREATE_PROPERTIES),
-            "required": ["title", "case_type"],
+            "required": ["title", "offence_type"],
             "additionalProperties": False,
         }
 
     async def execute(self, arguments: dict[str, Any]) -> list[TextContent]:
         title = arguments.get("title")
-        case_type = arguments.get("case_type")
+        offence_type = arguments.get("offence_type")
 
         if not _has_upstream_auth():
             return _error_text_content(f"Error: {_NO_AUTH_MESSAGE}")
@@ -656,8 +656,8 @@ class CreateJawafdehiCaseTool(BaseTool):
         if not title:
             return _error_text_content("Error: title is required")
 
-        if not case_type:
-            return _error_text_content("Error: case_type is required")
+        if not offence_type:
+            return _error_text_content("Error: offence_type is required")
 
         payload = {
             field: arguments[field]

@@ -165,6 +165,10 @@ def common_mappings() -> dict[str, Any]:
                 # Promoted to a top-level keyword (also kept in ``raw``) so it can be
                 # both filtered and faceted by the unified search.
                 "case_type": {"type": "keyword"},
+                # The Jawafdehi offence, additive alongside ``case_type`` while
+                # the frontend migrates. ``case_type`` stays the facet field so
+                # case docs and NGM courtcase docs keep sharing one bucket.
+                "offence_type": {"type": "keyword"},
                 # Bilingual title, dual-indexed + translit bridge. A ``.keyword``
                 # subfield on each side gives a sortable (untokenized) value for the
                 # alphabetical "title" sort — text fields themselves aren't sortable.

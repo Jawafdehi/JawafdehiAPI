@@ -31,7 +31,7 @@ STRANGER = "https://jawafdehi.org/entity/person/not-on-this-case-000000"
 
 
 def make_case(slug="ntc-081-cr-0111", title="NTC billing-system contract"):
-    return Case.objects.create(title=title, case_type=CaseType.CORRUPTION, slug=slug)
+    return Case.objects.create(title=title, offence_type=CaseType.CORRUPTION, slug=slug)
 
 
 def bind(case, nes_id, role=RelationshipType.ACCUSED, outcome=None):

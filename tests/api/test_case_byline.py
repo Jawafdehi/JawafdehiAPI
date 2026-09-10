@@ -34,7 +34,7 @@ def _make_case(**kwargs) -> Case:
     """A case complete except for the byline — one author short of publishable."""
     defaults = dict(
         title="Byline case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         description="Detailed allegation description",
         short_description="Short",

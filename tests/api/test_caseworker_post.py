@@ -28,7 +28,7 @@ def _authed_client(user):
 def test_post_requires_authentication():
     response = APIClient().post(
         URL,
-        data={"title": "Unauthorized case", "case_type": CaseType.CORRUPTION},
+        data={"title": "Unauthorized case", "offence_type": CaseType.CORRUPTION},
         format="json",
     )
 
@@ -45,7 +45,7 @@ def test_post_creates_draft():
         URL,
         data={
             "title": "Procurement irregularity",
-            "case_type": CaseType.CORRUPTION,
+            "offence_type": CaseType.CORRUPTION,
             "short_description": "Initial draft",
         },
         format="json",
@@ -71,7 +71,7 @@ def test_post_stores_public_notes():
         URL,
         data={
             "title": "Byline creation",
-            "case_type": CaseType.CORRUPTION,
+            "offence_type": CaseType.CORRUPTION,
             "public_notes": "Documented by the Jawafdehi research team.",
         },
         format="json",
@@ -94,7 +94,7 @@ def test_post_court_cases_stores_iris():
         URL,
         data={
             "title": "Court ref creation",
-            "case_type": CaseType.CORRUPTION,
+            "offence_type": CaseType.CORRUPTION,
             "court_cases": ["https://jawafdehi.org/courtcase/special/080-cr-0111"],
         },
         format="json",
@@ -130,7 +130,7 @@ def test_post_rejects_non_iri_court_refs():
             URL,
             data={
                 "title": "Bad court ref",
-                "case_type": CaseType.CORRUPTION,
+                "offence_type": CaseType.CORRUPTION,
                 "court_cases": bad_refs,
             },
             format="json",
@@ -171,7 +171,7 @@ def test_post_creates_case_for_every_frontend_case_type(case_type):
 
     assert response.status_code == 201, response.data
     assert response.data["case_type"] == case_type
-    assert Case.objects.get(pk=response.data["id"]).case_type == case_type
+    assert Case.objects.get(pk=response.data["id"]).offence_type == case_type
 
 
 @pytest.mark.django_db
@@ -186,7 +186,7 @@ def test_post_creates_case_with_entity_relationships():
         URL,
         data={
             "title": "Land use concern",
-            "case_type": CaseType.CORRUPTION,
+            "offence_type": CaseType.CORRUPTION,
             "alleged_entities": [alleged],
             "related_entities": [related, location],
         },
@@ -217,7 +217,7 @@ def test_post_rejects_non_draft_state():
         URL,
         data={
             "title": "Should fail",
-            "case_type": CaseType.CORRUPTION,
+            "offence_type": CaseType.CORRUPTION,
             "state": CaseState.PUBLISHED,
             "description": "Complete description",
             "key_allegations": ["An allegation"],
@@ -238,7 +238,7 @@ def test_post_rejects_missing_title():
 
     response = _authed_client(user).post(
         URL,
-        data={"case_type": CaseType.CORRUPTION},
+        data={"offence_type": CaseType.CORRUPTION},
         format="json",
     )
 
@@ -253,7 +253,7 @@ def test_post_rejects_blank_title():
 
     response = _authed_client(user).post(
         URL,
-        data={"title": "   ", "case_type": CaseType.CORRUPTION},
+        data={"title": "   ", "offence_type": CaseType.CORRUPTION},
         format="json",
     )
 
@@ -271,7 +271,7 @@ def test_post_rejects_invalid_slug_format():
         URL,
         data={
             "title": "Bad slug case",
-            "case_type": CaseType.CORRUPTION,
+            "offence_type": CaseType.CORRUPTION,
             "slug": "1-cannot-start-with-digit",
         },
         format="json",
@@ -290,7 +290,7 @@ def test_post_draft_stays_lenient_without_allegations_or_description():
 
     response = _authed_client(user).post(
         URL,
-        data={"title": "Bare draft", "case_type": CaseType.CORRUPTION},
+        data={"title": "Bare draft", "offence_type": CaseType.CORRUPTION},
         format="json",
     )
 
@@ -306,8 +306,8 @@ def test_post_rejects_array_payload():
     response = _authed_client(user).post(
         URL,
         data=[
-            {"title": "First case", "case_type": CaseType.CORRUPTION},
-            {"title": "Second case", "case_type": CaseType.CORRUPTION},
+            {"title": "First case", "offence_type": CaseType.CORRUPTION},
+            {"title": "Second case", "offence_type": CaseType.CORRUPTION},
         ],
         format="json",
     )

@@ -66,7 +66,7 @@ def case(db):
         title="परीक्षण मुद्दा",
         slug="image-test-case",
         state=CaseState.PUBLISHED,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Description",
         short_description="Short",
     )
@@ -378,7 +378,7 @@ def test_search_card_carries_the_rendition(case, image, media_root):
         title=case.title,
         short=case.short_description,
         tags=[],
-        case_type=case.case_type,
+        offence_type=case.offence_type,
         case_status="ongoing",
         entities=[],
     )
@@ -400,7 +400,7 @@ def test_search_card_tolerates_a_stand_in_without_an_image():
         title="x",
         short=None,
         tags=[],
-        case_type="CORRUPTION",
+        offence_type="CORRUPTION",
         case_status="ongoing",
         entities=[],
     )
@@ -500,7 +500,7 @@ def test_case_list_does_not_fan_out_per_case(db, media_root):
             title=f"मुद्दा {index}",
             slug=f"n1-case-{index}",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             thumbnail_image=img,
         )
 
@@ -631,7 +631,7 @@ def test_a_case_with_an_unreadable_image_indexes_no_thumbnail(case, image, monke
         title=case.title,
         short=case.short_description,
         tags=[],
-        case_type=case.case_type,
+        offence_type=case.offence_type,
         case_status="ongoing",
         entities=[],
     )

@@ -17,7 +17,7 @@ from materials.models import Material, Policy, Visibility
 
 def _case(slug="ingest-case"):
     return Case.objects.create(
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         title="Ingest case",
         slug=slug,

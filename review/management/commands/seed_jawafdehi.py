@@ -172,7 +172,7 @@ class Command(BaseCommand):
             return
 
         defaults = {
-            "case_type": case.get("case_type") or "CORRUPTION",
+            "case_type": case.get("offence_type") or case.get("case_type") or "CORRUPTION",
             "state": case.get("state") or "DRAFT",
             "title": case.get("title") or slug,
             "short_description": case.get("short_description") or "",

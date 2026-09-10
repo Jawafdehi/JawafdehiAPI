@@ -106,7 +106,7 @@ def test_in_review_validation_rejects_incomplete_data():
     case = create_case_with_entities(
         title="Test Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
 
     # Try to transition to IN_REVIEW without key_allegations
@@ -164,7 +164,7 @@ def test_case_requires_at_least_one_alleged_entity():
     case = create_case_with_entities(
         title="Test Case",
         alleged_entities=[],  # Empty list
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
     # Should not raise for DRAFT state
     case.validate()
@@ -199,7 +199,7 @@ def test_new_relationship_defaults_to_charged():
     case = create_case_with_entities(
         title="Outcome Default Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
     rel = case.entity_relationships.first()
     assert rel.outcome == RelationshipOutcome.CHARGED == "charged"
@@ -215,7 +215,7 @@ def test_case_requires_title():
         create_case_with_entities(
             title="",  # Empty title
             alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
         )
 
 
@@ -227,7 +227,7 @@ def test_case_notes_default_to_blank_and_persist():
     case = create_case_with_entities(
         title="Notes Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
 
     assert case.notes == ""
@@ -336,7 +336,7 @@ def test_notes_field_defaults_to_empty():
     case = create_case_with_entities(
         title="Test case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
     assert case.notes == "", "notes field should default to empty string"
 
@@ -348,7 +348,7 @@ def test_notes_field_stores_markdown():
     case = create_case_with_entities(
         title="Test case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         notes=markdown_content,
     )
     case.refresh_from_db()
@@ -372,7 +372,7 @@ def test_slug_auto_generated_during_validation_for_published_cases():
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         key_allegations=["Allegation 1"],
         description="Test description",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
 
     # Slug-only API: case.save() already auto-generated a slug on creation.
@@ -405,7 +405,7 @@ def test_multiple_drafts_get_unique_auto_slugs():
             alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
             key_allegations=[f"Allegation {i}"],
             description=f"Test description {i}",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.DRAFT,
         )
         if raw_slug is not None:
@@ -441,7 +441,7 @@ def test_corruption_does_not_require_accused_entity_for_review():
         related_entities=["https://jawafdehi.org/entity/person/witness"],
         key_allegations=["Allegation"],
         description="Description",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
     credit_author(case)
     case.state = CaseState.IN_REVIEW
@@ -464,7 +464,7 @@ def test_corruption_location_only_entity_is_insufficient():
         title="Corruption Case",
         key_allegations=["Allegation"],
         description="Description",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
     CaseEntityRelationship.objects.create(
         case=case,
@@ -486,7 +486,7 @@ def test_tax_evasion_does_not_require_accused_entity():
         related_entities=["https://jawafdehi.org/entity/person/subject"],
         key_allegations=["Allegation"],
         description="Description",
-        case_type=CaseType.TAX_EVASION,
+        offence_type=CaseType.TAX_EVASION,
     )
     credit_author(case)
     case.state = CaseState.IN_REVIEW
@@ -504,7 +504,7 @@ def test_tax_evasion_requires_at_least_one_entity():
         title="Tax Evasion Case",
         key_allegations=["Allegation"],
         description="Description",
-        case_type=CaseType.TAX_EVASION,
+        offence_type=CaseType.TAX_EVASION,
     )
     case.state = CaseState.IN_REVIEW
 
@@ -524,7 +524,7 @@ def test_tax_evasion_location_only_entity_is_insufficient():
         title="Tax Evasion Case",
         key_allegations=["Allegation"],
         description="Description",
-        case_type=CaseType.TAX_EVASION,
+        offence_type=CaseType.TAX_EVASION,
     )
     CaseEntityRelationship.objects.create(
         case=case,

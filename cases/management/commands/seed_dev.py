@@ -152,7 +152,7 @@ class Command(BaseCommand):
             court=court,
             case_number="075-CR-0123",
             defaults=dict(
-                case_type="Corruption",
+                offence_type="Corruption",
                 case_status="Pending",
                 plaintiff="State",
                 defendant="Ram Bahadur",
@@ -173,7 +173,7 @@ class Command(BaseCommand):
                 slug=slug,
                 defaults=dict(
                     title=title,
-                    case_type=CaseType.CORRUPTION,
+                    offence_type=CaseType.CORRUPTION,
                     state=state,
                     short_description="Seed case for local testing.",
                     description="## Summary\n\nSeed **markdown** body.",
@@ -204,7 +204,7 @@ class Command(BaseCommand):
                 status=CaseReview.STATUS_DONE,
                 case_title="Review: procurement fraud Ministry X",
                 case_state=CaseState.IN_REVIEW,
-                case_type=CaseType.CORRUPTION,
+                offence_type=CaseType.CORRUPTION,
                 source_count=2,
                 sources_converted=2,
                 result={"overall": {"score": 72, "verdict": "revise"}},

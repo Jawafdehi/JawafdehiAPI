@@ -55,7 +55,7 @@ class EntityMergeApiTests(APITestCase):
 
     def _case_with_bind(self, slug, nes_id, rel=RelationshipType.LOCATION):
         case = Case.objects.create(
-            title="Jhapa land revenue case", slug=slug, case_type=CaseType.CORRUPTION,
+            title="Jhapa land revenue case", slug=slug, offence_type=CaseType.CORRUPTION,
             state=CaseState.DRAFT, short_description="t", description="t",
         )
         CaseEntityRelationship.objects.create(case=case, nes_id=nes_id, relationship_type=rel)

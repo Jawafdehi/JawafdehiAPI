@@ -23,7 +23,7 @@ class TestAPIDocumentationIntegration:
         """Create a published case for testing."""
         case = create_case_with_entities(
             slug="case-test123",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Test Corruption Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
@@ -150,6 +150,9 @@ class TestAPIDocumentationIntegration:
 
         # Verify filtering parameters are documented
         param_names = [p["name"] for p in cases_list["parameters"]]
+        assert "offence_type" in param_names
+        # DEPRECATED alias, documented so the deployed SPA's param still
+        # appears in the schema until it is dropped.
         assert "case_type" in param_names
         assert "tags" in param_names
         assert "search" in param_names

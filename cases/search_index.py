@@ -9,11 +9,11 @@ case that leaves PUBLISHED is removed). ``should_index(case)`` exposes the rule.
 Field mapping:
 * ``iri``            ← ``Case.public_iri`` (``https://jawafdehi.org/case/<slug>``,
   minted at publish — the document ``_id``),
-* ``type``           ← ``"Case"`` (+ the platform ``case_type`` in keywords),
+* ``type``           ← ``"Case"`` (+ the platform ``offence_type`` in keywords),
 * ``title_ne/en``    ← ``Case.title`` (script-bucketed; cases store one title),
 * ``title_translit`` ← shared transliteration of the title,
 * ``body``           ← ``description`` + ``key_allegations`` (joined),
-* ``keywords``       ← ``tags`` (+ ``case_type``),
+* ``keywords``       ← ``tags`` (+ ``offence_type``),
 * ``identifiers``    ← the IRI, the slug, and the ``court_cases`` references,
 * ``date``           ← ``case_start_date`` (else created date),
 * ``case_status``    ← coarse ongoing/closed/others (mirrors the SPA rule); a
@@ -273,7 +273,7 @@ def _build_card(
     title: str,
     short: str | None,
     tags: list[str],
-    case_type: Any,
+    offence_type: Any,
     case_status: str,
     entities: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
@@ -289,7 +289,10 @@ def _build_card(
         "short_description": short.strip() if short and short.strip() else None,
         "key_allegations": _key_allegations(case),
         "tags": tags,
-        "case_type": case_type,
+        "offence_type": offence_type,
+        # The deployed SPA card reads ``case_type``; emitted alongside the new
+        # name until the frontend has moved. Drop with the other aliases.
+        "case_type": offence_type,
         "status": case_status,
         "case_start_date": _iso(getattr(case, "case_start_date", None)),
         "case_end_date": _iso(getattr(case, "case_end_date", None)),
@@ -326,9 +329,9 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
 
     tags = [t for t in (getattr(case, "tags", None) or []) if isinstance(t, str)]
     keywords = list(tags)
-    case_type = getattr(case, "case_type", None)
-    if case_type:
-        keywords.append(case_type)
+    offence_type = getattr(case, "offence_type", None)
+    if offence_type:
+        keywords.append(offence_type)
 
     slug = getattr(case, "slug", None)
     identifiers = _build_identifiers(case, iri, slug)
@@ -346,20 +349,26 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
         "raw": {
             "@id": iri,
             "slug": slug,
-            "case_type": case_type,
+            "offence_type": offence_type,
+            "case_type": offence_type,  # DEPRECATED alias, see above
             "title": title,
             "tags": tags,
         },
     }
-    # Promote case_type to a top-level keyword so the unified search can filter and
+    # Promote offence_type to a top-level keyword so the unified search can filter and
     # facet on it (it also stays in ``keywords`` and ``raw`` for text recall).
     # NORMALIZE to upper-case to share ONE facet vocabulary with the NGM courtcase
     # docs (courts/search_index.py also upper-cases): a Jawafdehi ``CORRUPTION``
     # case and a court case typed "Corruption" must land in the SAME facet bucket,
-    # and the ``?case_type=`` filter (which upper-cases too) must match both. The
+    # and the ``?offence_type=`` filter (which upper-cases too) must match both. The
     # CaseType enum is already upper-case; this guards against any non-enum value.
-    if case_type and isinstance(case_type, str):
-        doc["case_type"] = case_type.upper()
+    if offence_type and isinstance(offence_type, str):
+        # ``case_type`` stays the facet field: the shared bucket with the NGM
+        # courtcase docs is deliberate, and ``?case_type=`` filters both doc
+        # types from one parameter. ``offence_type`` is additive so the frontend
+        # can migrate before the facet is renamed in a later release.
+        doc["case_type"] = offence_type.upper()
+        doc["offence_type"] = offence_type.upper()
 
     # ``getattr`` with a default because build_doc is pure — it shapes whatever it
     # is given, including objects (and fixtures) predating the field.
@@ -392,7 +401,7 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
         title=title,
         short=short,
         tags=tags,
-        case_type=case_type,
+        offence_type=offence_type,
         case_status=case_status,
         entities=entities,
     )

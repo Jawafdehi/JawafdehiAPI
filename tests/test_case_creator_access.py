@@ -63,7 +63,7 @@ def test_caseworker_has_view_permission(contributor_user, case_admin):
     # Create a case
     case = create_case_with_entities(
         title="Test Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
@@ -89,7 +89,7 @@ def test_admin_is_read_only_even_for_creator(contributor_user, case_admin):
     # Create a case
     case = create_case_with_entities(
         title="Test Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
@@ -118,7 +118,7 @@ def test_other_caseworker_has_global_read_but_no_admin_change(
     # Create a case (no object-level assignment in v3)
     case = create_case_with_entities(
         title="Test Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
@@ -150,14 +150,14 @@ def test_caseworker_sees_all_cases_in_queryset(
     # Create cases (no object-level assignment in v3)
     case1 = create_case_with_entities(
         title="Case by Contributor 1",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
 
     case2 = create_case_with_entities(
         title="Case by Another Contributor",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
@@ -188,21 +188,21 @@ def test_caseworker_sees_multiple_cases(contributor_user, case_admin):
     # Create multiple cases
     case1 = create_case_with_entities(
         title="Case 1",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
 
     case2 = create_case_with_entities(
         title="Case 2",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
 
     case3 = create_case_with_entities(
         title="Case 3",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.IN_REVIEW,
     )
@@ -234,7 +234,7 @@ def test_caseworker_access_persists_after_state_change(contributor_user, case_ad
     # Create a case in DRAFT
     case = create_case_with_entities(
         title="Test Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         key_allegations=["Test allegation"],
         description="Test description",

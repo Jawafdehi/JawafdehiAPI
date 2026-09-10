@@ -31,7 +31,7 @@ pytestmark = pytest.mark.django_db
 def make_case(**kwargs):
     defaults = {
         "title": "Lalita Niwas land scam",
-        "case_type": CaseType.CORRUPTION,
+        "offence_type": CaseType.CORRUPTION,
         "slug": "lalita-niwas-land-scam",
         "description": "A land transfer case.",
         "timeline": [{"date": "2026-01-01", "title": "Charge sheet filed"}],

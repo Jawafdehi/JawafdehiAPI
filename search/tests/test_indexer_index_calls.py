@@ -62,7 +62,7 @@ def _case(state):
         short_description="",
         key_allegations=[],
         tags=[],
-        case_type="CORRUPTION",
+        offence_type="CORRUPTION",
         court_cases=[],
         case_start_date=None,
         created_at=None,

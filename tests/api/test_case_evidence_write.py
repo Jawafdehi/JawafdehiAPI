@@ -41,7 +41,7 @@ def _authed(user):
 def _make_case(**kwargs):
     defaults = dict(
         title="Test case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         description="Some description",
         short_description="Short",
@@ -73,7 +73,7 @@ class TestCreateWritesEvidence:
         resp = client.post(
             LIST_URL,
             data={
-                "case_type": CaseType.CORRUPTION,
+                "offence_type": CaseType.CORRUPTION,
                 "title": "Bribery at the ministry",
                 "evidence": [
                     {"material_iri": IRI_A, "additional_details": "the charge sheet"},
@@ -96,7 +96,7 @@ class TestCreateWritesEvidence:
         resp = client.post(
             LIST_URL,
             data={
-                "case_type": CaseType.CORRUPTION,
+                "offence_type": CaseType.CORRUPTION,
                 "title": "Bad evidence",
                 "evidence": [{"material_iri": "not-an-iri"}],
             },

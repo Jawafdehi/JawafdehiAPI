@@ -280,7 +280,7 @@ def _published_case():
         short_description="Short summary.",
         key_allegations=["Misappropriation of funds", "Forgery"],
         tags=["corruption", "budget"],
-        case_type="CORRUPTION",
+        offence_type="CORRUPTION",
         court_cases=["https://jawafdehi.org/courtcase/supreme/081-cr-0081"],
         case_start_date=None,
         created_at=None,
@@ -350,7 +350,7 @@ def _card_case(**overrides):
         short_description="<b>Short</b> summary.",
         key_allegations=["Encroachment", ""],
         tags=["land", "corruption"],
-        case_type="CORRUPTION",
+        offence_type="CORRUPTION",
         court_cases=[],
         case_start_date=date(2024, 1, 1),
         case_end_date=None,
@@ -424,6 +424,8 @@ def test_case_build_doc_card_payload():
     assert card["short_description"] == "<b>Short</b> summary."
     assert card["key_allegations"] == ["Encroachment"]  # blank dropped
     assert card["tags"] == ["land", "corruption"]
+    assert card["offence_type"] == "CORRUPTION"
+    # DEPRECATED alias the deployed SPA card still reads.
     assert card["case_type"] == "CORRUPTION"
     assert card["status"] == "ongoing"
     assert card["case_start_date"] == "2024-01-01"

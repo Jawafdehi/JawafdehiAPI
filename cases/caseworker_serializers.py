@@ -56,6 +56,9 @@ class CaseInsensitiveChoiceField(serializers.ChoiceField):
 BLOCKED_PATH_PREFIXES = frozenset(
     [
         "/id",
+        "/offence_type",
+        # DEPRECATED spelling: blocked before the rename, so it stays blocked
+        # rather than falling through and being silently dropped.
         "/case_type",
         "/version",
         "/created_at",
@@ -362,10 +365,10 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     ``dict(base_fields + fields)``, so these 17 now come first and each
     subclass's own declarations follow:
 
-        create: title…bigo, case_type, state, alleged_entities, related_entities
-        PATCH : title…bigo, state, case_type, entities
+        create: title…bigo, offence_type, state, alleged_entities, related_entities
+        PATCH : title…bigo, state, offence_type, entities
 
-    Previously `case_type` led on create and sat 9th on PATCH. This is
+    Previously `offence_type` led on create and sat 9th on PATCH. This is
     positional only — the same field names with the same types, validators and
     required/allow_null/default flags, verified field-by-field against the
     pre-refactor serializers. JSON object key order carries no meaning for
@@ -482,7 +485,18 @@ class CaseCreateSerializer(
     CaseEntityValidationMixin,
     CaseWriteFieldsSerializer,
 ):
-    case_type = serializers.ChoiceField(choices=CaseType.choices)
+    # ``offence_type`` is required, but not at the field level: a caller may
+    # supply it under the deprecated ``case_type`` name instead, and the
+    # requirement is enforced in ``validate`` once both have been considered.
+    offence_type = serializers.ChoiceField(choices=CaseType.choices, required=False)
+    # DEPRECATED create alias. The note calls POST create a hard cut, but the
+    # deployed SPA admin creates cases with ``case_type``. Declared as a real
+    # field, not stripped in ``to_internal_value``, because the create view
+    # rejects any key absent from ``CaseCreateSerializer().fields``. Drop it
+    # together with the read alias in ``CaseSerializer``.
+    case_type = serializers.ChoiceField(
+        choices=CaseType.choices, required=False, write_only=True
+    )
     state = serializers.ChoiceField(
         choices=CaseState.choices,
         required=False,
@@ -495,8 +509,19 @@ class CaseCreateSerializer(
         child=serializers.CharField(), required=False
     )
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        deprecated = attrs.pop("case_type", None)
+        if not attrs.get("offence_type") and deprecated:
+            attrs["offence_type"] = deprecated
+        if not attrs.get("offence_type"):
+            raise serializers.ValidationError(
+                {"offence_type": ["This field is required."]}
+            )
+        return attrs
+
 
 class CasePatchSerializer(CourtCaseRefsValidationMixin, CaseWriteFieldsSerializer):
     state = serializers.ChoiceField(choices=CaseState.choices, required=False)
-    case_type = serializers.ChoiceField(choices=CaseType.choices)
+    offence_type = serializers.ChoiceField(choices=CaseType.choices)
     entities = EntityPatchItemSerializer(many=True, required=False)

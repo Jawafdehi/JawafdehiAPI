@@ -47,7 +47,7 @@ def test_relationship_clean_rejects_noncanonical_host(db):
     from cases.models import Case, CaseType, CaseState, RelationshipType
 
     case = Case.objects.create(
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         title="t",
     )

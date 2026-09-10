@@ -84,11 +84,11 @@ class TestCreateJawafdehiCaseTool:
     def test_tool_metadata(self):
         assert self.tool.name == "create_jawafdehi_case"
         assert "draft Jawafdehi case" in self.tool.description
-        assert self.tool.input_schema["required"] == ["title", "case_type"]
+        assert self.tool.input_schema["required"] == ["title", "offence_type"]
 
-    def test_case_type_schema_matches_the_control_plane(self):
+    def test_offence_type_schema_matches_the_control_plane(self):
         assert CASE_TYPE_VALUES == [value for value, _label in CaseType.choices]
-        assert self.tool.input_schema["properties"]["case_type"]["enum"] == (
+        assert self.tool.input_schema["properties"]["offence_type"]["enum"] == (
             CASE_TYPE_VALUES
         )
 
@@ -98,6 +98,10 @@ class TestCreateJawafdehiCaseTool:
             for name, field in CaseCreateSerializer().fields.items()
             if not field.read_only
         }
+        # The MCP takes the hard cut the note prescribes for create, while the
+        # REST serializer keeps a deprecated ``case_type`` alias for the
+        # deployed SPA. That is the one field they are allowed to differ on.
+        serializer_fields -= {"case_type"}
 
         assert set(CASE_CREATE_FIELDS) == serializer_fields
         assert set(self.tool.input_schema["properties"]) == serializer_fields
@@ -109,7 +113,7 @@ class TestCreateJawafdehiCaseTool:
     async def test_requires_token(self, monkeypatch):
         monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
 
-        result = await self.tool.execute({"title": "Case", "case_type": "CORRUPTION"})
+        result = await self.tool.execute({"title": "Case", "offence_type": "CORRUPTION"})
 
         assert "JAWAFDEHI_API_TOKEN" in result[0].text
 
@@ -129,7 +133,7 @@ class TestCreateJawafdehiCaseTool:
             result = await self.tool.execute(
                 {
                     "title": "Road contract case",
-                    "case_type": "CORRUPTION",
+                    "offence_type": "CORRUPTION",
                     "short_description": "Tender irregularities",
                     "tags": ["procurement"],
                     "key_allegations": ["Bid steering"],
@@ -147,7 +151,7 @@ class TestCreateJawafdehiCaseTool:
         _, kwargs = client.post.await_args
         assert kwargs["headers"]["Authorization"] == "Bearer test-token"
         assert kwargs["json"]["title"] == "Road contract case"
-        assert kwargs["json"]["case_type"] == "CORRUPTION"
+        assert kwargs["json"]["offence_type"] == "CORRUPTION"
         assert kwargs["json"]["short_description"] == "Tender irregularities"
         assert kwargs["json"]["tags"] == ["procurement"]
         assert kwargs["json"]["key_allegations"] == ["Bid steering"]
@@ -172,7 +176,7 @@ class TestCreateJawafdehiCaseTool:
             return_value=context_manager,
         ):
             result = await self.tool.execute(
-                {"title": "x" * 201, "case_type": "CORRUPTION"}
+                {"title": "x" * 201, "offence_type": "CORRUPTION"}
             )
 
         payload = json.loads(result[0].text)
@@ -196,7 +200,7 @@ class TestCreateJawafdehiCaseTool:
             return_value=context_manager,
         ):
             result = await self.tool.execute(
-                {"title": "Case", "case_type": "CORRUPTION"}
+                {"title": "Case", "offence_type": "CORRUPTION"}
             )
 
         payload = json.loads(result[0].text)

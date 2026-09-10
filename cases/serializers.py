@@ -157,7 +157,10 @@ class AuthorCaseSummarySerializer(serializers.Serializer):
     slug = serializers.CharField(read_only=True)
     title = serializers.CharField(read_only=True)
     short_description = serializers.CharField(read_only=True, allow_blank=True)
-    case_type = serializers.CharField(read_only=True)
+    offence_type = serializers.CharField(read_only=True)
+    # DEPRECATED read alias for the deployed SPA; drop one release after the
+    # frontend reads ``offence_type``.
+    case_type = serializers.CharField(source="offence_type", read_only=True)
     thumbnail = SrcsetRenditionField(specs=CARD_SPECS, source="card_image")
     thumbnail_url = serializers.CharField(read_only=True, allow_blank=True)
     case_publish_date = serializers.DateField(read_only=True, allow_null=True)
@@ -244,6 +247,9 @@ class CaseSerializer(serializers.ModelSerializer):
     schema discrepancy. The API now returns only the unified format as documented.
     """
 
+    # DEPRECATED read alias for the deployed SPA; drop one release after the
+    # frontend reads ``offence_type``.
+    case_type = serializers.CharField(source="offence_type", read_only=True)
     entities = serializers.SerializerMethodField(
         help_text="Entity binds for this case (NES entity id, relationship type, "
         "role note), with display details resolved from NES. The per-bind "
@@ -471,7 +477,8 @@ class CaseSerializer(serializers.ModelSerializer):
             "id",
             "slug",
             "public_iri",
-            "case_type",
+            "offence_type",
+            "case_type",  # DEPRECATED alias, see above
             "state",
             "title",
             "short_description",

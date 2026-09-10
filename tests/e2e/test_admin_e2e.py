@@ -77,7 +77,7 @@ class TestDjangoAdminWorkflows:
             title="New Corruption Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test-official"],
             key_allegations=["Initial allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Initial draft description",
             state=CaseState.DRAFT,
         )
@@ -147,7 +147,7 @@ class TestDjangoAdminWorkflows:
             title="Any Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.DRAFT,
         )
@@ -197,7 +197,7 @@ class TestDjangoAdminWorkflows:
             title="Contributor's New Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test-official"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Case created by contributor1",
             state=CaseState.DRAFT,
         )
@@ -267,7 +267,7 @@ class TestDjangoAdminWorkflows:
         case = create_case_with_entities(
             title="Minimal Draft",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.DRAFT,
         )
 
@@ -313,7 +313,7 @@ class TestDjangoAdminWorkflows:
         form_data = {
             "slug": case.slug,
             "title": case.title,
-            "case_type": case.case_type,
+            "offence_type": case.offence_type,
             "state": CaseState.PUBLISHED,
             "key_allegations": case.key_allegations,
             "description": case.description,
@@ -346,7 +346,7 @@ class TestDjangoAdminWorkflows:
             title="Original Case Title",
             alleged_entities=["https://jawafdehi.org/entity/person/original"],
             key_allegations=["Original allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Original description",
             state=CaseState.PUBLISHED,
         )
@@ -390,7 +390,7 @@ class TestDjangoAdminWorkflows:
             title="Case to be Deleted",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.PUBLISHED,
         )
@@ -456,7 +456,7 @@ class TestDjangoAdminWorkflows:
             title="Case for Contributor 1",
             alleged_entities=["https://jawafdehi.org/entity/person/test1"],
             key_allegations=["Allegation 1"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Description 1",
             state=CaseState.DRAFT,
         )
@@ -465,7 +465,7 @@ class TestDjangoAdminWorkflows:
             title="Case for Contributor 2",
             alleged_entities=["https://jawafdehi.org/entity/person/test2"],
             key_allegations=["Allegation 2"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Description 2",
             state=CaseState.IN_REVIEW,
         )
@@ -600,7 +600,7 @@ class TestDjangoAdminWorkflows:
             title="Edit Publish Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Initial allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Initial version description",
             state=CaseState.DRAFT,
         )
@@ -665,7 +665,7 @@ class TestDjangoAdminWorkflows:
             title="State Transition Test",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.DRAFT,
         )
@@ -682,7 +682,7 @@ class TestDjangoAdminWorkflows:
         form_data = {
             "slug": case.slug,
             "title": case.title,
-            "case_type": case.case_type,
+            "offence_type": case.offence_type,
             "state": CaseState.IN_REVIEW,
             "key_allegations": case.key_allegations,
             "description": case.description,
@@ -760,7 +760,7 @@ class TestDjangoAdminWorkflows:
         # Step 3: Create a case (as if via SPA) and assign contributor
         case = create_case_with_entities(
             title="Minimal Case - Quick Start",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=["https://jawafdehi.org/entity/person/placeholder"],
             state=CaseState.DRAFT,
         )
@@ -836,7 +836,7 @@ class TestDjangoAdminWorkflows:
         # Step 1: Attempt to create a new case with state=PUBLISHED (should fail)
         form_data = {
             "title": "New Case - Published State",
-            "case_type": CaseType.CORRUPTION,
+            "offence_type": CaseType.CORRUPTION,
             "state": CaseState.PUBLISHED,
             "alleged_entities": list(entities),
             "key_allegations": ["Test allegation"],
@@ -878,7 +878,7 @@ class TestDjangoAdminWorkflows:
         # Step 4: Create a new case with state=DRAFT (should succeed)
         case_draft = Case(
             title="New Case - Draft State",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.DRAFT,
         )
         case_draft.save()
@@ -1014,7 +1014,7 @@ class TestDjangoAdminWorkflows:
         # Step 1: Create a case with valid entity IDs
         case = create_case_with_entities(
             title="Original Case",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=["https://jawafdehi.org/entity/person/original-person"],
             state=CaseState.DRAFT,
         )
@@ -1142,7 +1142,7 @@ class TestDjangoAdminWorkflows:
         # Step 1: Create a draft case without alleged_entities
         case = create_case_with_entities(
             title="Draft Without Entities",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[],  # Empty list
             state=CaseState.DRAFT,
         )
@@ -1216,7 +1216,7 @@ class TestDjangoAdminWorkflows:
         # Step 1: Create a draft case with alleged_entities
         case = create_case_with_entities(
             title="Case for Publishing",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=["https://jawafdehi.org/entity/person/test-official"],
             key_allegations=["Test allegation"],
             description="Test description",
