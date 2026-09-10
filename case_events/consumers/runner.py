@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The pull loop: fetch, hand to a handler, ack or bury.
 
 Structured so that the interesting part — what happens to one message — is a

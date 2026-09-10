@@ -69,3 +69,7 @@ Commits authored `oopsy <oopsy@claudy.com>`.
 _The deprecated `v2` branch still exists on the org remotes but is no longer the
 trunk; do not push to it. The Wagtail `content/` app was forward-ported onto the
 mainline (PR #270) and is now present on `main` — see `docs/ARCHITECTURE.md` §3.5._
+
+## License
+
+This project is licensed under the [Hippocratic License Version 3.0 (HL3)](./LICENSE), an [Ethical Source](https://ethicalsource.dev) license. See [`LICENSING.md`](./LICENSING.md) for the rationale and key provisions.

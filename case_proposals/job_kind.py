@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The ``case_proposal_intent`` job kind: server-side hooks.
 
 Intent generation is a *job*, not something a bus consumer does inline. A model

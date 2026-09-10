@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Signals for newly-archived documents: court orders and CIAA press releases.
 
 One ``post_save`` receiver covers both, because both land the same way — a

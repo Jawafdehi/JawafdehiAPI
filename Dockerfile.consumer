@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 # Jawafdehi jobs-consumer image: the platform image plus Node.js and the claude
 # CLI. The queue consumer (`manage.py review_poller`) runs the case_review /
 # material_convert handlers locally; with REVIEW_LLM_PROVIDER=claude_cli the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Tests for the prompt template engine.
 
 The load-bearing ones are the two silent-corruption guards: that autoescaping

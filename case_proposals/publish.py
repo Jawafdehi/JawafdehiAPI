@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Publishing proposal decisions to the event bus.
 
 This is the first real producer on ``jaw.case.>``, and it closes the loop the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Recognising an exhausted token budget.
 
 The point of these is the NEGATIVE cases. A helper that says yes too often does

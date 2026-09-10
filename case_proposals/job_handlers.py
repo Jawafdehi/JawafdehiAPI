@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Worker-side handler for ``case_proposal_intent`` jobs.
 
 The counterpart to :mod:`case_proposals.job_kind`: that module runs on the API
