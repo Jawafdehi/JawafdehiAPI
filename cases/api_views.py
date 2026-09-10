@@ -73,6 +73,12 @@ from .models import (
     RelationshipType,
     StatisticsSnapshot,
 )
+from .stages import (
+    StageError,
+    apply_legacy_date,
+    derived_proceeding_dates,
+    validate_stages,
+)
 from .rules.predicates import (
     can_change_case,
     can_transition_case_state,
@@ -123,6 +129,11 @@ _PATCH_SCALAR_FIELDS = frozenset(
         "banner_url",
         "case_start_date",
         "case_end_date",
+        # ``dates`` is a Case column like any other scalar. The two derived
+        # columns are NOT patchable by a client -- they are recomputed below
+        # and injected into the same UPDATE, because this write path skips
+        # save() and nothing else would refresh them.
+        "dates",
         "tags",
         "key_allegations",
         "timeline",
@@ -1420,12 +1431,55 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 resp["ETag"] = _version_token(locked)
                 return resp
 
+            # The deployed SPA admin emits /case_start_date and
+            # /case_end_date. Those addressed columns; the dates now live on a
+            # record inside a list, and RFC-6902 replace on a path that does
+            # not exist is an error -- so they are TRANSFORMED onto the
+            # first-instance stage here rather than rewritten as paths.
+            # The columns are still written alongside, so a rollback to the
+            # previous release does not lose the edit.
+            stage_document = validated.get("dates") or {"stages": []}
+            stages = list(stage_document.get("stages") or [])
+            for path, key in (("/case_start_date", "start"), ("/case_end_date", "end")):
+                if not self._touches(patch_ops, path):
+                    continue
+                try:
+                    stages = apply_legacy_date(
+                        stages, key, validated.get(path.lstrip("/"))
+                    )
+                except StageError as exc:
+                    transaction.set_rollback(True)
+                    return Response(
+                        {path.lstrip("/"): [str(exc)]},
+                        status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    )
+
+            # Re-validate WITH the case's binds. The serializer validates a
+            # document and cannot see the case, so the courtcase_iri rule can
+            # only be enforced here -- and this path never reaches save().
+            try:
+                validate_stages(stages, binds=case.court_cases)
+            except StageError as exc:
+                transaction.set_rollback(True)
+                return Response(
+                    {"dates": [str(exc)]},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            validated["dates"] = {**stage_document, "stages": stages}
+
             # Persist scalar field changes
             scalar_updates = {
                 field: validated[field]
                 for field in _PATCH_SCALAR_FIELDS
                 if field in validated
             }
+            # Derived from ``dates``, never from the client. This bulk UPDATE
+            # bypasses save(), which is where the model normally refreshes
+            # them, so they are recomputed and injected here or the archive
+            # silently misorders after every date edit.
+            started, decided = derived_proceeding_dates(stages)
+            scalar_updates["proceedings_started_on"] = started
+            scalar_updates["proceedings_decided_on"] = decided
             if scalar_updates:
                 case = self.get_object()
                 # ``QuerySet.update()`` bypasses the model's ``auto_now`` on
@@ -1574,6 +1628,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 str(case.case_start_date) if case.case_start_date else None
             ),
             "case_end_date": str(case.case_end_date) if case.case_end_date else None,
+            "dates": case.dates or {"stages": []},
             "offence_type": case.offence_type,
             "tags": list(case.tags) if case.tags else [],
             "key_allegations": (

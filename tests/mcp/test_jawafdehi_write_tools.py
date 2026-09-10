@@ -98,10 +98,14 @@ class TestCreateJawafdehiCaseTool:
             for name, field in CaseCreateSerializer().fields.items()
             if not field.read_only
         }
-        # The MCP takes the hard cut the note prescribes for create, while the
-        # REST serializer keeps a deprecated ``case_type`` alias for the
-        # deployed SPA. That is the one field they are allowed to differ on.
-        serializer_fields -= {"case_type"}
+        # Two deliberate differences. ``case_type`` is the deprecated create
+        # alias the REST serializer keeps for the deployed SPA, while the MCP
+        # takes the hard cut the note prescribes for create. ``dates`` is not
+        # offered on MCP create either -- a case is created without stages and
+        # they are patched in afterwards. The deprecated
+        # ``case_start_date``/``case_end_date`` stay on BOTH, and both fold
+        # into a first-instance stage.
+        serializer_fields -= {"case_type", "dates"}
 
         assert set(CASE_CREATE_FIELDS) == serializer_fields
         assert set(self.tool.input_schema["properties"]) == serializer_fields

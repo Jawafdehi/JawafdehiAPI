@@ -177,3 +177,62 @@ def derived_proceeding_dates(stages: Any) -> tuple[date | None, date | None]:
         min(starts) if starts else None,
         None if any_open or not ends else max(ends),
     )
+
+
+def first_instance_dates(stages: Any) -> tuple[str | None, str | None]:
+    """``(start, end)`` of the single ``initial`` stage, for the read aliases.
+
+    Returns ``(None, None)`` when there is no first instance, or more than one:
+    the deprecated scalar shape cannot represent parallel first instances, so
+    inventing an answer would be worse than admitting it has none.
+    """
+    if not isinstance(stages, list):
+        return (None, None)
+    initial = [
+        s for s in stages if isinstance(s, dict) and s.get("stage") == STAGE_INITIAL
+    ]
+    if len(initial) != 1:
+        return (None, None)
+    start = initial[0].get("start")
+    end = initial[0].get("end")
+    return (str(start) if start else None, str(end) if end else None)
+
+
+def apply_legacy_date(stages: Any, key: str, value: Any) -> list[dict[str, Any]]:
+    """Write a deprecated ``case_start_date`` / ``case_end_date`` into the stages.
+
+    The deployed SPA admin emits those two paths. They addressed columns; the
+    dates now live on a record inside a list, and RFC-6902 ``replace`` on a
+    path that does not exist is an error -- so this is a transform, not a path
+    rewrite. The first instance is created when the case has none.
+
+    Raises ``StageError`` when the case has more than one first instance: the
+    old form cannot express that case, so guessing which stage it meant would
+    corrupt data.
+    """
+    if key not in ("start", "end"):
+        raise StageError(f"{key!r} is not a legacy date field")
+
+    working = [dict(s) for s in stages if isinstance(s, dict)] if isinstance(stages, list) else []
+    initial = [s for s in working if s.get("stage") == STAGE_INITIAL]
+
+    if len(initial) > 1:
+        raise StageError(
+            "this case has more than one first-instance stage, so the "
+            "deprecated date field cannot say which one it means -- patch "
+            "/dates instead"
+        )
+
+    if not initial:
+        if value in (None, ""):
+            return working
+        target = {"stage": STAGE_INITIAL}
+        working.append(target)
+    else:
+        target = initial[0]
+
+    if value in (None, ""):
+        target.pop(key, None)
+    else:
+        target[key] = str(value)
+    return working

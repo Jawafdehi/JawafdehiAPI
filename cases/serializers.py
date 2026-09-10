@@ -12,6 +12,7 @@ from drf_spectacular.utils import extend_schema_field, inline_serializer
 from rest_framework import serializers
 
 from .image_serializers import CARD_SPECS, HERO_SPECS, SrcsetRenditionField
+from .stages import first_instance_dates
 from .models import (
     Case,
     CaseEntityRelationship,
@@ -250,6 +251,18 @@ class CaseSerializer(serializers.ModelSerializer):
     # DEPRECATED read alias for the deployed SPA; drop one release after the
     # frontend reads ``offence_type``.
     case_type = serializers.CharField(source="offence_type", read_only=True)
+    # DEPRECATED read aliases. They used to be columns; they now report the
+    # single first-instance stage, and are null when the case has none or has
+    # several (the scalar shape cannot express parallel first instances).
+    case_start_date = serializers.SerializerMethodField()
+    case_end_date = serializers.SerializerMethodField()
+
+    def get_case_start_date(self, obj):
+        return first_instance_dates((obj.dates or {}).get("stages") or [])[0]
+
+    def get_case_end_date(self, obj):
+        return first_instance_dates((obj.dates or {}).get("stages") or [])[1]
+
     entities = serializers.SerializerMethodField(
         help_text="Entity binds for this case (NES entity id, relationship type, "
         "role note), with display details resolved from NES. The per-bind "

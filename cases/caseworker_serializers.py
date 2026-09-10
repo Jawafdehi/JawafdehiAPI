@@ -19,6 +19,7 @@ from jawafdehi_shared.entities.ids import (
 
 from .fields import edit_history_date_error, parse_edit_history_date
 from .image_serializers import ImageIdField
+from .stages import StageError, validate_stages
 from .models import (
     CaseState,
     CaseType,
@@ -395,8 +396,12 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         required=False, allow_blank=True, max_length=500
     )
     banner_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
+    # DEPRECATED. Kept writable so the deployed SPA admin's PATCH still
+    # validates; the view transforms them onto the first-instance stage rather
+    # than writing the columns. Drop with the read aliases.
     case_start_date = serializers.DateField(required=False, allow_null=True)
     case_end_date = serializers.DateField(required=False, allow_null=True)
+    dates = serializers.JSONField(required=False)
     tags = serializers.ListField(child=serializers.CharField(), required=False)
     key_allegations = serializers.ListField(
         child=serializers.CharField(), required=False
@@ -480,6 +485,22 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         return value
 
 
+    def validate_dates(self, value):
+        """Reject an unknown stage or key with 422 rather than dropping it.
+
+        The bind check is deliberately NOT done here: the serializer validates
+        a document, not a case, so it cannot see the case's court_cases. The
+        model's save() re-runs the full rule with the binds in hand.
+        """
+        if not isinstance(value, dict) or "stages" not in value:
+            raise serializers.ValidationError("dates must be {'stages': [...]}")
+        try:
+            validate_stages(value["stages"])
+        except StageError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+        return value
+
+
 class CaseCreateSerializer(
     CourtCaseRefsValidationMixin,
     CaseEntityValidationMixin,
@@ -518,6 +539,23 @@ class CaseCreateSerializer(
             raise serializers.ValidationError(
                 {"offence_type": ["This field is required."]}
             )
+
+        # A create that supplies the deprecated dates has to land as a stage,
+        # not just as the vestigial columns -- otherwise the case reads as
+        # having no proceedings at all and sorts by created_at.
+        start = attrs.get("case_start_date")
+        end = attrs.get("case_end_date")
+        if (start or end) and not attrs.get("dates"):
+            stage = {"stage": "initial"}
+            if start:
+                stage["start"] = str(start)
+            if end:
+                stage["end"] = str(end)
+            try:
+                validate_stages([stage])
+            except StageError as exc:
+                raise serializers.ValidationError({"case_end_date": [str(exc)]}) from exc
+            attrs["dates"] = {"stages": [stage]}
         return attrs
 
 
