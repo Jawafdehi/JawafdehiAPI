@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The message envelope every event on the bus carries.
 
 One shape for signals and case events alike, so a consumer can read provenance,

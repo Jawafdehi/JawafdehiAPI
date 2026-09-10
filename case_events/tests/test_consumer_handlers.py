@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """What each consumer does with a message.
 
 The bus is stubbed throughout — these assert on the messages a handler WOULD

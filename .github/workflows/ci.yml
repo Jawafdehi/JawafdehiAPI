@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 
 # Test + lint gate for the platform monolith (restored uv-native after the wholesale port dropped the
 # legacy Poetry workflows). The WHOLE test suite runs on sqlite with ZERO external services —

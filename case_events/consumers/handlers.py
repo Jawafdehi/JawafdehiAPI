@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The four consumers, and what each does with a message.
 
 Each handler is an ordinary synchronous function of an envelope. It runs in a

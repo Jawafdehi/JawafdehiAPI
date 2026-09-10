@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The worker-side intent handler.
 
 The model is mocked throughout — what is under test is the prompt this builds

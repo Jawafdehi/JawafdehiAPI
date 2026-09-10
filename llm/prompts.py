@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """A named, versioned registry of prompts backed by template files.
 
 Prompts in this codebase are conventionally a module-level system constant plus

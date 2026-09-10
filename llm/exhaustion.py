@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Recognising "the model could not finish" across providers.
 
 This lives here rather than beside one caller because the same failure has been

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The one producer a human drives: a caseworker's manual note.
 
 Every other producer watches something. This one is typed. A caseworker who

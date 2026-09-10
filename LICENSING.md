@@ -23,15 +23,36 @@ The full license text is in the [LICENSE](./LICENSE) file at the root of this re
 Key provisions:
 
 - **Human Rights Compliance**: The software may not be used for activities that violate human rights laws or principles
-- **Enforcement**: Licensor may terminate the license for human rights violations after a 90-day notice and cure period
+- **Enforcement**: Termination runs in two stages. On learning of an alleged violation, the Licensor may notify the Licensee and allow 90 days to investigate and respond; after the earlier of that response or those 90 days, the Licensor may give notice of termination and allow a further 90 days to cease use of the software
 - **Indemnity**: Licensees indemnify Jawafdehi.org for non-compliance costs
 - **Ethical Source**: HL3 is an Ethical Source license, not an Open Source Initiative (OSI) approved license
 
 Because HL3 is not OSI-approved, GitHub classifies it as "Other" and some hosted services that gate a free tier on an OSI license will not recognise it.
 
+## SPDX Identifier
+
+Hippocratic 3.0 is **not** on the [SPDX License List](https://spdx.org/licenses/) — the list carries `Hippocratic-2.1`, and 3.0 is only a pending request. SPDX requires a `LicenseRef-` prefix for anything not on the list, so the only spec-valid identifier for this repository is:
+
+```
+LicenseRef-Hippocratic-3.0
+```
+
+That is what `pyproject.toml` declares, and it is what source-file headers must use:
+
+```python
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
+```
+
+A bare `Hippocratic-3.0` is not a valid SPDX identifier and downstream SPDX tooling may reject it.
+
 ## License Compliance Verification
 
-The [`spdx-header-check`](./.github/workflows/spdx-header-check.yml) workflow runs on every pull request. It **fails** the build if the `LICENSE` file is missing or is not HL3, and reports missing or non-HL3 `SPDX-License-Identifier` headers as warnings.
+The [`spdx-header-check`](./.github/workflows/spdx-header-check.yml) workflow runs on every pull request targeting `main`, and on pushes to `main`. It **fails** the build if:
+
+- the `LICENSE` file is missing, or its contents no longer match the SHA-256 digest pinned in the workflow (so the licence text cannot be reworded or truncated without a deliberate, reviewed change); or
+- any of `SECURITY.md`, `CONTRIBUTING.md` or `CODE_OF_CONDUCT.md` has been deleted.
+
+Missing or non-`LicenseRef-Hippocratic-3.0` `SPDX-License-Identifier` headers are reported as **warnings only** — most source files in this repository do not yet carry a header, so this step annotates rather than blocks.
 
 ## Questions
 

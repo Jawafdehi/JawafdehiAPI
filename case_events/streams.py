@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """JetStream stream topology, asserted from code rather than declared in YAML.
 
 NATS has no CRD and no declarative stream config in the server file, so the

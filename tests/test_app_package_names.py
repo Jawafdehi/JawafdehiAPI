@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Adding a Django app means editing three lists. These tests keep them in sync.
 
 An app has to be named in ``INSTALLED_APPS``, in the wheel's ``packages`` list,

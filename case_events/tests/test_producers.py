@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The producers: docket change-detect, and the Material post_save signal.
 
 Two properties are load-bearing and everything else is detail.

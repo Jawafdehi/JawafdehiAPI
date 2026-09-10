@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Supreme Court appellate dispositions recovered from ``enrichment_hearings``.
 
 Supreme's typed verdict columns are entirely empty — 107,554 rows, zero

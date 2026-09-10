@@ -18,8 +18,6 @@ Each repository has its own setup instructions in its README. Pick the repo that
 - **Judicial data:** [ngm](https://github.com/Jawafdehi/ngm) / [ngm-frontend](https://github.com/Jawafdehi/ngm-frontend)
 - **MCP server:** [jawafdehi-mcp](https://github.com/Jawafdehi/jawafdehi-mcp)
 
-Cross-repo orchestration lives in [jawafdehi-meta](https://github.com/Jawafdehi/jawafdehi-meta).
-
 ## Pull request workflow
 
 1. Fork the repository.

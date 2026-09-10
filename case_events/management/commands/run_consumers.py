@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Run the bus consumers.
 
     manage.py run_consumers                          # READ-ONLY: print topology, exit
