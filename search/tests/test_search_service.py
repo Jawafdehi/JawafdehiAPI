@@ -1828,3 +1828,76 @@ def test_did_you_mean_survives_an_option_with_no_score():
         )
     }
     assert svc._did_you_mean_from_suggest("coruption", suggest) == "corruption"
+
+
+# ── the stage-era case fields ────────────────────────────────────────────────
+#
+# The indexer writes the full six-value lifecycle to ``status`` and keeps the
+# legacy three-value one on ``case_status`` so the deployed card badge does not
+# break. Indexed is not the same as reachable: the envelope copies a fixed
+# allowlist, so a field absent from it cannot be read by any client.
+
+
+def test_serialize_hit_surfaces_the_full_case_lifecycle():
+    hit = {
+        "_index": "jawafdehi-cases",
+        "_source": {
+            "iri": "https://jawafdehi.org/case/x",
+            "status": "under_investigation",
+            "raw": {"case_status": "others"},
+        },
+    }
+
+    extra = svc._serialize_hit(hit)["extra"]
+
+    assert extra["status"] == "under_investigation"
+    assert extra["case_status"] == "others", "the legacy facet value stays too"
+
+
+def test_serialize_hit_does_not_leak_the_ngm_scraper_flag_as_a_status():
+    """``status`` carries TWO vocabularies by doc type.
+
+    NGM courtcase docs write their scraper enrichment flag there
+    (pending/enriched/failed). Copying the field unconditionally would publish
+    an internal pipeline state on every court-case hit and hand a client one
+    envelope key meaning two unrelated things.
+    """
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/special/081-cr-0095",
+            "status": "enriched",
+            "raw": {"status": "enriched"},
+        },
+    }
+
+    assert "status" not in svc._serialize_hit(hit)["extra"]
+
+
+def test_serialize_hit_surfaces_the_track_and_the_derived_proceeding_dates():
+    hit = {
+        "_index": "jawafdehi-cases",
+        "_source": {
+            "iri": "https://jawafdehi.org/case/x",
+            "case_track": "ciaa",
+            "proceedings_started_on": "2025-05-15",
+            "proceedings_decided_on": "2026-07-06",
+        },
+    }
+
+    extra = svc._serialize_hit(hit)["extra"]
+
+    assert extra["case_track"] == "ciaa"
+    assert extra["proceedings_started_on"] == "2025-05-15"
+    assert extra["proceedings_decided_on"] == "2026-07-06"
+
+
+def test_serialize_hit_omits_the_stage_fields_before_the_rebuild():
+    """They are omitted, not nulled, by the indexer — a doc written before the
+    rebuild simply lacks them, and the envelope must not invent keys."""
+    hit = {"_index": "jawafdehi-cases", "_source": {"iri": "https://jawafdehi.org/case/x"}}
+
+    extra = svc._serialize_hit(hit)["extra"]
+
+    for key in ("case_track", "proceedings_started_on", "proceedings_decided_on"):
+        assert key not in extra

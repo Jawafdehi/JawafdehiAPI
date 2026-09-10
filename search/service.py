@@ -1056,6 +1056,30 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
         if raw.get(key) is not None:
             extra[key] = raw[key]
 
+    # Case-only, and gated on the doc type rather than copied with the block
+    # above, because ``status`` carries TWO vocabularies: Jawafdehi cases write
+    # the derived lifecycle, NGM courtcase docs write their scraper enrichment
+    # flag (pending/enriched/failed). Copying it unconditionally would publish
+    # an internal pipeline state on every court-case hit and give one envelope
+    # key two unrelated meanings.
+    #
+    # ``case_status`` above stays exactly as it was -- it is the legacy
+    # three-value facet the deployed SPA badges on, and this adds the full
+    # vocabulary alongside so the frontend can migrate on its own schedule.
+    #
+    # The three stage-era fields are OMITTED by the indexer when unset, so a
+    # doc written before the ``reindex_all --rebuild`` this needs simply lacks
+    # them; the None guard keeps that a missing key rather than a null.
+    if result_type == "case":
+        for key in (
+            "status",
+            "case_track",
+            "proceedings_started_on",
+            "proceedings_decided_on",
+        ):
+            if source.get(key) is not None:
+                extra[key] = source[key]
+
     envelope: dict[str, Any] = {
         "type": result_type,
         "id": source.get("iri"),
