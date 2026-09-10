@@ -41,6 +41,17 @@ CASE_TYPE_VALUES = [
     "BANKING_OFFENCE",
 ]
 CASE_STATE_VALUES = ["DRAFT"]
+# A literal, like CASE_TYPE_VALUES above and the search tool's ``sort``: this
+# schema must build without Django. Pinned to ``cases.models.CaseTrack`` by
+# test_case_track_enum_tracks_the_model.
+CASE_TRACK_VALUES = [
+    "ciaa",
+    "money_laundering",
+    "public_prosecutor",
+    "writ",
+    "arbitration",
+    "other",
+]
 MAX_MATERIAL_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
@@ -105,6 +116,18 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
         "default": "DRAFT",
         "description": "New cases must be created in DRAFT state.",
     },
+    "case_track": _nullable_schema(
+        {
+            "type": "string",
+            "enum": CASE_TRACK_VALUES,
+            "description": (
+                "How the case reached court: ciaa (a CIAA prosecution), "
+                "money_laundering, public_prosecutor, writ, arbitration, "
+                "other. Leave unset when the sources do not say -- null is "
+                "honest, and an empty value would be a nameless facet bucket."
+            ),
+        }
+    ),
     "title": {
         "type": "string",
         "maxLength": 200,

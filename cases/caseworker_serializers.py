@@ -22,9 +22,11 @@ from .image_serializers import ImageIdField
 from .stages import StageError, validate_stages
 from .models import (
     CaseState,
+    CaseTrack,
     CaseType,
     RelationshipOutcome,
     RelationshipType,
+    StatusOverride,
 )
 from .validators import validate_courtcase_iri, validate_slug
 
@@ -399,6 +401,12 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     # DEPRECATED. Kept writable so the deployed SPA admin's PATCH still
     # validates; the view transforms them onto the first-instance stage rather
     # than writing the columns. Drop with the read aliases.
+    case_track = serializers.ChoiceField(
+        choices=CaseTrack.choices, required=False, allow_null=True
+    )
+    status_override = serializers.ChoiceField(
+        choices=StatusOverride.choices, required=False, allow_null=True
+    )
     case_start_date = serializers.DateField(required=False, allow_null=True)
     case_end_date = serializers.DateField(required=False, allow_null=True)
     dates = serializers.JSONField(required=False)

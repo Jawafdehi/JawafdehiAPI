@@ -311,3 +311,157 @@ def test_a_start_that_precedes_an_existing_end_is_validated_after_both_apply():
     case.refresh_from_db()
     assert case.dates["stages"] == [
         {"stage": "initial", "start": "2023-06-22", "end": "2024-06-04"}]
+
+
+# ── create ───────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_creating_with_a_stage_list_persists_it():
+    """POST must take what PATCH takes.
+
+    Without this the stage editor cannot appear on the create form at all --
+    only the two deprecated date inputs can, which is precisely the shape this
+    rework exists to retire. A caseworker would have to create the case, save,
+    and reopen it before recording that it went to appeal.
+    """
+    from cases.caseworker_serializers import CaseCreateSerializer
+
+    serializer = CaseCreateSerializer(data={
+        "title": "Created with stages",
+        "offence_type": CaseType.CORRUPTION,
+        "dates": {"stages": [
+            {"stage": "investigation", "start": "2023-01-12", "end": "2024-02-25"},
+            {"stage": "initial", "start": "2024-02-25"},
+        ]},
+    })
+
+    assert serializer.is_valid(), serializer.errors
+    assert serializer.validated_data["dates"]["stages"][1]["stage"] == "initial"
+
+
+@pytest.mark.django_db
+def test_creating_with_an_unknown_stage_is_refused():
+    from cases.caseworker_serializers import CaseCreateSerializer
+
+    serializer = CaseCreateSerializer(data={
+        "title": "Bad stage",
+        "offence_type": CaseType.CORRUPTION,
+        "dates": {"stages": [{"stage": "first_instance"}]},
+    })
+
+    assert not serializer.is_valid()
+    assert "dates" in serializer.errors
+
+
+@pytest.mark.django_db
+def test_posting_a_stage_list_is_accepted_by_the_create_view():
+    """The serializer taking it is not enough.
+
+    The create view rejects any key absent from ``CaseCreateSerializer().fields``
+    with "This field is not allowed", so a field that validates fine can still
+    be refused at the door. ``dates`` is inherited from
+    ``CaseWriteFieldsSerializer`` rather than declared on the create serializer,
+    which makes it easy to read the class and conclude it is not accepted.
+    """
+    response = _client().post(
+        "/api/cases/",
+        {
+            "title": "Posted with stages",
+            "offence_type": CaseType.CORRUPTION,
+            "description": "d",
+            "short_description": "s",
+            "dates": {"stages": [{"stage": "initial", "start": "2024-02-25"}]},
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201, response.data
+    case = Case.objects.get(pk=response.data["id"])
+    assert case.dates["stages"] == [{"stage": "initial", "start": "2024-02-25"}]
+    assert str(case.proceedings_started_on) == "2024-02-25"
+
+
+@pytest.mark.django_db
+def test_posting_the_deprecated_dates_lands_a_stage_through_the_view():
+    """The serializer folds them into an `initial` stage; the view must keep it.
+
+    Otherwise the case is created with the legacy COLUMN set and no stage, and
+    the read alias -- which reads off the stage list -- serves null for a date
+    the caseworker just typed.
+    """
+    response = _client().post(
+        "/api/cases/",
+        {
+            "title": "Posted with old dates",
+            "offence_type": CaseType.CORRUPTION,
+            "description": "d",
+            "short_description": "s",
+            "case_start_date": "2024-02-25",
+            "case_end_date": "2025-08-13",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201, response.data
+    case = Case.objects.get(pk=response.data["id"])
+    assert case.dates["stages"] == [
+        {"stage": "initial", "start": "2024-02-25", "end": "2025-08-13"}]
+    assert str(case.proceedings_decided_on) == "2025-08-13"
+
+
+@pytest.mark.django_db
+def test_posting_a_track_and_an_override_keeps_them():
+    """Same allowlist, same silent drop."""
+    response = _client().post(
+        "/api/cases/",
+        {
+            "title": "Posted with a track",
+            "offence_type": CaseType.CORRUPTION,
+            "description": "d",
+            "short_description": "s",
+            "case_track": "ciaa",
+            "status_override": "dormant",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201, response.data
+    case = Case.objects.get(pk=response.data["id"])
+    assert case.case_track == "ciaa"
+    assert case.status_override == "dormant"
+
+
+@pytest.mark.django_db
+def test_patching_the_track_and_the_override_persists_them():
+    """Both are Case columns added by this rework, and neither was reachable.
+
+    A field missing from `_PATCH_SCALAR_FIELDS` validates, returns 200, and is
+    then dropped when the bulk UPDATE is assembled -- the same silent drop the
+    list already records for `notes` (BB-28). The model had the columns, the
+    index read them and the frontend typed them, but no client could set one.
+    """
+    case = _case()
+
+    response = _patch(case, [
+        {"op": "replace", "path": "/case_track", "value": "ciaa"},
+        {"op": "replace", "path": "/status_override", "value": "dormant"},
+    ])
+
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.case_track == "ciaa"
+    assert case.status_override == "dormant"
+    assert case.status == "dormant", "the override must win over the derivation"
+
+
+@pytest.mark.django_db
+def test_an_unknown_track_is_refused():
+    case = _case()
+
+    response = _patch(case, [
+        {"op": "replace", "path": "/case_track", "value": "not_a_track"}
+    ])
+
+    assert response.status_code == 422, response.data
+    assert "case_track" in response.data

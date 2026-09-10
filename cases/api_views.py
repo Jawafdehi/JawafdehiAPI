@@ -152,6 +152,12 @@ _PATCH_SCALAR_FIELDS = frozenset(
         # it is a join, written by _sync_author_credits like court_cases.
         "case_publish_date",
         "public_edit_history",
+        # The two columns this rework added. Missing here, a patch
+        # validates, returns 200 and is then dropped when the bulk
+        # UPDATE is assembled -- the silent drop this list already
+        # records for ``notes`` (BB-28).
+        "case_track",
+        "status_override",
     ]
 )
 
@@ -700,6 +706,14 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "banner_url",
             "case_start_date",
             "case_end_date",
+            # ``dates`` carries the stage list, and the create
+            # serializer also folds the two deprecated dates above into
+            # it. Missing here, BOTH were dropped after validating: the
+            # case was created with the legacy column set and no stage,
+            # so the read alias served null for a date just typed.
+            "dates",
+            "case_track",
+            "status_override",
             "tags",
             "key_allegations",
             "timeline",
@@ -1629,6 +1643,11 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             ),
             "case_end_date": str(case.case_end_date) if case.case_end_date else None,
             "dates": case.dates or {"stages": []},
+            # Present in the snapshot or an RFC-6902 ``replace`` on the
+            # path 400s with "can't replace a non-existent object" --
+            # the field never reaches validation at all.
+            "case_track": case.case_track,
+            "status_override": case.status_override,
             "offence_type": case.offence_type,
             "tags": list(case.tags) if case.tags else [],
             "key_allegations": (
