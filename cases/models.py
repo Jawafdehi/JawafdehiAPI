@@ -1063,15 +1063,33 @@ class Case(models.Model):
             "list cannot express (withdrawn, dormant)."
         ),
     )
+    # These two held the COURT dates all along, whatever the old help text
+    # said: measured against NGM on ten published cases, case_start_date is
+    # the special court's registration date (seven exact, three a day out),
+    # and casework.enrich_court_record derives it from exactly that. The
+    # "alleged incident" wording was wrong for years and misread during this
+    # rework, which is why the correction is pinned by a test.
     case_start_date = models.DateField(
-        null=True, blank=True, help_text="When the alleged incident began"
+        null=True,
+        blank=True,
+        help_text=(
+            "DEPRECATED — edit the stage list instead. The first-instance "
+            "court registration date, served as an alias off the single "
+            "'initial' stage."
+        ),
     )
     case_end_date = models.DateField(
-        null=True, blank=True, help_text="When the alleged incident ended"
+        null=True,
+        blank=True,
+        help_text=(
+            "DEPRECATED — edit the stage list instead. The first-instance "
+            "court decision date, served as an alias off the single "
+            "'initial' stage."
+        ),
     )
     # The date the case was FIRST published on jawafdehi.org — about our
-    # publication, not about the alleged incident (case_start_date/case_end_date
-    # above). Nullable at the column so DRAFTs can exist without one; required
+    # publication, not about the proceedings (case_start_date/case_end_date
+    # above, and the stage list they alias). Nullable at the column so DRAFTs can exist without one; required
     # before a case may leave DRAFT (see validate()). Deliberately NOT derived
     # from created_at or from the first PUBLISHED CaseStateChange: cases are
     # routinely published here long after the research was done, and the state

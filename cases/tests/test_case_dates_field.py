@@ -103,3 +103,34 @@ def test_a_stage_iri_must_be_one_of_the_case_binds():
 
     with pytest.raises(ValidationError):
         case.save()
+
+
+# ── what the deprecated columns actually hold ────────────────────────────────
+
+
+def test_the_deprecated_date_columns_do_not_claim_to_be_incident_dates():
+    """They hold COURT dates, and the help text said otherwise for years.
+
+    Measured 2026-09-10 against NGM over ten published CIAA cases:
+    ``case_start_date`` equals the special court's registration date on seven
+    exactly and is one day out on three (one batch, one press release).
+    Nothing resembling an incident date, which for these is years earlier.
+    ``casework.enrich_court_record`` agrees from the writing side -- it
+    derives the value FROM court registration dates.
+
+    This matters because the wrong text was load-bearing: it is what the admin
+    form shows caseworkers and what OpenAPI publishes, and reasoning from it
+    produced a false claim in the search indexer during this very rework. The
+    assertion is on the WORD, not the sentence, so rewording stays free while
+    reinstating the incident reading does not.
+    """
+    for name in ("case_start_date", "case_end_date"):
+        help_text = Case._meta.get_field(name).help_text
+        assert "incident" not in help_text.lower(), (
+            f"{name}: holds the court registration/decision date, not an "
+            "incident date -- see measurements.md M5"
+        )
+        assert "deprecated" in help_text.lower(), (
+            f"{name}: superseded by dates.stages; say so where a caseworker "
+            "reads it"
+        )
