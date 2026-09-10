@@ -147,6 +147,12 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
                 email,
                 name=name,
                 variables={
+                    # Every newsletter template greets with {{first_name}}, so the
+                    # given name has to land in that variable specifically. The
+                    # joined display name above rides along as SendPulse's own
+                    # "Name" field, which is what the dashboard column shows and
+                    # which nothing in the templates reads.
+                    "first_name": data["firstName"],
                     "locale": data.get("locale", ""),
                     "consent_source": data["consentSource"],
                     "privacy_version": data["privacyVersion"],
