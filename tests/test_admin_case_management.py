@@ -337,3 +337,49 @@ def test_admin_can_publish_case():
     can_publish = can_transition_case_state(admin, case, CaseState.PUBLISHED)
 
     assert can_publish, "Admin should be able to transition case to PUBLISHED state"
+
+
+def test_case_admin_form_carries_no_bs_helper_fields():
+    """The Case admin is view-only (``has_change_permission`` is False), so the
+    ``*_bs`` CharFields never rendered as inputs and nothing ever populated
+    them. The two date columns stay; their dead companions go."""
+    from cases.admin import CaseAdminForm
+
+    form = CaseAdminForm()
+
+    assert {"case_start_date", "case_end_date"} <= set(form.fields)
+    assert not [name for name in form.fields if name.endswith("_bs")]
+
+
+def test_the_dates_fieldset_lists_exactly_the_two_columns():
+    """The removed fields must come off the fieldset too, or the admin 500s."""
+    from cases.admin import CaseAdmin
+
+    dates = next(opts["fields"] for name, opts in CaseAdmin.fieldsets if name == "Dates")
+    assert tuple(dates) == ("case_start_date", "case_end_date")
+
+
+def test_the_case_admin_no_longer_loads_the_nepali_date_picker():
+    """``CaseAdminForm.Media`` pulled the Nepali date picker from a third-party
+    host into an authenticated admin page on every case view, for a converter
+    that had no input to attach to.
+
+    Scoped to those two assets on purpose. The admin still loads the Toast UI
+    editor off ``uicdn.toast.com`` for the rich-text widgets; that one is live
+    and removing it is a separate decision."""
+    from django.contrib import admin as django_admin
+
+    from cases.admin import CaseAdmin, CaseAdminForm
+    from cases.models import Case
+
+    # Both, deliberately: ``ModelAdmin.media`` does NOT fold in the form's own
+    # Media -- the change page renders ``adminform.media`` separately -- so
+    # checking only the ModelAdmin would have missed the off-host assets, which
+    # lived on ``CaseAdminForm.Media``.
+    assets = []
+    for media in (CaseAdmin(Case, django_admin.site).media, CaseAdminForm().media):
+        assets += [str(a) for a in media._js]
+        assets += [str(a) for css in media._css.values() for a in css]
+
+    assert not [a for a in assets if "nepalidatepicker" in a], assets
+    assert not [a for a in assets if "date_converter" in a], assets
