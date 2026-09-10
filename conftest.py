@@ -16,10 +16,55 @@ sufficient: each app owns its own ``tests`` package (``entities/tests``,
 ``courts/tests``, …) so no other suite consumes the bare ``tests`` name.
 """
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# OpenSearch isolation — the suite must NEVER reach a real cluster.
+#
+# This is a hard assignment at conftest import time (before Django settings and
+# before anything can build a client), and it is deliberately not a
+# ``setdefault``: an ``OPENSEARCH_URL`` exported in the developer's shell must
+# LOSE to this, because that export is exactly the thing that goes wrong.
+#
+# WHY THIS EXISTS. ``make_client()`` resolves its endpoint from the RAW PROCESS
+# ENV (``jawafdehi_shared/search/opensearch.py``), not from Django settings, and
+# defaults to ``http://localhost:9200``. The write-time indexer runs from a
+# ``post_save`` signal on ``transaction.on_commit`` (``cases/signals.py``), which
+# never fires under a plain ``@pytest.mark.django_db`` because that transaction
+# is rolled back — but DOES fire for ``django_db(transaction=True)`` (every
+# ``live_server`` test) and for ``django_capture_on_commit_callbacks(execute=True)``.
+# So those tests really do index. On 2026-08-26, with a ``kubectl port-forward
+# -n platform svc/opensearch 9200:9200`` open, ``localhost:9200`` WAS production:
+# six fixtures (``lc-a``, ``live-old``, ``live-q-old``, ``live-f-old``,
+# ``live-h-old``, ``c-promo``) landed in the live ``jawafdehi-cases`` index and
+# rendered as public case cards on jawafdehi.org. Their DB rows were torn down
+# with the test database, so no signal could ever evict them — only a rebuild.
+#
+# WHY HERE, and not only in ``config/settings_test.py``. ``pyproject.toml`` pins
+# ``DJANGO_SETTINGS_MODULE = "config.settings"``, so a local ``uv run pytest``
+# loads PRODUCTION settings; ``settings_test`` is used by CI (which sets the env
+# var) and by ``manage.py test``. A guard that lives only there would not have
+# covered the run that actually leaked. This conftest is imported for every
+# pytest invocation regardless of settings module, which makes it the only
+# chokepoint that covers all of them. ``config/settings_test.py`` pins the same
+# value for the non-pytest paths.
+#
+# Port 1 is chosen so the failure is INSTANT ECONNREFUSED rather than a timeout:
+# an unroutable address (TEST-NET, blackhole IP) would instead burn the 30s
+# ``OPENSEARCH_TIMEOUT`` and its retries on every accidental call. Indexing is
+# best-effort and swallows the connection error (``cases/search_index.py``), so
+# the suite stays green and silent — it simply cannot reach a cluster.
+#
+# A test that genuinely wants a client may still point one somewhere explicitly,
+# via ``monkeypatch.setenv`` or ``make_client(url=...)``; both override this.
+# ``tests/test_search_isolation.py`` fails if this pin is removed or weakened.
+# ---------------------------------------------------------------------------
+OPENSEARCH_TEST_BLACKHOLE = "http://127.0.0.1:1"
+os.environ["OPENSEARCH_URL"] = OPENSEARCH_TEST_BLACKHOLE
 
 _REPO_ROOT = Path(__file__).resolve().parent
 if _REPO_ROOT.is_dir():

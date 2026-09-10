@@ -115,6 +115,25 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
         "type": "string",
         "description": "Full case description in Markdown.",
     },
+    "thumbnail_image_id": _nullable_schema(
+        {
+            "type": "integer",
+            "description": (
+                "Id of an uploaded image (POST /api/case-images/) to use as the "
+                "card image on the home page and in search results."
+            ),
+        }
+    ),
+    "banner_image_id": _nullable_schema(
+        {
+            "type": "integer",
+            "description": (
+                "Id of an uploaded image to use as the hero on the case detail page."
+            ),
+        }
+    ),
+    # DEPRECATED, superseded by the two image ids above. An external URL here
+    # gets no renditions, so every surface loads it at full size.
     "thumbnail_url": {"type": "string", "maxLength": 500},
     "banner_url": {"type": "string", "maxLength": 500},
     "case_start_date": _nullable_schema({"type": "string", "format": "date"}),

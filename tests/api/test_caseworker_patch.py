@@ -1032,8 +1032,9 @@ def test_patch_echo_matches_a_read_back_of_the_same_case():
     # must agree. They disagreed before (echo blank, GET populated), which is
     # exactly what made a successful write look like a dropped one. Every
     # principal allowed to PATCH is a casework role — can_change_case rejects
-    # everyone else with a 403 — so the public-blanking half of the BB-04 gate is
-    # covered on the GET path (see the anonymous-reader test above), not here.
+    # everyone else with a 403 — so the public-blanking half of the BB-04 gate on
+    # the CASE-level note is covered on the GET path (see the anonymous-reader
+    # test above), not here. The per-entity role note is public and ungated.
     user = _contributor("hira")
     case = _make_case(state=CaseState.PUBLISHED, notes="case-level internal note")
     _bind(case, "hira-bahadura-sahi")
@@ -1053,10 +1054,10 @@ def test_patch_echo_matches_a_read_back_of_the_same_case():
     ]
     assert response.data["entities"][0]["notes"] == _ROLE_NOTE
 
-    # ...and the public reader still sees neither note.
+    # ...and the public reader sees the role note but NOT the case-level note.
     anon = APIClient().get(URL.format(case.slug))
     assert anon.data["notes"] == ""
-    assert [e["notes"] for e in anon.data["entities"]] == [""]
+    assert [e["notes"] for e in anon.data["entities"]] == [_ROLE_NOTE]
 
 
 @pytest.mark.django_db

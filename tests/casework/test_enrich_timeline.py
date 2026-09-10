@@ -38,6 +38,7 @@ from pathlib import Path
 import pytest
 
 from casework import enrich_timeline as et
+from casework.common import court_order
 from casework.common.llm import tier_for
 from casework.enrich_timeline import (
     _assemble_source_text,
@@ -128,7 +129,13 @@ def donor_common_tree(donor_common_source):
 
 @pytest.fixture(scope="module")
 def shipped_source() -> str:
-    return Path(et.__file__).read_text()
+    # `VERDICT_SUMMARY_SYSTEM_PROMPT` moved to `casework/common/court_order.py`
+    # (a shared home enrich_description.py no longer has to reach across
+    # enrich_timeline.py for); enrich_timeline.py now only re-exports the
+    # name, so it is no longer a top-level assignment in `et.__file__`. Read
+    # the prompt's actual current source so this pin keeps checking real
+    # content instead of failing on an import statement.
+    return Path(court_order.__file__).read_text()
 
 
 @pytest.fixture(scope="module")

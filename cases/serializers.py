@@ -11,6 +11,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field, inline_serializer
 from rest_framework import serializers
 
+from .image_serializers import CARD_SPECS, HERO_SPECS, SrcsetRenditionField
 from .models import (
     Case,
     CaseEntityRelationship,
@@ -157,6 +158,7 @@ class AuthorCaseSummarySerializer(serializers.Serializer):
     title = serializers.CharField(read_only=True)
     short_description = serializers.CharField(read_only=True, allow_blank=True)
     case_type = serializers.CharField(read_only=True)
+    thumbnail = SrcsetRenditionField(specs=CARD_SPECS, source="card_image")
     thumbnail_url = serializers.CharField(read_only=True, allow_blank=True)
     case_publish_date = serializers.DateField(read_only=True, allow_null=True)
     bigo = serializers.IntegerField(read_only=True, allow_null=True)
@@ -244,13 +246,29 @@ class CaseSerializer(serializers.ModelSerializer):
 
     entities = serializers.SerializerMethodField(
         help_text="Entity binds for this case (NES entity id, relationship type, "
-        "notes), with display details resolved from NES"
+        "role note), with display details resolved from NES. The per-bind "
+        "``notes`` is PUBLIC — the party's role line, shown beside the name on "
+        "the case page. Not to be confused with the case-level ``notes`` field, "
+        "which is internal."
     )
     notes = serializers.SerializerMethodField(
         help_text="Internal casework notes. Returned only to authenticated "
         "casework roles (Admin/Moderator/Caseworker/ReadOnly); an empty string "
         "for public/anonymous callers (notes are 'not shown publicly')."
     )
+    # The two case images as responsive payloads (src + srcset + intrinsic
+    # dimensions), at the two ladders the two surfaces actually need. ``source``
+    # points at the Case properties, so each falls back to the other image
+    # rather than to a placeholder when only one was uploaded. Null when the
+    # case has no uploaded image at all — in which case the client falls back to
+    # the deprecated ``thumbnail_url`` / ``banner_url`` below.
+    thumbnail = SrcsetRenditionField(specs=CARD_SPECS, source="card_image")
+    banner = SrcsetRenditionField(specs=HERO_SPECS, source="hero_image")
+    # The editor reads these back to render the current selection in the upload
+    # widget, and PATCHes the same names. Read-only here; the write path is
+    # CasePatchSerializer.
+    thumbnail_image_id = serializers.IntegerField(read_only=True, allow_null=True)
+    banner_image_id = serializers.IntegerField(read_only=True, allow_null=True)
 
     @extend_schema_field(serializers.CharField(allow_blank=True))
     def get_notes(self, obj):
@@ -282,9 +300,13 @@ class CaseSerializer(serializers.ModelSerializer):
     def get_entities(self, obj):
         """Get the case's entity binds, resolving display details from NES.
 
-        Each entry is ``{nes_id, display_name, entity_type, type, notes}`` where
-        ``type`` is the relationship type. ``display_name``/``entity_type`` come
-        from the NES resolver (``None`` when NES can't resolve the id).
+        Each entry is ``{nes_id, display_name, entity_type, type, outcome, notes}``
+        where ``type`` is the relationship type. ``display_name``/``entity_type``
+        come from the NES resolver (``None`` when NES can't resolve the id).
+
+        The per-bind ``notes`` is the party's PUBLIC role line and is returned to
+        every caller — see ``build_entity_binds``. The case-level ``notes`` field
+        (``get_notes`` above) is a different, internal column and stays gated.
         """
         from cases.services.nes_resolver import build_entity_binds, resolve_entities
 
@@ -296,15 +318,7 @@ class CaseSerializer(serializers.ModelSerializer):
             resolved = self.context.get("resolved_entities")
             if resolved is None:
                 resolved = resolve_entities(rel.nes_id for rel in relationships)
-            # Per-entity relationship notes are internal-only, same as the
-            # case-level notes field (BB-04): expose them to casework roles only.
-            # The shared shaper (build_entity_binds) defaults notes to "" so the
-            # public search-card path can't leak them; we pass include_notes for
-            # casework viewers here.
-            notes_visible = _viewer_has_casework_access(self.context)
-            return build_entity_binds(
-                relationships, resolved, include_notes=notes_visible
-            )
+            return build_entity_binds(relationships, resolved)
         except (ValueError, TypeError, AttributeError) as e:
             logger.error(
                 f"Error serializing entities for case {obj.slug}: {e}",
@@ -470,6 +484,13 @@ class CaseSerializer(serializers.ModelSerializer):
             # DEPRECATED free-text byline, still returned so the frontend can
             # fall back to it on cases that have no structured authors yet.
             "public_notes",
+            # Responsive image payloads, plus the ids the editor round-trips.
+            "thumbnail",
+            "banner",
+            "thumbnail_image_id",
+            "banner_image_id",
+            # DEPRECATED bare URLs, still returned as the fallback for the cases
+            # that predate the upload flow.
             "thumbnail_url",
             "banner_url",
             "case_start_date",

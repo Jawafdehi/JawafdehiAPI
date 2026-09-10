@@ -132,9 +132,7 @@ def resolve_entities(nes_ids) -> dict[str, ResolvedEntity]:
     return resolved
 
 
-def build_entity_binds(
-    relationships, resolved, *, include_notes: bool = False
-) -> list[dict]:
+def build_entity_binds(relationships, resolved) -> list[dict]:
     """Shape ``CaseEntityRelationship`` rows + resolved NES details into the entity
     binds used by BOTH the API (``CaseSerializer.get_entities``) and the search
     index card. One definition so the two consumers can't drift.
@@ -143,11 +141,18 @@ def build_entity_binds(
     a missing/unresolved id yields ``None`` name/type rather than raising, so this
     is safe on the best-effort indexing path as well as the API path.
 
-    Per-entity ``notes`` are internal casework content (BB-04): they must NOT reach
-    public/anonymous callers. The ``notes`` key is always present for schema
-    stability, but its value is ``""`` unless ``include_notes`` is set. The API
-    passes ``include_notes`` only for casework-role viewers; the public search-card
-    path leaves it ``False`` so the denormalized card never leaks internal notes."""
+    Per-entity ``notes`` are PUBLIC. They are the defendant's role line — "तत्कालीन
+    प्रधानाध्यापक — मुख्य प्रतिवादी" — written to be read next to the name on the
+    public case page, and the extractor that fills them (``accused_verdicts``, added
+    in #474) caps the role at 90 chars for exactly that purpose. They used to be
+    withheld from anonymous callers as internal casework content under BB-04, which
+    is a rule about the case-level ``Case.notes`` field; the per-bind column shares
+    only its name. That gate is gone: the field renders unconditionally in the public
+    entity chips, so gating it here made a public page's content depend on whether
+    the viewer's OIDC token happened to be attached.
+
+    ``Case.notes`` — the case-level internal field — is a DIFFERENT column and stays
+    casework-gated in ``CaseSerializer.get_notes``. Do not conflate the two."""
     return [
         {
             "nes_id": rel.nes_id,
@@ -155,7 +160,7 @@ def build_entity_binds(
             "entity_type": (resolved.get(rel.nes_id) or {}).get("entity_type"),
             "type": rel.relationship_type,
             "outcome": rel.outcome,
-            "notes": rel.notes if include_notes else "",
+            "notes": rel.notes or "",
         }
         for rel in relationships
     ]

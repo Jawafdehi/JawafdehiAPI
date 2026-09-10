@@ -26,6 +26,7 @@ the `tier`/`max_tokens` LLM-call arguments directly from the donor at commit
 transcription).
 """
 import ast
+import inspect
 import json
 import logging
 import subprocess
@@ -45,7 +46,6 @@ from casework.enrich_related_entities import (
     _build_content_parts,
     _enforce_prompt_budget,
     _parse_extraction_response,
-    _truncate_court_order,
     _truncate_press_release,
     current_entity_binds,
     is_promoted,
@@ -182,17 +182,18 @@ class TestDonorFidelity:
             assert section in RELATIONSHIP_TYPES, (
                 f"the prompt offers {section!r} but the binder would refuse it")
 
-    def test_court_order_full_threshold_matches_donor(self, donor):
-        assert ere.COURT_ORDER_FULL_THRESHOLD == donor["COURT_ORDER_FULL_THRESHOLD"]
-
-    def test_court_order_head_chars_matches_donor(self, donor):
-        assert ere.COURT_ORDER_HEAD_CHARS == donor["COURT_ORDER_HEAD_CHARS"]
-
-    def test_court_order_tail_chars_matches_donor(self, donor):
-        assert ere.COURT_ORDER_TAIL_CHARS == donor["COURT_ORDER_TAIL_CHARS"]
-
-    def test_court_order_thahar_chars_matches_donor(self, donor):
-        assert ere.COURT_ORDER_THAHAR_CHARS == donor["COURT_ORDER_THAHAR_CHARS"]
+    # THE FOUR COURT-ORDER TRUNCATION CONSTANTS ARE DELIBERATELY NO LONGER
+    # PINNED. COURT_ORDER_FULL_THRESHOLD / _HEAD_CHARS / _TAIL_CHARS /
+    # _THAHAR_CHARS described a slice that anchored on the literal `ठहर खण्ड`
+    # and took 12,000 chars forward. Measured over 37 production court orders
+    # (2026-08-31), that reached the operative verdict in 10 of them: the
+    # verdict sits a median 2,852 chars from the END of the file, and the
+    # marker is a section heading roughly two-thirds of the way in. Fidelity to
+    # a donor constant is worth nothing when the constant encodes a defect, and
+    # `PRESS_RELEASE_CHARS`, `PRESS_RELEASE_CHARS_NO_COURT` and
+    # `PROMPT_HARD_MAX` stay pinned because nothing was found wrong with them.
+    # The replacement's own numbers are pinned in
+    # `tests/casework/test_court_order.py::TestZoneSizes`.
 
     def test_press_release_chars_matches_donor(self, donor):
         assert ere.PRESS_RELEASE_CHARS == donor["PRESS_RELEASE_CHARS"]
@@ -298,48 +299,6 @@ class TestTruncatePressRelease:
 
 
 # --------------------------------------------------------------------------
-# _truncate_court_order
-# --------------------------------------------------------------------------
-
-
-class TestTruncateCourtOrder:
-    def test_none_text_passthrough(self):
-        assert _truncate_court_order(None) is None
-
-    def test_text_under_threshold_is_unchanged(self):
-        text = "छोटो आदेश।" * 5
-        assert len(text) < ere.COURT_ORDER_FULL_THRESHOLD
-        assert _truncate_court_order(text) == text
-
-    def test_thahar_khanda_extracted_when_present_and_short(self):
-        head = "क" * ere.COURT_ORDER_FULL_THRESHOLD
-        thahar = "ठहर खण्ड\nयो ठहर खण्डको सामग्री हो।"
-        text = head + thahar
-        result = _truncate_court_order(text)
-        assert "ठहर खण्ड (verdict section)" in result
-        assert thahar in result
-        assert head not in result
-
-    def test_thahar_khanda_truncated_at_sentence_boundary_when_long(self):
-        head = "क" * ere.COURT_ORDER_FULL_THRESHOLD
-        long_thahar_body = "वाक्य एक। " + ("ख" * (ere.COURT_ORDER_THAHAR_CHARS + 500))
-        text = head + "ठहर खण्ड" + long_thahar_body
-        result = _truncate_court_order(text)
-        assert "[...ठहर खण्ड (verdict section)...]" in result
-        # Truncated content must not exceed the thahar budget.
-        after_label = result.split("...]\n\n", 1)[1]
-        assert len(after_label) <= ere.COURT_ORDER_THAHAR_CHARS
-
-    def test_head_tail_fallback_when_no_thahar_khanda(self):
-        text = "श" * (ere.COURT_ORDER_FULL_THRESHOLD + 1000)
-        result = _truncate_court_order(text)
-        assert "[...court order header section...]" in result
-        assert "[...court order verdict section...]" in result
-        assert text[:ere.COURT_ORDER_HEAD_CHARS] in result
-        assert text[-ere.COURT_ORDER_TAIL_CHARS:] in result
-
-
-# --------------------------------------------------------------------------
 # _enforce_prompt_budget
 # --------------------------------------------------------------------------
 
@@ -402,10 +361,22 @@ class TestBuildContentPartsMatrix:
         assert parts[1] == text  # untouched: under the NO_COURT limit
         assert "COURT ORDER" not in "\n".join(parts)
 
-    def test_court_only_yields_only_court_section(self):
+    def test_a_short_order_ships_once_whole(self):
+        # It used to ship TWICE -- once as the head zone, once as the thahar
+        # zone, because each reader returns the text unchanged when it is
+        # already within that zone's limit. The second copy was labelled an
+        # excerpt from the ठहर खण्ड whether or not the order had one.
         court_text = "अदालतको आदेश।" * 5
         parts = _build_content_parts(None, court_text)
         assert parts == ["--- COURT ORDER ---", court_text]
+
+    def test_an_order_under_the_thahar_limit_is_never_sent_twice(self):
+        # The boundary case the head zone hides: over HEAD_CHARS the two
+        # sections are no longer identical, so the duplication is partial and
+        # invisible to an equality check on short text.
+        court_text = "क" * (ere.THAHAR_CHARS - 1)
+        joined = "\n\n".join(_build_content_parts(None, court_text))
+        assert joined.count("क") == len(court_text)
 
     def test_both_present_press_uses_the_smaller_limit(self):
         # Same press text as the press-only case, but WITH a court order
@@ -424,6 +395,115 @@ class TestBuildContentPartsMatrix:
         parts = _build_content_parts("प्रेस।", "आदेश।")
         assert parts[0] == "--- PRESS RELEASE ---"
         assert parts[2] == "--- COURT ORDER ---"
+
+
+# --------------------------------------------------------------------------
+# The extraction call reads the order's HEAD zone, not its middle
+# --------------------------------------------------------------------------
+
+
+class TestExtractionReadsHeadAndThahar:
+    def test_court_order_section_carries_the_start_of_the_order(self):
+        # The extractor wants the caption and party list, which sit in the
+        # first 3% of every order in the 38-order sample. Its narrative comes
+        # from the press release, which it is also given.
+        #
+        # Built to actually DISCRIMINATE from the old `_truncate_court_order`,
+        # not merely pass under both: caption/party list at the top, then
+        # filler long enough to push the `ठहर खण्ड` marker well past
+        # HEAD_CHARS, then the marker and verdict text. Verified against the
+        # pre-change helper (commit 4b30173) in a scratch script: once that
+        # marker is found, the old slice starts AT the marker and drops the
+        # caption entirely. `court_order_head` just takes the first
+        # HEAD_CHARS chars, so the caption survives and the filler does not.
+        press = "प्रेस विज्ञप्ति पाठ"
+        caption = "वादी: नेपाल सरकार। प्रतिवादी: राम बहादुर।"
+        filler = "ख" * 20_000
+        verdict = "ठहर खण्ड\nयो ठहर खण्डको सामग्री हो।"
+        order = caption + filler + verdict
+        parts = ere._build_content_parts(press, order)
+        joined = "\n\n".join(parts)
+        assert caption in joined
+        assert filler not in joined
+
+    def test_truncate_court_order_is_gone(self):
+        # Its replacement is casework.common.court_order. A lingering copy is
+        # how two slicing rules end up in one module.
+        assert not hasattr(ere, "_truncate_court_order")
+
+    def test_prompt_stays_within_the_hard_max(self):
+        # An invariant guard, not a regression test: it passes unchanged
+        # against the old `_truncate_court_order` too, so it proves the hard
+        # cap holds, not that the slice changed.
+        press = "प" * 40_000
+        order = "अ" * 400_000
+        prompt = ere._enforce_prompt_budget(ere._build_content_parts(press, order))
+        assert len(prompt) <= ere.PROMPT_HARD_MAX
+
+    def test_the_operative_section_is_carried_too(self):
+        # The Task 4 A/B: 12 entities live in [marker, marker+12000) and were
+        # lost when the extraction saw only the head. Both zones ship now.
+        press = "प्रेस विज्ञप्ति पाठ"
+        caption = "वादी: नेपाल सरकार। प्रतिवादी: राम बहादुर।"
+        filler = "ख" * 20_000
+        operative = "ठहर खण्ड\nदिनेश लामिछाने उपर कसुर ठहर्छ।"
+        parts = ere._build_content_parts(press, caption + filler + operative)
+        joined = "\n\n".join(parts)
+        assert caption in joined
+        assert "दिनेश लामिछाने" in joined
+        assert filler not in joined
+
+    def test_an_order_with_no_marker_is_never_labelled_a_thahar_excerpt(self):
+        # Long enough to need both zones, but with no `ठहर खण्ड` anywhere --
+        # so neither the section header nor the fragment label may claim one.
+        from casework.common import court_order as co
+
+        order = "क" * 40_000 + "अन्तिम"
+        joined = "\n\n".join(ere._build_content_parts("प्रेस।", order))
+        assert co.THAHAR_MARKER not in joined
+        assert joined.endswith("अन्तिम")
+
+    def test_a_long_order_with_a_marker_still_gets_head_plus_marker_window(self):
+        # THE MEASURED SLICE, PINNED. Everything M5 changed is about orders
+        # that do NOT get this shape; this one must come through untouched.
+        from casework.common import court_order as co
+
+        order = "वादी: नेपाल सरकार।" + "ख" * 20_000 + co.THAHAR_MARKER + "ठ" * 500
+        assert ere._build_content_parts(None, order) == [
+            "--- COURT ORDER ---",
+            co.court_order_head(order),
+            "--- COURT ORDER (ठहर खण्ड) ---",
+            co.court_order_thahar(order),
+        ]
+
+    def test_realistic_budget_is_not_clipped(self):
+        # The true worst case: press sits AT its cap (so it is not shrunk
+        # further and still contributes its full size), and both
+        # court-order zones are long enough to truncate -- which attaches
+        # their fragment labels, the bytes Fix round 1 found missing from
+        # the brief's arithmetic. A sentinel at the very end of the source
+        # region the thahar window should reach pins the failure mode
+        # directly: `_enforce_prompt_budget` truncates its largest part
+        # from the END, so a silent clip drops this sentinel first.
+        from casework.common import court_order as co
+
+        sentinel = "SENTINEL-END-OF-WINDOW"
+        press = "प" * ere.PRESS_RELEASE_CHARS
+        head_source = "क" * (co.HEAD_CHARS + 1)  # forces head to truncate + label
+        filler = "फ" * 200_000  # pushes the marker well past the head zone
+        window_filler_len = co.THAHAR_CHARS - len(co.THAHAR_MARKER) - len(sentinel)
+        court = (
+            head_source
+            + filler
+            + co.THAHAR_MARKER
+            + ("ठ" * window_filler_len)
+            + sentinel
+        )
+        parts = ere._build_content_parts(press, court)
+        prompt = ere._enforce_prompt_budget(parts)
+
+        assert sentinel in prompt, "the thahar window's tail was clipped"
+        assert len(prompt) < ere.PROMPT_HARD_MAX
 
 
 # --------------------------------------------------------------------------
@@ -1588,10 +1668,11 @@ def test_strict_downgrades_a_bind_to_review_when_the_document_is_an_election_rec
     assert api.get_entity_calls == [ANKUR_IRI]
 
 
-def test_permissive_binds_an_election_record_and_records_the_overridden_veto():
-    # The default mode overrides this veto -- that is the requested behaviour --
-    # but the bind must carry WHY, so the run's binds.jsonl can be filtered back
-    # down to exactly the judgement calls.
+def test_permissive_does_not_bind_an_election_record():
+    # NOT promotable, even in permissive mode. NES holds the bulk ECN candidate
+    # rolls, so a name match against one carries no information: 5 of 5 wrong in
+    # the 2026-08-13 review, 12 of 12 on the FY078/079 batch. Permissive mode
+    # accepts uncertainty ABOUT a match; this is a match with nothing behind it.
     case = {"slug": "case-elect", "state": "DRAFT", "entities": []}
     election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
     api = _SearchStubApi(
@@ -1599,21 +1680,20 @@ def test_permissive_binds_an_election_record_and_records_the_overridden_veto():
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
 
-    assert plan.action == "WOULD_PATCH"
-    assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
-    assert plan.review == []
-    _name, decision, _notes, _section = plan.bound[0]
-    assert decision.nes_id == ANKUR_IRI
-    assert is_promoted(decision)
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    _name, decision, _section = plan.review[0]
+    assert decision.nes_id is None
     assert "Election Commission" in decision.reason
 
 
-def test_a_doubly_uncertain_bind_records_both_vetoes_it_overrode():
+def test_a_doubly_vetoed_name_records_both_reasons():
     # `apply_document_veto` REPLACES the reason, so a name that was ambiguous AND
     # turned out to be an election record used to end up recorded as only the
-    # second. `*.binds.jsonl` is the whole audit trail for permissive mode -- the
-    # file a caseworker filters to find the judgement calls -- so it must not
-    # under-report how uncertain a bind was.
+    # second. The carry-forward still has to hold now that the election veto
+    # refuses rather than promotes -- the review row is what a caseworker reads,
+    # and it must not under-report how uncertain the name was.
     election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
     case = {"slug": "case-both", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]},
@@ -1621,9 +1701,8 @@ def test_a_doubly_uncertain_bind_records_both_vetoes_it_overrode():
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"}])
 
-    _name, decision, _notes, _section = plan.bound[0]
-    assert decision.nes_id == ANISH_A["id"]
-    assert is_promoted(decision)
+    assert plan.bound == []
+    _name, decision, _section = plan.review[0]
     assert "Election Commission" in decision.reason   # the second veto
     assert "ambiguous" in decision.reason             # the first, no longer lost
 
@@ -3814,3 +3893,1841 @@ def test_an_uncanonical_created_iri_costs_one_name_not_the_run(
     rows = _created_rows()
     assert [r["outcome"] for r in rows] == ["error", "error"]
     assert all("canonical NES entity IRI" in r["reason"] for r in rows)
+
+
+class TestApplyAccusedUpdates:
+    IRI = "https://jawafdehi.org/entity/person/ram-bahadur-1"
+
+    def _bind(self, notes="", outcome="charged", rel="accused"):
+        return {"nes_id": self.IRI, "relationship_type": rel,
+                "notes": notes, "outcome": outcome}
+
+    def test_placeholder_note_is_replaced(self):
+        binds = [self._bind(notes="प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "convicted", "notes": "तत्कालीन सचिव — घूस लिने"}})
+        assert got[0]["notes"] == "तत्कालीन सचिव — घूस लिने"
+        assert got[0]["outcome"] == "convicted"
+
+    def test_a_humans_note_is_never_overwritten(self):
+        binds = [self._bind(notes="तत्कालीन प्रमुख नापी अधिकृत — मुख्य प्रतिवादी")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "convicted", "notes": "मोडेलको पाठ"}})
+        assert got[0]["notes"] == "तत्कालीन प्रमुख नापी अधिकृत — मुख्य प्रतिवादी"
+        # The verdict still lands. Refusing the note must not refuse the outcome.
+        assert got[0]["outcome"] == "convicted"
+
+    def test_an_empty_note_is_filled(self):
+        binds = [self._bind(notes="")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "acquitted", "notes": "सहायक"}})
+        assert got[0]["notes"] == "सहायक"
+
+    def test_the_alias_tail_of_a_placeholder_survives(self):
+        # enrich_court_record puts the court's own alias on the bind. It is the
+        # only place the record says the court called this person something
+        # else; replacing the whole note drops it on the floor.
+        note = ("प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"
+                "; अदालतको अभिलेखमा: रामे भन्ने राम बहादुर")
+        got = ere.apply_accused_updates(
+            [self._bind(notes=note)],
+            {self.IRI: {"outcome": "convicted", "notes": "तत्कालीन सचिव"}})
+        assert got[0]["notes"].startswith("तत्कालीन सचिव")
+        assert "; अदालतको अभिलेखमा: रामे भन्ने राम बहादुर" in got[0]["notes"]
+
+    def test_an_empty_role_never_blanks_a_placeholder(self):
+        # A judgment can convict a defendant it never describes. An empty
+        # `notes` means "no role known", not "erase the placeholder".
+        binds = [self._bind(notes="प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "convicted", "notes": ""}})
+        assert got[0]["notes"] == "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"
+        assert got[0]["outcome"] == "convicted"
+
+    def test_an_empty_role_never_blanks_a_placeholders_alias_tail(self):
+        note = ("प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"
+                "; अदालतको अभिलेखमा: रामे भन्ने राम बहादुर")
+        got = ere.apply_accused_updates(
+            [self._bind(notes=note)],
+            {self.IRI: {"outcome": "convicted", "notes": ""}})
+        assert got[0]["notes"] == note
+
+    def test_an_empty_note_and_an_empty_role_stay_empty(self):
+        got = ere.apply_accused_updates(
+            [self._bind(notes="")],
+            {self.IRI: {"outcome": "convicted", "notes": ""}})
+        assert got[0]["notes"] == ""
+
+    def test_a_bind_with_no_update_is_copied_through_unchanged(self):
+        other = {"nes_id": "https://jawafdehi.org/entity/person/other-9",
+                 "relationship_type": "accused", "notes": "मानव लेख", "outcome": "acquitted"}
+        got = ere.apply_accused_updates([self._bind(), other], {})
+        assert got[1] == other
+
+    def test_a_non_accused_bind_is_never_touched(self):
+        rel = {"nes_id": self.IRI, "relationship_type": "related", "notes": "स्थान"}
+        got = ere.apply_accused_updates(
+            [rel], {self.IRI: {"outcome": "convicted", "notes": "x"}})
+        assert got[0] == rel
+
+    def test_unknown_is_never_written(self):
+        binds = [self._bind(outcome="charged")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "unknown", "notes": "भूमिका"}})
+        assert got[0]["outcome"] == "charged"
+        # The role note is still worth having even when the verdict is not.
+        assert got[0]["notes"] == "भूमिका"
+
+    def test_order_and_length_are_preserved(self):
+        binds = [self._bind(), {"nes_id": "https://jawafdehi.org/entity/person/b-2",
+                                "relationship_type": "accused", "notes": "", "outcome": "charged"}]
+        got = ere.apply_accused_updates(binds, {})
+        assert [b["nes_id"] for b in got] == [b["nes_id"] for b in binds]
+
+    def test_every_row_it_returns_passes_the_serializer_mirror(self):
+        binds = [self._bind(notes="प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071")]
+        got = ere.apply_accused_updates(
+            binds, {self.IRI: {"outcome": "convicted", "notes": "सचिव"}})
+        for item in got:
+            ere.validate_bind_item(item)
+
+
+class TestParseVerdictResponse:
+    def test_extracts_the_defendants_array(self):
+        got = ere.parse_verdict_response(
+            'text before {"defendants":[{"name":"क","outcome":"convicted",'
+            '"role":"सचिव","evidence":"ठहर्छ"}]} after')
+        assert got[0]["name"] == "क"
+
+    def test_a_row_with_no_name_is_dropped(self):
+        got = ere.parse_verdict_response('{"defendants":[{"outcome":"convicted"}]}')
+        assert got == []
+
+    def test_an_unknown_outcome_value_is_dropped_not_coerced(self):
+        got = ere.parse_verdict_response(
+            '{"defendants":[{"name":"क","outcome":"दोषी","role":"","evidence":""}]}')
+        assert got == []
+
+    def test_unparseable_text_returns_empty(self):
+        assert ere.parse_verdict_response("the model apologised") == []
+
+    def test_role_is_capped_at_90_chars(self):
+        got = ere.parse_verdict_response(
+            '{"defendants":[{"name":"क","outcome":"charged","role":"' + "अ" * 300
+            + '","evidence":""}]}')
+        assert len(got[0]["role"]) <= 90
+
+
+class TestVerdictPromptBounds:
+    """Every field the reply carries is bounded. `role` was capped at 90 chars
+    from the start; `evidence` -- quoted VERBATIM, and the one field that can
+    run to a paragraph -- was not, and 20 unbounded quotes overrun
+    VERDICT_MAX_TOKENS. A reply cut off there parses as nothing at all.
+    """
+
+    def test_the_prompt_bounds_the_evidence_quote(self):
+        assert "under 200 characters" in ere.VERDICT_SYSTEM_PROMPT
+        assert "one sentence" in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_the_quote_is_still_required_to_be_verbatim(self):
+        # Bounded, not paraphrased: the evidence phrase is the only way a
+        # wrong `convicted` is findable in the artefact.
+        assert "VERBATIM" in ere.VERDICT_SYSTEM_PROMPT
+
+
+class TestAccusedVerdicts:
+    def _reply(self, names):
+        import json
+        return json.dumps({"defendants": [
+            {"name": n, "outcome": "convicted", "role": "सचिव", "evidence": "ठहर्छ"}
+            for n in names]}, ensure_ascii=False)
+
+    def test_one_chunk_for_a_small_case(self):
+        calls = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls.append(content)
+            return self._reply(["क", "ख"])
+
+        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        assert len(calls) == 1
+        assert got["क"]["outcome"] == "convicted"
+        assert errors == []
+
+    def test_a_long_accused_list_is_chunked(self):
+        # Measured: ~300 output tokens per defendant in Devanagari, so 8,000
+        # buys about 25. Production holds cases with 185 and 249 accused binds.
+        names = [f"नाम{i}" for i in range(45)]
+        seen = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            batch = [n for n in names if f"- {n}\n" in content + "\n"]
+            seen.append(len(batch))
+            return self._reply(batch)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert len(seen) == 3          # 20 + 20 + 5
+        assert max(seen) <= ere.VERDICT_CHUNK
+        assert len(got) == 45
+
+    def test_a_short_chunk_is_an_error_not_a_partial(self):
+        # The probe's apparent "0 of 9 correct" was really nine rows silently
+        # missing. A run that reports that as a clean result is the one failure
+        # mode this must never ship with.
+        def fake(system, content, max_tokens, tier, usage=None):
+            return self._reply(["नाम0"])
+
+        got, errors = ere.accused_verdicts([f"नाम{i}" for i in range(5)], "आदेश", fake)
+        assert errors and "1 of 5" in errors[0]
+
+    def test_a_failed_chunk_does_not_lose_the_others(self):
+        names = [f"नाम{i}" for i in range(25)]
+        calls = {"n": 0}
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("provider 502")
+            return self._reply([n for n in names if f"- {n}\n" in content + "\n"])
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert errors
+        assert len(got) == 5           # the second chunk survived
+
+    def test_a_short_chunk_is_retried_and_the_retry_fills_the_gap(self):
+        # A chunk of 20 that returns 1 defendant must not lose the other 19:
+        # retry once, asking only about the names still missing.
+        names = [f"नाम{i}" for i in range(5)]
+        calls = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls.append(content)
+            if len(calls) == 1:
+                return self._reply(["नाम0"])
+            batch = [n for n in names if f"- {n}\n" in content + "\n"]
+            return self._reply(batch)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert len(calls) == 2
+        assert len(got) == 5
+        assert errors == []
+
+    def test_a_chunk_still_short_after_retry_keeps_partial_results_and_errors(self):
+        # If the retry also comes back short, keep what was answered, error
+        # on the rest, and never retry a second time.
+        names = [f"नाम{i}" for i in range(5)]
+        calls = {"n": 0}
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls["n"] += 1
+            return self._reply(["नाम0"])
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert calls["n"] == 2          # exactly one retry, never a second
+        assert got["नाम0"]["outcome"] == "convicted"
+        assert len(got) == 1
+        assert errors
+
+    def _sizes_stub(self, names, truncate_over):
+        """A stub that truncates its reply whenever more than `truncate_over`
+        names are asked for, and records the size of every request."""
+        sizes = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            batch = [n for n in names if f"- {n}\n" in content + "\n"]
+            sizes.append(len(batch))
+            reply = self._reply(batch)
+            # A reply cut off at VERDICT_MAX_TOKENS: the JSON never closes, so
+            # `parse_extraction_response` returns None and the WHOLE chunk is
+            # lost -- not just the tail.
+            return reply[:60] if len(batch) > truncate_over else reply
+
+        return fake, sizes
+
+    def test_a_truncated_reply_is_recovered_by_halving_the_chunk(self):
+        # The likeliest cause of a short chunk is a reply truncated at
+        # VERDICT_MAX_TOKENS, and a retry of the SAME size just reproduces it.
+        # The retry re-enters the chunk loop at VERDICT_CHUNK // 2 instead.
+        names = [f"नाम{i}" for i in range(ere.VERDICT_CHUNK)]
+        fake, sizes = self._sizes_stub(names, ere.VERDICT_CHUNK // 2)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert sizes == [ere.VERDICT_CHUNK,
+                         ere.VERDICT_CHUNK // 2, ere.VERDICT_CHUNK // 2]
+        assert len(got) == ere.VERDICT_CHUNK
+        assert errors == []
+
+    def test_a_chunk_short_after_the_halved_retry_is_never_retried_again(self):
+        # One retry PASS, not a recursion: the halves are asked once each, and
+        # every name still missing is an error carrying its own name.
+        names = [f"नाम{i}" for i in range(ere.VERDICT_CHUNK)]
+        fake, sizes = self._sizes_stub(names, 0)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert sizes == [ere.VERDICT_CHUNK,
+                         ere.VERDICT_CHUNK // 2, ere.VERDICT_CHUNK // 2]
+        assert got == {}
+        assert errors and f"0 of {ere.VERDICT_CHUNK}" in errors[0]
+        assert all(name in errors[0] for name in names)
+
+    def test_a_complete_first_reply_triggers_no_retry(self):
+        names = ["क", "ख"]
+        calls = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls.append(content)
+            return self._reply(names)
+
+        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        assert len(calls) == 1
+        assert len(got) == 2
+        assert errors == []
+
+    def test_an_unrequested_name_in_the_reply_is_dropped_and_flagged(self):
+        # A hallucinated extra row must not slip into `results` unflagged.
+        def fake(system, content, max_tokens, tier, usage=None):
+            return self._reply(["क", "ख", "अनाधिकृत नाम"])
+
+        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        assert "अनाधिकृत नाम" not in got
+        assert got["क"]["outcome"] == "convicted"
+        assert got["ख"]["outcome"] == "convicted"
+        assert any("अनाधिकृत नाम" in e for e in errors)
+
+    def test_a_swapped_name_leaves_the_request_missing_and_errors(self):
+        # Same row count as requested, but the name is fabricated. The
+        # requested defendant must not vanish with errors == [] -- that is
+        # the exact silent-drop failure the chunking design exists to catch.
+        def fake(system, content, max_tokens, tier, usage=None):
+            return self._reply(["नक्कली नाम"])
+
+        got, errors = ere.accused_verdicts(["क"], "आदेश", fake)
+        assert "क" not in got
+        assert errors
+
+    def test_a_reply_omitting_one_requested_name_still_returns_the_others(self):
+        def fake(system, content, max_tokens, tier, usage=None):
+            return self._reply(["क"])  # "ख" was requested but never answered
+
+        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        assert got["क"]["outcome"] == "convicted"
+        assert "ख" not in got
+        assert any("ख" in e for e in errors)
+
+    def test_an_unusable_reply_errors_for_every_name_in_the_chunk(self):
+        def fake(system, content, max_tokens, tier, usage=None):
+            return "the model apologised"
+
+        got, errors = ere.accused_verdicts(["क", "ख", "ग"], "आदेश", fake)
+        assert got == {}
+        assert errors
+        assert all(name in errors[0] for name in ("क", "ख", "ग"))
+
+    def test_the_model_sees_the_verdict_zone_not_the_plain_tail(self):
+        # Replaces the original brief's plain-tail assertion (Ruling 14): the
+        # verdict call now reads `court_order_verdict_zone`, a union of the
+        # marker-anchored window and the order's last chars, not a single
+        # fixed-distance-from-the-end slice. Build an order whose marker
+        # region carries a distinctive name and whose ending carries the
+        # pronouncement, and require both to reach the prompt.
+        seen = {}
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            seen["content"] = content
+            return self._reply(["क"])
+
+        order = (
+            "सुरुको भाग" + "ख" * 200_000
+            + "ठहर खण्ड" + "राम बहादुर कारागार सजाय" + "ग" * 50_000
+            + "सफाई पाउने ठहर्छ"
+        )
+        ere.accused_verdicts(["क"], order, fake)
+        assert "राम बहादुर कारागार सजाय" in seen["content"]
+        assert "सफाई पाउने ठहर्छ" in seen["content"]
+        assert "सुरुको भाग" not in seen["content"]
+
+    def test_the_accused_list_is_put_in_the_prompt(self):
+        seen = {}
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            seen["content"] = content
+            return self._reply(["राम बहादुर"])
+
+        ere.accused_verdicts(["राम बहादुर"], "आदेश", fake)
+        assert "राम बहादुर" in seen["content"]
+
+
+class TestTheServerPreservesOmittedOutcomes:
+    """`apply_accused_updates` sends `outcome` only on the rows it decided.
+
+    Every other accused row goes out with no `outcome` key, and
+    `cases.api_views.CaseViewSet._rewrite_entity_binds` preserves that bind's prior
+    verdict across the whole-list delete/recreate. If that ever stops being true,
+    this enricher silently resets verdicts to 'charged' -- so pin it here.
+    """
+
+    def test_the_replace_handler_still_preserves_an_omitted_outcome(self):
+        import inspect
+
+        from cases.api_views import CaseViewSet
+
+        source = inspect.getsource(CaseViewSet._rewrite_entity_binds)
+        assert '"outcome" in item' in source
+        assert "prior_outcomes" in source
+
+
+# --------------------------------------------------------------------------
+# Task 7 -- the verdict step wired into main().
+#
+# ROUTING NOTE. The brief's `_two_call_stub` routed on
+# `VERDICT_SYSTEM_PROMPT[:40]`, but both system prompts open with the same 41
+# characters ("You are a Nepali legal research assistant"), so a 40-char prefix
+# matches the EXTRACTION call too and every call would land in `verdict_calls`.
+# `accused_verdicts` passes the constant verbatim, so exact equality is both
+# correct and provable.
+# --------------------------------------------------------------------------
+
+ACCUSED_IRI = "https://jawafdehi.org/entity/person/ram-bahadur-1"
+SECOND_ACCUSED_IRI = "https://jawafdehi.org/entity/person/ram-bahadur-2"
+SAJHA_IRI = ("https://jawafdehi.org/entity/organization/"
+             "sajha-bhandara-sahakari-9f9f9f")
+
+
+def _two_call_stub(entity_response=None, verdict_response=None):
+    """Route by prompt: this stage now makes an extraction call and a verdict
+    call, and a test that cannot tell them apart cannot prove the verdict gate
+    fired. Recording rather than raising, for the reason `_call_tracking_stub`
+    documents: a raise from a call that legitimately happens is swallowed by
+    the per-case `except Exception` and counted as an `error` status instead of
+    failing the test loudly.
+    """
+    if entity_response is None:
+        entity_response = json.dumps({"entities": [], "accused_notes": []})
+    if verdict_response is None:
+        verdict_response = json.dumps({"defendants": []})
+    entity_calls, verdict_calls = [], []
+
+    def stub(**kw):
+        if kw.get("system") == ere.VERDICT_SYSTEM_PROMPT:
+            verdict_calls.append(kw)
+            return verdict_response
+        entity_calls.append(kw)
+        return entity_response
+
+    stub.entity_calls = entity_calls
+    stub.verdict_calls = verdict_calls
+    return stub
+
+
+def _accused_case(slug="case-verdict", outcome="charged", court=True,
+                  notes="प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071",
+                  display_name="राम बहादुर", extra_entities=()):
+    evidence = [
+        {"material_iri": "https://jawafdehi.org/material/ciaa/press_releases/9",
+         "material": {"material_type": "press_release", "urls": [
+             {"link": "https://x/press.md", "role": "MARKDOWN"}]}},
+    ]
+    if court:
+        evidence.append(
+            {"material_iri": "https://jawafdehi.org/material/ngm/court_orders/9",
+             "material": {"material_type": "court_order", "urls": [
+                 {"link": "https://x/court.md", "role": "MARKDOWN"}]}})
+    return {
+        "slug": slug, "title": "फैसला भएको मुद्दा", "state": "DRAFT",
+        "evidence": evidence,
+        "entities": [
+            {"nes_id": ACCUSED_IRI, "type": "accused", "display_name": display_name,
+             "outcome": outcome, "notes": notes},
+            *extra_entities,
+        ],
+    }
+
+
+VERDICT_RESPONSE = json.dumps({"defendants": [
+    {"name": "राम बहादुर", "outcome": "convicted",
+     "role": "तत्कालीन सचिव, अर्थ मन्त्रालय — घूस लिने",
+     "evidence": "निज प्रतिवादीले कसुर गरेको ठहर्छ"},
+]}, ensure_ascii=False)
+
+
+def _read_report(tmp_path, suffix):
+    """The one report file this run wrote whose name ends in `suffix`."""
+    matches = [p for p in Path(tmp_path).iterdir()
+               if p.is_file() and p.name.endswith(suffix)]
+    assert len(matches) == 1, f"expected one *{suffix}, found {matches}"
+    return matches[0].read_text(encoding="utf-8")
+
+
+def _verdict_rows(tmp_path):
+    return [json.loads(line)
+            for line in _read_report(tmp_path, "verdicts.jsonl").splitlines()
+            if line.strip()]
+
+
+class TestVerdictGate:
+    # `_StubApi` is correct HERE: these assert that a call was NOT made, which
+    # needs no ETag and no write. See TestVerdictWrite for why a write test
+    # cannot use it.
+
+    def test_a_case_with_no_court_order_makes_no_verdict_call(
+            self, monkeypatch, patched_fetch_markdown):
+        # The gate is the court order's presence: an order is bound to a case
+        # after it is decided (31 of 31 in the sample carried verdict language),
+        # so this costs no extra request and undecided cases spend nothing.
+        api = _StubApi([_accused_case(court=False)])
+        stub = _two_call_stub()
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        assert stub.verdict_calls == []
+
+    def test_a_case_whose_accused_ALL_carry_a_terminal_outcome_is_skipped(
+            self, monkeypatch, patched_fetch_markdown):
+        # 486 production cases read all-`acquitted` from bind_outcome's सफाई
+        # rule -- whole-case acquittals, not re-litigated here.
+        api = _StubApi([_accused_case(outcome="acquitted")])
+        stub = _two_call_stub()
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        assert stub.verdict_calls == []
+
+    def test_the_spend_gate_and_the_planner_read_the_state_the_same_way(self):
+        # The spend gate used to upper-case the state while the planner
+        # compared it exactly, so a payload carrying `draft` passed the gate,
+        # bought a premium verdict call per chunk, and was then refused at the
+        # write -- the one thing the state clause exists to prevent.
+        case = dict(_accused_case(), state="draft")
+        assert ere.verdict_state_refusal(case), "the spend gate let `draft` through"
+        plan = ere.plan_case_entities(None, case, 'W/"abc123"', [])
+        assert plan.action == "SKIP_STATE"
+
+    def test_an_in_review_case_never_pays_for_a_verdict_call(
+            self, monkeypatch, patched_fetch_markdown):
+        # `select.ENRICHABLE_STATES` admits IN_REVIEW, but the write requires
+        # DRAFT. Without this clause every IN_REVIEW case in the population
+        # buys a premium verdict prompt per chunk -- up to ~103k chars of zone
+        # each time -- and is then refused at the write gate.
+        case = dict(_accused_case(slug="case-in-review-verdict"), state="IN_REVIEW")
+        api = _StubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        assert stub.verdict_calls == []
+
+    def test_the_state_skip_is_a_row_in_the_verdicts_file(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # The skip must be VISIBLE. Its binds are decidable in every other
+        # respect, so without a row the case is simply absent from the
+        # artefact and nothing says its defendants were passed over.
+        case = dict(_accused_case(slug="case-in-review-verdict"), state="IN_REVIEW")
+        api = _StubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert row["written"] is False
+        assert "IN_REVIEW" in row["reason"] and "DRAFT" in row["reason"]
+        # Not the write refusal the planner records further down: this row says
+        # the judgment was never read at all, which is the spend being saved.
+        assert "judgment was not read" in row["reason"]
+        assert stub.verdict_calls == []
+
+    # THE TWO TESTS ABOVE GATE A SPEND, NOT THE WRITE. The planner's own
+    # non-DRAFT refusal is what stops a notes-redacted IN_REVIEW read from
+    # reaching the destructive whole-list replace, and it stays where it is --
+    # `test_plan_refuses_a_non_draft_case` pins it.
+
+    def test_a_charged_case_with_an_order_is_processed(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _StubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        assert len(stub.verdict_calls) == 1
+
+    def test_the_verdict_read_is_off_unless_asked_for(
+            self, monkeypatch, patched_fetch_markdown):
+        # OPT-IN. `convicted` on a real person is the worst thing this module
+        # can get wrong, so a run that only wants entity binds must not write
+        # one. Same case as the test above, minus the flag.
+        api = _StubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run"])
+        assert stub.verdict_calls == []
+
+    def test_a_case_already_carrying_related_binds_still_gets_its_verdicts(
+            self, monkeypatch, patched_fetch_markdown):
+        # THE POINT OF A SEPARATE GATE. main() skips extraction for a case that
+        # already has a `related` bind, and nearly every case this feature
+        # targets is in exactly that state. Sharing that gate would skip all of
+        # them.
+        case = _accused_case(extra_entities=[
+            {"nes_id": "https://jawafdehi.org/entity/organization/o-1",
+             "type": "related", "display_name": "संस्था", "notes": ""}])
+        api = _StubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        assert stub.entity_calls == []
+        assert len(stub.verdict_calls) == 1
+
+    def test_without_verdicts_the_already_enriched_skip_stays_free(
+            self, monkeypatch, patched_fetch_markdown):
+        # The other half of the default: without --verdicts, an already-enriched
+        # case must still cost nothing at all, not merely no LLM call.
+        case = _accused_case(extra_entities=[
+            {"nes_id": "https://jawafdehi.org/entity/organization/o-1",
+             "type": "related", "display_name": "संस्था", "notes": ""}])
+        api = _StubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run"])
+        assert stub.entity_calls == [] and stub.verdict_calls == []
+
+
+RELATED_BIND = {"nes_id": "https://jawafdehi.org/entity/organization/o-1",
+                "type": "related", "display_name": "संस्था", "notes": ""}
+
+
+def _sita(outcome):
+    return {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+            "display_name": "सीता देवी", "outcome": outcome,
+            "notes": "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"}
+
+
+class TestSettledOutcomesAreSkippedPerBind:
+    """A judgment that decides some defendants and not others is the NORMAL
+    case -- 8 abstentions in 83 measured defendants. Refusing the whole case
+    on any terminal outcome wrote the answered ones and then locked the rest
+    at `charged` forever. The filter is per-BIND: a settled bind is never
+    re-litigated, and the case stays finishable.
+    """
+
+    def test_a_partly_settled_case_is_still_read(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case(extra_entities=[_sita("convicted")])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        assert len(stub.verdict_calls) == 1
+        prompt = stub.verdict_calls[0]["content"]
+        assert "राम बहादुर" in prompt
+        assert "सीता देवी" not in prompt
+
+    def test_the_settled_bind_is_reported_with_its_reason(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        api = _SearchStubApi([_accused_case(extra_entities=[_sita("convicted")])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        row = next(r for r in _verdict_rows(tmp_path)
+                   if r["nes_id"] == SECOND_ACCUSED_IRI)
+        assert row["written"] is False
+        assert row["old_outcome"] == "convicted"
+        assert "terminal outcome" in row["reason"]
+
+    def test_the_settled_binds_stored_outcome_is_not_rewritten(
+            self, monkeypatch, patched_fetch_markdown):
+        # An omitted `outcome` is what makes the server preserve the stored
+        # one across the whole-list replace. The settled bind must go out
+        # without one, and must not be dropped from the list either.
+        api = _SearchStubApi([_accused_case(extra_entities=[_sita("convicted")])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        _slug, _path, items, _if_match = api.replace_list_calls[0]
+        by_id = {i["nes_id"]: i for i in items}
+        assert "outcome" not in by_id[SECOND_ACCUSED_IRI]
+        assert by_id[ACCUSED_IRI]["outcome"] == "convicted"
+
+    def test_a_re_run_finishes_a_half_decided_case(
+            self, monkeypatch, patched_fetch_markdown):
+        # THE GUARANTEE B1 RESTORES. This is the case exactly as a first run
+        # that answered for राम बहादुर only would have left it; the second run
+        # must be able to decide सीता देवी rather than find the case locked.
+        api = _SearchStubApi([_accused_case(outcome="convicted",
+                                            extra_entities=[_sita("charged")])])
+        stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
+            {"name": "सीता देवी", "outcome": "acquitted", "role": "तत्कालीन लेखापाल",
+             "evidence": "सफाई पाउने ठहर्छ"}]}, ensure_ascii=False))
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls, "the re-run wrote nothing"
+        _slug, _path, items, _if_match = api.replace_list_calls[0]
+        by_id = {i["nes_id"]: i for i in items}
+        assert by_id[SECOND_ACCUSED_IRI]["outcome"] == "acquitted"
+        assert "outcome" not in by_id[ACCUSED_IRI]
+
+
+class TestTheGateSpendsNothingItCannotUse:
+    def test_a_refused_case_pays_for_no_document_fetch(
+            self, monkeypatch, patched_fetch_markdown):
+        # The clauses answerable from the case payload -- state, an accused
+        # bind, an already-settled list -- run BEFORE the markdown fetch. The
+        # API client has no 5xx retry, so a request that can only be discarded
+        # is a request worth not making.
+        import casework.common.materials as m
+        fetched = []
+
+        def counting(link, timeout=60):
+            fetched.append(link)
+            return "अदालतको आदेशमा ठहर खण्ड उल्लेख छ।"
+
+        monkeypatch.setattr(m, "fetch_markdown", counting)
+        api = _StubApi([_accused_case(outcome="acquitted",
+                                      extra_entities=[RELATED_BIND])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        assert stub.verdict_calls == []
+        assert fetched == []
+
+    def test_the_state_skip_is_still_a_row_when_no_document_was_fetched(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # Saving the fetch must not cost the artefact row: an IN_REVIEW case
+        # that is ALSO skipped for extraction reaches the gate with no court
+        # text at all, and the row is keyed on the order being BOUND.
+        import casework.common.materials as m
+        fetched = []
+
+        def counting(link, timeout=60):
+            fetched.append(link)
+            return "अदालतको आदेशमा ठहर खण्ड उल्लेख छ।"
+
+        monkeypatch.setattr(m, "fetch_markdown", counting)
+        case = dict(_accused_case(slug="case-in-review-skipped",
+                                  extra_entities=[RELATED_BIND]), state="IN_REVIEW")
+        api = _StubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        assert fetched == []
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert "judgment was not read" in row["reason"]
+
+
+class TestAHumanWhoSettlesABindMidRunWins:
+    """The gate reads `detail`; the write list is built from the later `fresh`
+    read, and `If-Match` cannot catch a human who settled a bind in between --
+    the ETag comes from that same later read.
+    """
+
+    class _RacedApi(_SearchStubApi):
+        def get_case_with_etag(self, slug, timeout=60):
+            case = dict(self._cases[slug])
+            case["entities"] = [
+                dict(bind, outcome="acquitted")
+                if bind["nes_id"] == ACCUSED_IRI else bind
+                for bind in case["entities"]]
+            return case, self.etag
+
+    def test_the_verdict_is_dropped_rather_than_written_over_the_human(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        api = self._RacedApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)  # says convicted
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls == []
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert row["written"] is False
+        assert "between" in row["reason"]
+
+
+class TestEveryRowIsAccountedFor:
+    def test_a_refused_write_leaves_its_rows_in_the_undecided_count(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # `_StubApi` has no `get_case_with_etag`, so the write gate refuses.
+        # The row was computed and never written: counted in neither total,
+        # the epilogue's two numbers stop accounting for every row in the file.
+        api = _StubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "WOULD update from the judgment: 0" in out
+        assert "1 accused bind(s) were left exactly as they were" in out
+
+    def test_a_failed_write_leaves_its_rows_in_the_undecided_count(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        class _FailingApi(_SearchStubApi):
+            def replace_list(self, slug, path, items, timeout=60, if_match=None):
+                raise urllib.error.HTTPError(
+                    "https://x/api/cases/", 412, "Precondition Failed", {}, None)
+
+        api = _FailingApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "updated from the judgment: 0" in out
+        assert "1 accused bind(s) were left exactly as they were" in out
+
+
+class TestVerdictNameMapping:
+    def test_two_accused_sharing_a_display_name_are_both_left_alone(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # A verdict keyed by name cannot say which of two namesakes the court
+        # meant, and binding it to either is a coin flip on a criminal record.
+        case = _accused_case(extra_entities=[
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "राम बहादुर", "outcome": "charged", "notes": ""}])
+        api = _SearchStubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        assert stub.verdict_calls == []
+        assert api.replace_list_calls == []
+        rows = _verdict_rows(tmp_path)
+        assert {r["nes_id"] for r in rows} == {ACCUSED_IRI, SECOND_ACCUSED_IRI}
+        assert all(r["written"] is False and r["reason"] for r in rows)
+
+    def test_an_accused_bind_with_no_display_name_is_recorded_not_guessed_at(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # display_name is None when NES cannot resolve the id -- there is no
+        # name to match against the judgment, so there is no verdict to be had.
+        case = _accused_case(display_name=None)
+        api = _SearchStubApi([case])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        assert stub.verdict_calls == []
+        assert api.replace_list_calls == []
+        rows = _verdict_rows(tmp_path)
+        assert [r["nes_id"] for r in rows] == [ACCUSED_IRI]
+        assert "display_name" in rows[0]["reason"]
+
+    def test_a_name_the_model_never_answered_for_is_flagged_not_dropped(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        api = _SearchStubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=json.dumps({"defendants": []}))
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls == []
+        rows = _verdict_rows(tmp_path)
+        assert [r["nes_id"] for r in rows] == [ACCUSED_IRI]
+        assert rows[0]["reason"] and rows[0]["written"] is False
+
+    def test_a_verdict_for_someone_else_is_never_applied(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # `accused_verdicts` reconciles by exact name; this pins that the
+        # name -> nes_id mapping main() owns does not re-open the hole.
+        api = _SearchStubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
+            {"name": "श्याम बहादुर", "outcome": "convicted", "role": "स",
+             "evidence": "ठहर्छ"}]}, ensure_ascii=False))
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls == []
+        rows = _verdict_rows(tmp_path)
+        assert [r["nes_id"] for r in rows] == [ACCUSED_IRI]
+        assert all(r["name"] != "श्याम बहादुर" for r in rows)
+
+
+class TestVerdictWrite:
+    # USE `_SearchStubApi`, NOT `_StubApi`, FOR ANY TEST THAT EXPECTS A WRITE.
+    # `_StubApi` deliberately has no `get_case_with_etag`, so
+    # `plan_case_entities` captures no ETag, `_check_entity_plan` refuses the
+    # unconditional whole-list replace, and the case is recorded as an error
+    # having written nothing. The module already documents this. `_SearchStubApi`
+    # subclasses it, serves `etag = 'W/"abc123"'`, and records
+    # `replace_list_calls` entries as FOUR-tuples `(slug, path, items, if_match)`.
+
+    def test_the_patch_carries_the_new_outcome_and_note(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls, "the run wrote nothing"
+        _slug, path, items, if_match = api.replace_list_calls[0]
+        assert path == "entities"
+        assert if_match == api.etag
+        row = next(i for i in items if i["nes_id"] == ACCUSED_IRI)
+        assert row["outcome"] == "convicted"
+        assert row["notes"].startswith("तत्कालीन सचिव")
+
+    def test_a_dry_run_writes_nothing(self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        assert api.replace_list_calls == []
+        assert api.patch_calls == []
+
+    def test_the_verdict_and_the_extraction_share_one_patch(
+            self, monkeypatch, patched_fetch_markdown):
+        # ONE conditional whole-list replace per case, never two: the /entities
+        # write is destructive, so a second PATCH would re-run the whole
+        # delete-and-recreate against a list the first one just changed.
+        api = _SearchStubApi(
+            [_accused_case()],
+            {"साझा भण्डार सहकारी": [{"id": SAJHA_IRI,
+                                     "title": {"ne": "साझा भण्डार सहकारी"},
+                                     "score": 200.0}]})
+        stub = _two_call_stub(entity_response=ENTITY_RESPONSE,
+                              verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        assert len(api.replace_list_calls) == 1
+        _slug, _path, items, _if_match = api.replace_list_calls[0]
+        by_id = {i["nes_id"]: i for i in items}
+        assert by_id[ACCUSED_IRI]["outcome"] == "convicted"
+        assert SAJHA_IRI in by_id
+
+    def test_a_non_terminal_outcome_never_reaches_the_patch(
+            self, monkeypatch, patched_fetch_markdown):
+        # Asserted on the ITEMS, not on the absence of a call: a test that only
+        # checks `replace_list_calls == []` passes just as well when the whole
+        # verdict feature is deleted. The run must reach the write path with a
+        # non-terminal verdict in hand -- an extraction bind supplies the PATCH --
+        # and the accused row in that PATCH must carry no new `outcome`, so the
+        # server's omitted-outcome preservation keeps the stored verdict.
+        api = _SearchStubApi(
+            [_accused_case()],
+            {"साझा भण्डार सहकारी": [{"id": SAJHA_IRI,
+                                     "title": {"ne": "साझा भण्डार सहकारी"},
+                                     "score": 200.0}]})
+        stub = _two_call_stub(entity_response=ENTITY_RESPONSE,
+                              verdict_response=json.dumps({"defendants": [
+                                  {"name": "राम बहादुर", "outcome": "charged",
+                                   "role": "", "evidence": ""}]}, ensure_ascii=False))
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        assert len(api.replace_list_calls) == 1, "the write path was never reached"
+        _slug, _path, items, if_match = api.replace_list_calls[0]
+        assert if_match == api.etag
+        assert SAJHA_IRI in {i["nes_id"] for i in items}, "no PATCH-forcing bind"
+        row = next(i for i in items if i["nes_id"] == ACCUSED_IRI)
+        assert "outcome" not in row
+        assert row["notes"] == "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"
+
+    def test_a_bind_this_run_never_touched_survives_the_whole_list_replace(
+            self, monkeypatch, patched_fetch_markdown):
+        # THE PROPERTY MOST WORTH PINNING. `/entities` deletes every bind and
+        # recreates the list from exactly what is sent, so an omitted bind is a
+        # deleted bind -- and this case is the production shape: a `related`
+        # bind is already there (which skips extraction entirely), carrying a
+        # human's note that nothing in this run may touch.
+        human_note = "ठेक्का प्राप्त गर्ने संस्था — मानिसले लेखेको टिप्पणी"
+        untouched = {"nes_id": SAJHA_IRI, "type": "related",
+                     "display_name": "साझा भण्डार सहकारी", "notes": human_note}
+        api = _SearchStubApi([_accused_case(extra_entities=[untouched])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+
+        assert len(api.replace_list_calls) == 1
+        _slug, path, items, if_match = api.replace_list_calls[0]
+        assert (path, if_match) == ("entities", api.etag)
+        by_id = {i["nes_id"]: i for i in items}
+        assert by_id[SAJHA_IRI] == {"nes_id": SAJHA_IRI,
+                                    "relationship_type": "related",
+                                    "notes": human_note}
+        assert by_id[ACCUSED_IRI]["outcome"] == "convicted"
+
+
+class TestVerdictReport:
+    def test_verdicts_jsonl_records_a_row_that_was_not_written(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # A run that changes nothing must still say what it saw.
+        api = _StubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
+            {"name": "राम बहादुर", "outcome": "unknown", "role": "",
+             "evidence": ""}]}, ensure_ascii=False))
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        rows = _verdict_rows(tmp_path)
+        assert rows and rows[0]["new_outcome"] == "unknown"
+        assert rows[0]["written"] is False
+
+    def test_a_refused_human_note_is_reported(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        api = _StubApi([_accused_case(notes="तत्कालीन प्रमुख — मुख्य प्रतिवादी")])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        rows = _verdict_rows(tmp_path)
+        assert any("note" in (r.get("reason") or "") for r in rows)
+
+    def test_the_evidence_phrase_rides_on_the_bind_row(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # Every factual claim needs a cited source. This is that rule applied to
+        # a machine write, and the only way a wrong `convicted` is findable.
+        api = _StubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        text = _read_report(tmp_path, "verdicts.jsonl")
+        assert "निज प्रतिवादीले कसुर गरेको ठहर्छ" in text
+
+    def test_a_written_verdict_also_lands_in_binds_jsonl_with_its_evidence(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        api = _SearchStubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        rows = [json.loads(line) for line in
+                _read_report(tmp_path, "binds.jsonl").splitlines() if line.strip()]
+        row = next(r for r in rows if r["nes_id"] == ACCUSED_IRI)
+        assert row["role"] == "accused"
+        assert "निज प्रतिवादीले कसुर गरेको ठहर्छ" in row["reason"]
+        assert row["written"] is True
+
+    def test_the_verdict_step_logs_an_event_per_case(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        steps = {(r["step"], r["status"]) for r in _read_events(_events_path())}
+        assert ("verdicts", "ok") in steps
+
+    def test_the_epilogue_totals_the_verdicts(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        api = _SearchStubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        assert "accused bind(s) updated from the judgment: 1" in capsys.readouterr().out
+
+    def test_a_refused_write_says_so_on_the_row_it_would_have_written(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        # `_StubApi` has no `get_case_with_etag`, so the unconditional
+        # whole-list replace is refused at the write gate. The bind DID change,
+        # so `settle_verdict_rows` has nothing to explain -- without a reason
+        # here the row reads `written: false` and says nothing at all.
+        api = _StubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        rows = _verdict_rows(tmp_path)
+        row = next(r for r in rows if r["nes_id"] == ACCUSED_IRI)
+        assert row["written"] is False
+        assert "not written" in row["reason"] and "ETag" in row["reason"]
+
+    def test_a_failed_write_says_so_on_the_row_it_would_have_written(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        class _FailingApi(_SearchStubApi):
+            def replace_list(self, slug, path, items, timeout=60, if_match=None):
+                raise urllib.error.HTTPError(
+                    "https://x/api/cases/", 412, "Precondition Failed", {}, None)
+
+        api = _FailingApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert row["written"] is False
+        assert "write failed" in row["reason"]
+
+    def test_report_paths_carries_the_verdicts_file(self):
+        paths = ere.report_paths({"log": "/tmp/run-abc.log"})
+        assert paths["verdicts"] == "/tmp/run-abc.verdicts.jsonl"
+
+
+# --------------------------------------------------------------------------
+# A case the judgment only half-answered, and the epilogue that names it. The
+# defendants a short chunk never answered for stay `charged`; the gate is
+# per-bind, so a re-run asks about exactly those, and the epilogue's list is
+# what to check by hand when a re-run leaves them undecided.
+# --------------------------------------------------------------------------
+
+SECOND_ACCUSED = {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+                  "display_name": "सीता देवी", "outcome": "charged",
+                  "notes": "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0071"}
+
+
+class TestVerdictCoverageEpilogue:
+    def test_a_half_answered_judgment_is_named_as_partially_decided(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # Two accused, and VERDICT_RESPONSE answers for राम बहादुर only.
+        api = _SearchStubApi([_accused_case(slug="case-half",
+                                            extra_entities=[SECOND_ACCUSED])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "1 partially decided" in out
+        assert "\n      case-half\n" in out, "the half-decided case is not named"
+        # NOT locked: the per-bind gate lets a re-run decide the rest.
+        assert "LOCKED" not in out
+        assert "re-run" in out
+
+    def test_a_fully_answered_judgment_is_not_reported_as_partial(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        api = _SearchStubApi([_accused_case(slug="case-whole")])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "1 fully decided" in out and "0 partially decided" in out
+        assert "LOCKED" not in out
+
+    def test_a_case_nothing_was_decided_on_counts_as_undecided(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # No court order, so the gate never reads a judgment -- the case is
+        # untouched, not half-done, and must not be filed with the partial ones.
+        api = _StubApi([_accused_case(slug="case-untouched", court=False)])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "1 undecided" in out
+        assert "LOCKED" not in out
+
+    def test_a_run_without_verdicts_reports_no_coverage_at_all(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # Nothing read the judgments, so there is no coverage to claim.
+        api = _StubApi([_accused_case(slug="case-skipped")])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run"])
+        assert "ACCUSED VERDICT COVERAGE" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Accused role notes reach a settled case, and a defendant is not re-bound
+# under a lesser section.
+# ---------------------------------------------------------------------------
+
+ROLE_NOTE = "तत्कालीन प्रबन्ध निर्देशक, नेपाल टेलिकम"
+
+
+def _notes_response(name="राम बहादुर", role=ROLE_NOTE, entities=()):
+    return json.dumps({"entities": list(entities),
+                       "accused_notes": [{"name": name, "notes": role}]},
+                      ensure_ascii=False)
+
+
+class TestAccusedNoteUpdates:
+    """`accused_note_updates` -- the mapping, in isolation."""
+
+    def test_a_settled_bind_still_gets_its_note(self):
+        case = _accused_case(outcome="acquitted")
+        updates = ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": ROLE_NOTE}])
+        assert updates == {ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_no_outcome_key_is_ever_produced(self):
+        # The whole safety story: `apply_accused_updates` only writes an
+        # outcome it is handed, so absence is what protects the verdict.
+        case = _accused_case(outcome="convicted")
+        updates = ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": ROLE_NOTE}])
+        assert "outcome" not in updates[ACCUSED_IRI]
+
+    def test_namesakes_are_both_skipped(self):
+        case = _accused_case(extra_entities=[
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "राम बहादुर", "outcome": "acquitted", "notes": ""}])
+        assert ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": ROLE_NOTE}]) == {}
+
+    def test_a_name_no_bind_carries_is_dropped(self):
+        case = _accused_case()
+        assert ere.accused_note_updates(
+            case, [{"name": "श्याम बहादुर", "notes": ROLE_NOTE}]) == {}
+
+    def test_a_blank_role_is_not_written(self):
+        case = _accused_case()
+        assert ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": "   "}]) == {}
+
+    def test_junk_rows_do_not_raise(self):
+        case = _accused_case()
+        assert ere.accused_note_updates(case, ["nope", None, {}]) == {}
+
+    def test_a_long_role_note_is_capped_like_the_verdict_path(self):
+        # `CaseEntityRelationship.notes` is an uncapped TextField and the
+        # serializer publishes it beside the name ("``notes`` is PUBLIC -- the
+        # party's role line"), so the prompt's "under 80 chars" is a request.
+        # The two writers must not cap the same column differently.
+        long_role = "क" * 500
+        case = _accused_case()
+        written = ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": long_role}])[ACCUSED_IRI]
+        assert len(written["notes"]) == ere.ROLE_NOTE_MAX_CHARS
+        verdict = ere.parse_verdict_response(json.dumps(
+            {"defendants": [{"name": "राम बहादुर", "outcome": "convicted",
+                             "role": long_role}]}, ensure_ascii=False))
+        assert len(verdict[0]["role"]) == len(written["notes"])
+
+    def test_a_note_inside_the_cap_is_untouched(self):
+        case = _accused_case()
+        assert ere.accused_note_updates(
+            case, [{"name": "राम बहादुर", "notes": ROLE_NOTE}]
+        )[ACCUSED_IRI] == {"notes": ROLE_NOTE}
+
+
+class TestAccusedVerdictTargetsAfterTheSplit:
+    """The settled filter must stay on the VERDICT path, not the shared one."""
+
+    def test_the_verdict_path_still_skips_a_settled_bind(self):
+        targets, skipped = ere.accused_verdict_targets(
+            _accused_case(outcome="acquitted"))
+        assert targets == {}
+        assert "terminal outcome" in skipped[0][2]
+
+    def test_the_shared_grouping_does_not(self):
+        grouped, skipped = ere.accused_binds_by_name(
+            _accused_case(outcome="acquitted"))
+        assert list(grouped) == ["राम बहादुर"]
+        assert skipped == []
+
+
+class TestNotesReachASettledCase:
+    """End to end: the case the verdict gate refuses still gets its notes."""
+
+    def test_a_fully_settled_case_gets_notes_without_verdicts(
+            self, monkeypatch, patched_fetch_markdown):
+        case = _accused_case(outcome="acquitted")
+        api = _SearchStubApi([case])
+        stub = _two_call_stub(entity_response=_notes_response())
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        # The gate refused the case, so no judgment was read...
+        assert stub.verdict_calls == []
+        # ...and the note landed anyway.
+        _slug, _path, items, _etag = api.replace_list_calls[0]
+        written = [i for i in items if i["nes_id"] == ACCUSED_IRI]
+        assert written[0]["notes"] == ROLE_NOTE
+
+    def test_the_verdict_survives_the_note_write(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply"])
+        _slug, _path, items, _etag = api.replace_list_calls[0]
+        # `outcome` is omitted entirely, which is what makes the server keep it.
+        assert all("outcome" not in i for i in items)
+
+    def test_notes_do_not_need_the_verdicts_flag(
+            self, monkeypatch, patched_fetch_markdown):
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply"])
+        _slug, _path, items, _etag = api.replace_list_calls[0]
+        assert [i for i in items if i["nes_id"] == ACCUSED_IRI][0]["notes"] == ROLE_NOTE
+
+    def test_a_human_written_note_is_never_overwritten(
+            self, monkeypatch, patched_fetch_markdown):
+        human = "यो मानिसको भूमिका हातले लेखिएको"
+        api = _SearchStubApi([_accused_case(outcome="acquitted", notes=human)])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply"])
+        assert api.replace_list_calls == []
+
+    def test_a_note_only_write_lands_in_the_binds_audit_file(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        # A NOTE-ONLY WRITE IS STILL A WRITE. `changed_ids` is derived from
+        # VERDICT rows, and a note-only update makes none, so this run sent a
+        # real `replace_list` while reporting `0 bound, 0 verdict update(s)`
+        # and an epilogue reading "bound zero entities because it extracted
+        # none". This module's own docstrings call `*.binds.jsonl` the sole
+        # audit trail, and a name-matched note is exactly the judgement call it
+        # exists to record.
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply", "--verdicts"])
+        assert api.replace_list_calls, "the fixture must actually write"
+
+        binds = [json.loads(line) for line in Path(_report_files()["binds"])
+                 .read_text(encoding="utf-8").splitlines()]
+        note_rows = [b for b in binds if b["nes_id"] == ACCUSED_IRI]
+        assert len(note_rows) == 1
+        assert note_rows[0]["notes"] == ROLE_NOTE
+        assert note_rows[0]["written"] is True
+        assert note_rows[0]["role"] == "accused"
+        # Same shape as `verdict_bind_row`, so the file stays readable as one.
+        assert set(note_rows[0]) == {
+            "slug", "extracted", "role", "nes_id", "score", "matched_name",
+            "notes", "reason", "written"}
+        assert "SET (accused) राम बहादुर " in capsys.readouterr().out
+
+    def test_a_dry_run_says_it_would_set_the_note(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--dry-run"])
+        out = capsys.readouterr().out
+        assert "WOULD SET (accused)" in out and "note only" in out
+        binds = [json.loads(line) for line in Path(_report_files()["binds"])
+                 .read_text(encoding="utf-8").splitlines()]
+        assert [b["written"] for b in binds if b["nes_id"] == ACCUSED_IRI] == [False]
+
+    def test_the_epilogue_no_longer_claims_the_run_wrote_nothing(
+            self, monkeypatch, patched_fetch_markdown, capsys):
+        api = _SearchStubApi([_accused_case(outcome="acquitted")])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply", "--verdicts"])
+        out = capsys.readouterr().out
+        assert "bound zero entities because it extracted none" not in out
+        assert "TOTAL accused bind(s) given a role note" in out
+
+    def test_a_refused_note_produces_no_bind_row(
+            self, monkeypatch, patched_fetch_markdown):
+        # `apply_accused_updates` leaves a human-written note alone, so nothing
+        # is written and nothing may be claimed. The row is keyed on the
+        # base -> updated DIFF, never on what the merge intended.
+        human = "यो मानिसको भूमिका हातले लेखिएको"
+        api = _SearchStubApi([_accused_case(outcome="acquitted", notes=human)])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(
+            entity_response=_notes_response()), argv=["--apply"])
+        assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
+
+    def test_a_verdict_role_note_wins_over_an_extracted_one(
+            self, monkeypatch, patched_fetch_markdown):
+        # The judgment's own wording is the better source; the extraction's job
+        # title only fills a gap it leaves.
+        api = _SearchStubApi([_accused_case(outcome="charged")])
+        stub = _two_call_stub(entity_response=_notes_response(),
+                              verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--apply", "--verdicts"])
+        _slug, _path, items, _etag = api.replace_list_calls[0]
+        note = [i for i in items if i["nes_id"] == ACCUSED_IRI][0]["notes"]
+        assert note == "तत्कालीन सचिव, अर्थ मन्त्रालय — घूस लिने"
+
+
+class TestAnAccusedIsNotReboundUnderAnotherSection:
+    """The extraction is told not to name defendants; this is what happens when
+    it does it anyway."""
+
+    @staticmethod
+    def _extracted(section):
+        return json.dumps({"entities": [
+            {"entity_name": "राम बहादुर", "relationship_type": section,
+             "entity_prefix": "person", "entity_type": "Person",
+             "is_named_entity": True, "name_en": "Ram Bahadur",
+             "notes": "सम्बद्ध"}], "accused_notes": []}, ensure_ascii=False)
+
+    def _api(self, case):
+        return _SearchStubApi([case], {
+            "राम बहादुर": [{"id": ACCUSED_IRI, "title": {"ne": "राम बहादुर"},
+                             "score": 180.0}]})
+
+    def test_a_defendant_relabelled_related_is_refused(
+            self, monkeypatch, patched_fetch_markdown):
+        api = self._api(_accused_case(outcome="acquitted"))
+        _run_main(monkeypatch, api,
+                  invoke_text_stub=lambda **kw: self._extracted("related"),
+                  argv=["--apply"])
+        assert api.replace_list_calls == []
+
+    def test_a_defendant_relabelled_alleged_is_refused(
+            self, monkeypatch, patched_fetch_markdown):
+        api = self._api(_accused_case(outcome="acquitted"))
+        _run_main(monkeypatch, api,
+                  invoke_text_stub=lambda **kw: self._extracted("alleged"),
+                  argv=["--apply"])
+        assert api.replace_list_calls == []
+
+    def test_the_refusal_is_recorded_on_the_plan(self):
+        case = _accused_case(outcome="acquitted")
+        api = self._api(case)
+        plan = ere.plan_case_entities(
+            api, case, "etag-1",
+            json.loads(self._extracted("related"))["entities"])
+        assert plan.action == "NOOP"
+        assert [(n, sec) for n, sec, _ in plan.already_accused] == [
+            ("राम बहादुर", "related")]
+        assert plan.bound == []
+
+    def test_a_non_defendant_still_binds(self):
+        # The guard must key on THIS case's accused, not on being a person.
+        case = _accused_case(outcome="acquitted")
+        other = "https://jawafdehi.org/entity/person/nani-kaji-thapa"
+        api = _SearchStubApi([case], {
+            "नानी काजी थापा": [{"id": other, "title": {"ne": "नानी काजी थापा"},
+                                 "score": 180.0}]})
+        items = [{"entity_name": "नानी काजी थापा", "relationship_type": "alleged",
+                  "entity_prefix": "person", "entity_type": "Person",
+                  "is_named_entity": True, "name_en": "", "notes": "उल्लेख"}]
+        plan = ere.plan_case_entities(api, case, "etag-1", items)
+        assert plan.already_accused == []
+        assert [d.nes_id for _n, d, _no, _s in plan.bound] == [other]
+
+    def test_the_guard_cannot_be_silently_disabled(self):
+        # `accused_ids` carries no default: a second caller that forgot it would
+        # re-bind defendants under a lesser role with no error anywhere. Asserted
+        # on the signature rather than by calling short -- `ty` rejects that call
+        # at check time, which is the contract working.
+        param = inspect.signature(ere._bind_one).parameters["accused_ids"]
+        assert param.default is inspect.Parameter.empty
+
+
+class TestNoteNameFolding:
+    """The court and the model join compound given names; NES spaces them."""
+
+    @pytest.mark.parametrize("written,bound", [
+        ("रामप्रसाद घिमिरे", "राम प्रसाद घिमिरे"),
+        ("जयराज घिमिरे", "जय राज घिमिरे"),
+        ("चन्द्रकुमार पोखरेल", "चन्द्र कुमार पोखरेल"),
+        ("धर्मराज खड्का", "धर्म राज खड्का"),
+        ("बिष्णुप्रसाद न्यौपाने", "बिष्णु प्रसाद न्यौपाने"),
+    ])
+    def test_a_joined_given_name_matches_its_spaced_bind(self, written, bound):
+        case = _accused_case(outcome="acquitted", display_name=bound)
+        assert ere.accused_note_updates(
+            case, [{"name": written, "notes": ROLE_NOTE}]) == {
+                ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_a_collision_created_by_the_fold_is_dropped(self):
+        # If two binds fold to one key they are as ambiguous as two binds
+        # sharing a display name, and get the same treatment.
+        case = _accused_case(outcome="acquitted", display_name="राम प्रसाद")
+        case["entities"].append(
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "रामप्रसाद", "outcome": "acquitted", "notes": ""})
+        assert ere.accused_note_updates(
+            case, [{"name": "रामप्रसाद", "notes": ROLE_NOTE}]) == {}
+
+
+class TestNoteVariantFolding:
+    """Spelling variants that are one person, and the ones that are not."""
+
+    @pytest.mark.parametrize("written,bound", [
+        ("बिकास श्रेष्ठ", "विकास श्रेष्ठ"),          # ba / va
+        ("घनश्याम दुबे", "घनश्याम दुवे"),
+        ("हरिशंकर शर्मा", "हरीशंकर शर्मा"),          # vowel length
+        ("इच्छाकुमार श्रेष्ठ", "ईच्छाकुमार श्रेष्ठ"),
+        ("रामकिशोर शाह", "रामकिशोर साह"),          # sibilant
+    ])
+    def test_a_spelling_variant_matches(self, written, bound):
+        case = _accused_case(outcome="acquitted", display_name=bound)
+        assert ere.accused_note_updates(
+            case, [{"name": written, "notes": ROLE_NOTE}]) == {
+                ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    @pytest.mark.parametrize("written,bound", [
+        ("सरोज श्रेष्ठ", "सुरज श्रेष्ठ"),
+        ("मिना अधिकारी", "मुना अधिकारी"),
+        ("हरि बहादुर", "हिरा बहादुर"),
+        ("राजकुमार साह", "राजकुमार सिंह"),
+    ])
+    def test_two_different_people_never_match(self, written, bound):
+        # Every pair here is one the "drop all matras" fold merged. It was
+        # measured over 2,860 production binds and rejected for exactly this.
+        case = _accused_case(outcome="acquitted", display_name=bound)
+        assert ere.accused_note_updates(
+            case, [{"name": written, "notes": ROLE_NOTE}]) == {}
+
+    def test_an_inserted_matra_matches_when_it_is_the_only_candidate(self):
+        case = _accused_case(outcome="acquitted", display_name="प्रशान्त बोहोरा")
+        assert ere.accused_note_updates(
+            case, [{"name": "प्रशान्त बोहरा", "notes": ROLE_NOTE}]) == {
+                ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_the_exact_match_wins_and_the_near_pass_never_runs(self):
+        # दल / दिल differ by one matra and are different people. With BOTH on
+        # the case, the exact key must claim the note; a near match must not
+        # get the chance to take it.
+        case = _accused_case(outcome="acquitted", display_name="दल बहादुर")
+        case["entities"].append(
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "दिल बहादुर", "outcome": "acquitted", "notes": ""})
+        assert ere.accused_note_updates(
+            case, [{"name": "दिल बहादुर", "notes": ROLE_NOTE}]) == {
+                SECOND_ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_two_near_candidates_are_refused_not_guessed_between(self):
+        # वोहोरा and वोहेरा are the same length and each is one INSERTED matra
+        # away from वोहरा, so the queried name has two candidates and may pick
+        # neither. (The pair was वोहोरा/वोहारा until `ा` stopped being
+        # insertable -- see `is_matra_variant`; वोहारा is no longer a candidate
+        # at all, which left one and defeated the refusal this pins.)
+        case = _accused_case(outcome="acquitted", display_name="वोहोरा")
+        case["entities"].append(
+            {"nes_id": SECOND_ACCUSED_IRI, "type": "accused",
+             "display_name": "वोहेरा", "outcome": "acquitted", "notes": ""})
+        assert ere.accused_note_updates(
+            case, [{"name": "वोहरा", "notes": ROLE_NOTE}]) == {}
+
+    def test_a_near_name_that_is_not_a_bind_cannot_take_an_exact_match(self):
+        # THE DANGEROUS SHAPE, and the one the two passes being interleaved got
+        # wrong. The case holds ONE accused, दिल बहादुर. The court order also
+        # names दल बहादुर, who is not a bind at all, so the model returns a note
+        # for each. The दल row finds no exact key, falls into the relaxed pass,
+        # matches the one bind on the case -- and used to overwrite the note the
+        # दिल row had already placed there, purely because it came second.
+        case = _accused_case(outcome="acquitted", display_name="दिल बहादुर")
+        assert ere.accused_note_updates(case, [
+            {"name": "दिल बहादुर", "notes": ROLE_NOTE},
+            {"name": "दल बहादुर", "notes": "वडा अध्यक्ष"},
+        ]) == {ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_the_exact_match_wins_whichever_order_the_notes_arrive_in(self):
+        # The same two rows the other way round. An extraction's row order is
+        # not a contract, so the answer may not depend on it.
+        case = _accused_case(outcome="acquitted", display_name="दिल बहादुर")
+        assert ere.accused_note_updates(case, [
+            {"name": "दल बहादुर", "notes": "वडा अध्यक्ष"},
+            {"name": "दिल बहादुर", "notes": ROLE_NOTE},
+        ]) == {ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_two_notes_folding_to_one_exact_key_are_refused(self):
+        # विकास and बिकास fold to the same `note_match_key`, so both rows claim
+        # the one bind. Last-wins silently staples whichever the model happened
+        # to emit second onto the defendant; refuse instead, the way
+        # `accused_binds_by_name` drops a shared display name.
+        case = _accused_case(outcome="acquitted", display_name="विकास शर्मा")
+        assert ere.accused_note_updates(case, [
+            {"name": "विकास शर्मा", "notes": ROLE_NOTE},
+            {"name": "बिकास शर्मा", "notes": "वडा अध्यक्ष"},
+        ]) == {}
+
+    def test_one_key_claimed_twice_with_the_SAME_role_is_not_a_conflict(self):
+        # A duplicated row says nothing contradictory, so refusing it would cost
+        # a real note for no gain.
+        case = _accused_case(outcome="acquitted", display_name="विकास शर्मा")
+        assert ere.accused_note_updates(case, [
+            {"name": "विकास शर्मा", "notes": ROLE_NOTE},
+            {"name": "बिकास शर्मा", "notes": ROLE_NOTE},
+        ]) == {ACCUSED_IRI: {"notes": ROLE_NOTE}}
+
+    def test_two_relaxed_notes_claiming_one_bind_are_refused(self):
+        # The relaxed pass has the same collision. `वोहरा` and `वहोरा` each drop
+        # a different `ो` from the single bind `वोहोरा`, so both are one
+        # insertion away, neither is an exact key, and both reach it --
+        # first-wins is as much a guess as last-wins.
+        case = _accused_case(outcome="acquitted", display_name="वोहोरा")
+        assert ere.accused_note_updates(case, [
+            {"name": "वोहरा", "notes": ROLE_NOTE},
+            {"name": "वहोरा", "notes": "वडा अध्यक्ष"},
+        ]) == {}
+
+    def test_a_relaxed_note_may_not_take_a_bind_an_exact_row_refused(self):
+        # A key the exact pass REFUSED is spoken for, not free. Letting the
+        # relaxed pass fill it would route round the refusal.
+        case = _accused_case(outcome="acquitted", display_name="विकास")
+        assert ere.accused_note_updates(case, [
+            {"name": "विकास", "notes": ROLE_NOTE},
+            {"name": "बिकास", "notes": "वडा अध्यक्ष"},
+            {"name": "विकाास", "notes": "सचिव"},
+        ]) == {}
+
+    # A TRAILING `ा` IS THE FEMININE MARKER, not an ordinary inserted matra.
+    # कमल/कमला are one insertion apart and are different people, usually of
+    # different gender -- and the module docstring already names कमल थापा /
+    # Kamala Thapa as a known hazard on the cross-script side. Rejecting an
+    # insertion "at the end of the string" does NOT catch these: `note_match_key`
+    # strips spaces, so on कमलाथापा the inserted `ा` sits mid-key.
+    FEMININE_PAIRS = [
+        ("कमल थापा", "कमला थापा"),
+        ("सुनिल", "सुनिला"),
+        ("गोपाल", "गोपाला"),
+        ("बिमल", "बिमला"),
+        ("रमेश", "रमेशा"),
+    ]
+
+    @pytest.mark.parametrize("masculine,feminine", FEMININE_PAIRS)
+    def test_the_feminine_marker_is_not_an_insertable_matra(self, masculine,
+                                                            feminine):
+        assert not ere.is_matra_variant(ere.note_match_key(masculine),
+                                        ere.note_match_key(feminine))
+
+    @pytest.mark.parametrize("masculine,feminine", FEMININE_PAIRS)
+    def test_a_masculine_note_never_lands_on_a_feminine_bind(self, masculine,
+                                                             feminine):
+        # End to end, with the feminine name as the case's ONLY accused bind --
+        # the single-candidate shape the relaxed pass accepts.
+        case = _accused_case(outcome="acquitted", display_name=feminine)
+        assert ere.accused_note_updates(
+            case, [{"name": masculine, "notes": ROLE_NOTE}]) == {}
+
+    def test_the_motivating_insertion_still_matches(self):
+        # The fold exists for बोहरा -> बोहोरा, which inserts `ो`, not `ा`.
+        # Excluding the feminine marker must not cost this.
+        assert ere.is_matra_variant(ere.note_match_key("बोहरा"),
+                                    ere.note_match_key("बोहोरा"))
+
+
+def test_the_variant_fold_keeps_these_known_pairs_apart():
+    """A regression table of pairs `NOTE_VARIANTS` must never merge.
+
+    NOT the measurement itself. `NOTE_VARIANTS` was chosen by running the fold
+    over all 2,860 accused binds in FY076-079 and rejecting any candidate that
+    collapsed two different accused; the six pairs below are the ones that
+    rejected the aggressive fold, kept here so a future entry that re-merges
+    them fails in CI. To re-run the corpus measurement, use
+    `work/2026-09-01-fy078-079-enrichment-status/fold_probe.py` (read-only) in
+    the jawafdehi-meta checkout -- a new `NOTE_VARIANTS` entry needs that, not
+    this test.
+    """
+    different_people = [
+        ("सरोज", "सुरज"), ("मिना", "मुना"), ("हरि", "हिरा"),
+        ("दल बहादुर", "दिल बहादुर"), ("राजकुमार साह", "राजकुमार सिंह"),
+        ("नविन कुमार साह", "नविन कुमार सिंह"),
+    ]
+    for a, b in different_people:
+        assert ere.note_match_key(a) != ere.note_match_key(b), (a, b)
+
+
+# ---------------------------------------------------------------------------
+# enricher-fix-rules.json: entity.drop_duplicate_location_org and
+# entity.reject_ecn_candidate_binds.
+# ---------------------------------------------------------------------------
+
+KANCHANPUR_CODED = "https://jawafdehi.org/entity/location/district/kanchanpur-np0772"
+KANCHANPUR_BARE = "https://jawafdehi.org/entity/location/kanchanpur"
+
+
+class TestAGazetteerTwinIsNotBoundAlongsideItsCodedRecord:
+    """NES holds कञ्चनपुर twice. `resolve` drops the bare twin; this pins that
+    `qualifying_binds` does not put it back."""
+
+    @staticmethod
+    def _api(case):
+        return _SearchStubApi([case], {"कञ्चनपुर": [
+            {"id": KANCHANPUR_CODED, "title": {"ne": "कञ्चनपुर"}, "score": 180.0},
+            {"id": KANCHANPUR_BARE, "title": {"ne": "कञ्चनपुर"}, "score": 180.0}]})
+
+    @staticmethod
+    def _items():
+        return [{"entity_name": "कञ्चनपुर", "relationship_type": "location",
+                 "entity_prefix": "location/district", "entity_type": "Place",
+                 "is_named_entity": True, "name_en": "Kanchanpur",
+                 "notes": "कसुर भएको जिल्ला"}]
+
+    def test_only_the_coded_record_binds(self):
+        case = {"slug": "case-kanchanpur", "state": "DRAFT", "entities": []}
+        plan = plan_case_entities(self._api(case), case, 'W/"e"', self._items())
+        assert [i["nes_id"] for i in plan.patch_items] == [KANCHANPUR_CODED]
+
+    def test_the_dropped_twin_still_reaches_the_report(self):
+        # `candidates` is the audit trail -- narrowing the BIND must not hide
+        # that NES holds the place twice.
+        case = {"slug": "case-kanchanpur-2", "state": "DRAFT", "entities": []}
+        plan = plan_case_entities(self._api(case), case, 'W/"e"', self._items())
+        _name, decision, _notes, _section = plan.bound[0]
+        assert KANCHANPUR_BARE in {c[1] for c in decision.candidates}
+
+    def test_a_person_with_two_candidates_still_binds_both(self):
+        # The narrowing must not touch the person fan-out that
+        # `qualifying_binds` exists for.
+        a = "https://jawafdehi.org/entity/person/anish-shrestha-1"
+        b = "https://jawafdehi.org/entity/person/anish-shrestha-2"
+        case = {"slug": "case-person-fanout", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [
+            {"id": a, "title": {"ne": "अनिष श्रेष्ठ"}, "score": 180.0},
+            {"id": b, "title": {"ne": "अनिष श्रेष्ठ"}, "score": 180.0}]})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "entity_prefix": "person", "entity_type": "Person",
+             "is_named_entity": True, "name_en": "", "notes": "क"}])
+        assert {i["nes_id"] for i in plan.patch_items} == {a, b}
+
+
+# कञ्चनपुर MASKS THE BUG BELOW, which is why the class above passes. The
+# narrowing used to key on `decision.nes_id`, and `_promote_top_candidate`
+# re-derives that from `Decision.candidates` -- a tuple `resolve` captured
+# BEFORE its own narrowing. Which twin sorts first is pure lexicography:
+# `location/district/kanchanpur-np0772` beats `location/kanchanpur` because
+# `d` < `k`. It goes the other way for every district whose slug sorts before
+# the literal `district/` -- achham, baglung, banke, bara, chitwan, dailekh,
+# dhading -- and for six of the seven provinces against `province/`.
+ACHHAM_CODED = "https://jawafdehi.org/entity/location/district/achham-np0901"
+ACHHAM_BARE = "https://jawafdehi.org/entity/location/achham"
+
+
+class _TruncatedCandidates(list):
+    """A search result the API stopped early on -- `resolve`'s truncation veto."""
+
+    complete = False
+
+
+class TestTheGazetteerNarrowingSurvivesAPromotedReview:
+    """The narrowing has to hold on every path that reaches a bind, not only
+    the one where `resolve` returns a clean BIND."""
+
+    @staticmethod
+    def _candidates():
+        return [{"id": ACHHAM_BARE, "title": {"ne": "अछाम"}, "score": 180.0},
+                {"id": ACHHAM_CODED, "title": {"ne": "अछाम"}, "score": 180.0}]
+
+    def _bind(self, slug, rel_type="location", complete=True):
+        case = {"slug": slug, "state": "DRAFT", "entities": []}
+        found = (list(self._candidates()) if complete
+                 else _TruncatedCandidates(self._candidates()))
+        api = _SearchStubApi([case], {"अछाम": found})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अछाम", "relationship_type": rel_type,
+             "entity_prefix": "location/district", "entity_type": "Place",
+             "is_named_entity": True, "name_en": "Achham",
+             "notes": "कसुर भएको जिल्ला"}])
+        return {i["nes_id"] for i in plan.patch_items}
+
+    def test_a_truncated_candidate_window_still_drops_the_bare_twin(self):
+        # Routine for a common district name: the search stopped early, so
+        # `resolve` REVIEWs on the truncation veto and the promotion re-derives
+        # the winner from the un-narrowed tuple -- the bare twin, here.
+        assert self._bind("case-achham-truncated", complete=False) == {
+            ACHHAM_CODED}
+
+    def test_a_place_filed_under_another_section_still_drops_the_bare_twin(self):
+        # `prefer_gazetteer` is only on for the location section, so this one
+        # REVIEWs as an ambiguity and is then promoted. `bind_section`'s
+        # coercion to `related` makes this easy for the extraction to produce.
+        assert self._bind("case-achham-related", rel_type="related") == {
+            ACHHAM_CODED}
+
+    def test_the_clean_location_path_is_unchanged(self):
+        # The one path the previous tests exercised, and the one that already
+        # worked. It must keep working.
+        assert self._bind("case-achham-clean") == {ACHHAM_CODED}
+
+    def test_the_dropped_twin_still_reaches_the_report_on_a_promotion(self):
+        case = {"slug": "case-achham-report", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अछाम": self._candidates()})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अछाम", "relationship_type": "related",
+             "notes": "कसुर भएको जिल्ला"}])
+        _name, decision, _notes, _section = plan.bound[0]
+        assert ACHHAM_BARE in {c[1] for c in decision.candidates}
+
+    def test_a_place_beside_a_non_location_candidate_is_left_alone(self):
+        # The narrowing may only fire when EVERY qualifying candidate is a
+        # location. A coded district scoring alongside an organisation is a real
+        # ambiguity, and dropping the organisation would decide it silently.
+        org = "https://jawafdehi.org/entity/organization/achham"
+        case = {"slug": "case-achham-mixed", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अछाम": [
+            {"id": ACHHAM_CODED, "title": {"ne": "अछाम"}, "score": 180.0},
+            {"id": org, "title": {"ne": "अछाम"}, "score": 180.0}]})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अछाम", "relationship_type": "related",
+             "notes": "क"}])
+        assert {i["nes_id"] for i in plan.patch_items} == {ACHHAM_CODED, org}
+
+
+class TestElectionRecordsAreNeverPromoted:
+    ELECTION_DOC = {"identifier": [
+        {"propertyID": "ecn-candidate-id", "value": "187623"}]}
+
+    def test_strict_and_permissive_agree_on_an_election_record(self):
+        # The one veto where the two modes must NOT differ.
+        case = {"slug": "case-ecn-modes", "state": "DRAFT", "entities": []}
+        items = [{"entity_name": "अंकुर खत्री", "relationship_type": "related",
+                  "notes": "क"}]
+        for strict in (False, True):
+            api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]},
+                                 documents={ANKUR_IRI: self.ELECTION_DOC})
+            plan = plan_case_entities(api, case, 'W/"e"', items, strict=strict)
+            assert plan.bound == [], f"bound under strict={strict}"
+
+    def test_a_clean_document_still_promotes_an_ambiguity(self):
+        # Only the election veto became absolute. The ambiguity promotion that
+        # permissive mode exists for must survive.
+        case = {"slug": "case-still-promotes", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        assert plan.bound, "a clean ambiguity must still promote"
+
+    # The fan-out, not the winner. `_resolve_with_vetoes` reads ONE document --
+    # `decision.nes_id` -- and `qualifying_binds` then turns that decision into
+    # one bind per qualifying candidate. Without a per-candidate re-check the
+    # veto only ever fires when the election record happens to sort first, and
+    # the sort is `(-score, nes_id)`, so a clean record with a lower slug hides
+    # every namesake behind it. This is the shape the FY078/079 batch produced:
+    # one CIAA investigating officer bound to five defeated local candidates.
+    CLEAN_ANISH = "https://jawafdehi.org/entity/person/anish-shrestha-000001"
+
+    def _tied_candidates(self):
+        return [{"id": nes_id, "title": {"ne": "अनिष श्रेष्ठ"}, "score": 180.0}
+                for nes_id in (self.CLEAN_ANISH, ANISH_A["id"], ANISH_B["id"])]
+
+    def test_an_election_runner_up_is_not_bound_behind_a_clean_winner(self):
+        case = {"slug": "case-ecn-fanout", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi(
+            [case], {"अनिष श्रेष्ठ": self._tied_candidates()},
+            documents={ANISH_A["id"]: self.ELECTION_DOC,
+                       ANISH_B["id"]: self.ELECTION_DOC})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        bound = {decision.nes_id for _n, decision, _no, _s in plan.bound}
+        assert bound == {self.CLEAN_ANISH}, "an ECN record was bound as a runner-up"
+
+    def test_a_vetoed_runner_up_is_reported_for_review_not_dropped(self):
+        # Refused is not the same as unseen. The runner-up must reach
+        # `*.review.jsonl` carrying the veto, or a bind this run declined
+        # appears in no artefact at all.
+        case = {"slug": "case-ecn-fanout-review", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi(
+            [case], {"अनिष श्रेष्ठ": self._tied_candidates()},
+            documents={ANISH_A["id"]: self.ELECTION_DOC,
+                       ANISH_B["id"]: self.ELECTION_DOC})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        reasons = [decision.reason for _n, decision, _s in plan.review]
+        assert len(reasons) == 2
+        assert all("Election Commission record" in reason for reason in reasons)
+        # `apply_document_veto` blanks `nes_id` on a downgrade by contract, so
+        # the only place the refused candidate is named is the reason. Without
+        # that the two rows one fan-out produces are indistinguishable.
+        assert all(decision.nes_id is None for _n, decision, _s in plan.review)
+        assert {ANISH_A["id"], ANISH_B["id"]} == {
+            iri for iri in (ANISH_A["id"], ANISH_B["id"])
+            if any(iri in reason for reason in reasons)}
+
+    def test_every_fanned_out_candidate_is_read_exactly_once(self):
+        # The re-check costs one `get_entity` per runner-up and must not cost
+        # two: the winner's document is already read by `_resolve_with_vetoes`.
+        case = {"slug": "case-ecn-fanout-reads", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi(
+            [case], {"अनिष श्रेष्ठ": self._tied_candidates()},
+            documents={ANISH_A["id"]: self.ELECTION_DOC,
+                       ANISH_B["id"]: self.ELECTION_DOC})
+        plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        assert sorted(api.get_entity_calls) == sorted(
+            [self.CLEAN_ANISH, ANISH_A["id"], ANISH_B["id"]])
+
+    def test_an_unreadable_runner_up_document_refuses_the_bind(self):
+        # Fail closed on the fan-out exactly as `_resolve_with_vetoes` does on
+        # the winner: a transient read failure must never leave a bind standing.
+        case = {"slug": "case-ecn-fanout-unreadable", "state": "DRAFT",
+                "entities": []}
+        api = _SearchStubApi(
+            [case], {"अनिष श्रेष्ठ": self._tied_candidates()},
+            documents={ANISH_A["id"]: RuntimeError("502 Bad Gateway")})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        bound = {decision.nes_id for _n, decision, _no, _s in plan.bound}
+        assert ANISH_A["id"] not in bound
+        assert ANISH_B["id"] in bound, "a clean runner-up must still bind"
+
+    def test_a_clean_fan_out_still_binds_every_candidate(self):
+        # The re-check must not become a second ambiguity veto: three clean
+        # records still produce three binds and read three documents.
+        case = {"slug": "case-clean-fanout", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अनिष श्रेष्ठ": self._tied_candidates()})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        bound = {decision.nes_id for _n, decision, _no, _s in plan.bound}
+        assert bound == {self.CLEAN_ANISH, ANISH_A["id"], ANISH_B["id"]}
+
+
+class TestTheVerdictPromptCarriesItsGuardrails:
+    """enricher-fix-rules.json `entity.outcome_from_verdict`. Each marker below
+    is quoted from a real order in this corpus, so a reworded prompt that drops
+    one fails here rather than in a criminal outcome."""
+
+    @pytest.mark.parametrize("marker", [
+        "जफत प्रयोजनको लागि प्रतिवादी",      # 079-CR-0019
+        "प्रयोजनार्थ मात्र प्रतिवादी",         # 079-CR-0156
+    ])
+    def test_confiscation_only_defendants_are_described(self, marker):
+        assert marker in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_a_confiscation_only_defendant_is_told_to_stay_charged(self):
+        block = ere.VERDICT_SYSTEM_PROMPT[
+            ere.VERDICT_SYSTEM_PROMPT.index("CONFISCATION-ONLY"):]
+        block = block[:block.index("A SPLIT BENCH")]
+        assert "charged" in block and "never acquitted" in block
+
+    @pytest.mark.parametrize("marker", [
+        "फरक राय", "मतैक्य हुन नसकी", "दफा ६ को उपदफा (४)",   # 079-CR-0025
+    ])
+    def test_the_split_bench_markers_are_named(self, marker):
+        assert marker in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_a_split_bench_disagreement_is_told_to_answer_unknown(self):
+        block = ere.VERDICT_SYSTEM_PROMPT[
+            ere.VERDICT_SYSTEM_PROMPT.index("A SPLIT BENCH"):]
+        block = block[:block.index("AN ABETTOR")]
+        assert "unknown" in block
+
+    @pytest.mark.parametrize("marker", [
+        "मतियार", "दफा २२", "प्रतिबन्धात्मक वाक्यांश",          # 078-CR-0073
+    ])
+    def test_the_abettor_markers_are_named(self, marker):
+        assert marker in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_abated_is_still_reserved_for_death(self):
+        assert "मुद्दा तामेली" in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_the_outcome_vocabulary_is_unchanged(self):
+        # The guardrails must not have introduced a fifth answer.
+        assert ere.VERDICT_OUTCOMES == frozenset(
+            {"convicted", "acquitted", "abated", "charged", "unknown"})

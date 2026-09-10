@@ -776,7 +776,7 @@ def qualified_siblings(extracted: str, candidates: list[dict],
         instance of it.
 
     A subset test cannot tell those apart and would refuse all seven
-    municipality binds in `tests/casework/fixtures/` on top of this one --
+    municipality binds in the labelled set (commit `67d5293`) on top of this one --
     measured: 33 correct binds down to 26, recall 0.846 -> 0.667. The prefix test
     refuses one row, `मालपोत कार्यालय`, and no other.
 
@@ -1084,7 +1084,7 @@ def is_election_candidate_record(document) -> bool:
     corroboration, a DIFFERENT PERSON who happens to share the name.
 
     That is not hypothetical. Six of the 39 first-pass binds across the labelled
-    set in `tests/casework/fixtures/` were namesake candidates in the wrong
+    set (commit `67d5293`) were namesake candidates in the wrong
     district. The clearest is `नन्दलाल दास`, bound to
     `person/nandlal-das-310567` — a Ward Member candidate for Katahariya
     Municipality ward 4 in RAUTAHAT, while case 080-CR-0064 names a former Germi

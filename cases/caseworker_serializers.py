@@ -18,6 +18,7 @@ from jawafdehi_shared.entities.ids import (
 )
 
 from .fields import edit_history_date_error, parse_edit_history_date
+from .image_serializers import ImageIdField
 from .models import (
     CaseState,
     CaseType,
@@ -378,6 +379,15 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=200)
     short_description = serializers.CharField(required=False, allow_blank=True)
     description = serializers.CharField(required=False, allow_blank=True)
+    # The two case images, as ids of uploaded Wagtail images (see
+    # ``POST /api/case-images/``). ``allow_null`` because clearing an image is a
+    # normal edit — the editor sends ``null`` and the FK goes to NULL.
+    # ImageIdField so an id that names no image 422s here rather than reaching
+    # the bulk UPDATE and failing as an IntegrityError.
+    thumbnail_image_id = ImageIdField(required=False, allow_null=True)
+    banner_image_id = ImageIdField(required=False, allow_null=True)
+    # DEPRECATED, superseded by the two image ids above. Still writable so the
+    # cases that predate the upload flow remain editable; do not add new writers.
     thumbnail_url = serializers.URLField(
         required=False, allow_blank=True, max_length=500
     )

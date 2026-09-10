@@ -1,0 +1,151 @@
+# Every distinct raw value in Case.tags across the 82 published cases, with its
+# count, snapshotted 2026-08-24. This is what vocabulary.yml exists to absorb:
+# each line must either alias to a tag or appear in the dropped: block.
+#
+# Committed so the coverage guard runs in CI. Regenerate after a corpus import:
+#   uv run python manage.py rebuild_case_tags --dry-run
+
+53	CIAA
+49	Corruption
+27	Public Office Abuse
+26	Local Government
+16	Illegal Property Acquisition
+15	Procurement Irregularities
+13	Land Management
+11	Embezzlement
+10	Forged Documents
+10	Procurement
+9	Kathmandu Valley
+8	Assets Beyond Known Income
+7	Bagmati
+7	Public Procurement
+7	Revenue Leakage
+6	Lalitpur
+6	Madhesh
+5	Finance
+5	Forestry
+5	Revenue
+5	Special Court
+4	Construction
+4	Lumbini
+4	nphl
+3	Bid Rigging
+3	Infrastructure
+3	Karnali
+3	NITC
+3	Public Works
+3	Water Supply
+3	कर छली
+2	Civil Servant
+2	Education
+2	Gandaki
+2	Health
+2	IT
+2	Illegal Enrichment
+2	Illicit Enrichment
+2	Kathmandu
+2	Land
+2	Money Laundering
+2	Nagarjun Municipality
+2	Ncell
+2	Political Corruption
+2	Supreme Court
+2	Tax Evasion
+2	एनसेल
+1	081-CR-0098
+1	081-CR-0111
+1	Abuse of Authority
+1	Abuse of Power.
+1	Agriculture
+1	Agriculture Subsidy
+1	Asia Info
+1	Bagmati Mayor Involvement
+1	Budget Misuse
+1	Budhigandaki Hydropower Project
+1	Civil Servants
+1	Conflict of Interest
+1	Conflict of Interest.
+1	Corruption Allegation
+1	Danusha
+1	Embezzled
+1	Ghost Employees
+1	Giribandhu
+1	Health Supply Management Center, Bagmati Province
+1	High Specification
+1	Hospital Scandal
+1	Hospital related
+1	Hulak Saving  Bank Case
+1	Hydropower
+1	ICISD
+1	Illegal Property
+1	Illegal Wealth
+1	Illegal enrichment
+1	Irregular Amount
+1	Jhapa
+1	K.P. Sharma Oli
+1	Kathmandu Valley Development Authority
+1	Kickbacks
+1	Koshi
+1	Land Grab
+1	Land Scandel
+1	Madesh Province
+1	Maoist Combatants
+1	Misappropriation
+1	Money-laundering
+1	Morang
+1	NTC
+1	Pashupati Development Area
+1	Pashupati Jalahari
+1	Peace Process
+1	Policy Corruption
+1	Prime Minister of Nepal
+1	Procurement Splitting
+1	Province 1
+1	RSP
+1	Stalled Investigation
+1	Sudurpashchim
+1	Sudurpashchim Province
+1	TERAMOCS CASE
+1	Telecommunications
+1	Transport
+1	Transportation
+1	Unsubstantiated Claim
+1	Witness Tampering
+1	axiata
+1	baluwatar
+1	bribery
+1	cooperative fraud
+1	damak
+1	land-deal
+1	national issue
+1	ncell
+1	sashikanta jha
+1	tax evasion
+1	~1 Crore 25 Lakh
+1	~1 Crore 31 Lakh
+1	~1 Crore 55 Lakh
+1	~1 Crore 61 Lakh
+1	~1 Crore 8 Lakh
+1	~17 Crore 98 Lakh
+1	~2 Crore 89 Lakh
+1	~21 Crore 21 Lakh
+1	~26 Lakh 82 Hazar
+1	~3 Crore 15 Lakh
+1	~3 Crore 21 Lakh
+1	~3 Crore 29 Lakh
+1	~3 Lakh 20 Hazar
+1	~34 Crore 66 Lakh
+1	~4 Crore 67 Lakh
+1	~45 Hazar
+1	~5 Crore 33 Lakh
+1	~5 Crore 5 Lakh
+1	~6 Arab 21 Crore
+1	~85 Lakh 18 Hazar
+1	~9 Lakh 13 Hazar
+1	एनसेल प्रकरण
+1	गण्डकी प्रदेश
+1	झलक शर्मा पौडेल
+1	नेपाल दूरसञ्चार प्राधिकरण
+1	महालेखा परीक्षक
+1	माछापाेखरी
+1	सार्वजनिक सम्पत्ति हानी नाेकसानी

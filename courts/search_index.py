@@ -29,10 +29,37 @@ from jawafdehi_shared.search.indexing import (
     upsert_doc,
 )
 from jawafdehi_shared.search.opensearch import COURTCASE_INDEX, make_client
+from courts.geography import court_location
 from courts.normalize import is_verdict_sentinel
 
 SOURCE_APP = "ngm"
 TYPE_TOKEN = "jawafdehi:CourtCase"
+
+
+#: How many names per side ride along in ``raw.parties``. A card shows one name
+#: plus "+N others", so it needs the first name and a true total, not the whole
+#: list — and a case can carry a lot of parties. Five keeps the doc small while
+#: leaving room for a consumer that wants to list a few; ``total`` is the real
+#: count and is NOT capped, so "+N others" stays correct past the cap.
+PARTY_NAME_CAP = 5
+
+#: The values ``CaseEntity.side`` actually holds. The column documents
+#: ``plaintiff``/``defendant``, but it is a free CharField the scrapers write
+#: to and Devanagari equivalents occur — the SPA has long matched both. A side
+#: outside these sets is dropped rather than guessed at.
+_PLAINTIFF_SIDES = frozenset({"plaintiff", "वादी"})
+_DEFENDANT_SIDES = frozenset({"defendant", "प्रतिवादी"})
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    """Drop repeats, preserve first-seen order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
 
 
 def _party_names(case: Any) -> list[str]:
@@ -54,13 +81,57 @@ def _party_names(case: Any) -> list[str]:
                 names.append(name.strip())
     except Exception:  # noqa: BLE001 — shaping must not hard-fail on DB state.
         pass
-    # Deduplicate, preserve order.
-    seen: set[str] = set()
-    out: list[str] = []
-    for n in names:
-        if n not in seen:
-            seen.add(n)
-            out.append(n)
+    return _dedupe(names)
+
+
+def _parties_by_side(case: Any) -> dict[str, dict[str, Any]]:
+    """Party names split by side, for a search result card.
+
+    ``_party_names`` above deliberately flattens every party into ONE bag,
+    because its job is text recall — ``body``/``keywords`` only need the names
+    to be matchable, not attributable. A card cannot use that: it has to label a
+    name as plaintiff or defendant, and it has to know how many more there are
+    on each side to render "one name + N others". Hence a second, structured
+    pass over the same rows rather than a reshaping of the first.
+
+    Shape per side: ``{"names": [...capped...], "total": <int>}``.
+
+    Falls back to the case-level free-text ``plaintiff``/``defendant`` for a
+    side with no ``CaseEntity`` rows — the same precedence the SPA already
+    applies on the court-case detail page, and what lets a case that was never
+    entity-resolved still show its parties. Defensive like its neighbours: on a
+    bare instance with no DB it returns just those two strings.
+    """
+    collected: dict[str, list[str]] = {"plaintiff": [], "defendant": []}
+
+    try:
+        from courts.models import CaseEntity
+
+        rows = CaseEntity.objects.filter(
+            court_id=case.court_id, case_number=case.case_number
+        ).values_list("side", "name")
+        for side, name in rows:
+            if not isinstance(name, str) or not name.strip():
+                continue
+            key = (side or "").strip().lower()
+            if key in _PLAINTIFF_SIDES:
+                collected["plaintiff"].append(name.strip())
+            elif key in _DEFENDANT_SIDES:
+                collected["defendant"].append(name.strip())
+    except Exception:  # noqa: BLE001 — shaping must not hard-fail on DB state.
+        pass
+
+    for side in ("plaintiff", "defendant"):
+        if collected[side]:
+            continue
+        value = getattr(case, side, None)
+        if isinstance(value, str) and value.strip():
+            collected[side].append(value.strip())
+
+    out: dict[str, dict[str, Any]] = {}
+    for side, names in collected.items():
+        unique = _dedupe(names)
+        out[side] = {"names": unique[:PARTY_NAME_CAP], "total": len(unique)}
     return out
 
 
@@ -149,6 +220,13 @@ def build_doc(obj: Any) -> dict[str, Any]:
             "case_status": getattr(obj, "case_status", None),
             "plaintiff": getattr(obj, "plaintiff", None),
             "defendant": getattr(obj, "defendant", None),
+            # Side-attributed parties for a result card. Kept alongside the two
+            # free-text fields above rather than replacing them: those are what
+            # the scrapers captured verbatim, and a consumer may want the raw
+            # string. ``raw`` is mapped ``enabled: false``, so this is stored
+            # for display and costs nothing in the index — but it is a NEW key,
+            # so existing docs only gain it on reindex.
+            "parties": _parties_by_side(obj),
         },
     }
     # Promote case_type to a top-level keyword so the unified search can filter and
@@ -159,6 +237,37 @@ def build_doc(obj: Any) -> dict[str, Any]:
     # is preserved in ``raw.case_type`` for display; the label layer upper-cases too.
     if case_type and isinstance(case_type, str):
         doc["case_type"] = case_type.upper()
+
+    # Promote the deciding court's identifier to a top-level keyword so the
+    # unified search can filter/facet on ONE court (``?court=kathmandudc``). It
+    # already rides along in ``identifiers`` (text recall) and ``raw.court``
+    # (display), but neither can be a facet: ``identifiers`` mixes in IRIs and
+    # case numbers, and ``raw`` is mapped ``enabled: false``.
+    if court_id:
+        doc["court"] = court_id
+
+    # Promote the court tier (district/high/supreme/special) so the unified search
+    # can filter/facet by tier. Named for the DB column it is read from, which is
+    # also what the SPA and the analytics payloads already call it. Defensive:
+    # pure-shaping tests use bare objects whose court has no ``court_type``, and
+    # scraper stubs create Court rows with ``court_type=""``
+    # (courts/scraper/base.py) — skip both rather than polluting the facet with
+    # an empty bucket. Lower-cased: one controlled vocabulary.
+    court_type = getattr(getattr(obj, "court", None), "court_type", None)
+    if isinstance(court_type, str) and court_type.strip():
+        doc["court_type"] = court_type.strip().lower()
+
+    # Court geography, derived from the identifier alone (no DB access, so it
+    # works on the bare objects pure-shaping tests use). Unknown identifier → no
+    # fields: indexing nothing is recoverable, a wrong bucket is not. District is
+    # only ever a district court's OWN district, so high/supreme/special resolve
+    # with district None and set the province alone.
+    location = court_location(court_id)
+    if location:
+        district, province = location
+        if district is not None:
+            doc["court_district"] = district
+        doc["court_province"] = province
 
     reg_ad = getattr(obj, "registration_date_ad", None)
     if reg_ad is not None:

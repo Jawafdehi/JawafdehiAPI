@@ -22,7 +22,8 @@ One flat JSON line per query (rendered by the structlog JSON formatter; the log 
 | `types` | requested type filter, sorted; `[]` means all types. |
 | `sort` | `relevance` / `newest` / `oldest` / `title`. |
 | `page`, `page_size` | paging. |
-| `filters` | active refine facets (`case_type` / `entity_type` / `tags` / `status`), taxonomy tokens only; `null` when none. |
+| `filters` | active refine facets (`case_type` / `entity_type` / `tags` / `status` / `court` / `court_type` / `district` / `province`), taxonomy tokens only; `null` when none. |
+| `ranges` | active range bounds (`bigo_min` / `bigo_max` / `date_from` / `date_to`), scalars; `null` when none. |
 | `result_count` | total hits. |
 | `zero_result` | **the key gap signal** — a real query (`has_query`) that returned nothing. A browse returning nothing is not a miss. |
 | `counts_by_type` | per-type hit counts — which index satisfied the demand. |

@@ -213,11 +213,70 @@ def common_mappings() -> dict[str, Any]:
                 # internal scraper enrichment flag pending/enriched/failed). Only
                 # Jawafdehi cases set this; other doc types leave it absent.
                 "case_status": {"type": "keyword"},
+                # The deciding court's identifier for NGM court cases
+                # ("kathmandudc", "patanhc", "supreme") — the ONE-court facet.
+                # A duplicate of ``raw.court`` on purpose: ``raw`` is
+                # ``enabled: false`` (below) and so cannot be aggregated. Same
+                # single-type pattern as ``case_status`` above: only court-case
+                # docs set it. Same rebuild caveat as ``weight`` below: an
+                # existing index only gains the mapping on the next --rebuild
+                # generation, until which the facet returns zero buckets and a
+                # filter matches nothing (safe degradation, no errors).
+                "court": {"type": "keyword"},
+                # Court tier for NGM court cases (district/high/supreme/special),
+                # lower-cased from ``Court.court_type`` at index time — and named
+                # after that column, which is what the SPA and the analytics
+                # payloads already call it. Same single-type + rebuild caveats.
+                "court_type": {"type": "keyword"},
+                # Court geography for NGM court cases, derived in-repo from the
+                # court identifier (courts/geography.py — there is no DB column;
+                # the courts table is SQLAlchemy-owned). Title-case English names
+                # ("Kathmandu", "Bagmati").
+                #
+                # ``court_district`` is a DISTRICT COURT's own district and
+                # nothing else — high/supreme/special leave it absent (a high
+                # court is a provincial court; its bench town is not whose case
+                # it is). ``court_province`` covers all 95 sub-national courts,
+                # with the sentinel "NATIONAL" for supreme/special so national
+                # jurisdiction stays a visible, filterable group. Same rebuild
+                # caveat as ``court_type``/``weight``.
+                "court_district": {"type": "keyword"},
+                "court_province": {"type": "keyword"},
+                # What KIND of record an NGM material is — the closed
+                # ``MaterialType`` vocabulary, promoted from the column of the
+                # same name. Materials-only; other doc types leave it absent.
+                #
+                # The sibling ``Material.source`` column is deliberately NOT
+                # indexed. It reads like a provenance facet but conflates two
+                # things: 11 of its 30 production tokens name an office ("ag",
+                # "ppmo", "cib"), 10 just restate the document form with no
+                # office at all ("court_order" — 23,399 rows, the third largest),
+                # and the CIAA is split across ``ciaa_press_release`` and
+                # ``ciaa_annual_report`` so the one office a reader would ask for
+                # cannot be selected. Faceting it would put "Court order" in a
+                # list of publishers. It needs the column normalised first, which
+                # is a data change, not a mapping one.
+                #
+                # Same rebuild caveat as ``court``/``court_type``/``weight``: an
+                # existing index only gains the declared mapping on the next
+                # --rebuild generation. Until then the facet returns zero buckets
+                # and a filter matches nothing — safe degradation, no errors.
+                "material_type": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get
                 # this declared type — an existing one picks the field up by dynamic
                 # mapping on reindex, which is why _sort_spec sets ``unmapped_type``.
                 "weight": {"type": "integer"},
+                # बिगो — the alleged embezzled/disputed amount, in whole NPR.
+                # ``long`` mirrors ``Case.bigo`` (a BigIntegerField): the corpus
+                # already holds values into the tens of अरब, which overflow a 32-bit
+                # ``integer``. Promoted to a TOP-LEVEL field purely so it can be
+                # range-queried — the copy inside the card payload lives under
+                # ``raw``, which is ``enabled: false`` and therefore not indexed at
+                # all. Only Jawafdehi cases set this; other doc types leave it
+                # absent (and a ``range`` clause excludes a doc missing the field,
+                # which is the behaviour we want for an unrecorded amount).
+                "bigo": {"type": "long"},
                 # Full serialized JSON-LD / record, return-only (not searchable).
                 "raw": {"type": "object", "enabled": False},
             }

@@ -17,6 +17,7 @@ from .api_views import (
     OEmbedView,
     StatisticsView,
 )
+from .image_views import CaseImageUploadView
 
 # Create a router and register our viewsets.
 #
@@ -62,6 +63,13 @@ urlpatterns = [
         AuthorProfileView.as_view(),
         name="author-profile",
     ),
+    # Case image upload. A flat path rather than a ``cases/`` sub-route because
+    # an uploaded image is not scoped to one case — the same image can be the
+    # thumbnail of one and the hero of another, and it stays in the library after
+    # the case that first used it is unlinked. Naming it ``case-images/`` also
+    # keeps it clear of the router's ``cases/<pk>/`` detail pattern, which would
+    # otherwise match ``cases/images/`` with ``pk="images"``.
+    path("case-images/", CaseImageUploadView.as_view(), name="case-image-upload"),
     path("statistics/", StatisticsView.as_view(), name="statistics"),
     path("feedback/", FeedbackView.as_view(), name="feedback"),
     path("oembed/", OEmbedView.as_view(), name="oembed"),

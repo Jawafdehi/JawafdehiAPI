@@ -36,6 +36,7 @@ COPY courts/ ./courts/
 COPY materials/ ./materials/
 COPY lakehouse/ ./lakehouse/
 COPY cases/ ./cases/
+COPY case_tags/ ./case_tags/
 COPY review/ ./review/
 COPY case_proposals/ ./case_proposals/
 COPY newsletter/ ./newsletter/

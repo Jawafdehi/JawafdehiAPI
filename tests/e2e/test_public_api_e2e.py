@@ -239,26 +239,30 @@ class TestPublicAPIWorkflows:
             in_review_case.slug not in case_ids
         ), "In Review cases should not appear in list"
 
-    def test_notes_are_hidden_from_public_but_shown_to_casework(self):
+    def test_case_notes_are_casework_only_but_entity_role_notes_are_public(self):
         """
-        E2E Test: internal ``notes`` are gated by casework role (BB-04).
+        E2E Test: the two ``notes`` columns have OPPOSITE visibility.
 
-        ``notes`` (case-level and per-entity relationship notes) are internal —
-        the authoring UI labels them "not shown publicly". The public/anonymous
-        response must carry the ``notes`` key (schema stability) but with an empty
-        value; an authenticated casework role sees the real content.
+        ``Case.notes`` is internal casework content — the authoring UI labels it
+        "not shown publicly" (BB-04). The anonymous response must carry the key
+        (schema stability) with an empty value; a casework role sees the real text.
+
+        ``CaseEntityRelationship.notes`` is the party's PUBLIC role line, rendered
+        next to the name in the entity chips. It goes to EVERY caller. It was gated
+        alongside the case-level field once, which made the public page's content
+        depend on whether the viewer's token happened to be attached.
 
         Workflow:
-        1. Create a published case with case-level and per-entity notes.
-        2. Retrieve anonymously -> notes gated to "" (no leak).
-        3. Retrieve as a Caseworker -> real notes returned (editor round-trip).
+        1. Create a published case with a case-level note and a per-entity role note.
+        2. Retrieve anonymously -> case note "" , entity role note PRESENT.
+        3. Retrieve as a Caseworker -> both present (editor round-trip).
 
-        Validates: Requirements 6.3 (corrected: notes are casework-only).
+        Validates: Requirements 6.3.
         """
         internal_note = (
             "## Background\n\nThis case involves corruption at the ministry level."
         )
-        entity_note = "Internal: suspected primary beneficiary."
+        entity_note = "तत्कालीन प्रधानाध्यापक — मुख्य प्रतिवादी"
 
         # Step 1: Create a published case with case-level + per-entity notes.
         case = create_case_with_entities(
@@ -275,21 +279,21 @@ class TestPublicAPIWorkflows:
         rel.notes = entity_note
         rel.save()
 
-        # Step 2: Anonymous retrieval must NOT leak notes.
+        # Step 2: Anonymous retrieval — case note gated, role note published.
         response = self.client.get(f"/api/cases/{case.slug}/")
         assert response.status_code == 200
         public_detail = response.data
         assert "notes" in public_detail, "notes key should remain for schema stability"
         assert public_detail["notes"] == "", "case notes must be hidden from the public"
-        assert all(
-            e["notes"] == "" for e in public_detail["entities"]
-        ), "per-entity notes must be hidden from the public"
+        assert any(
+            e["notes"] == entity_note for e in public_detail["entities"]
+        ), "per-entity role notes must be visible to the public"
 
         # audit_history is still never exposed.
         assert "audit_history" not in public_detail
 
-        # Step 3: A casework role (Caseworker) still sees the real notes so the
-        # admin editor can reload and round-trip them.
+        # Step 3: A casework role sees the case note too, so the admin editor can
+        # reload and round-trip it.
         caseworker = create_user_with_role(
             "cw-notes", "cw-notes@example.com", "Caseworker"
         )

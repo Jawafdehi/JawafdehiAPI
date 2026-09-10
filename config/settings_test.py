@@ -1,9 +1,12 @@
 """Test settings for the consolidated Jawafdehi platform .
 
-Imports the production settings unchanged, then overrides ONLY the database
-configuration so the WHOLE test suite runs on sqlite with zero external
-services. The base settings already fall back to sqlite when the DB-URL env
-vars are unset, but that fallback points all three aliases at the SAME
+Imports the production settings unchanged, then overrides the database
+configuration so the WHOLE test suite runs on sqlite, and pins ``OPENSEARCH_URL``
+at a closed port so no run can reach a live cluster. (That second override used
+to be missing, and the "zero external services" this docstring claimed was true
+of Postgres but NOT of search — see the incident note below.) The base settings
+already fall back to sqlite when the DB-URL env vars are unset, but that
+fallback points all three aliases at the SAME
 ``db.sqlite3`` file — which makes the DB router's per-alias isolation a fiction
 under tests (a write routed to ``nes`` would be visible on ``default``).
 
@@ -36,6 +39,18 @@ os.environ.setdefault("TESTING", "true")
 os.environ.setdefault("SECRET_KEY", "test-key-for-tests-only")
 os.environ.setdefault("DEBUG", "True")
 os.environ.setdefault("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")
+
+# Point OpenSearch at a closed local port. Deliberately NOT a ``setdefault``: an
+# ``OPENSEARCH_URL`` inherited from the environment must LOSE, because an
+# endpoint someone exported — or a ``kubectl port-forward`` sitting on
+# ``localhost:9200``, which is the module default — is precisely the hazard. On
+# 2026-08-26 that forward made ``localhost:9200`` production, and the tests that
+# really run ``transaction.on_commit`` wrote six fixture documents into the live
+# ``jawafdehi-cases`` index, where they rendered as public case cards. The
+# repo-root ``conftest.py`` carries the full account and pins the same value for
+# every pytest run; this line covers the paths that never load that conftest
+# (``manage.py test``, or any direct import of this module).
+os.environ["OPENSEARCH_URL"] = "http://127.0.0.1:1"
 
 from config.settings import *  # noqa: F401,F403,E402
 

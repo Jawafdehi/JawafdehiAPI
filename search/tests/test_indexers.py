@@ -105,6 +105,49 @@ def test_material_build_doc_shape_with_dates():
     assert "081-CR-0081" in doc["identifiers"]
 
 
+def test_material_build_doc_promotes_the_document_form():
+    """``material_type`` becomes a top-level facet field.
+
+    The sibling ``source`` column is deliberately NOT promoted: it conflates
+    the publishing office with the document form (10 of its 30 production
+    tokens just restate the form, and the CIAA is split across two), so it is
+    not faceted until the column is normalised. ``source_app`` — the owning
+    APPLICATION — is a different field and keeps its own value.
+    """
+    iri = "https://jawafdehi.org/material/ciaa_press_release/1701"
+    obj = SimpleNamespace(
+        iri=iri,
+        ident="1701",
+        source="ciaa_press_release",
+        material_type="press_release",
+        data={"@id": iri, "@type": "CreativeWork", "name": {"ne": "प्रेस विज्ञप्ति"}},
+    )
+    doc = material_index.build_doc(obj)
+    assert doc["material_type"] == "press_release"
+    assert doc["source_app"] == "ngm"
+    assert "source" not in doc
+    assert "material_source" not in doc
+
+
+def test_material_build_doc_omits_a_blank_document_form():
+    """A blank column is left OUT, not written as "".
+
+    A ``terms`` filter excludes a doc that lacks the field, which is what an
+    unrecorded type should do — an "" bucket would otherwise show up in the
+    facet as a nameless option a reader could select.
+    """
+    iri = "https://jawafdehi.org/material/x/1"
+    obj = SimpleNamespace(
+        iri=iri,
+        ident="1",
+        source="",
+        material_type=None,
+        data={"@id": iri, "@type": "CreativeWork"},
+    )
+    doc = material_index.build_doc(obj)
+    assert "material_type" not in doc
+
+
 # ── courtcase ──────────────────────────────────────────────────────────────────
 
 
@@ -123,7 +166,7 @@ def _courtcase_obj():
         nes_id="https://jawafdehi.org/entity/person/ram-bahadur",
         registration_date_ad=None,
         registration_date_bs="2080-10-01",
-        court=SimpleNamespace(full_name_english="Supreme Court"),
+        court=SimpleNamespace(full_name_english="Supreme Court", court_type="supreme"),
     )
     obj.iri = build_courtcase_iri(obj.court_id, obj.case_number)
     return obj
@@ -153,6 +196,42 @@ def test_courtcase_build_doc_shape_and_title_from_case_number():
     # split into duplicate facet buckets. The verbatim value stays in ``raw``.
     assert doc["case_type"] == "CORRUPTION"
     assert doc["raw"]["case_type"] == "corruption"
+    # The court identifier promoted to a top-level keyword for the one-court
+    # facet — ``identifiers`` and ``raw.court`` carry it too, but neither can
+    # aggregate.
+    assert doc["court"] == "supreme"
+    # Court tier promoted for the unified search's court_type facet.
+    assert doc["court_type"] == "supreme"
+    # National jurisdiction: no district at all, and the NATIONAL sentinel for
+    # province so "national jurisdiction" stays a visible, filterable group.
+    assert "court_district" not in doc
+    assert doc["court_province"] == "NATIONAL"
+
+
+def test_courtcase_parties_fall_back_to_the_case_level_strings():
+    """No DB here, so ``CaseEntity`` cannot be read — the shaping must still
+    attribute a side, using the case's own ``plaintiff``/``defendant``. This is
+    also the live path for a case that was never entity-resolved."""
+    doc = courtcase_index.build_doc(_courtcase_obj())
+    assert doc["raw"]["parties"] == {
+        "plaintiff": {"names": ["नेपाल सरकार"], "total": 1},
+        "defendant": {"names": ["राम बहादुर"], "total": 1},
+    }
+    # The flattened bag is unchanged: it feeds text recall, not the card.
+    assert "नेपाल सरकार" in doc["keywords"]
+
+
+def test_courtcase_parties_empty_side_reports_zero_not_a_missing_key():
+    """A side with nothing on it stays present with total 0, so a client
+    branches on the number rather than on whether a key exists."""
+    obj = _courtcase_obj()
+    obj.plaintiff = None
+    obj.defendant = "   "  # whitespace-only is not a party
+    doc = courtcase_index.build_doc(obj)
+    assert doc["raw"]["parties"] == {
+        "plaintiff": {"names": [], "total": 0},
+        "defendant": {"names": [], "total": 0},
+    }
 
 
 def test_courtcase_title_en_none_without_english_court_name():
@@ -161,6 +240,74 @@ def test_courtcase_title_en_none_without_english_court_name():
     doc = courtcase_index.build_doc(obj)
     assert doc["title_en"] is None
     assert doc["title_ne"] == "081-CR-0081"
+
+
+def test_courtcase_court_type_absent_for_stub_court():
+    """Scraper stubs create Court rows with ``court_type=""`` — an empty keyword
+    would pollute the facet with a nameless bucket, so the field is dropped."""
+    obj = _courtcase_obj()
+    obj.court = SimpleNamespace(full_name_english=None, court_type="")
+    doc = courtcase_index.build_doc(obj)
+    assert "court_type" not in doc
+
+
+def test_courtcase_court_type_absent_without_court():
+    """Drop the field, never the document (the bigo lesson)."""
+    obj = _courtcase_obj()
+    obj.court = None
+    doc = courtcase_index.build_doc(obj)
+    assert "court_type" not in doc
+
+
+def test_courtcase_court_type_is_lowercased():
+    """One controlled vocabulary — casing variants must not split facet buckets."""
+    obj = _courtcase_obj()
+    obj.court = SimpleNamespace(full_name_english=None, court_type="District")
+    doc = courtcase_index.build_doc(obj)
+    assert doc["court_type"] == "district"
+
+
+def test_courtcase_court_identifier_is_indexed_even_without_a_court_row():
+    """The one-court facet is fed from ``court_id``, not the joined Court row, so
+    it survives the stub/None cases that drop ``court_type``."""
+    obj = _courtcase_obj()
+    obj.court_id = "achhamdc"
+    obj.court = None
+    doc = courtcase_index.build_doc(obj)
+    assert doc["court"] == "achhamdc"
+
+
+def test_courtcase_district_court_resolves_its_own_district_and_province():
+    """A district court's identifier IS its scraper code_name; geography is
+    derived from it alone (no DB access)."""
+    obj = _courtcase_obj()
+    obj.court_id = "achhamdc"
+    doc = courtcase_index.build_doc(obj)
+    assert doc["court_district"] == "Achham"
+    assert doc["court_province"] == "Sudurpashchim"
+
+
+def test_courtcase_high_court_gets_a_province_but_no_district():
+    """A high court is a PROVINCIAL court: its seat district would answer "which
+    town is the bench in", not "whose case is this" — so only province is
+    indexed, and an additional bench resolves to its parent court's province."""
+    obj = _courtcase_obj()
+    obj.court_id = "patanhc"
+    doc = courtcase_index.build_doc(obj)
+    assert "court_district" not in doc
+    assert doc["court_province"] == "Bagmati"
+    # Butwal is an additional bench of High Court Tulsipur — same province.
+    obj.court_id = "butwalhc"
+    assert courtcase_index.build_doc(obj)["court_province"] == "Lumbini"
+
+
+def test_courtcase_unknown_court_indexes_no_location():
+    """Indexing nothing is recoverable; a wrong bucket is a lie the facet serves."""
+    obj = _courtcase_obj()
+    obj.court_id = "atlantisdc"
+    doc = courtcase_index.build_doc(obj)
+    assert "court_district" not in doc
+    assert "court_province" not in doc
 
 
 # ── case ───────────────────────────────────────────────────────────────────────
@@ -337,3 +484,79 @@ def test_case_build_doc_card_entities_default_empty():
     """Pure shaping (no ``entities`` arg) still emits a card, with no entities."""
     doc = case_index.build_doc(_card_case())
     assert doc["raw"]["card"]["entities"] == []
+
+
+# ── बिगो promoted to a top-level range-queryable field ─────────────────────────
+
+
+def test_case_build_doc_promotes_bigo_to_top_level():
+    """बिगो must be a TOP-LEVEL field, not only the card copy.
+
+    ``raw`` is mapped ``enabled: false``, so ``raw.card.bigo`` is stored but never
+    indexed — a range filter can only see the promoted field. Both must be
+    present: the promoted one to filter on, the card one to render from.
+    """
+    doc = case_index.build_doc(_card_case())
+    assert doc["bigo"] == 12345678
+    assert doc["raw"]["card"]["bigo"] == 12345678
+
+
+def test_case_build_doc_omits_bigo_when_unrecorded():
+    """No amount → the key is ABSENT (not null).
+
+    A ``range`` clause excludes a document missing the field, which is exactly the
+    wanted behaviour for a case with no known amount; a ``null`` would instead be
+    rejected by the ``long`` mapping and drop the whole case from the index.
+    """
+    doc = case_index.build_doc(_card_case(bigo=None))
+    assert "bigo" not in doc
+    # The card still carries its own (null) copy — the SPA renders "not recorded".
+    assert doc["raw"]["card"]["bigo"] is None
+
+
+def test_case_build_doc_coerces_a_numeric_string_bigo():
+    """An API-shaped record can carry बिगो as a string; index it as a number."""
+    assert case_index.build_doc(_card_case(bigo="66000000000"))["bigo"] == 66000000000
+    assert case_index.build_doc(_card_case(bigo="1.9"))["bigo"] == 1
+
+
+def test_case_build_doc_drops_an_uncoercible_bigo_without_losing_the_case():
+    """Garbage in ``bigo`` must cost the FIELD, never the whole document.
+
+    Sending a non-numeric value against the ``long`` mapping would have OpenSearch
+    reject the doc outright, silently removing a published case from search.
+    """
+    junk_values = (
+        "not-a-number",
+        object(),
+        True,  # a bool is not an amount; would otherwise index as 1
+        2**63,  # past the ``long`` ceiling — rejected by the mapping
+        -(2**63) - 1,
+        float("inf"),  # int(float("inf")) raises OverflowError
+        float("nan"),  # int(float("nan")) raises ValueError
+    )
+    for junk in junk_values:
+        doc = case_index.build_doc(_card_case(bigo=junk))
+        assert "bigo" not in doc, junk
+        assert doc["iri"] == "https://jawafdehi.org/case/land-grab-2081"
+
+
+def test_case_build_doc_keeps_the_largest_real_amount_exactly():
+    """The screen must reject only what the ``long`` mapping cannot hold, and must
+    not mangle what it keeps.
+
+    The corpus already holds amounts into the tens of अरब. Coercing through
+    ``float`` is lossy above 2**53 — it would round the ceiling value UP past the
+    ceiling and silently drop a valid figure — so the coercion tries ``int`` first.
+    """
+    assert case_index.build_doc(_card_case(bigo=66_000_000_000))["bigo"] == 66_000_000_000
+    assert case_index.build_doc(_card_case(bigo=2**63 - 1))["bigo"] == 2**63 - 1
+    # Same for the string form an API-shaped record carries.
+    assert case_index.build_doc(_card_case(bigo=str(2**63 - 1)))["bigo"] == 2**63 - 1
+
+
+def test_case_build_doc_keeps_a_zero_bigo():
+    """``0`` is a recorded amount, not a synonym for "unknown" — so it is indexed
+    and remains filterable. (No published case records one; inventing the rule
+    here would make an honest zero invisible to every bound.)"""
+    assert case_index.build_doc(_card_case(bigo=0))["bigo"] == 0

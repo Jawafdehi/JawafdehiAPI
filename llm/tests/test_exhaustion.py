@@ -34,6 +34,25 @@ class TestFailuresThatMeanOutOfRoom:
     def test_an_explicit_stop_reason_is_read_as_exhaustion(self, message):
         assert is_exhaustion(RuntimeError(message))
 
+    def test_the_cli_output_cap_is_read_as_exhaustion(self):
+        """The verbatim production string, from the review judge on 2026-09-02.
+
+        It names neither a turn limit nor a stop reason, so both matchers above
+        miss it — which is how a truncated grade came to be reported as an
+        unreachable judge and dead-lettered a whole review.
+        """
+        assert is_exhaustion(
+            RuntimeError(
+                "claude_cli failed (rc=1): API Error: Claude's response exceeded "
+                "the 900 output token maximum. To configure this behavior, set "
+                "the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable."
+            )
+        )
+
+    @pytest.mark.parametrize("cap", ["1", "900", "4000", "32000"])
+    def test_the_output_cap_matches_at_any_budget(self, cap):
+        assert is_exhaustion(f"response exceeded the {cap} output token maximum")
+
     def test_matching_ignores_case(self):
         assert is_exhaustion(RuntimeError("ERROR_MAX_TURNS"))
 
@@ -63,6 +82,21 @@ class TestFailuresThatMustNotBeRetriedAtFourTimesTheCost:
         ],
     )
     def test_an_unrelated_failure_is_not_exhaustion(self, message):
+        assert not is_exhaustion(RuntimeError(message))
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS must be a positive integer",
+            "unset CLAUDE_CODE_MAX_OUTPUT_TOKENS to remove the output token maximum",
+            "invalid output token maximum",
+        ],
+    )
+    def test_an_output_cap_CONFIGURATION_error_is_not_exhaustion(self, message):
+        """The cap's own error message recommends setting the env var, so matching
+        on the var name — or on bare "output token maximum" — would read a
+        complaint ABOUT the setting as a generation that overflowed it. Requiring
+        the digits keeps the two apart."""
         assert not is_exhaustion(RuntimeError(message))
 
     @pytest.mark.parametrize(

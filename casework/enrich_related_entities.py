@@ -42,9 +42,11 @@ accepts. When several entities tie above the threshold, the best-scoring one win
 by a deterministic `(-score, nes_id)` sort, so some binds WILL name the wrong
 namesake. That is the accepted cost of the mode; every such bind is marked
 `[UNCERTAIN]` on the console and carries a `promoted over:` reason in
-`*.binds.jsonl`, which is how they are found again. Measured on the 142-row
-labelled set: precision 0.872, recall 0.872, and all five wrong binds are
-Election Commission candidate records rather than namesake mix-ups.
+`*.binds.jsonl`, which is how they are found again. Measured on the hand-labelled
+resolver set from commit `67d5293` (it scores name-to-NES resolution only, never
+which names the extractor found): precision 0.872, recall 0.872, and
+all five wrong binds are Election Commission candidate records rather than
+namesake mix-ups.
 
 ONE REFUSAL SURVIVES THAT MODE:
 
@@ -86,10 +88,23 @@ bind without writing anything; `--apply` is required to actually write, and
 even then `CaseworkApi` itself refuses a non-loopback host unless
 `--allow-remote-writes` is also passed -- never pass that against production.
 
+IT ALSO UPDATES ACCUSED BINDS IT DID NOT CREATE, under `--verdicts`.
+`enrich_court_record` binds every court-record defendant with
+`outcome = charged` and a placeholder note, because a `ठहर` on a 19-defendant
+judgment does not say who. With `--verdicts`, a case with a bound court order
+and an accused bind not yet settled has the judgment's operative section read
+and those binds rewritten in place -- a real role note and a per-defendant
+verdict -- in the SAME `/entities` replace the new binds go out in, never a
+second PATCH. It still proposes no accused bind of its own. OPT-IN, because
+`convicted` on a real person is the worst thing this module can get wrong.
+Gated INDEPENDENTLY of the `related`-bind idempotency skip: nearly every case
+this targets has already been through an extraction run.
+
 Usage:
     uv run python -m casework.enrich_related_entities --dry-run
     uv run python -m casework.enrich_related_entities --slug case-0123
     uv run python -m casework.enrich_related_entities --limit 10 --verbose
+    uv run python -m casework.enrich_related_entities --verdicts
     uv run python -m casework.enrich_related_entities --apply   # loopback only
 """
 
@@ -112,8 +127,15 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
+from casework.common.court_order import (
+    THAHAR_CHARS,
+    THAHAR_MARKER,
+    court_order_head,
+    court_order_thahar,
+    court_order_verdict_zone,
+)
 from casework.common.llm import bootstrap, tier_for
-from casework.common.materials import source_chunks, source_text
+from casework.common.materials import materials_of_type, source_chunks, source_text
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.common.parse import parse_extraction_response
 from casework.common.pipeline import (
@@ -139,6 +161,8 @@ from casework.entity_resolver import (
     Decision,
     _name_vetoes,
     apply_document_veto,
+    is_election_candidate_record,
+    names_a_gazetteer_place,
     normalise_name,
     resolve,
 )
@@ -173,12 +197,9 @@ EXTRACTION_MAX_TOKENS = 8000
 # defaults). The donor read these via an `env_int()` helper that lived in the
 # deleted `casework/common.py` and was never re-created in the Task 5-11
 # common package (see `enrich_missing_bigo.py`'s identical note) -- fixed at
-# the donor's own defaults.
-COURT_ORDER_FULL_THRESHOLD = 8_000
-COURT_ORDER_HEAD_CHARS = 4_000
-COURT_ORDER_TAIL_CHARS = 2_000
-COURT_ORDER_THAHAR_CHARS = 12_000
-
+# the donor's own defaults. The court-order side of this budget is no longer
+# here: it comes from `casework.common.court_order.court_order_head` and
+# `court_order_thahar`.
 PRESS_RELEASE_CHARS = 3_000
 PRESS_RELEASE_CHARS_NO_COURT = 18_000
 
@@ -506,6 +527,704 @@ def merge_entity_binds(current, additions):
     return merged
 
 
+MACHINE_NOTE_PREFIX = "प्रतिवादी — विशेष अदालत मुद्दा "
+ALIAS_MARKER = "; अदालतको अभिलेखमा: "
+TERMINAL_OUTCOMES = frozenset({"convicted", "acquitted", "abated"})
+
+#: The cap BOTH role-note writers apply. `CaseEntityRelationship.notes` is an
+#: uncapped `TextField` and the serializer publishes it beside the party's name
+#: on the case page, so the prompts' "under 80/90 characters" is a request and
+#: not a bound. The verdict path has capped at 90 since #474; the extraction
+#: path writes the same column and shares the number rather than restating it.
+ROLE_NOTE_MAX_CHARS = 90
+
+
+def is_settled(bind):
+    """Whether a bind already carries a terminal outcome this stage may not re-decide."""
+    return (bind.get("outcome") or "").strip().lower() in TERMINAL_OUTCOMES
+
+
+def settled_accused_ids(case):
+    """The `nes_id`s whose accused bind on `case` is already settled."""
+    return {(bind.get("nes_id") or "").strip()
+            for bind in (case.get("entities") or [])
+            if bind_relationship_type(bind) == ACCUSED_SECTION and is_settled(bind)}
+
+
+def apply_accused_updates(binds, updates):
+    """Rewrite in place only the accused binds `updates` (`{nes_id: {"outcome", "notes"}}`) covers.
+
+    Never creates or drops a bind -- same order, same length as `binds`. Only a
+    `TERMINAL_OUTCOMES` verdict is written, so an 'unknown' or 'charged' reply
+    cannot blank a stored one; an EMPTY `notes` leaves the existing note alone
+    rather than blanking it, since a judgment can convict a defendant it never
+    describes.
+    """
+    result = []
+    for bind in binds:
+        update = updates.get(bind.get("nes_id"))
+        if bind_relationship_type(bind) != "accused" or not update:
+            result.append(bind)
+            continue
+        new_bind = dict(bind)
+        if update.get("outcome") in TERMINAL_OUTCOMES:
+            new_bind["outcome"] = update["outcome"]
+        notes = bind.get("notes") or ""
+        role = update.get("notes") or ""
+        if role and (not notes or notes.startswith(MACHINE_NOTE_PREFIX)):
+            new_notes = role
+            if notes.startswith(MACHINE_NOTE_PREFIX) and ALIAS_MARKER in notes:
+                new_notes += notes[notes.index(ALIAS_MARKER):]
+            new_bind["notes"] = new_notes
+        result.append(new_bind)
+    return result
+
+
+VERDICT_MAX_TOKENS = 8_000
+# Measured: ~300 output tokens per defendant in Devanagari, so 8,000 buys
+# about 25 rows. Production holds cases with 185 and 249 accused binds.
+VERDICT_CHUNK = 20
+VERDICT_OUTCOMES = frozenset({"convicted", "acquitted", "abated", "charged", "unknown"})
+
+VERDICT_SYSTEM_PROMPT = """You are a Nepali legal research assistant reading a Special Court \
+(विशेष अदालत) judgment (फैसला) to record what the court decided about each named defendant.
+
+Decide from the OPERATIVE section only -- the ठहर खण्ड and the तपसिल directions near the \
+end. The earlier sections recite the charge and the defence; they state what was ALLEGED, \
+not what was decided.
+
+The operative verbs are ठहर्छ / ठहरेको (held guilty) and सफाई पाउने ठहर्छ (acquitted). A \
+defendant whose case was discontinued on death is abated (मुद्दा तामेली).
+
+THREE SITUATIONS THE OPERATIVE SECTION DOES NOT DECIDE THE WAY IT READS.
+
+CONFISCATION-ONLY DEFENDANTS. A spouse, parent or child is routinely captioned \
+प्रतिवादी purely so their property can be attached -- "जफत प्रयोजनको लागि प्रतिवादी \
+बनाएको", "असुल उपर गर्ने प्रयोजनार्थ मात्र प्रतिवादी बनाईएको". The court never \
+adjudicates their guilt, so a blanket line acquitting or convicting प्रतिवादीहरू does \
+NOT reach them. Answer charged for these -- never acquitted, never convicted.
+
+A SPLIT BENCH SETTLES ONLY WHO BOTH OPINIONS AGREE ON. When the order carries a \
+फरक राय, says मतैक्य हुन नसकी, or is referred on under विशेष अदालत ऐन, २०५९ को दफा ६ \
+को उपदफा (४), read BOTH opinions. Answer unknown for every name they treat \
+differently: that name goes to a third judge and is not decided yet. Only names \
+both opinions decide the same way are settled.
+
+AN ABETTOR IS CONVICTED. A defendant found मतियार under दफा २२ (the \
+प्रतिबन्धात्मक वाक्यांश) with कैद or जरिबाना ordered is convicted, even though the \
+wording differs from the main formula. Death is the ONLY route to abated \
+(मुद्दा तामेली) -- a defendant who absconded, or who died after judgment, can still \
+be convicted or acquitted on what the order says.
+
+For EACH name in the accused list, answer:
+  outcome   exactly one of: convicted | acquitted | abated | charged | unknown.
+            Answer unknown -- never a guess -- when the operative section does
+            not decide that person's case.
+  role      a short Nepali note: the person's post and employer at the time,
+            plus what the court found they did, under 90 characters. "" if the
+            document does not say.
+  evidence  the phrase the answer was decided from, quoted VERBATIM from the
+            order: at most one sentence, under 200 characters.
+
+Reply with ONLY this JSON object, no other text:
+{"defendants": [{"name": "<copied exactly from the accused list>", "outcome": "...", \
+"role": "...", "evidence": "..."}]}
+"""
+
+
+def parse_verdict_response(text: str) -> list:
+    """Parse a verdict-call reply into validated `{name, outcome, role, evidence}` rows.
+
+    Drops a row with no `name` or whose `outcome` is not in `VERDICT_OUTCOMES`,
+    never coercing one: a model answering `दोषी` has not answered the question
+    asked. Truncates `role` to `ROLE_NOTE_MAX_CHARS`.
+    """
+    rows = parse_extraction_response(text, ("defendants",)) or []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = (row.get("name") or "").strip()
+        outcome = (row.get("outcome") or "").strip()
+        if not name or outcome not in VERDICT_OUTCOMES:
+            continue
+        out.append({
+            "name": name,
+            "outcome": outcome,
+            "role": (row.get("role") or "")[:ROLE_NOTE_MAX_CHARS],
+            "evidence": row.get("evidence") or "",
+        })
+    return out
+
+
+def _ask_verdict_names(names, zone, invoke_text, usage):
+    """One verdict call for exactly `names`, reconciled by EXACT name match.
+
+    Returns `(answered, unrequested_errors)`. A row naming anyone but one of
+    `names` is dropped and reported, never fuzzily matched: the prompt tells
+    the model to copy `name` verbatim, and a near-match here binds a verdict to
+    the wrong person. Propagates an `invoke_text` failure to the caller.
+    """
+    requested = set(names)
+    listing = "\n".join(f"- {name}" for name in names)
+    content = (
+        f"ACCUSED ON THIS CASE:\n{listing}\n\n"
+        f"COURT ORDER (operative section):\n{zone}"
+    )
+    response_text = invoke_text(
+        system=VERDICT_SYSTEM_PROMPT,
+        content=content,
+        max_tokens=VERDICT_MAX_TOKENS,
+        tier=tier_for("entities"),
+        usage=usage,
+    )
+    answered = {}
+    unrequested_errors = []
+    for row in parse_verdict_response(response_text):
+        name = row["name"]
+        if name not in requested:
+            unrequested_errors.append(f"chunk returned an unrequested name: {name!r}")
+            continue
+        answered[name] = {
+            "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
+        }
+    return answered, unrequested_errors
+
+
+def _retry_verdict_names(missing, zone, invoke_text, usage):
+    """One retry pass over `missing`, re-entered in chunks of `VERDICT_CHUNK // 2`.
+
+    Halved, not repeated: the likeliest cause of a short chunk is a reply
+    truncated at `VERDICT_MAX_TOKENS`, whose unbalanced JSON parses as nothing
+    at all, so a same-size retry reproduces it. One pass, never a recursion.
+    """
+    answered: dict = {}
+    errors: list = []
+    size = max(1, VERDICT_CHUNK // 2)
+    for start in range(0, len(missing), size):
+        part = missing[start:start + size]
+        try:
+            part_answered, part_unrequested = _ask_verdict_names(
+                part, zone, invoke_text, usage)
+        except Exception as exc:  # noqa: BLE001 - one failed half must not lose the other
+            errors.append(f"retry of {len(part)} defendants failed: {exc}")
+            continue
+        answered.update(part_answered)
+        errors.extend(part_unrequested)
+    return answered, errors
+
+
+def accused_verdicts(names, order_text, invoke_text, usage=None):
+    """Ask the model, per chunk of `VERDICT_CHUNK` names, what the order's
+    operative section decided for each -- returns `({name: {"outcome", "role",
+    "evidence"}}, errors)`.
+
+    A short chunk is retried ONCE over the missing names at half the chunk
+    size (`_retry_verdict_names`); one still short after that keeps the rows it
+    did answer and errors naming the rest. A silent partial loss is what the
+    reconciliation this wraps exists to prevent.
+    """
+    zone = court_order_verdict_zone(order_text)
+    results: dict = {}
+    errors: list = []
+    for start in range(0, len(names), VERDICT_CHUNK):
+        chunk = names[start:start + VERDICT_CHUNK]
+        try:
+            answered, unrequested_errors = _ask_verdict_names(chunk, zone, invoke_text, usage)
+        except Exception as exc:  # noqa: BLE001 - one bad chunk must not lose the rest
+            errors.append(f"chunk of {len(chunk)} defendants failed: {exc}")
+            continue
+        results.update(answered)
+        missing = [name for name in chunk if name not in answered]
+        if not missing:
+            errors.extend(unrequested_errors)
+            continue
+
+        retry_answered, retry_unrequested = _retry_verdict_names(
+            missing, zone, invoke_text, usage)
+
+        results.update(retry_answered)
+        still_missing = [name for name in missing if name not in retry_answered]
+        errors.extend(unrequested_errors)
+        if still_missing:
+            errors.append(
+                f"chunk returned {len(answered) + len(retry_answered)} of {len(chunk)} "
+                f"defendants after retry; missing: {', '.join(still_missing)}")
+        errors.extend(retry_unrequested)
+    return results, errors
+
+
+def accused_binds_by_name(case):
+    """Accused binds any name-keyed update may address:
+    `({display_name: (nes_id, bind)}, skipped)`, in bind order.
+
+    `skipped` rows are `(nes_id, display_name, reason)` -- unresolved binds (no
+    name to match a document against) and namesakes, BOTH dropped, since a
+    name-keyed update cannot say which person the document meant.
+
+    Split out of `accused_verdict_targets` so the note path can reuse the
+    grouping WITHOUT its settled filter: a role note describes a defendant's job
+    and must reach a bind whose verdict is already in.
+    """
+    by_name: dict = {}
+    skipped: list = []
+    for entity in (case.get("entities") or []):
+        if bind_relationship_type(entity) != ACCUSED_SECTION:
+            continue
+        nes_id = (entity.get("nes_id") or "").strip()
+        if not nes_id:
+            continue
+        name = (entity.get("display_name") or "").strip()
+        if not name:
+            skipped.append((nes_id, "", "no display_name: NES did not resolve this "
+                                        "bind, so no name can be matched to the judgment"))
+            continue
+        by_name.setdefault(name, []).append((nes_id, entity))
+    grouped = {}
+    for name, binds in by_name.items():
+        if len(binds) > 1:
+            for nes_id, _entity in binds:
+                skipped.append((nes_id, name,
+                                f"{len(binds)} accused binds share the display name "
+                                f"{name!r}: a name-keyed verdict cannot say which"))
+            continue
+        grouped[name] = binds[0]
+    return grouped, skipped
+
+
+def accused_verdict_targets(case):
+    """The accused binds a name-keyed verdict may be applied to:
+    `({display_name: nes_id}, skipped)`, in bind order.
+
+    `accused_binds_by_name` drops unresolved binds and namesakes; this adds the
+    one filter only a verdict wants -- a bind already carrying a terminal
+    outcome is not re-decided.
+
+    The settled filter runs AFTER the name grouping: dropping one namesake for
+    being settled would make the other look unique and hand it a verdict the
+    name cannot place.
+    """
+    grouped, skipped = accused_binds_by_name(case)
+    targets = {}
+    for name, (nes_id, entity) in grouped.items():
+        if is_settled(entity):
+            outcome = (entity.get("outcome") or "").strip()
+            skipped.append((nes_id, name,
+                            f"the bind already carries the terminal outcome {outcome!r}: "
+                            "a settled verdict is not re-decided"))
+            continue
+        targets[name] = nes_id
+    return targets, skipped
+
+
+#: Devanagari vowel signs. `NOTE_VARIANTS` folds the ones that only ever mark a
+#: spelling convention; this set is what the second matching pass may insert or
+#: drop, and nothing else.
+MATRAS = frozenset("ािीुूृॄॅॆेैॉॊोौ")
+
+#: Spellings of one Nepali name that are never two different people. Measured
+#: over the 2,860 accused binds in FY076-079: folding these merges 13 name pairs,
+#: every one of them the same person (`बिकास`/`विकास`, `घनश्याम दुबे`/`दुवे`,
+#: `हरिशंकर`/`हरीशंकर`), and collides no two accused anywhere in the corpus.
+#:
+#: DROPPING ALL MATRAS WAS MEASURED AND REJECTED. It additionally merges
+#: `सरोज`/`सुरज`, `मिना`/`मुना`, `हरि`/`हिरा` and `राजकुमार साह`/`राजकुमार सिंह` --
+#: different people every time.
+NOTE_VARIANTS = str.maketrans({
+    "ी": "ि", "ू": "ु", "ई": "इ", "ऊ": "उ",     # vowel length
+    "ब": "व", "श": "स", "ष": "स", "ण": "न",     # ba/va, sibilants, retroflex n
+})
+
+
+def note_match_key(name):
+    """The key an `accused_notes` name is matched on.
+
+    `normalise_name`, spaces removed, `NOTE_VARIANTS` applied. Two folds, both
+    deterministic, neither a similarity score:
+
+    SPACES, because Nepali compound given names are written joined by the court
+    and the model and spaced in NES -- `रामप्रसाद` against `राम प्रसाद`. That one
+    difference accounted for 5 of the 6 unmatched notes on 078-CR-0042.
+
+    VARIANT LETTERS, because `बिकास` and `विकास` are one person spelled two ways.
+    """
+    return normalise_name(name).translate(NOTE_VARIANTS).replace(" ", "")
+
+
+def is_matra_variant(a, b):
+    """True when `a` and `b` differ by at most ONE inserted or dropped matra.
+
+    For `बोहरा` against `बोहोरा`, which `note_match_key` cannot reach: the
+    difference is an inserted vowel sign, not a substituted one.
+
+    THIS RULE IS NOT SAFE ON ITS OWN and is never used on its own. `दल` and `दिल`
+    also differ by one inserted matra and are different people, so
+    `accused_note_updates` runs it ONLY after an exact key match found nothing,
+    and only accepts a single candidate. What makes that sound is measured, not
+    assumed: across the 2,860 accused binds in FY076-079 no two accused on the
+    SAME case fall within one matra of each other, so the relaxed pass has no
+    pair to confuse. A future case that breaks that holds two candidates and is
+    refused rather than guessed at.
+
+    Insertion only, never substitution -- `सरोज`/`सुरज` move a matra rather than
+    add one, which is two edits here and stays unmatched.
+    """
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) != 1:
+        return False
+    longer, shorter = (a, b) if len(a) > len(b) else (b, a)
+    # `ा` IS NOT INSERTABLE. A trailing `ा` is the feminine marker, so
+    # कमल/कमला, सुनिल/सुनिला, गोपाल/गोपाला, बिमल/बिमला and रमेश/रमेशा each sit
+    # one insertion apart and are different people -- usually of different
+    # gender. The module docstring already names कमल थापा / Kamala Thapa as a
+    # hazard on the cross-script side; without this the fold reintroduces it in
+    # Devanagari.
+    #
+    # A "not at the end of the string" test does NOT catch them: `note_match_key`
+    # strips spaces, which puts the difference mid-key on any multi-token name --
+    # on कमलाथापा the inserted `ा` is at index 3 of 8.
+    #
+    # It costs nothing the fold was built for: one inserted char has only one
+    # possible identity, so excluding `ा` can never hide a different matra, and
+    # the motivating case बोहरा -> बोहोरा inserts `ो`.
+    return any(longer[i] in MATRAS and longer[i] != "ा"
+               and longer[:i] + longer[i + 1:] == shorter
+               for i in range(len(longer)))
+
+
+def accused_note_updates(case, accused_notes):
+    """`{nes_id: {"notes": role}}` from the extraction's `accused_notes`, keyed
+    by EXACT display-name match against this case's accused binds.
+
+    SETTLED BINDS ARE INCLUDED, which is the whole point. A role note describes
+    a job, not an outcome, so it must not ride the verdict gate --
+    `verdict_case_refusal` refuses a fully-settled case, which left 73 of the
+    121 accused binds on the FY078/079 batch stuck on the machine placeholder
+    with no flag able to reach them.
+
+    Carries NO `outcome` key, so `apply_accused_updates` writes the note and
+    leaves the verdict alone; that function also refuses to overwrite anything
+    but an empty or placeholder note, so a human's text is safe.
+
+    Matched on `note_match_key`, never on a similarity score: a near match
+    staples one defendant's job title onto another, and the accused binds are
+    the rows this module is least entitled to get wrong.
+
+    Capped at `ROLE_NOTE_MAX_CHARS`, the cap `parse_verdict_response` already
+    applies: both writers land in one published column.
+    """
+    grouped, _skipped = accused_binds_by_name(case)
+    by_key: dict = {}
+    for name, (nes_id, _entity) in grouped.items():
+        by_key.setdefault(note_match_key(name), []).append(nes_id)
+    # Two binds landing on one key is the same ambiguity `accused_binds_by_name`
+    # drops a shared display name for, one fold later -- so drop it the same way
+    # rather than letting the fold introduce a collision the caller never saw.
+    index = {key: ids[0] for key, ids in by_key.items() if len(ids) == 1}
+    slug = case.get("slug") or "<no slug>"
+    # THE TWO PASSES RUN IN SEQUENCE, NEVER INTERLEAVED. Run together in one
+    # loop, a later row that found no exact key ran the relaxed match against
+    # the WHOLE index -- including keys an earlier row had already claimed --
+    # and the assignment was unconditional, so it overwrote a note an exact
+    # match had placed. The dangerous row is a note for someone who is not an
+    # accused bind at all: the court order names plenty of them, दिल बहादुर and
+    # दल बहादुर are one matra apart, and the wrong job title landed on the
+    # defendant purely because the model emitted it second.
+    exact: dict = {}
+    unmatched: list = []
+    for note in (accused_notes or []):
+        if not isinstance(note, dict):
+            continue
+        name = (note.get("name") or "").strip()
+        role = (note.get("notes") or "").strip()[:ROLE_NOTE_MAX_CHARS]
+        if not name or not role:
+            continue
+        key = note_match_key(name)
+        nes_id = index.get(key)
+        if nes_id is None:
+            unmatched.append((key, role))
+            continue
+        exact.setdefault(nes_id, set()).add(role)
+    updates = _settle_note_claims(slug, exact, "exact name match")
+    # SECOND PASS, and only ever second -- and only once EVERY exact match is
+    # in, so a near match can never take a bind an exact one already claimed.
+    # See `is_matra_variant` for why it may not run first and why a tie is
+    # refused rather than broken.
+    #
+    # Keyed on `exact` rather than on `updates`: a bind whose exact rows
+    # CONTRADICTED each other is spoken for too, and letting a near match fill
+    # it would route straight round that refusal.
+    relaxed: dict = {}
+    for key, role in unmatched:
+        near = [i for k, i in index.items() if is_matra_variant(key, k)]
+        if len(near) != 1 or near[0] in exact:
+            continue
+        relaxed.setdefault(near[0], set()).add(role)
+    updates.update(_settle_note_claims(slug, relaxed, "relaxed matra match"))
+    return updates
+
+
+def _settle_note_claims(slug, claims, how):
+    """`{nes_id: {"notes": role}}` for every bind exactly one role note claimed.
+
+    Two notes reaching one bind with DIFFERENT roles is refused, not resolved:
+    whichever way it is broken -- first-wins or last-wins -- the answer is the
+    order the model happened to emit its rows in, and the losing role is a real
+    job title stapled onto the wrong defendant. Same refusal
+    `accused_binds_by_name` makes when two binds share a display name, one fold
+    later. Two rows carrying the SAME role contradict nothing and are kept.
+    """
+    settled = {}
+    for nes_id, roles in claims.items():
+        if len(roles) == 1:
+            settled[nes_id] = {"notes": next(iter(roles))}
+            continue
+        log.warning("%s: refusing the role note on %s -- %d notes reached it by "
+                    "%s with different roles: %s", slug, nes_id, len(roles), how,
+                    "; ".join(sorted(roles)))
+    return settled
+
+
+def case_state(case):
+    """A case's state as EVERY write gate reads it.
+
+    One helper, so the spend gate and `plan_case_entities` cannot disagree: the
+    gate used to upper-case while the planner compared exactly, so `draft`
+    bought the verdict call and was then refused at the write.
+    """
+    return (case.get("state") or "").strip()
+
+
+def verdict_state_refusal(case):
+    """The reason this case's state forbids reading its judgment, or "" if it does not."""
+    state = case_state(case)
+    if state == REQUIRED_WRITE_STATE:
+        return ""
+    return (f"case state {state!r} != {REQUIRED_WRITE_STATE!r}: the verdict write "
+            "would be refused, so the judgment was not read")
+
+
+def verdict_skip_rows(slug, case, reason):
+    """One `*.verdicts.jsonl` row per accused bind on a case the gate refused.
+
+    For the state refusal, whose binds are decidable in every other respect:
+    without a row an IN_REVIEW case is absent from the artefact entirely.
+    """
+    return [
+        _verdict_row(slug, (entity.get("display_name") or "").strip(),
+                     (entity.get("nes_id") or "").strip(),
+                     (entity.get("outcome") or "").strip(), "", "", "", reason)
+        for entity in (case.get("entities") or [])
+        if bind_relationship_type(entity) == ACCUSED_SECTION
+    ]
+
+
+def verdict_decidedness(binds):
+    """How much of a case's accused list carries a terminal outcome: "all",
+    "partial", "none", or "" when the case has no accused bind.
+
+    "partial" is the one worth naming in the epilogue: the binds the judgment
+    did not answer for stay `charged`, and a re-run is what decides them.
+    """
+    accused = [bind for bind in binds
+               if bind_relationship_type(bind) == ACCUSED_SECTION]
+    if not accused:
+        return ""
+    decided = sum(1 for bind in accused if is_settled(bind))
+    if not decided:
+        return "none"
+    return "all" if decided == len(accused) else "partial"
+
+
+def verdict_case_refusal(case):
+    """The reason this case may not be read for verdicts, from the payload
+    ALONE (so no clause needing a document fetch), or "" if there is none.
+
+    The state clause only stops the SPEND (`select.ENRICHABLE_STATES` admits
+    IN_REVIEW); `plan_case_entities`' own non-DRAFT refusal is what keeps a
+    notes-redacted read away from the destructive replace, and stays there.
+    """
+    state_refusal = verdict_state_refusal(case)
+    if state_refusal:
+        return state_refusal
+    accused = [entity for entity in (case.get("entities") or [])
+               if bind_relationship_type(entity) == ACCUSED_SECTION]
+    if not accused:
+        return "no accused bind to update"
+    # PER-CASE only when there is nothing left to decide. The per-BIND filter
+    # is `accused_verdict_targets`': a judgment that decides some defendants
+    # and not others is the normal case (8 abstentions in 83 measured), and
+    # refusing on ANY terminal outcome locked the rest at `charged` for good.
+    if all(is_settled(entity) for entity in accused):
+        return f"all {len(accused)} accused bind(s) already carry a terminal outcome"
+    return ""
+
+
+def verdict_gate(case, court_text):
+    """Whether this case's judgment may be read for per-defendant verdicts,
+    and the reason it may not.
+
+    The court order's presence IS the decided-ness test: an order is bound to a
+    case only after it is decided, so an undecided case spends nothing here.
+    """
+    refusal = verdict_case_refusal(case)
+    if refusal:
+        return False, refusal
+    if not court_text:
+        return False, "no court-order text"
+    return True, ""
+
+
+def _verdict_row(slug, name, nes_id, old_outcome, new_outcome, role, evidence,
+                 reason, written=False):
+    """One `*.verdicts.jsonl` row -- every accused bind considered, decided or not."""
+    return {"slug": slug, "name": name, "nes_id": nes_id,
+            "old_outcome": old_outcome, "new_outcome": new_outcome,
+            "role": role, "evidence": evidence, "reason": reason,
+            "written": written}
+
+
+def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
+    """Read one case's judgment for its accused binds: `(updates, rows, errors)`.
+
+    `updates` is `apply_accused_updates`' input, keyed by `nes_id`; `rows` cover
+    EVERY accused bind, including the ones never sent to the model. The
+    name -> `nes_id` mapping is exact, never normalised: this is the step where
+    a verdict can land on the wrong person.
+    """
+    targets, skipped = accused_verdict_targets(case)
+    # Keyed on `(nes_id, relationship_type)`, the DB's own bind identity (see
+    # `bind_key`): one entity may hold two binds on a case under different
+    # sections, and a `nes_id`-only key lets the non-accused one overwrite the
+    # accused outcome this report is about.
+    outcomes = {bind_key({"nes_id": entity.get("nes_id"),
+                          "relationship_type": bind_relationship_type(entity)}):
+                (entity.get("outcome") or "").strip()
+                for entity in (case.get("entities") or [])}
+
+    def old_outcome(nes_id):
+        return outcomes.get((nes_id, ACCUSED_SECTION), "")
+
+    rows = [_verdict_row(slug, name, nes_id, old_outcome(nes_id), "", "", "", reason)
+            for nes_id, name, reason in skipped]
+    if not targets:
+        return {}, rows, []
+    verdicts, errors = accused_verdicts(list(targets), court_text, invoke_text,
+                                        usage=usage)
+    updates = {}
+    for name, nes_id in targets.items():
+        verdict = verdicts.get(name)
+        if verdict is None:
+            rows.append(_verdict_row(
+                slug, name, nes_id, old_outcome(nes_id), "", "", "",
+                "the judgment reply did not answer for this name"))
+            continue
+        updates[nes_id] = {"outcome": verdict["outcome"], "notes": verdict["role"]}
+        rows.append(_verdict_row(
+            slug, name, nes_id, old_outcome(nes_id), verdict["outcome"],
+            verdict["role"], verdict["evidence"], ""))
+    return updates, rows, errors
+
+
+def settle_verdict_rows(rows, before, after):
+    """Fill in each undecided row's `reason` from what the patch list actually
+    changed, and return the `nes_id`s whose bind changed.
+
+    `before`/`after` are `{nes_id: bind}` either side of
+    `apply_accused_updates`. Derived from the diff, never from re-deciding the
+    rules, so the report cannot disagree with the list that gets sent.
+    """
+    changed = set()
+    for row in rows:
+        nes_id = row["nes_id"]
+        old, new = before.get(nes_id), after.get(nes_id)
+        if old is not None and new != old:
+            changed.add(nes_id)
+        if row["reason"]:
+            continue
+        if old is None:
+            row["reason"] = ("the bind was no longer on the case when it was "
+                             "re-read for the write")
+            continue
+        reasons = []
+        if row["new_outcome"] not in TERMINAL_OUTCOMES:
+            reasons.append(f"outcome {row['new_outcome']!r} is not terminal, "
+                           "so no verdict was written")
+        if not row["role"]:
+            reasons.append("the judgment states no role; the existing note was left alone")
+        elif new.get("notes") == old.get("notes"):
+            reasons.append("note kept: the existing note is not the machine "
+                           "placeholder this stage may overwrite")
+        row["reason"] = "; ".join(reasons)
+    return changed
+
+
+def note_verdict_not_written(rows, changed_ids, reason):
+    """Record on every row this run WOULD have written why it was not.
+
+    The opposite of `settle_verdict_rows`: the bind did change, and then the
+    write did not happen. Without it the row reads `written: false` with an
+    empty `reason`, the one thing that artefact exists to prevent.
+    """
+    for row in rows:
+        if row["nes_id"] not in changed_ids:
+            continue
+        row["reason"] = f"{row['reason']}; {reason}" if row["reason"] else reason
+
+
+def verdict_bind_row(slug, row, written):
+    """A `*.binds.jsonl` row for an accused bind the judgment changed.
+
+    Without it the evidence phrase behind a machine `convicted` appears in no
+    bind audit file at all. `score` is null and `matched_name` is the bind's own
+    display name: nothing was matched, the bind was already on the case.
+    """
+    return {"slug": slug, "extracted": row["name"], "role": ACCUSED_SECTION,
+            "nes_id": row["nes_id"], "score": None, "matched_name": row["name"],
+            "notes": row["role"],
+            "reason": f"verdict {row['new_outcome']}: {row['evidence']}",
+            "written": written}
+
+
+def note_only_bind_rows(slug, case, before, after, noted, changed_ids):
+    """One `*.binds.jsonl` row per accused bind this run changed with a role note ALONE.
+
+    `changed_ids` is derived from the VERDICT rows, and a note-only update makes
+    none of those -- so the bind changed, the whole-list replace went out, and
+    the run reported `0 bound, 0 verdict update(s)` beside a real write. This
+    module's own docstrings call `*.binds.jsonl` the sole audit trail and "the
+    file a caseworker filters to find the judgement calls"; a role note is
+    name-matched, so it is exactly such a call.
+
+    Keyed on the base -> updated DIFF, never on what the merge intended:
+    `apply_accused_updates` refuses to overwrite a human's note, and a row for
+    a write that did not happen is the one thing this artefact exists to
+    prevent. Binds already in `changed_ids` are left to `verdict_bind_row` so
+    one bind never produces two rows.
+
+    Same row shape as `verdict_bind_row`, so the file stays readable as one.
+    """
+    names = {(entity.get("nes_id") or "").strip():
+             (entity.get("display_name") or "").strip()
+             for entity in (case.get("entities") or [])
+             if bind_relationship_type(entity) == ACCUSED_SECTION}
+    rows = []
+    for nes_id, role in noted.items():
+        if nes_id in changed_ids:
+            continue
+        old = before.get(nes_id)
+        if old is None or after.get(nes_id) == old:
+            continue
+        rows.append({"slug": slug, "extracted": names.get(nes_id, ""),
+                     "role": ACCUSED_SECTION, "nes_id": nes_id, "score": None,
+                     "matched_name": names.get(nes_id, ""), "notes": role,
+                     "reason": "role note from the extraction; the judgment was "
+                               "not read for this bind, so no verdict was written",
+                     "written": False})
+    return rows
+
+
 def validate_bind_item(item):
     """Local mirror of `EntityPatchItemSerializer`'s rules, applied BEFORE the
     request body is built so a bad item never reaches the API. Raises ValueError.
@@ -587,6 +1306,11 @@ class EntityBindPlan:
     #: (name, section) the extraction produced for a section this enricher does
     #: not own. Only `accused` today -- reported, never bound, never created.
     court_record_only: list = field(default_factory=list)
+    #: (name, section, nes_id) resolved binds refused because the entity is
+    #: ALREADY an `accused` on this case. Reported rather than dropped silently:
+    #: this is the extraction ignoring "do not list the defendants", and the
+    #: count is how you notice it getting worse.
+    already_accused: list = field(default_factory=list)
     patch_items: list = field(default_factory=list)
     reason: str = ""
     # There are no separate accused lists. Every name this planner handles comes
@@ -690,11 +1414,88 @@ def qualifying_binds(decision):
         return []
     qualifying = [c for c in (decision.candidates or ())
                   if c[0] >= MIN_BIND_SCORE]
+    # THE GAZETTEER NARROWING HAS TO SURVIVE THIS FUNCTION. `resolve` already
+    # drops the un-coded twin of a district or province -- NES holds `कञ्चनपुर`
+    # as both `location/district/kanchanpur-np0772` and a bare
+    # `location/kanchanpur` -- but it keeps every candidate in `candidates` so
+    # the report can still show the twin. Re-deriving the bind set from that
+    # tuple put the twin straight back, and 079-CR-0122 and 079-CR-0156 each
+    # carried कञ्चनपुर twice in production because of it.
+    #
+    # KEYED ON THE CANDIDATE SET, NOT ON THE WINNER. `resolve` captures
+    # `Decision.candidates` BEFORE its own narrowing, and
+    # `_promote_top_candidate` re-derives the winner from that un-narrowed
+    # tuple -- so whenever a location REVIEWs for any reason and is promoted,
+    # `decision.nes_id` can be the bare twin, and a winner-keyed test then does
+    # not fire. Which twin sorts first is pure lexicography:
+    # `location/district/kanchanpur-np0772` beats `location/kanchanpur` because
+    # `d` < `k`, and it goes the other way for achham, baglung, banke, bara,
+    # chitwan, dailekh, dhading and six of the seven provinces. The two live
+    # paths were a truncated candidate window (routine for a common district
+    # name) and a place the extraction filed under a section other than
+    # `location`, which `bind_section`'s coercion makes easy.
+    #
+    # `all(...location...)` as well as `any(...gazetteer...)`: a coded district
+    # scoring alongside an ORGANISATION of the same name is a real ambiguity and
+    # both should bind, but the district sorts first (`l` < `o`) so keying on
+    # the winner silently dropped the organisation. Two coded entries still
+    # never reach here -- `resolve` calls that ambiguous and reviews it, which
+    # is what the two Miklajung rural municipalities need. False for every
+    # person fan-out, which is what `qualifying_binds` exists for.
+    if (any(names_a_gazetteer_place(c[1]) for c in qualifying)
+            and all("/entity/location/" in c[1] for c in qualifying)):
+        qualifying = [c for c in qualifying if names_a_gazetteer_place(c[1])]
     if not qualifying:
         return [decision]
     return [Decision(BIND, nes_id, score, matched,
                      decision.reason, decision.candidates)
             for score, nes_id, matched in qualifying]
+
+
+def veto_against_own_document(api, name, decision, overridden=""):
+    """`decision` re-checked against ITS OWN entity document: `(decision, promotable)`.
+
+    Split out of `_resolve_with_vetoes` so the FAN-OUT can reuse it. That
+    function reads exactly one document -- the winner's -- and
+    `qualifying_binds` then turns one decision into one bind per qualifying
+    candidate. Every runner-up used to reach the case unread, so the
+    election-record veto fired only when the ECN record happened to sort first
+    under `(-score, nes_id)`; a clean record with a lower slug hid every
+    namesake behind it. That is the FY078/079 shape: one CIAA investigating
+    officer bound to five defeated local candidates.
+
+    `promotable` is "the document came back and is not an election record" --
+    the two conditions permissive mode may NOT override. Returned rather than
+    re-derived by the caller, because it is read from the document and the
+    document does not leave this function.
+
+    Fails closed: ANY exception maps to an unreadable document, which the veto
+    downgrades to REVIEW.
+    """
+    read_error = None
+    try:
+        document = api.get_entity(decision.nes_id)
+    except Exception as exc:  # noqa: BLE001 - unreadable == unverified, which is a valid verdict
+        document = None  # unreadable == unverified
+        read_error = str(exc)
+    readable = isinstance(document, dict) and bool(document)
+    decision = apply_document_veto(decision, document)
+    if overridden and decision.reason != f"{PROMOTED_PREFIX}{overridden}":
+        # The veto (or the unreadable-document branch) wrote over the reason.
+        decision = Decision(
+            decision.verdict, decision.nes_id, decision.score,
+            decision.matched_name, f"{decision.reason}; also {overridden}",
+            decision.candidates)
+    if read_error:
+        log.warning("get_entity(%s) failed while veto-checking %r: %s",
+                    decision.nes_id if decision.nes_id else "<downgraded>",
+                    name, read_error)
+        decision = Decision(
+            decision.verdict, decision.nes_id, decision.score,
+            decision.matched_name,
+            f"{decision.reason} (read error: {read_error!r})",
+            decision.candidates)
+    return decision, readable and not is_election_candidate_record(document)
 
 
 def _resolve_with_vetoes(api, name, strict=False, *, section=""):
@@ -703,12 +1504,15 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     no role can drift onto a different guard.
 
     `strict=False` (the default) binds the best-scoring candidate whenever one
-    cleared the threshold, even if a veto fired -- with ONE exception, which the
-    fail-closed branch below spells out: an unreadable entity document is never
-    promoted. The cross-script refusal that used to be the second exception was
-    removed on 2026-08-05, so `कमल थापा` can now bind a `Kamala Thapa` entity.
-    `strict=True` restores the conservative behaviour: a veto means REVIEW and a
-    human decides.
+    cleared the threshold, even if a veto fired -- with TWO exceptions, both
+    spelled out at the promotion below: an unreadable entity document, and an
+    election-candidate record. The cross-script refusal that used to be one of
+    them was removed on 2026-08-05, so `कमल थापा` can now bind a `Kamala Thapa`
+    entity. `strict=True` restores the conservative behaviour: a veto means
+    REVIEW and a human decides.
+
+    ONE NAME IN, ONE `Decision` OUT. `qualifying_binds` is what fans a promoted
+    ambiguity out into several binds; this function never returns more than one.
 
     Completeness goes IN, so `resolve` applies the truncation veto itself
     alongside the ambiguity check it protects. `search_entities` knows whether it
@@ -749,36 +1553,26 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     # mode -- would under-report how uncertain the bind actually was.
     overridden = decision.reason[len(PROMOTED_PREFIX):] if is_promoted(decision) else ""
 
-    read_error = None
-    try:
-        document = api.get_entity(decision.nes_id)
-    except Exception as exc:  # noqa: BLE001 - unreadable == unverified, which is a valid verdict
-        document = None  # unreadable == unverified
-        read_error = str(exc)
-    readable = isinstance(document, dict) and bool(document)
-    decision = apply_document_veto(decision, document)
-    if overridden and decision.reason != f"{PROMOTED_PREFIX}{overridden}":
-        # The veto (or the unreadable-document branch) wrote over the reason.
-        decision = Decision(
-            decision.verdict, decision.nes_id, decision.score,
-            decision.matched_name, f"{decision.reason}; also {overridden}",
-            decision.candidates)
-    if read_error:
-        log.warning("get_entity(%s) failed while veto-checking %r: %s",
-                    decision.nes_id if decision.nes_id else "<downgraded>",
-                    name, read_error)
-        decision = Decision(
-            decision.verdict, decision.nes_id, decision.score,
-            decision.matched_name,
-            f"{decision.reason} (read error: {read_error!r})",
-            decision.candidates)
+    decision, promotable = veto_against_own_document(api, name, decision, overridden)
     # An UNREADABLE document stays REVIEW even in permissive mode. Promoting a
     # judgement veto ("this looks like an election-candidate record") is the
     # uncertainty this mode was asked to accept; promoting a failed HTTP read is
     # not -- one 403 or 502 would bind whichever namesake happened to sort first,
     # with nothing having actually been matched against. Distinguished by whether
     # the document came back, never by parsing the veto's reason text.
-    if not strict and readable:
+    # NEITHER IS AN ELECTION-CANDIDATE RECORD, and that one is a measured call
+    # rather than a principle. NES holds the bulk Election Commission candidate
+    # rolls -- 1,542 people named विजय दास, 1,877 named मोहन अधिकारी -- so a
+    # name match against one carries no information at all. Every promoted
+    # election bind anyone has checked was wrong: 5 of 5 in the 2026-08-13
+    # review (`work/slug-fix/enricher-fix-rules.json`,
+    # `entity.reject_ecn_candidate_binds`) and 12 of 12 on the FY078/079 batch
+    # of 2026-09-01, where a Standards Department lab officer and a CIAA
+    # investigating officer were each bound to five defeated local candidates.
+    #
+    # Read from the document, never from the veto's reason text, for the same
+    # reason the unreadable branch is: reason strings are for humans.
+    if not strict and promotable:
         decision = _promote_top_candidate(decision)
     return decision
 
@@ -872,7 +1666,7 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     the write, and a reader must not infer a guard that no longer exists.
     """
     slug = case.get("slug")
-    state = case.get("state")
+    state = case_state(case)
     plan = EntityBindPlan(slug=slug, action="NOOP", state=state, if_match=etag)
     if state != REQUIRED_WRITE_STATE:
         plan.action = "SKIP_STATE"
@@ -900,6 +1694,20 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     current = current_entity_binds(case)
     plan.n_current = len(current)
     have = {bind_key(bind) for bind in current}
+    # THE DEFENDANTS THIS CASE ALREADY HOLDS. The prompt tells the extraction
+    # not to name them and it does anyway: on 078-CR-0042 it returned eight of
+    # them as `related` and three more as `alleged`. Refusing the `accused`
+    # SECTION (below) stops it inventing a defendant; it does nothing about one
+    # re-labelled, and bind identity is `(nes_id, relationship_type)`, so the
+    # re-labelled row is a NEW key that lands beside the accused bind. One
+    # person, two rows, contradictory roles.
+    #
+    # Keyed on `nes_id` and applied AFTER resolution, never on the name before
+    # it: the spelling the model writes rarely matches the court record's.
+    accused_ids = {(bind.get("nes_id") or "").strip()
+                   for bind in (case.get("entities") or [])
+                   if bind_relationship_type(bind) == ACCUSED_SECTION}
+    accused_ids.discard("")
     # No `already_characterised` set here any more. It existed only to feed the
     # accused-escalation guard, and the accused section is refused outright now
     # -- see `_bind_one`. Rebuilding it per case would cost a set build and
@@ -957,8 +1765,35 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
         notes = (item.get("notes") or "").strip()
         # One name, possibly several binds -- see `qualifying_binds`.
         for bind_decision in qualifying_binds(decision):
+            # EVERY RUNNER-UP GETS ITS OWN DOCUMENT VETO. `_resolve_with_vetoes`
+            # read one document, the winner's; the rest of the fan-out reached
+            # the case unread, so an Election Commission record sitting behind a
+            # clean top candidate bound untouched -- see
+            # `veto_against_own_document`.
+            #
+            # `promotable` is deliberately ignored here. This candidate is
+            # already a BIND that `qualifying_binds` chose; re-promoting it
+            # would run `_promote_top_candidate`, which re-derives the winner
+            # from `candidates[0]` and would replace the runner-up with the
+            # top candidate.
+            #
+            # One extra read per runner-up, and only on an ambiguity. NOT
+            # cached: the whole point of this read is that it is authoritative,
+            # and a run-lifetime cache would answer a later case from a snapshot
+            # taken before an operator fixed the entity.
+            if bind_decision.nes_id != decision.nes_id:
+                bind_decision, _promotable = veto_against_own_document(
+                    api, name, bind_decision)
+                if not bind_decision.is_bind:
+                    # A refused runner-up is REPORTED, not dropped. Its
+                    # `nes_id` is None -- `apply_document_veto` blanks it by
+                    # contract -- but both veto reasons name the IRI they
+                    # refused, so the rows one fan-out produces stay tellable
+                    # apart in `*.review.jsonl`.
+                    plan.review.append((name, bind_decision, rel_type))
+                    continue
             _bind_one(plan, name, bind_decision, rel_type, notes, have,
-                      additions)
+                      additions, accused_ids)
 
     merged = merge_entity_binds(current, additions)
     if merged != current:
@@ -967,15 +1802,30 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     return plan
 
 
-def _bind_one(plan, name, decision, rel_type, notes, have, additions):
+def _bind_one(plan, name, decision, rel_type, notes, have, additions,
+              accused_ids):
     """Add ONE (entity, section) bind to `plan`, or record why it was not added.
 
     Split out of `plan_case_entities` when one extracted name became able to
     produce several binds -- the body was a `continue`-driven block inside that
     loop, and `continue` cannot mean "next candidate" and "next name" at once.
     Mutates `plan`, `have` and `additions`: the caller's loop owns them, and this
-    is the only writer of a bind row.
+    is the only writer of a bind row. `accused_ids` is required for the same
+    reason: an empty default would turn the guard below OFF for a second caller
+    that forgot it, with no error and no failing test.
     """
+    # AN ACCUSED IS NOT RE-BOUND UNDER A LESSER SECTION. Checked before the
+    # `have` test so a defendant a previous run already mis-bound as `related`
+    # is REPORTED here rather than passing silently as "already bound".
+    #
+    # This is the direction the old `already_characterised` set used to cover.
+    # It was dropped when `plan_case_entities` began refusing the `accused`
+    # section outright -- but that refusal only stops accused coming IN, and
+    # says nothing about an existing accused going OUT under another label.
+    if rel_type != ACCUSED_SECTION and decision.nes_id in accused_ids:
+        plan.already_accused.append((name, rel_type, decision.nes_id))
+        return
+
     item_to_bind = {
         "nes_id": decision.nes_id,
         "relationship_type": rel_type,
@@ -1369,7 +2219,7 @@ def plan_summary(plan, extracted_items):
 
 
 def report_paths(paths):
-    """The three report files, sharing the run log's timestamp-and-run-id stem.
+    """The run's report files, sharing the run log's timestamp-and-run-id stem.
 
     Guards against blindly slicing off the last 4 characters of any path: a
     log path that genuinely ends in ".log" has that suffix stripped so the
@@ -1393,7 +2243,11 @@ def report_paths(paths):
             # left no trace of either beyond a count in the log.
             "extracted": f"{stem}.extracted.jsonl",
             "accused_notes": f"{stem}.accused_notes.jsonl",
-            "created": f"{stem}.created.jsonl"}
+            "created": f"{stem}.created.jsonl",
+            # Every accused bind the verdict step LOOKED AT, decided or not --
+            # a defendant left undecided is as much of a fact about the run as
+            # one that was convicted, and this is the only place it is visible.
+            "verdicts": f"{stem}.verdicts.jsonl"}
 
 
 #: The no-match report IS the caseworker queue, so an unescaped `|` in an
@@ -1483,39 +2337,6 @@ def _truncate_press_release(text, limit=None):
     return chunk
 
 
-def _truncate_court_order(text):
-    """Extract the most entity-rich section from a court order."""
-    if not text:
-        return text
-
-    if len(text) < COURT_ORDER_FULL_THRESHOLD:
-        return text
-
-    thahar_marker = "ठहर खण्ड"
-    idx = text.find(thahar_marker)
-    if idx != -1:
-        thahar_text = text[idx:]
-        limit = COURT_ORDER_THAHAR_CHARS
-        if len(thahar_text) <= limit:
-            return f"\n\n[...ठहर खण्ड (verdict section)...]\n\n{thahar_text}"
-        chunk = thahar_text[:limit]
-        for sep in ("।", "\n", ".", "!"):
-            sep_idx = chunk.rfind(sep)
-            if sep_idx >= limit // 2:
-                chunk = chunk[: sep_idx + 1]
-                break
-        return f"\n\n[...ठहर खण्ड (verdict section)...]\n\n{chunk}"
-
-    label_head = "\n\n[...court order header section...]\n\n"
-    label_tail = "\n\n[...court order verdict section...]\n\n"
-    return (
-        label_head
-        + text[:COURT_ORDER_HEAD_CHARS]
-        + label_tail
-        + text[-COURT_ORDER_TAIL_CHARS:]
-    )
-
-
 def _enforce_prompt_budget(parts):
     """Ensure combined prompt stays within budget."""
     combined = "\n\n".join(parts)
@@ -1534,16 +2355,16 @@ def _enforce_prompt_budget(parts):
 
 
 def _build_content_parts(press_release_text, court_order_text):
-    """Build the LLM's user-prompt sections from the two independently-sourced
-    texts. Extracted verbatim from the donor's inline `_process_case` (donor
-    lines 385-405) into a named, unit-testable function -- the logic itself is
-    unchanged: either source alone is sufficient, and the press-release
-    truncation limit depends on whether a court order is ALSO present
-    (`PRESS_RELEASE_CHARS_NO_COURT` vs `PRESS_RELEASE_CHARS`). One divergence
-    from the verbatim donor: an EMPTY court_order_text ("") is now treated the
-    same as None (no court present), so a case with fetched-but-empty court text
-    still gets the larger no-court press budget instead of being needlessly
-    clipped to the with-court limit."""
+    """Build the LLM's user-prompt sections from the two independently-sourced texts.
+
+    A court order short enough to fit `THAHAR_CHARS` goes out ONCE, whole,
+    under the plain header. Longer, it contributes the UNION of
+    `court_order_head` (caption, party list) and `court_order_thahar` (the
+    operative section), as two separate labelled sections rather than one
+    joined block -- they are not contiguous in the source document, and
+    telling the model otherwise would mislead it about what it's reading. The
+    second header names the `ठहर खण्ड` only when the order actually carries
+    the marker; without one, `court_order_thahar` returns the ending."""
     content_parts = []
 
     if press_release_text:
@@ -1557,9 +2378,17 @@ def _build_content_parts(press_release_text, court_order_text):
         content_parts.append(truncated)
 
     if court_order_text:
-        truncated = _truncate_court_order(court_order_text)
         content_parts.append("--- COURT ORDER ---")
-        content_parts.append(truncated)
+        if len(court_order_text) <= THAHAR_CHARS:
+            # The head is a prefix of this and the thahar window is a slice of
+            # it, so both readers would send text the model already has.
+            content_parts.append(court_order_text)
+        else:
+            content_parts.append(court_order_head(court_order_text))
+            content_parts.append(
+                "--- COURT ORDER (ठहर खण्ड) ---" if THAHAR_MARKER in court_order_text
+                else "--- COURT ORDER (अन्त्य) ---")
+            content_parts.append(court_order_thahar(court_order_text))
 
     return content_parts
 
@@ -1621,10 +2450,22 @@ def main(argv=None):
         "--strict", action="store_true",
         help="Bind only when exactly one NES entity matched and no veto fired; "
              "send ambiguities and vetoed matches to review instead. Off by "
-             "default: the default binds the best-scoring match for every name, "
-             "including a match that exists only across scripts -- that refusal "
-             "was removed on 2026-08-05, so a case charging कमल थापा can bind a "
-             "Kamala Thapa entity.")
+             "default: the default promotes a vetoed match and binds EVERY "
+             "candidate that cleared the threshold, not just the best one, so "
+             "one name can produce several binds -- including a match that "
+             "exists only across scripts, a refusal removed on 2026-08-05, so a "
+             "case charging कमल थापा can bind a Kamala Thapa entity. An "
+             "election-candidate record is refused either way.")
+    ap.add_argument(
+        "--verdicts", action="store_true",
+        help="Also read each bound judgment for per-defendant outcomes. OFF by "
+             "default: it writes a terminal criminal outcome (convicted / "
+             "acquitted / abated) onto an accused bind, so a run that only "
+             "wants entity binds must not do it by accident. With the flag, a "
+             "DRAFT case with a bound court order and an unsettled accused "
+             "bind costs one extra LLM call per chunk of 20 defendants, and "
+             "the outcome and role note it decides ride out in the SAME "
+             "/entities write as the binds.")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -1668,6 +2509,8 @@ def main(argv=None):
         print("  --dry-run: printing what WOULD bind; no /entities writes will be made.")
     if args.force:
         print("  --force: re-extracting even for cases with a 'related' bind already present")
+    if args.verdicts:
+        print("  --verdicts: reading each bound judgment for per-defendant outcomes")
     if args.strict:
         print("  --strict: a veto or an ambiguity means REVIEW, not a bind")
     else:
@@ -1677,6 +2520,8 @@ def main(argv=None):
 
     total_entities_extracted = 0
     total_accused_notes_extracted = 0
+    total_notes_written = 0
+    total_already_accused = 0
     total_bound = total_review = total_nomatch = total_already_bound = 0
     # Binds that only exist because permissive mode overrode a veto. Counted
     # separately and printed on its own line: "we bound 40 things" and "9 of
@@ -1692,7 +2537,20 @@ def main(argv=None):
     # reviewed nor unmatched, so without their own counter the zero-bind footer
     # below blames the resolver for a refusal that happened after it.
     total_refused_binds = 0
-    bind_rows, review_rows, nomatch_rows = [], [], []
+    # Accused binds the judgment actually changed, and the defendants this run
+    # declined to decide. Counted apart because "we set 40 verdicts" and "9
+    # defendants got none" are different facts, and only the second one tells a
+    # caseworker there is still work on those cases. Together they must account
+    # for every row in `*.verdicts.jsonl`, so a row computed and then refused
+    # or lost to a failed write is counted as undecided.
+    total_verdicts = total_verdicts_undecided = 0
+    # Per CASE, not per bind: how much of its accused list ends this run with a
+    # terminal outcome. A partially decided case is the one nobody can find
+    # otherwise -- its remaining binds stay `charged` until a re-run (or a
+    # human) decides them.
+    verdict_coverage = {"all": 0, "partial": 0, "none": 0}
+    partially_decided = []
+    bind_rows, review_rows, nomatch_rows, verdict_rows = [], [], [], []
     # Collected BEFORE resolution, so they survive a run where nothing binds.
     extracted_rows, accused_notes_rows = [], []
     created_rows = []
@@ -1703,6 +2561,110 @@ def main(argv=None):
     run_entities = {}
     # Fetched on first use, not at startup -- see the call site.
     live_prefixes = None
+
+    def record_decidedness(slug, binds):
+        """Count one case's verdict coverage. Called at exactly one exit per case."""
+        coverage = verdict_decidedness(binds)
+        if not coverage:
+            return
+        verdict_coverage[coverage] += 1
+        if coverage == "partial":
+            partially_decided.append(slug)
+
+    def extract_entities_for(slug, content_parts):
+        """One case's LLM extraction: `(valid_items, produced)`.
+
+        Lifted out of the loop body so that every way extraction can come up
+        empty -- an unusable prompt, a failed call, a reply with nothing in it --
+        is a `return` rather than a `continue`. The verdict step below has to run
+        on a case whose extraction gave nothing, and a `continue` skipped it.
+        `produced` is False when the case would have been abandoned before, so
+        the caller can keep the old reporting exactly.
+        """
+        nonlocal total_entities_extracted, total_accused_notes_extracted, live_prefixes
+
+        user_prompt = _enforce_prompt_budget(content_parts)
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="prompt", status="ok", detail=f"{len(user_prompt)} chars")
+
+        if not user_prompt.strip():
+            report.record(slug, "entities", "skipped", "empty prompt after truncation")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="prompt", status="skipped",
+                      detail="empty prompt after truncation", level=logging.WARNING)
+            return [], False, []
+
+        # The category list rides on the system prompt only when we might create
+        # something. Fetched once per run, here as well as at the create step,
+        # because the prompt is built first.
+        if args.create_entities and live_prefixes is None:
+            live_prefixes = read_live_prefixes(api)
+
+        try:
+            response_text = invoke_text(
+                system=SYSTEM_PROMPT + prefix_prompt_section(
+                    live_prefixes if args.create_entities else None),
+                content=user_prompt,
+                max_tokens=EXTRACTION_MAX_TOKENS,
+                tier=tier_for("entities"),
+                usage=usage,
+            )
+        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
+            report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="extract", status="error", detail=str(exc),
+                      level=logging.ERROR)
+            if args.verbose:
+                import traceback
+
+                traceback.print_exc()
+            return [], False, []
+
+        entities_data, accused_notes = _parse_extraction_response(response_text)
+        # Only two things are dropped here: a non-dict, and an item with no name.
+        # Both are unrecordable -- `plan_case_entities` skips a nameless item
+        # without putting it in ANY of its three lists, so `plan_summary` would
+        # count it as already-bound (it derives that by subtraction).
+        #
+        # The relationship_type is deliberately NOT filtered here. It used to be
+        # (`in ("location", "related")`), which silently discarded every other
+        # section before the planner could see it -- so widening the planner to
+        # all nine types would have been dead code for seven of them. One place
+        # decides which sections are bindable, and that place is the planner.
+        valid_items = [
+            item for item in entities_data
+            if isinstance(item, dict) and (item.get("entity_name") or "").strip()
+        ]
+
+        if not valid_items and not accused_notes:
+            report.record(
+                slug, "entities", "skipped", "LLM returned no entities or accused notes")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="extract", status="skipped",
+                      detail="LLM returned no entities or accused notes",
+                      level=logging.WARNING)
+            return [], False, []
+
+        total_entities_extracted += len(valid_items)
+        total_accused_notes_extracted += len(accused_notes)
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="extract", status="ok",
+                  detail=f"{len(valid_items)} entities + {len(accused_notes)} accused_notes")
+
+        # Record the extraction itself, here, before anything can drop it. Every
+        # later exit -- an ETag failure, a refused plan, a whole case of
+        # no-matches -- leaves these rows already written.
+        for item in valid_items:
+            extracted_rows.append({
+                "slug": slug,
+                "extracted": (item.get("entity_name") or "").strip(),
+                "relationship_type": (item.get("relationship_type") or "").strip().lower(),
+                "notes": (item.get("notes") or "").strip(),
+            })
+        for note in accused_notes:
+            if isinstance(note, dict):
+                accused_notes_rows.append({**note, "slug": slug})
+        return valid_items, True, accused_notes
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
@@ -1736,7 +2698,13 @@ def main(argv=None):
             bind for bind in (case.get("entities") or [])
             if bind_relationship_type(bind) == "related"
         ]
-        if existing_related and not args.force:
+        # THE SKIP IS EXTRACTION-ONLY SINCE THE VERDICT STEP LANDED. It stops
+        # the premium extraction call, not the case: nearly every case the
+        # verdict step targets has already been through an extraction run, so
+        # sharing this gate with it would skip all of them. Without
+        # `--verdicts` the skip is free again -- no detail read, nothing.
+        skip_extraction = bool(existing_related) and not args.force
+        if skip_extraction:
             total_skipped_enriched += 1
             report.record(
                 slug, "entities", "already",
@@ -1744,7 +2712,8 @@ def main(argv=None):
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="idempotency", status="already",
                       detail=f"{len(existing_related)} 'related' bind(s) already present")
-            continue
+            if not args.verdicts:
+                continue
 
         try:
             detail = api.get_case(slug)
@@ -1754,121 +2723,99 @@ def main(argv=None):
                       step="fetch", status="fallback", detail=str(exc),
                       level=logging.WARNING)
 
-        unmet = unmet_prerequisites(STAGE, detail)
-        if unmet:
-            for reason in unmet:
-                report.record(slug, "entities", "unmet", reason)
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="prereq", status="unmet", detail="; ".join(unmet),
-                      level=logging.WARNING)
+        if skip_extraction:
+            # Here for the verdicts only, and those read the court order alone --
+            # fetching the press release too would spend a markdown read per
+            # case on a prompt this run will never build. The clauses the case
+            # payload can answer run FIRST, so a case the gate refuses pays for
+            # no document fetch at all.
+            court_text = None
+            if not verdict_case_refusal(detail):
+                court_text, _court_unmet = source_text(detail, types=COURT_TYPES)
+                court_text = court_text.strip() or None
+            valid_items, produced, case_accused_notes = [], False, []
+        else:
+            unmet = unmet_prerequisites(STAGE, detail)
+            if unmet:
+                for reason in unmet:
+                    report.record(slug, "entities", "unmet", reason)
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="prereq", status="unmet",
+                          detail="; ".join(unmet), level=logging.WARNING)
+                continue
+
+            press_text, press_unmet = source_text(detail, types=PRESS_TYPES)
+            court_text, court_unmet = source_text(detail, types=COURT_TYPES)
+            press_text = press_text.strip() or None
+            court_text = court_text.strip() or None
+
+            content_parts = _build_content_parts(press_text, court_text)
+            if not content_parts:
+                # Donor-preserved gate (donor line 404): skip only when BOTH
+                # press release and court order content are absent.
+                reasons = (press_unmet + court_unmet) or [
+                    "no press release or court order content"]
+                for reason in reasons:
+                    report.record(slug, "entities", "unmet", reason)
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="source", status="unmet",
+                          detail="; ".join(reasons), level=logging.WARNING)
+                continue
+
+            if press_text:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="source", status="ok",
+                          detail=f"press release {len(press_text)} chars")
+            if court_text:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="source", status="ok",
+                          detail=f"court order {len(court_text)} chars")
+
+            valid_items, produced, case_accused_notes = extract_entities_for(
+                slug, content_parts)
+
+        # THE VERDICT GATE, EVALUATED INDEPENDENTLY OF THE SKIP ABOVE. The
+        # updates it produces are merged into the SAME whole-list replace the
+        # binds go out in -- `/entities` is destructive, so a second PATCH would
+        # re-run the delete-and-recreate over a list this one just rewrote.
+        updates, case_verdict_rows, verdict_errors = {}, [], []
+        if args.verdicts:
+            decidable, why_not = verdict_gate(detail, court_text)
+            if not decidable:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="verdicts", status="skipped", detail=why_not)
+                if verdict_state_refusal(detail) and materials_of_type(
+                        detail, types=COURT_TYPES):
+                    # The one refusal whose binds were decidable in every other
+                    # respect -- there is a judgment, and only the state stops
+                    # it being read. Without a row the case is absent from the
+                    # artefact entirely. Keyed on the material being BOUND, not
+                    # on its text: the fetch is what the gate just declined to
+                    # pay for.
+                    case_verdict_rows = verdict_skip_rows(slug, detail, why_not)
+            else:
+                updates, case_verdict_rows, verdict_errors = case_verdict_updates(
+                    slug, detail, court_text, invoke_text, usage=usage)
+
+        # Nothing extracted and no verdict to write: the extraction path already
+        # recorded why, and there is no reason to spend the conditional re-read.
+        if not produced and not updates:
+            # Every row here already carries its own reason: `updates` is empty
+            # only when no accused bind was decidable or the reply answered for
+            # none of them.
+            verdict_rows.extend(case_verdict_rows)
+            total_verdicts_undecided += len(case_verdict_rows)
+            if args.verdicts:
+                record_decidedness(slug, detail.get("entities") or [])
+            for error in verdict_errors:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="verdicts", status="error", detail=error,
+                          level=logging.ERROR)
+            if case_verdict_rows:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="verdicts", status="ok",
+                          detail=f"0 of {len(case_verdict_rows)} accused bind(s) updated")
             continue
-
-        press_text, press_unmet = source_text(detail, types=PRESS_TYPES)
-        court_text, court_unmet = source_text(detail, types=COURT_TYPES)
-        press_text = press_text.strip() or None
-        court_text = court_text.strip() or None
-
-        content_parts = _build_content_parts(press_text, court_text)
-        if not content_parts:
-            # Donor-preserved gate (donor line 404): skip only when BOTH
-            # press release and court order content are absent.
-            reasons = (press_unmet + court_unmet) or [
-                "no press release or court order content"]
-            for reason in reasons:
-                report.record(slug, "entities", "unmet", reason)
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="source", status="unmet", detail="; ".join(reasons),
-                      level=logging.WARNING)
-            continue
-
-        if press_text:
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="source", status="ok", detail=f"press release {len(press_text)} chars")
-        if court_text:
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="source", status="ok", detail=f"court order {len(court_text)} chars")
-
-        user_prompt = _enforce_prompt_budget(content_parts)
-        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                  step="prompt", status="ok", detail=f"{len(user_prompt)} chars")
-
-        if not user_prompt.strip():
-            report.record(slug, "entities", "skipped", "empty prompt after truncation")
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="prompt", status="skipped",
-                      detail="empty prompt after truncation", level=logging.WARNING)
-            continue
-
-        # The category list rides on the system prompt only when we might create
-        # something. Fetched once per run, here as well as at the create step,
-        # because the prompt is built first.
-        if args.create_entities and live_prefixes is None:
-            live_prefixes = read_live_prefixes(api)
-
-        try:
-            response_text = invoke_text(
-                system=SYSTEM_PROMPT + prefix_prompt_section(
-                    live_prefixes if args.create_entities else None),
-                content=user_prompt,
-                max_tokens=EXTRACTION_MAX_TOKENS,
-                tier=tier_for("entities"),
-                usage=usage,
-            )
-        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
-            report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="extract", status="error", detail=str(exc),
-                      level=logging.ERROR)
-            if args.verbose:
-                import traceback
-
-                traceback.print_exc()
-            continue
-
-        entities_data, accused_notes = _parse_extraction_response(response_text)
-        # Only two things are dropped here: a non-dict, and an item with no name.
-        # Both are unrecordable -- `plan_case_entities` skips a nameless item
-        # without putting it in ANY of its three lists, so `plan_summary` would
-        # count it as already-bound (it derives that by subtraction).
-        #
-        # The relationship_type is deliberately NOT filtered here. It used to be
-        # (`in ("location", "related")`), which silently discarded every other
-        # section before the planner could see it -- so widening the planner to
-        # all nine types would have been dead code for seven of them. One place
-        # decides which sections are bindable, and that place is the planner.
-        valid_items = [
-            item for item in entities_data
-            if isinstance(item, dict) and (item.get("entity_name") or "").strip()
-        ]
-
-        if not valid_items and not accused_notes:
-            report.record(
-                slug, "entities", "skipped", "LLM returned no entities or accused notes")
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="extract", status="skipped",
-                      detail="LLM returned no entities or accused notes",
-                      level=logging.WARNING)
-            continue
-
-        total_entities_extracted += len(valid_items)
-        total_accused_notes_extracted += len(accused_notes)
-        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                  step="extract", status="ok",
-                  detail=f"{len(valid_items)} entities + {len(accused_notes)} accused_notes")
-
-        # Record the extraction itself, here, before anything can drop it. Every
-        # later exit -- an ETag failure, a refused plan, a whole case of
-        # no-matches -- leaves these rows already written.
-        for item in valid_items:
-            extracted_rows.append({
-                "slug": slug,
-                "extracted": (item.get("entity_name") or "").strip(),
-                "relationship_type": (item.get("relationship_type") or "").strip().lower(),
-                "notes": (item.get("notes") or "").strip(),
-            })
-        for note in accused_notes:
-            if isinstance(note, dict):
-                accused_notes_rows.append({**note, "slug": slug})
 
         # Re-read WITH the ETag so the whole-list replace is conditional. `detail`
         # above came from `get_case`, which returns no ETag.
@@ -1905,6 +2852,15 @@ def main(argv=None):
                       step="resolve", status="skipped" if refused_state else "error",
                       detail=plan.reason,
                       level=logging.WARNING if refused_state else logging.ERROR)
+            # The judgment was still read, so say what it said and why none of
+            # it landed. A verdict that vanishes with the plan is a defendant
+            # nobody knows was looked at.
+            for row in case_verdict_rows:
+                row["reason"] = row["reason"] or f"case not written: {plan.reason}"
+            verdict_rows.extend(case_verdict_rows)
+            total_verdicts_undecided += len(case_verdict_rows)
+            if args.verdicts:
+                record_decidedness(slug, detail.get("entities") or [])
             continue
 
         # `role` is the section the extraction ASKED for, which the planner records
@@ -1953,6 +2909,80 @@ def main(argv=None):
                 plan.patch_items = merge_entity_binds(base, created_binds)
                 plan.action = "WOULD_PATCH"
 
+        # THE GATE READ `detail`; THIS LIST IS BUILT FROM `fresh`. A human who
+        # settled a bind between the two reads is invisible to `If-Match` --
+        # the ETag came from `fresh` too -- so re-check against it and drop
+        # those binds rather than write a machine verdict over a human one.
+        raced = settled_accused_ids(fresh) & set(updates)
+        for nes_id in raced:
+            del updates[nes_id]
+        for row in case_verdict_rows:
+            if row["nes_id"] in raced:
+                row["reason"] = ("the bind gained a terminal outcome between the gate "
+                                 "read and the write, so it was left alone")
+
+        # ROLE NOTES, MERGED IN AFTER `raced` AND DELIBERATELY OFF THE VERDICT
+        # GATE. `raced` protects a human's VERDICT from a machine one; a note
+        # carries no outcome and `apply_accused_updates` refuses to overwrite
+        # anything but an empty or placeholder note, so it is safe past that
+        # filter. Off the gate because `verdict_case_refusal` turns down a
+        # fully-settled case, which is exactly where the placeholders pile up.
+        #
+        # A verdict's own role note wins: it is read from the judgment's
+        # operative section, where this one is a job title from the extraction.
+        noted = {}
+        for nes_id, note_update in accused_note_updates(
+                fresh, case_accused_notes).items():
+            if not (updates.get(nes_id) or {}).get("notes"):
+                updates.setdefault(nes_id, {}).update(note_update)
+                noted[nes_id] = note_update["notes"]
+
+        # THE LAST MERGE, and the only one that rewrites a row rather than
+        # appending one. It goes into the same `patch_items` the binds above
+        # built, so the case still gets exactly one conditional whole-list
+        # replace. `apply_accused_updates` never adds or drops a bind, so the
+        # destructive replace stays exactly as safe as it was.
+        base = plan.patch_items or current_entity_binds(fresh)
+        updated = apply_accused_updates(base, updates) if updates else base
+        accused_before = {b["nes_id"]: b for b in base
+                          if bind_relationship_type(b) == ACCUSED_SECTION}
+        accused_after = {b["nes_id"]: b for b in updated
+                         if bind_relationship_type(b) == ACCUSED_SECTION}
+        changed_ids = settle_verdict_rows(
+            case_verdict_rows, accused_before, accused_after)
+        # A NOTE-ONLY WRITE IS STILL A WRITE, and `changed_ids` cannot see it --
+        # see `note_only_bind_rows`. Appended to `bind_rows` beside the verdict
+        # rows below, and only once the write has actually happened.
+        case_note_rows = note_only_bind_rows(
+            slug, fresh, accused_before, accused_after, noted, changed_ids)
+        note_detail = (f", {len(case_note_rows)} role note(s)"
+                       if case_note_rows else "")
+        verdict_rows.extend(case_verdict_rows)
+        total_verdicts_undecided += sum(
+            1 for row in case_verdict_rows if row["nes_id"] not in changed_ids)
+        # `updated` is the list the write would send, so under --dry-run (and on
+        # a refused or failed write) this is a projection, which is what the
+        # epilogue says. The alternative -- counting only after a successful
+        # write -- reports nothing at all on the default run.
+        if args.verdicts:
+            record_decidedness(slug, updated)
+        for error in verdict_errors:
+            log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                      slug=slug, step="verdicts", status="error", detail=error,
+                      level=logging.ERROR)
+        if case_verdict_rows:
+            log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                      slug=slug, step="verdicts", status="ok",
+                      detail=(f"{len(changed_ids)} of {len(case_verdict_rows)} accused "
+                              f"bind(s) updated, {len(verdict_errors)} chunk error(s)"))
+        # Keyed on the LIST having changed, not on `changed_ids`. That set is
+        # derived from the verdict rows, so a note-only update -- the whole
+        # point of `accused_note_updates` -- left the plan at NOOP and the
+        # rewritten list was computed and then thrown away.
+        if updated != base:
+            plan.patch_items = updated
+            plan.action = "WOULD_PATCH"
+
         for name, decision, section in plan.nomatch:
             nomatch_rows.append((name, slug, decision, section))
 
@@ -1965,6 +2995,17 @@ def main(argv=None):
                   step="resolve", status="ok",
                   detail=(f"{len(plan.bound)} bind, {len(plan.review)} review, "
                           f"{len(plan.nomatch)} no-match"))
+        # Surfaced per case, not just tallied at the end: a run that refuses a
+        # dozen of these is an extraction ignoring its instructions, and the
+        # operator wants to see that while the run is going, not afterwards.
+        if plan.already_accused:
+            total_already_accused += len(plan.already_accused)
+            log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                      slug=slug, step="resolve", status="refused",
+                      detail=("already accused on this case, not re-bound: "
+                              + "; ".join(f"{n} as {sec}"
+                                          for n, sec, _ in plan.already_accused)),
+                      level=logging.WARNING)
 
         if plan.action == "NOOP":
             report.record(slug, "entities", "already",
@@ -1988,7 +3029,14 @@ def main(argv=None):
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
                           slug=slug, step="write", status="would-refuse",
                           detail=refusal, level=logging.WARNING)
-                print(f"  WOULD REFUSE {len(plan.bound)} bind(s) on {slug}: {refusal}")
+                note_verdict_not_written(case_verdict_rows, changed_ids,
+                                         f"not written: {refusal}")
+                # Computed and then refused: these rows belong to the undecided
+                # count, or the epilogue's two numbers stop accounting for
+                # every row in the file.
+                total_verdicts_undecided += len(changed_ids)
+                print(f"  WOULD REFUSE {len(plan.bound)} bind(s) and "
+                      f"{len(changed_ids)} verdict update(s) on {slug}: {refusal}")
                 continue
             total_bound += counts["bound"]
             for name, decision, notes, section in plan.bound:
@@ -1998,8 +3046,22 @@ def main(argv=None):
                 print(f"  WOULD BIND ({section}) {name}  ->  {decision.nes_id}  "
                       f"(score {decision.score:.2f})"
                       f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
+            total_verdicts += len(changed_ids)
+            note_verdict_not_written(case_verdict_rows, changed_ids,
+                                     "dry run: nothing was written")
+            for row in case_verdict_rows:
+                if row["nes_id"] in changed_ids:
+                    bind_rows.append(verdict_bind_row(slug, row, False))
+                    print(f"  WOULD SET ({ACCUSED_SECTION}) {row['name']}  ->  "
+                          f"{row['new_outcome'] or 'note only'}")
+            total_notes_written += len(case_note_rows)
+            for row in case_note_rows:
+                bind_rows.append(row)
+                print(f"  WOULD SET ({ACCUSED_SECTION}) {row['extracted']}  ->  "
+                      "note only")
             report.record(slug, "entities", "would-bind",
-                          f"{len(plan.bound)} would bind")
+                          f"{len(plan.bound)} would bind, "
+                          f"{len(changed_ids)} verdict update(s){note_detail}")
             continue
 
         try:
@@ -2008,6 +3070,9 @@ def main(argv=None):
             report.record(slug, "entities", "error", f"bind failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="write", status="error", detail=str(exc), level=logging.ERROR)
+            note_verdict_not_written(case_verdict_rows, changed_ids,
+                                     f"the /entities write failed: {exc}")
+            total_verdicts_undecided += len(changed_ids)
             continue
 
         total_bound += counts["bound"]
@@ -2016,9 +3081,27 @@ def main(argv=None):
             total_promoted += is_promoted(decision)
             print(f"  BOUND ({section}) {name}  ->  {decision.nes_id}"
                   f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
-        report.record(slug, "entities", "bound", f"{len(plan.bound)} bound")
+        total_verdicts += len(changed_ids)
+        for row in case_verdict_rows:
+            if row["nes_id"] in changed_ids:
+                row["written"] = True
+                bind_rows.append(verdict_bind_row(slug, row, True))
+                print(f"  SET ({ACCUSED_SECTION}) {row['name']}  ->  "
+                      f"{row['new_outcome'] or 'note only'}")
+        total_notes_written += len(case_note_rows)
+        for row in case_note_rows:
+            # Flipped only here: the write above succeeded, so the row may now
+            # claim it. Same order as the bind rows for the same reason.
+            row["written"] = True
+            bind_rows.append(row)
+            print(f"  SET ({ACCUSED_SECTION}) {row['extracted']}  ->  note only")
+        report.record(slug, "entities", "bound",
+                      f"{len(plan.bound)} bound, "
+                      f"{len(changed_ids)} verdict update(s){note_detail}")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                  step="write", status="ok", detail=f"{len(plan.bound)} bound")
+                  step="write", status="ok",
+                  detail=(f"{len(plan.bound)} bound, "
+                          f"{len(changed_ids)} verdict update(s){note_detail}"))
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Related-entity extraction")
@@ -2034,11 +3117,14 @@ def main(argv=None):
     write_jsonl(reports["extracted"], extracted_rows)
     write_jsonl(reports["accused_notes"], accused_notes_rows)
     write_jsonl(reports["created"], created_rows)
+    write_jsonl(reports["verdicts"], verdict_rows)
     write_nomatch_report(reports["nomatch"], nomatch_rows)
 
     print()
     print(f"  TOTAL entities extracted across all cases: {total_entities_extracted}")
     print(f"  TOTAL accused notes extracted: {total_accused_notes_extracted}")
+    if total_already_accused:
+        print(f"  TOTAL refused, already accused on the case: {total_already_accused}")
     # "matched an EXISTING entity" and not just "bound": with --create-entities a
     # created entity is bound too, and it is counted on the create line below.
     # Reading 0 here while 13 entities reach the case is the kind of misreport
@@ -2061,14 +3147,48 @@ def main(argv=None):
             n = sum(1 for row in created_rows if row["outcome"] == outcome)
             if n:
                 print(f"    {n} {outcome} (left unmatched)")
+    if verdict_rows:
+        verb = "WOULD update" if args.dry_run else "updated"
+        print(f"  TOTAL accused bind(s) {verb} from the judgment: {total_verdicts}"
+              f"  -> {reports['verdicts']}")
+        if total_verdicts_undecided:
+            # Named, not merely subtracted: an unresolved bind, two defendants
+            # sharing a name, and a judgment that says nothing about someone are
+            # all cases a human still has to settle.
+            print(f"    {total_verdicts_undecided} accused bind(s) were left exactly "
+                  "as they were -- each is a row in that file carrying the reason.")
+    if total_notes_written:
+        verb = "WOULD be given" if args.dry_run else "given"
+        print(f"  TOTAL accused bind(s) {verb} a role note and nothing else: "
+              f"{total_notes_written}  -> {reports['binds']}")
+    cases_seen = sum(verdict_coverage.values())
+    if cases_seen:
+        projected = "  Projected -- this dry run wrote nothing." if args.dry_run else ""
+        print(f"  ACCUSED VERDICT COVERAGE -- of {cases_seen} case(s) with accused "
+              f"bind(s): {verdict_coverage['all']} fully decided, "
+              f"{verdict_coverage['partial']} partially decided, "
+              f"{verdict_coverage['none']} undecided.{projected}")
+        if partially_decided:
+            print("    A PARTIALLY DECIDED case still has accused bind(s) the judgment "
+                  "did not answer for; they stay 'charged'. The gate is per-bind, so a "
+                  "re-run asks about exactly those and leaves the settled ones alone. "
+                  "Check these by hand once a re-run has not moved them:")
+            for case_slug in partially_decided[:20]:
+                print(f"      {case_slug}")
+            if len(partially_decided) > 20:
+                print(f"      ... and {len(partially_decided) - 20} more")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
     if total_skipped_enriched:
-        # Not necessarily finished, since the section scope widened after those
-        # cases were enriched -- see the idempotency gate's comment.
-        print(f"  {total_skipped_enriched} case(s) skipped as already enriched, on "
-              "the presence of a 'related' bind. A case enriched before the "
-              "section scope widened may still have accused/location/witness "
-              "names outstanding; re-run those with --force to pick them up.")
+        # EXTRACTION, not the case. The verdict gate is independent of this
+        # skip, so some of these cases were written in this very run and
+        # calling them "skipped" would misreport what happened to them.
+        also = ("" if not args.verdicts
+                else " Their judgments were still read for verdicts.")
+        print(f"  {total_skipped_enriched} case(s) skipped EXTRACTION as already "
+              "enriched, on the presence of a 'related' bind."
+              f"{also} A case enriched before the section scope widened may "
+              "still have accused/location/witness names outstanding; re-run "
+              "those with --force to pick them up.")
     if total_refused_binds:
         print(f"  {total_refused_binds} resolved bind(s) were REFUSED at the write "
               "gate, not rejected by the matcher -- see the WOULD REFUSE lines "
@@ -2080,7 +3200,14 @@ def main(argv=None):
               f"carries a 'promoted over:' reason in {reports['binds']}. These "
               "are the ones to spot-check first.")
     if total_bound == 0:
-        if total_entities_extracted == 0:
+        # Checked FIRST. A note-only run binds no entity and writes anyway, so
+        # every branch below -- "extracted none" most of all -- describes a run
+        # that did nothing while a whole-list replace went to production.
+        if total_notes_written:
+            print("  This run bound zero NEW entities, but wrote a role note onto "
+                  f"{total_notes_written} accused bind(s) already on their "
+                  f"case(s) -- see {reports['binds']}.")
+        elif total_entities_extracted == 0:
             # Reachable from three separate skip gates -- the idempotency skip,
             # the prerequisite gate and the no-source gate -- plus an LLM that
             # returns nothing. Without this branch the `else` below fires and

@@ -81,6 +81,30 @@ def test_build_event_flags_zero_result_only_for_real_queries():
     assert browse["zero_result"] is False
 
 
+def test_build_event_flags_whether_a_zero_result_was_recoverable():
+    """Design §18 wants the did-you-mean RATE — this flag over ``zero_result``. The
+    FLAG only, never the suggested text: it is derived from ``q_normalized``, which
+    the event already carries."""
+    empty = {"count": 0, "counts": {}, "results": []}
+    recoverable = build_search_event(
+        search_id="x",
+        params=_params(q="coruption"),
+        response={**empty, "did_you_mean": "corruption"},
+        took_ms=1.0,
+    )
+    assert recoverable["zero_result"] is True
+    assert recoverable["did_you_mean"] is True
+    # A miss with nothing to suggest is the residual gap the romanization work owns.
+    dead_end = build_search_event(
+        search_id="x",
+        params=_params(q="melamchee"),
+        response={**empty, "did_you_mean": None},
+        took_ms=1.0,
+    )
+    assert dead_end["zero_result"] is True
+    assert dead_end["did_you_mean"] is False
+
+
 def test_build_event_omits_top_hit_beyond_first_page():
     response = {
         "count": 99,
@@ -127,6 +151,38 @@ def test_build_event_records_active_facets_and_sorted_types():
     # Types are sorted for stable aggregation; empty facet lists are dropped.
     assert event["types"] == ["case", "entity"]
     assert event["filters"] == {"case_type": ["CORRUPTION"]}
+
+
+def test_build_event_records_active_range_bounds():
+    """Which refine controls readers actually reach for is the point of this event,
+    so the बिगो bounds are recorded — in their own key, since they are scalars
+    rather than the term lists ``filters`` holds."""
+    event = build_search_event(
+        search_id="x",
+        params=_params(ranges={"bigo_min": 10_000_000, "bigo_max": None}),
+        response={"count": 1, "counts": {}, "results": []},
+        took_ms=1.0,
+    )
+    assert event["ranges"] == {"bigo_min": 10_000_000}
+
+
+def test_build_event_ranges_none_when_unbounded_and_keeps_a_zero_bound():
+    """No bound → ``None`` (consistent with ``filters``). But ``0`` is a real
+    bound: dropping it on falsiness would misreport the query that was run."""
+    unbounded = build_search_event(
+        search_id="x",
+        params=_params(),
+        response={"count": 0, "counts": {}, "results": []},
+        took_ms=1.0,
+    )
+    assert unbounded["ranges"] is None
+    zero = build_search_event(
+        search_id="x",
+        params=_params(ranges={"bigo_min": 0}),
+        response={"count": 0, "counts": {}, "results": []},
+        took_ms=1.0,
+    )
+    assert zero["ranges"] == {"bigo_min": 0}
 
 
 def test_build_event_carries_no_user_identity():

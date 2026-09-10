@@ -71,6 +71,10 @@ def test_common_mappings_has_expected_fields():
         "date",
         "date_bs",
         "weight",
+        "court",
+        "court_type",
+        "court_district",
+        "court_province",
         "raw",
     }
     assert expected <= set(props)
@@ -85,6 +89,14 @@ def test_weight_is_a_sortable_numeric():
 def test_case_type_is_keyword():
     props = common_mappings()["properties"]
     assert props["case_type"]["type"] == "keyword"
+
+
+def test_court_facet_fields_are_keywords():
+    """An analyzed text mapping would tokenize and break exact terms filtering —
+    and would split an identifier like ``kathmandudc`` or a two-word province."""
+    props = common_mappings()["properties"]
+    for field in ("court", "court_type", "court_district", "court_province"):
+        assert props[field]["type"] == "keyword", field
 
 
 def test_title_fields_have_sortable_keyword_subfield():
@@ -106,6 +118,19 @@ def test_raw_is_disabled_object():
     raw = common_mappings()["properties"]["raw"]
     assert raw["type"] == "object"
     assert raw["enabled"] is False
+
+
+def test_bigo_is_a_long_at_the_top_level():
+    """बिगो must be range-queryable, which needs a TOP-LEVEL numeric field.
+
+    ``long``, not ``integer``: the published corpus already holds amounts into the
+    tens of अरब (6.6e10), well past the 2^31 ceiling. And top-level, not the copy
+    inside the card, because ``raw`` is ``enabled: false`` — nothing under it is
+    indexed, so ``raw.card.bigo`` cannot be filtered on at all.
+    """
+    props = common_mappings()["properties"]
+    assert props["bigo"] == {"type": "long"}
+    assert props["raw"]["enabled"] is False
 
 
 def test_bilingual_title_analyzers():
