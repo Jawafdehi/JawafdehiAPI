@@ -210,13 +210,41 @@ def common_mappings() -> dict[str, Any]:
                 "verdict_date_bs": {"type": "keyword"},
                 "verdict_date": {"type": "date"},
                 "verdict_type": {"type": "keyword"},
+                # TWO vocabularies share this field, by doc type. NGM courtcase
+                # docs write their scraper enrichment flag (pending/enriched/
+                # failed); Jawafdehi case docs write the FULL derived lifecycle
+                # (``Case.status``: ongoing / under_investigation / concluded /
+                # others / withdrawn / dormant). They live in different indices,
+                # so a single-index query is unambiguous — but a unified query
+                # spanning both would aggregate them into one bucket list. That
+                # is why nothing aggregates this field: the ``status`` REQUEST
+                # parameter is wired to ``case_status`` below, not to here (see
+                # ``search.service.FACET_FIELDS``). Faceting on it later means
+                # splitting the two vocabularies into separate fields first.
                 "status": {"type": "keyword"},
-                # Coarse Jawafdehi-case lifecycle (ongoing/closed/others). A dedicated
-                # keyword so the unified search can facet/filter cases WITHOUT
-                # colliding with the generic ``status`` above (which NGM uses for its
-                # internal scraper enrichment flag pending/enriched/failed). Only
-                # Jawafdehi cases set this; other doc types leave it absent.
+                # The LEGACY coarse Jawafdehi-case lifecycle, exactly three
+                # values (ongoing/closed/others), which is what the deployed SPA
+                # filters on. Written by mapping ``status`` above down through
+                # ``cases.search_index.LEGACY_CASE_STATUS``, and kept as the
+                # facet field until the frontend has migrated to ``status``.
+                # Only Jawafdehi cases set this; other doc types leave it absent.
                 "case_status": {"type": "keyword"},
+                # The route into court (ciaa / money_laundering /
+                # public_prosecutor / writ / arbitration / other). Cases-only,
+                # absent while unclassified: null is honest for the ~2,900
+                # drafts nobody has read the sources for, and an empty keyword
+                # would hand the facet one nameless bucket holding all of them.
+                "case_track": {"type": "keyword"},
+                # The two derived proceeding dates (``cases.stages``): earliest
+                # start among COURT stages, and the last court stage's end (null
+                # while any is still open). Real ``date`` mappings, not keyword —
+                # ``proceedings_started_on`` is also what feeds ``date``, so a
+                # keyword here would sort the archive lexically. Cases-only and
+                # omitted when null: a null against a ``date`` mapping is
+                # rejected and takes the whole document with it, while an absent
+                # field is simply excluded by a range clause.
+                "proceedings_started_on": {"type": "date"},
+                "proceedings_decided_on": {"type": "date"},
                 # The deciding court's identifier for NGM court cases
                 # ("kathmandudc", "patanhc", "supreme") — the ONE-court facet.
                 # A duplicate of ``raw.court`` on purpose: ``raw`` is
