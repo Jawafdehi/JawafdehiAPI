@@ -783,6 +783,7 @@ class CaseAuthor(models.Model):
 
 
 from .stages import (  # noqa: E402  (kept beside the model it serves)
+    COURT_STAGES,
     StageError,
     derived_proceeding_dates,
     validate_stages,
@@ -792,6 +793,41 @@ from .stages import (  # noqa: E402  (kept beside the model it serves)
 def _empty_stage_document() -> dict:
     """Callable default: a shared mutable literal would leak between rows."""
     return {"stages": []}
+
+
+class CaseStatus(models.TextChoices):
+    """Derived lifecycle. Not a column -- see ``Case.status``."""
+
+    ONGOING = "ongoing", "Ongoing"
+    UNDER_INVESTIGATION = "under_investigation", "Under investigation"
+    CONCLUDED = "concluded", "Concluded"
+    OTHERS = "others", "Others"
+
+
+class StatusOverride(models.TextChoices):
+    """The two lifecycles no stage list can express."""
+
+    WITHDRAWN = "withdrawn", "Withdrawn"
+    # A stage with a start, no end and no decision coming -- "मिसिल जलेको",
+    # a bench never constituted. Rule 2 would otherwise read it as ongoing
+    # forever.
+    DORMANT = "dormant", "Dormant"
+
+
+class CaseTrack(models.TextChoices):
+    """The route the case took into court -- distinct from the offence.
+
+    It also says how many appellate tiers to expect: one for ``ciaa`` and
+    ``money_laundering``, two for ``public_prosecutor``, none for ``writ``.
+    A validation hint, not a hard rule.
+    """
+
+    CIAA = "ciaa", "अख्तियार / CIAA"
+    MONEY_LAUNDERING = "money_laundering", "सम्पत्ति शुद्धीकरण / Money laundering"
+    PUBLIC_PROSECUTOR = "public_prosecutor", "सरकारवादी / Public prosecutor"
+    WRIT = "writ", "रिट / Writ"
+    ARBITRATION = "arbitration", "मध्यस्थता / Arbitration"
+    OTHER = "other", "Other"
 
 
 class CaseType(models.TextChoices):
@@ -1003,6 +1039,28 @@ class Case(models.Model):
         help_text=(
             "Derived: the last court stage's end, NULL while any court stage "
             "is still open."
+        ),
+    )
+    case_track = models.CharField(
+        max_length=20,
+        choices=CaseTrack.choices,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "The route into court. Null until a caseworker who has read the "
+            "sources sets it -- an inferred value is worse than null, because "
+            "null is honest and queryable."
+        ),
+    )
+    status_override = models.CharField(
+        max_length=20,
+        choices=StatusOverride.choices,
+        null=True,
+        blank=True,
+        help_text=(
+            "Overrides the derived status for the two lifecycles the stage "
+            "list cannot express (withdrawn, dormant)."
         ),
     )
     case_start_date = models.DateField(
@@ -1448,6 +1506,48 @@ class Case(models.Model):
         slug = f"{base}-{suffix}"
 
         return slug[:50]
+
+    @property
+    def status(self) -> str:
+        """The case lifecycle, derived on read.
+
+        Deliberately NOT a stored column. Rules 3 and 4 read
+        ``CaseEntityRelationship.outcome``, so a stored value would be
+        invalidated by an entity-outcome edit -- a different endpoint from the
+        one that writes ``dates``, and one nothing would recompute. Derived on
+        read it cannot go stale, and the rule order can change in a patch
+        release instead of a backfill.
+        """
+        if self.status_override:
+            return self.status_override
+
+        stages = (self.dates or {}).get("stages") or []
+        court = [s for s in stages if isinstance(s, dict) and s.get("stage") in COURT_STAGES]
+        open_court = [s for s in court if not s.get("end")]
+
+        if open_court:
+            return CaseStatus.ONGOING
+
+        outcomes = [
+            bind.outcome
+            for bind in self.entity_relationships.filter(
+                relationship_type=RelationshipType.ACCUSED
+            )
+            if bind.outcome
+        ]
+        if RelationshipOutcome.REMANDED in outcomes:
+            return CaseStatus.ONGOING
+
+        if court and outcomes and all(o in TERMINAL_OUTCOMES for o in outcomes):
+            return CaseStatus.CONCLUDED
+
+        if not court and any(
+            isinstance(s, dict) and s.get("stage") == "investigation" and not s.get("end")
+            for s in stages
+        ):
+            return CaseStatus.UNDER_INVESTIGATION
+
+        return CaseStatus.OTHERS
 
     def _validate_and_derive_stages(self):
         """Validate ``dates`` and refresh the two derived columns.
