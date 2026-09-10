@@ -33,7 +33,7 @@ Because HL3 is not OSI-approved, GitHub classifies it as "Other" and some hosted
 
 Hippocratic 3.0 is **not** on the [SPDX License List](https://spdx.org/licenses/) — the list carries `Hippocratic-2.1`, and 3.0 is only a pending request. SPDX requires a `LicenseRef-` prefix for anything not on the list, so the only spec-valid identifier for this repository is:
 
-```
+```text
 LicenseRef-Hippocratic-3.0
 ```
 

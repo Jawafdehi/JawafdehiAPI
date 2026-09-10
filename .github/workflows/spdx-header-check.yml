@@ -8,6 +8,11 @@ on:
   push:
     branches: [main]
 
+# The job only reads the tree. Nothing here writes to the repository, comments
+# on a pull request, or publishes anything.
+permissions:
+  contents: read
+
 jobs:
   spdx-check:
     name: Check SPDX License Headers
@@ -101,9 +106,21 @@ jobs:
             LINE=$(head -20 "$file" 2>/dev/null | grep -i "SPDX-License-Identifier" | head -1 || true)
             if [ -n "$LINE" ]; then
               TOTAL=$((TOTAL + 1))
-              if ! echo "$LINE" | grep -qiF "LicenseRef-Hippocratic-3.0"; then
+              # Compare the declared expression exactly, not as a substring: a
+              # substring match would wave through `LicenseRef-Hippocratic-3.00`
+              # and `LicenseRef-Hippocratic-3.0 OR MIT`, neither of which is the
+              # identifier this repository requires.
+              #
+              # The tag holds no colon of its own, so everything after the first
+              # colon is the expression, whatever comment marker opened the line.
+              VALUE="${LINE#*:}"
+              VALUE="${VALUE%%-->*}"      # <!-- ... --> (html, xml)
+              VALUE="${VALUE%%\*/*}"      # /* ... */    (css, scss, java, go)
+              VALUE="${VALUE#"${VALUE%%[![:space:]]*}"}"
+              VALUE="${VALUE%"${VALUE##*[![:space:]]}"}"
+              if [ "$VALUE" != "LicenseRef-Hippocratic-3.0" ]; then
                 echo "::warning title=Non-HL3 SPDX identifier::$file"
-                echo "  Found: ${LINE#"${LINE%%[![:space:]]*}"}"
+                echo "  Found: $VALUE"
                 MISMATCH=$((MISMATCH + 1))
               fi
             fi
