@@ -273,7 +273,7 @@ def _map_field(data: dict, label: str, value: str) -> None:
     # public index. The charge wins; the class is kept alongside it.
     elif label == "मुद्दाको किसिम":
         data["case_class"] = value[:200]
-        data.setdefault("case_type", value[:200])   # fallback: some pages omit मुद्दा
+        data.setdefault("case_type", value[:200])  # fallback: some pages omit मुद्दा
         data.setdefault("case_subject", value)
     elif label in ["मुद्दा", "मुद्दाको बिषय"]:
         data["case_type"] = value[:200]
@@ -388,10 +388,15 @@ def parse_hearings_and_timeline(soup: BeautifulSoup) -> dict[str, list[dict]]:
                 if len(cells) >= 2:
                     hearing_date = normalize_whitespace(cells[0].get_text())
                     judges = extract_judges(cells[1]) or ""
-                    if judges and hearing_date and hearing_date not in [
-                        "सुनवाइ मिती",
-                        "मिती",
-                    ]:
+                    if (
+                        judges
+                        and hearing_date
+                        and hearing_date
+                        not in [
+                            "सुनवाइ मिती",
+                            "मिती",
+                        ]
+                    ):
                         entry = {
                             "date": normalize_date(hearing_date),
                             "judges": judges,
@@ -479,7 +484,9 @@ def parse_search_result_link(html: str, case_number: str | None = None) -> str |
             continue
         if want is None:
             return href
-        if want in [best_effort_normalize(td.get_text(strip=True)) for td in row.find_all("td")]:
+        if want in [
+            best_effort_normalize(td.get_text(strip=True)) for td in row.find_all("td")
+        ]:
             return href
     return None
 

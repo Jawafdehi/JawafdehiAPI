@@ -190,9 +190,15 @@ class Command(BaseCommand):
 
     def _purge(self, keys):
         for court, number in keys:
-            CaseEntity.objects.using("ngm").filter(court_id=court, case_number=number).delete()
-            CourtCaseHearing.objects.using("ngm").filter(court_id=court, case_number=number).delete()
-            CourtCase.objects.using("ngm").filter(court_id=court, case_number=number).delete()
+            CaseEntity.objects.using("ngm").filter(
+                court_id=court, case_number=number
+            ).delete()
+            CourtCaseHearing.objects.using("ngm").filter(
+                court_id=court, case_number=number
+            ).delete()
+            CourtCase.objects.using("ngm").filter(
+                court_id=court, case_number=number
+            ).delete()
         self.stdout.write(f"Purged {len(keys)} seeded court cases.")
 
     def _seed_case(self, case: dict):

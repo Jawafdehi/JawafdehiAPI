@@ -43,9 +43,7 @@ class CourtCaseDeleteTests(APITestCase):
         )
 
     def _get(self):
-        return CourtCase.objects.get(
-            court_id="kathmandudc", case_number="082-OA-0503"
-        )
+        return CourtCase.objects.get(court_id="kathmandudc", case_number="082-OA-0503")
 
     def test_delete_soft_deletes_and_returns_204(self):
         self.client.force_authenticate(user=self.user)

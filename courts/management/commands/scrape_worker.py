@@ -37,17 +37,31 @@ class Command(BaseCommand):
     help = "Drain court_scrape jobs from the central queue (in-process, ngm DB)."
 
     def add_arguments(self, parser):
-        parser.add_argument("--apply", action="store_true",
-                            help="claim/run/finalize (mutates the queue + ngm "
-                                 "lake); without it the worker only reports the "
-                                 "queued count")
-        parser.add_argument("--once", action="store_true",
-                            help="with --apply: drain currently-available jobs "
-                                 "then exit (the CronJob mode)")
-        parser.add_argument("--poll", type=float, default=5.0,
-                            help="seconds between polls when idle (daemon mode)")
-        parser.add_argument("--max-jobs", type=int, default=None,
-                            help="finalize at most this many jobs, then exit")
+        parser.add_argument(
+            "--apply",
+            action="store_true",
+            help="claim/run/finalize (mutates the queue + ngm "
+            "lake); without it the worker only reports the "
+            "queued count",
+        )
+        parser.add_argument(
+            "--once",
+            action="store_true",
+            help="with --apply: drain currently-available jobs "
+            "then exit (the CronJob mode)",
+        )
+        parser.add_argument(
+            "--poll",
+            type=float,
+            default=5.0,
+            help="seconds between polls when idle (daemon mode)",
+        )
+        parser.add_argument(
+            "--max-jobs",
+            type=int,
+            default=None,
+            help="finalize at most this many jobs, then exit",
+        )
 
     def handle(self, *args, **o):
         if not o["apply"]:
@@ -98,15 +112,15 @@ class Command(BaseCommand):
         except jobs_queue.JobNotRunning:
             self.stderr.write(f"  job {job.pk}: lease lost mid-run; result dropped.")
             return
-        self.stdout.write(self.style.SUCCESS(
-            f"  finished job {job.pk}: {result['cases']} cases / "
-            f"{result['hearings']} hearings across {result['courts']} court(s)"
-        ))
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"  finished job {job.pk}: {result['cases']} cases / "
+                f"{result['hearings']} hearings across {result['courts']} court(s)"
+            )
+        )
 
     def _finalize_failed(self, job, err, retryable):
         try:
-            jobs_queue.finalize(
-                job, status=Job.FAILED, error=err, retryable=retryable
-            )
+            jobs_queue.finalize(job, status=Job.FAILED, error=err, retryable=retryable)
         except jobs_queue.JobNotRunning:
             self.stderr.write(f"  job {job.pk}: lease lost; not finalizing failure.")

@@ -123,8 +123,12 @@ def to_payload(firm: ParsedFirm) -> dict:
         "reason": firm.reason,
         "recommending_office": firm.recommending_office,
         "effective_until_bs": firm.effective_until_bs,
-        "blacklist_date_ad": firm.blacklist_date_ad.isoformat() if firm.blacklist_date_ad else None,
-        "effective_until_ad": firm.effective_until_ad.isoformat() if firm.effective_until_ad else None,
+        "blacklist_date_ad": firm.blacklist_date_ad.isoformat()
+        if firm.blacklist_date_ad
+        else None,
+        "effective_until_ad": firm.effective_until_ad.isoformat()
+        if firm.effective_until_ad
+        else None,
     }
     payload.update({key: value for key, value in optional.items() if value})
     return payload

@@ -98,9 +98,7 @@ def test_desep_judges_quadruple_glue_and_double_application():
 def test_desep_judges_mixed_glued_and_already_spaced():
     # First boundary already space-delimited (clean), second boundary glued.
     mixed = "मा. न्या. श्री एक मा. न्या. श्री दुईमा. न्या. श्री तीन"
-    assert desep_judges(mixed) == (
-        "मा. न्या. श्री एक मा. न्या. श्री दुई, मा. न्या. श्री तीन"
-    )
+    assert desep_judges(mixed) == ("मा. न्या. श्री एक मा. न्या. श्री दुई, मा. न्या. श्री तीन")
 
 
 def test_extract_judges_self_closing_br_and_multiline():

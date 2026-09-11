@@ -5,24 +5,35 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('courts', '0004_courtcase_is_deleted'),
+        ("courts", "0004_courtcase_is_deleted"),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='ScrapedDate',
+            name="ScrapedDate",
             fields=[
-                ('id', models.AutoField(primary_key=True, serialize=False)),
-                ('date_bs', models.CharField(db_index=True, max_length=20)),
-                ('note', models.CharField(blank=True, max_length=200, null=True)),
-                ('scraped_at', models.DateTimeField(auto_now_add=True)),
-                ('court', models.ForeignKey(db_column='court_identifier', on_delete=django.db.models.deletion.DO_NOTHING, related_name='scraped_dates', to='courts.court')),
+                ("id", models.AutoField(primary_key=True, serialize=False)),
+                ("date_bs", models.CharField(db_index=True, max_length=20)),
+                ("note", models.CharField(blank=True, max_length=200, null=True)),
+                ("scraped_at", models.DateTimeField(auto_now_add=True)),
+                (
+                    "court",
+                    models.ForeignKey(
+                        db_column="court_identifier",
+                        on_delete=django.db.models.deletion.DO_NOTHING,
+                        related_name="scraped_dates",
+                        to="courts.court",
+                    ),
+                ),
             ],
             options={
-                'db_table': 'scraped_dates',
-                'constraints': [models.UniqueConstraint(fields=('court', 'date_bs'), name='uniq_scraped_court_date')],
+                "db_table": "scraped_dates",
+                "constraints": [
+                    models.UniqueConstraint(
+                        fields=("court", "date_bs"), name="uniq_scraped_court_date"
+                    )
+                ],
             },
         ),
     ]

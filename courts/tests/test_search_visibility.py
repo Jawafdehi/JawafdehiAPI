@@ -192,6 +192,7 @@ class TestCompositeChargesReachTheSensitiveFloor:
         ],
     )
     def test_a_sensitive_offence_anywhere_hides_the_case(self, case_type):
+        """The charge is coded non-sensitively, yet the case must still be hidden."""
         assert sv.case_type_code(case_type) not in sv.SENSITIVE_CODES
         assert sv.names_a_sensitive_offence(case_type) is True
         assert sv.court_case_public_visible(_case(case_type=case_type)) is False
@@ -205,6 +206,25 @@ class TestCompositeChargesReachTheSensitiveFloor:
             case_number="081-CR-0404",
             iri=iri,
         )
+        assert sv.court_case_public_visible(case) is False
+
+    def test_an_unmapped_sensitive_charge_survives_the_publish_link(self, monkeypatch):
+        """The publish-link path is the one rule an unknown code can still reach.
+
+        A case_type absent from the map fails rule 1 and, outside the corruption
+        forum, rule 2 — so a PUBLISHED Jawafdehi case referencing it is the only
+        thing that could surface it. The text floor has to hold there too.
+        """
+        iri = "https://jawafdehi.org/courtcase/patanhc/081-ci-0406"
+        case = _case(
+            case_type="____ novel ____ जबरजस्ती करणी",
+            court_id="patanhc",
+            case_number="081-CI-0406",
+            iri=iri,
+        )
+        assert sv.case_type_code(case.case_type) is None
+        monkeypatch.setattr(sv, "_published_iris", frozenset({iri}))
+        assert sv.is_published_referenced(case) is True
         assert sv.court_case_public_visible(case) is False
 
 
@@ -228,6 +248,7 @@ class TestSpellingVariantsAreFolded:
         ],
     )
     def test_variant_spellings_are_caught(self, case_type):
+        """Each of these spellings occurs in live rows, not just in theory."""
         assert sv.names_a_sensitive_offence(case_type) is True
         assert sv.court_case_public_visible(_case(case_type=case_type)) is False
 
@@ -236,6 +257,7 @@ class TestSpellingVariantsAreFolded:
         assert sv.names_a_sensitive_offence("ठगी तथा जबरज‍स्ती कर‌णी") is True
 
     def test_nukta_forms_are_nfc_normalised(self):
+        """Nukta letters arrive both composed and decomposed; NFC settles it."""
         decomposed = unicodedata.normalize("NFD", "चेलीबेटी खख़रिद")
         assert "ख़" not in decomposed  # genuinely decomposed by NFD
         assert sv.names_a_sensitive_offence(decomposed) is True
@@ -253,10 +275,12 @@ class TestTheGateDoesNotTrustTheMap:
     """
 
     def test_the_archaic_trafficking_name_is_hidden_despite_its_code(self):
+        """Coded HOMICIDE and OTHER_CRIMINAL respectively — hidden regardless."""
         for case_type in ("जिउ मास्ने बेच्ने", "जिउ मास्ने वेच्ने", "जीउ मास्ने बेच्ने र ठगी"):
             assert sv.court_case_public_visible(_case(case_type=case_type)) is False
 
     def test_it_is_hidden_in_the_corruption_forum_too(self):
+        """Its code is procedural, so only the text floor can hold here."""
         case = _case(
             case_type="जिउ मास्ने वेच्ने", court_id="special", case_number="081-CR-0505"
         )
@@ -282,9 +306,11 @@ class TestTheFloorDoesNotOverreach:
         ],
     )
     def test_ordinary_language_is_not_a_sensitive_offence(self, case_type):
+        """Held out deliberately — hiding these costs accountability cases."""
         assert sv.names_a_sensitive_offence(case_type) is False
 
     def test_the_corruption_slice_is_untouched(self):
+        """The index's actual purpose must survive the fix."""
         assert sv.court_case_public_visible(_case(case_type="भ्रष्टाचार")) is True
         assert sv.court_case_public_visible(_case(case_type="रिसवत(घुस)")) is True
 
@@ -310,6 +336,7 @@ class TestCourtAnonymisedComplainants:
         ],
     )
     def test_an_anonymised_complainant_hides_an_innocuous_charge(self, plaintiff):
+        """The charge is in SHOW_CODES; only the party signal can catch this."""
         case = _case(case_type="ठगी", plaintiff=plaintiff)
         assert sv.case_type_code(case.case_type) in sv.SHOW_CODES
         assert sv.court_case_public_visible(case) is False
@@ -330,10 +357,51 @@ class TestCourtAnonymisedComplainants:
         assert sv.has_anonymised_party(case) is False
 
     def test_an_anonymised_party_on_either_side_counts(self):
+        """Defendants are not anonymised, but checking both sides costs nothing."""
         assert sv.has_anonymised_party(_case(defendant="परिवर्तित नाम ललितपुर ५")) is True
 
     def test_a_plain_party_is_not_anonymised(self):
+        """An ordinary named party must not trip the check."""
         assert sv.has_anonymised_party(_case()) is False
+
+    @pytest.mark.parametrize(
+        "plaintiff",
+        [
+            "परिवर्तित नाम काठमाडौं ९ र एबीसी इनभेस्टमेन्ट प्रा.लि.",
+            "एबीसी इनभेस्टमेन्ट प्रा.लि., परिवर्तित नाम काठमाडौं ९",
+            "एबीसी प्रा.लि. | परिवर्तित नाम बौद्ध १७",
+            "उदाहरण उद्योग प्रा.लि. को हाल परिवर्तित नाम नमुना प्रा.लि., "
+            "परिवर्तित नाम ललितपुर ५ को जाहेरीले नेपाल सरकार",
+        ],
+    )
+    def test_a_company_alongside_a_human_does_not_suppress_the_check(self, plaintiff):
+        """The company exclusion is judged PER PARTY, never per cell.
+
+        Judged per cell it was a bypass: one renamed company anywhere in the
+        cell suppressed the check for a protected complainant named beside it.
+        """
+        assert sv.has_anonymised_party(_case(plaintiff=plaintiff)) is True
+        assert (
+            sv.court_case_public_visible(_case(case_type="ठगी", plaintiff=plaintiff))
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        "plaintiff",
+        [
+            "परिवर्तित‍ नाम बौद्ध १७",  # stray ZWJ inside the pseudonym
+            "परिबर्तित नाम बौद्ध १७",  # ब/व swap
+            "परिवर्तित  नाम  बौद्ध १७",  # doubled spacing
+            "परिवर्तित नामथर बौद्ध १७",
+        ],
+    )
+    def test_the_pseudonym_is_matched_on_the_folded_form(self, plaintiff):
+        """A typo in the pseudonym must not be a way past a privacy gate.
+
+        The case_type floor already folds; matching parties on raw text left the
+        weaker of the two axes as the way in.
+        """
+        assert sv.has_anonymised_party(_case(plaintiff=plaintiff)) is True
 
 
 class TestTheMapWideInvariant:
@@ -346,6 +414,7 @@ class TestTheMapWideInvariant:
     """
 
     def test_no_sensitive_case_type_is_publicly_visible(self):
+        """Over every key in the shipped map, not a sample of it."""
         offenders = [
             case_type
             for case_type in sv._load_map()
@@ -355,6 +424,7 @@ class TestTheMapWideInvariant:
         assert offenders == []
 
     def test_the_invariant_holds_inside_the_corruption_forum(self):
+        """The forum rule is the widest show path, so check the invariant there."""
         offenders = [
             case_type
             for case_type in sv._load_map()

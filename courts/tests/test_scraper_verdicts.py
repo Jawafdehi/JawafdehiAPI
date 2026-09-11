@@ -101,9 +101,12 @@ class BuildHearingTests(TestCase):
     databases = "__all__"
 
     def setUp(self):
-        self.court = Court.objects.create(identifier="special", court_type="special", full_name_nepali="विशेष अदालत")
+        self.court = Court.objects.create(
+            identifier="special", court_type="special", full_name_nepali="विशेष अदालत"
+        )
         self.case = CourtCase.objects.create(
-            case_number="076-CR-0215", court=self.court,
+            case_number="076-CR-0215",
+            court=self.court,
             case_status="फैसला (मिती: २०७६/१२/०३)",
             extra_data={"court_orders": ["https://s3.example/x.docx"]},
         )
@@ -115,12 +118,16 @@ class BuildHearingTests(TestCase):
         h = build_hearing(self.case, ex, order_url="u", model="m", now=timezone.now())
         self.assertEqual(h.hearing_date_bs, "2076-12-03")
         self.assertIsNotNone(h.hearing_date_ad)
-        self.assertEqual(h.extra_data[PROVENANCE_KEY]["model_verdict_date_bs"], "2000-01-01")
+        self.assertEqual(
+            h.extra_data[PROVENANCE_KEY]["model_verdict_date_bs"], "2000-01-01"
+        )
 
     def test_every_written_row_is_marked_model_derived(self):
         """A published conviction rate mixing scraped and inferred verdicts
         without saying so would misrepresent the data."""
-        h = build_hearing(self.case, self.ex, order_url="u", model="m", now=timezone.now())
+        h = build_hearing(
+            self.case, self.ex, order_url="u", model="m", now=timezone.now()
+        )
         prov = h.extra_data[PROVENANCE_KEY]
         self.assertTrue(prov["derived"])
         self.assertEqual(prov["model"], "m")
@@ -128,10 +135,18 @@ class BuildHearingTests(TestCase):
         self.assertEqual(prov["evidence"], "जरिवाना हुने ठहर्छ")
 
         h.save(using="ngm")
-        self.assertTrue(CourtCaseHearing.objects.using("ngm").filter(derived_hearing_filter()).exists())
+        self.assertTrue(
+            CourtCaseHearing.objects.using("ngm")
+            .filter(derived_hearing_filter())
+            .exists()
+        )
         scraped = CourtCaseHearing.objects.using("ngm").create(
-            case_number="076-CR-0999", court=self.court, hearing_date_bs="2076-01-01",
-            hearing_date_ad="2019-04-14", decision_type=FULL, scraped_at=timezone.now(),
+            case_number="076-CR-0999",
+            court=self.court,
+            hearing_date_bs="2076-01-01",
+            hearing_date_ad="2019-04-14",
+            decision_type=FULL,
+            scraped_at=timezone.now(),
         )
         found = CourtCaseHearing.objects.using("ngm").filter(derived_hearing_filter())
         self.assertNotIn(scraped.pk, [h.pk for h in found])
@@ -146,11 +161,18 @@ class BuildHearingTests(TestCase):
         because nothing about them survived the terminal scrollback. A run whose
         only record is its own stdout cannot answer a question asked afterwards.
         """
-        plain = build_hearing(self.case, self.ex, order_url="u", model="m", now=timezone.now())
+        plain = build_hearing(
+            self.case, self.ex, order_url="u", model="m", now=timezone.now()
+        )
         self.assertFalse(plain.extra_data[PROVENANCE_KEY]["escalated"])
 
         hard = build_hearing(
-            self.case, self.ex, order_url="u", model="m", now=timezone.now(), escalated=True
+            self.case,
+            self.ex,
+            order_url="u",
+            model="m",
+            now=timezone.now(),
+            escalated=True,
         )
         self.assertTrue(hard.extra_data[PROVENANCE_KEY]["escalated"])
 
@@ -165,43 +187,64 @@ class BuildHearingTests(TestCase):
         """A caller that has not been taught about escalation must record False,
         not crash and not omit the key — an absent key would read as 'unknown'
         for every historical row and make the next comparison ambiguous again."""
-        h = build_hearing(self.case, self.ex, order_url="u", model="m", now=timezone.now())
+        h = build_hearing(
+            self.case, self.ex, order_url="u", model="m", now=timezone.now()
+        )
         self.assertIn("escalated", h.extra_data[PROVENANCE_KEY])
 
     def test_an_abstention_can_never_become_a_row(self):
         with self.assertRaises(ValueError):
-            build_hearing(self.case, parse_response(_resp(decision_type="ABSTAIN")),
-                          order_url="u", model="m", now=timezone.now())
+            build_hearing(
+                self.case,
+                parse_response(_resp(decision_type="ABSTAIN")),
+                order_url="u",
+                model="m",
+                now=timezone.now(),
+            )
 
     def test_a_case_without_a_verdict_date_is_refused(self):
         """No date means no defensible hearing_date -- better to skip the case
         than to invent one or reach for a sentinel."""
         self.case.case_status = "फैसला"
         with self.assertRaises(ValueError):
-            build_hearing(self.case, self.ex, order_url="u", model="m", now=timezone.now())
+            build_hearing(
+                self.case, self.ex, order_url="u", model="m", now=timezone.now()
+            )
 
 
 class BacklogTests(TestCase):
     databases = "__all__"
 
     def setUp(self):
-        self.court = Court.objects.create(identifier="special", court_type="special", full_name_nepali="विशेष अदालत")
-        self.other = Court.objects.create(identifier="supreme", court_type="supreme", full_name_nepali="सर्वोच्च अदालत")
+        self.court = Court.objects.create(
+            identifier="special", court_type="special", full_name_nepali="विशेष अदालत"
+        )
+        self.other = Court.objects.create(
+            identifier="supreme", court_type="supreme", full_name_nepali="सर्वोच्च अदालत"
+        )
 
     def _case(self, num, *, orders=True, status="फैसला (मिती: २०७६/१२/०३)", court=None):
         return CourtCase.objects.create(
-            case_number=num, court=court or self.court, case_status=status,
-            extra_data={"court_orders": ["https://s3.example/x.docx"]} if orders else {},
+            case_number=num,
+            court=court or self.court,
+            case_status=status,
+            extra_data={"court_orders": ["https://s3.example/x.docx"]}
+            if orders
+            else {},
         )
 
     def test_it_selects_only_cases_that_need_and_can_have_a_verdict(self):
         want = self._case("076-CR-0001")
-        self._case("076-CR-0002", orders=False)          # nothing to read
-        self._case("076-CR-0003", status="")             # no status at all
+        self._case("076-CR-0002", orders=False)  # nothing to read
+        self._case("076-CR-0003", status="")  # no status at all
         already = self._case("076-CR-0004")
         CourtCaseHearing.objects.create(
-            case_number=already.case_number, court=self.court, hearing_date_bs="2076-01-01",
-            hearing_date_ad="2019-04-14", decision_type=ACQUITTAL, scraped_at=timezone.now(),
+            case_number=already.case_number,
+            court=self.court,
+            hearing_date_bs="2076-01-01",
+            hearing_date_ad="2019-04-14",
+            decision_type=ACQUITTAL,
+            scraped_at=timezone.now(),
         )
         self.assertEqual([c.case_number for c in backlog()], [want.case_number])
 
@@ -210,8 +253,12 @@ class BacklogTests(TestCase):
         decision_type never populated. Missing them would defeat the point."""
         c = self._case("076-CR-0005")
         CourtCaseHearing.objects.create(
-            case_number=c.case_number, court=self.court, hearing_date_bs="2076-01-01",
-            hearing_date_ad="2019-04-14", decision_type=None, scraped_at=timezone.now(),
+            case_number=c.case_number,
+            court=self.court,
+            hearing_date_bs="2076-01-01",
+            hearing_date_ad="2019-04-14",
+            decision_type=None,
+            scraped_at=timezone.now(),
         )
         self.assertIn(c.case_number, [x.case_number for x in backlog()])
 
@@ -221,14 +268,18 @@ class BacklogTests(TestCase):
 
     def test_a_named_case_bypasses_the_filters_for_smoke_testing(self):
         c = self._case("076-CR-0008", orders=False)
-        self.assertEqual([x.case_number for x in backlog(case_number=c.case_number)], [c.case_number])
+        self.assertEqual(
+            [x.case_number for x in backlog(case_number=c.case_number)], [c.case_number]
+        )
 
 
 class CaseHelperTests(TestCase):
     databases = "__all__"
 
     def setUp(self):
-        self.court = Court.objects.create(identifier="special", court_type="special", full_name_nepali="विशेष अदालत")
+        self.court = Court.objects.create(
+            identifier="special", court_type="special", full_name_nepali="विशेष अदालत"
+        )
 
     def test_is_decided_reads_the_shared_parser(self):
         mk = lambda s: CourtCase(case_number="x", court=self.court, case_status=s)  # noqa: E731
@@ -237,17 +288,32 @@ class CaseHelperTests(TestCase):
         self.assertFalse(is_decided(mk("")))
 
     def test_order_urls_ignores_junk_entries(self):
-        c = CourtCase(case_number="x", court=self.court,
-                      extra_data={"court_orders": ["https://a/x.doc", "", None, 7, "not-a-url"]})
+        c = CourtCase(
+            case_number="x",
+            court=self.court,
+            extra_data={"court_orders": ["https://a/x.doc", "", None, 7, "not-a-url"]},
+        )
         self.assertEqual(order_urls(c), ["https://a/x.doc"])
-        self.assertEqual(order_urls(CourtCase(case_number="y", court=self.court, extra_data=None)), [])
+        self.assertEqual(
+            order_urls(CourtCase(case_number="y", court=self.court, extra_data=None)),
+            [],
+        )
 
     def test_order_urls_reads_the_CANONICAL_document_source_shape(self):
-        c = CourtCase(case_number="x", court=self.court, document_sources=[{
-            "source_type": "COURT_ORDER", "document_id": "d",
-            "url": [{"link": "https://a/alt.pdf", "role": "ALTERNATE"},
-                    {"link": "https://a/raw.doc", "role": "RAW"}],
-        }])
+        c = CourtCase(
+            case_number="x",
+            court=self.court,
+            document_sources=[
+                {
+                    "source_type": "COURT_ORDER",
+                    "document_id": "d",
+                    "url": [
+                        {"link": "https://a/alt.pdf", "role": "ALTERNATE"},
+                        {"link": "https://a/raw.doc", "role": "RAW"},
+                    ],
+                }
+            ],
+        )
         # RAW first: it is the judgment; ALTERNATE may be a scan or a summary.
         self.assertEqual(order_urls(c), ["https://a/raw.doc", "https://a/alt.pdf"])
 
@@ -255,24 +321,40 @@ class CaseHelperTests(TestCase):
         """The 2026-07 rehost left historical cases with a SCALAR `url` plus a
         `links` list. materials.jsonld drops these, so reading document_sources
         naively would make every historical order invisible."""
-        c = CourtCase(case_number="x", court=self.court, document_sources=[{
-            "source_type": "COURT_ORDER",
-            "url": "https://a/raw.doc",
-            "links": [{"link": "https://a/raw.doc", "role": "RAW"}],
-        }])
+        c = CourtCase(
+            case_number="x",
+            court=self.court,
+            document_sources=[
+                {
+                    "source_type": "COURT_ORDER",
+                    "url": "https://a/raw.doc",
+                    "links": [{"link": "https://a/raw.doc", "role": "RAW"}],
+                }
+            ],
+        )
         self.assertEqual(order_urls(c), ["https://a/raw.doc"])
 
     def test_order_urls_skips_relative_legacy_court_orders_keys(self):
         """Historical `extra_data['court_orders']` holds STORAGE KEYS, not URLs.
         Treating one as a URL would fetch nothing and look like a missing order."""
-        c = CourtCase(case_number="x", court=self.court,
-                      extra_data={"court_orders": ["court-orders/special/076-CR-0006.1.doc"]})
+        c = CourtCase(
+            case_number="x",
+            court=self.court,
+            extra_data={"court_orders": ["court-orders/special/076-CR-0006.1.doc"]},
+        )
         self.assertEqual(order_urls(c), [])
 
     def test_order_urls_ignores_non_order_document_sources(self):
-        c = CourtCase(case_number="x", court=self.court, document_sources=[
-            {"source_type": "PRESS_RELEASE", "url": [{"link": "https://a/pr.pdf", "role": "RAW"}]},
-        ])
+        c = CourtCase(
+            case_number="x",
+            court=self.court,
+            document_sources=[
+                {
+                    "source_type": "PRESS_RELEASE",
+                    "url": [{"link": "https://a/pr.pdf", "role": "RAW"}],
+                },
+            ],
+        )
         self.assertEqual(order_urls(c), [])
 
 
@@ -283,12 +365,18 @@ class EvalAnswerKeyTests(TestCase):
     databases = "__all__"
 
     def setUp(self):
-        self.court = Court.objects.create(identifier="special", court_type="special", full_name_nepali="विशेष अदालत")
+        self.court = Court.objects.create(
+            identifier="special", court_type="special", full_name_nepali="विशेष अदालत"
+        )
 
     def _hearing(self, num, *, derived, decision=FULL):
         return CourtCaseHearing.objects.create(
-            case_number=num, court=self.court, hearing_date_bs="2076-01-01",
-            hearing_date_ad="2019-04-14", decision_type=decision, scraped_at=timezone.now(),
+            case_number=num,
+            court=self.court,
+            hearing_date_bs="2076-01-01",
+            hearing_date_ad="2019-04-14",
+            decision_type=decision,
+            scraped_at=timezone.now(),
             extra_data={PROVENANCE_KEY: {"derived": True}} if derived else {},
         )
 
@@ -301,9 +389,13 @@ class EvalAnswerKeyTests(TestCase):
         """Left unfiltered, each --write run would enlarge the key with the
         model's own answers and accuracy would drift towards self-agreement."""
         case = CourtCase.objects.create(
-            case_number="076-CR-0215", court=self.court, case_status="फैसला (मिती: २०७६/१२/०३)",
+            case_number="076-CR-0215",
+            court=self.court,
+            case_status="फैसला (मिती: २०७६/१२/०३)",
         )
-        build_hearing(case, parse_response(_resp()), order_url="u", model="m", now=timezone.now()).save()
+        build_hearing(
+            case, parse_response(_resp()), order_url="u", model="m", now=timezone.now()
+        ).save()
         self.assertEqual(dict(court_coded_verdicts("special")), {})
 
     def test_hearings_without_a_disposition_are_not_an_answer(self):
@@ -321,7 +413,7 @@ class PolitenessGapTests(TestCase):
         cmd._downloads = 0
         with mock.patch.object(extract_verdicts, "time") as clock:
             cmd._gap(2.5)
-            self.assertFalse(clock.sleep.called)   # nothing to be polite about yet
+            self.assertFalse(clock.sleep.called)  # nothing to be polite about yet
             cmd._gap(2.5)
             cmd._gap(2.5)
         self.assertEqual([c.args for c in clock.sleep.call_args_list], [(2.5,), (2.5,)])
@@ -365,7 +457,9 @@ class BudgetEscalationTests(TestCase):
                 )
             return ("EX", "u", "m", 99)
 
-        with mock.patch.object(Command, "_extract_one", autospec=True, side_effect=fake):
+        with mock.patch.object(
+            Command, "_extract_one", autospec=True, side_effect=fake
+        ):
             result = cmd._extract(mock.Mock(), tier="premium")
         self.assertEqual(result, ("EX", "u", "m", 99, True))
         self.assertEqual(
@@ -384,7 +478,9 @@ class BudgetEscalationTests(TestCase):
             calls.append(max_tokens)
             raise RuntimeError("no order document yielded text")
 
-        with mock.patch.object(Command, "_extract_one", autospec=True, side_effect=fake):
+        with mock.patch.object(
+            Command, "_extract_one", autospec=True, side_effect=fake
+        ):
             with self.assertRaises(RuntimeError):
                 cmd._extract(mock.Mock(), tier="premium")
         self.assertEqual(calls, [extract_verdicts.MAX_TOKENS])
@@ -397,7 +493,9 @@ class BudgetEscalationTests(TestCase):
         """
         cmd = self._cmd()
         with mock.patch.object(
-            Command, "_extract_one", autospec=True,
+            Command,
+            "_extract_one",
+            autospec=True,
             side_effect=RuntimeError("error_max_turns"),
         ) as one:
             with self.assertRaises(RuntimeError):
@@ -431,10 +529,16 @@ class BudgetEscalationTests(TestCase):
         """
         cmd = self._cmd()
         case = mock.Mock(case_number="070-CR-0001")
-        with mock.patch.object(extract_verdicts, "order_urls", return_value=["http://x/a.pdf"]), \
-             mock.patch("review.converter.convert_all",
-                        return_value=[{"conversion_status": "ok", "markdown": "फैसला"}]), \
-             mock.patch("llm.routing.provider_for_tier"), \
-             mock.patch("llm.invoke.invoke_text", return_value=_resp()) as invoke_text:
+        with (
+            mock.patch.object(
+                extract_verdicts, "order_urls", return_value=["http://x/a.pdf"]
+            ),
+            mock.patch(
+                "review.converter.convert_all",
+                return_value=[{"conversion_status": "ok", "markdown": "फैसला"}],
+            ),
+            mock.patch("llm.routing.provider_for_tier"),
+            mock.patch("llm.invoke.invoke_text", return_value=_resp()) as invoke_text,
+        ):
             cmd._extract_one(case, tier="premium", max_tokens=4242)
         self.assertEqual(invoke_text.call_args.args[2], 4242)

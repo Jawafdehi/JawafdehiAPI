@@ -34,7 +34,7 @@ class TestTheLabelFinalOrderIsNotEvidenceOfAVerdict:
     @pytest.mark.parametrize(
         "order_type",
         [
-            "कैफियत प्रतिवेदन माग्ने",          # 1,289 of the sampled entries
+            "कैफियत प्रतिवेदन माग्ने",  # 1,289 of the sampled entries
             "लिखित जवाफ माग्ने",
             "प्रत्यर्थी झिकाउने",
             "बयान गराउने",
@@ -155,11 +155,11 @@ class TestTwoDecadesOfInconsistentSpelling:
     @pytest.mark.parametrize(
         "older,expected",
         [
-            ("वदर", cs.REVERSED),                    # व/ब are interchangeable
+            ("वदर", cs.REVERSED),  # व/ब are interchangeable
             ("आदेश वदर", cs.REVERSED),
-            ("कानुन वमोजिम गर्नु", cs.PROCEDURAL),   # + कानुन/कानून
+            ("कानुन वमोजिम गर्नु", cs.PROCEDURAL),  # + कानुन/कानून
             ("माग वमोजिम हुने", cs.CLAIM_UPHELD),
-            ("माग वमोजङ्गम हुने", cs.CLAIM_UPHELD),   # mojibake for बमोजिम
+            ("माग वमोजङ्गम हुने", cs.CLAIM_UPHELD),  # mojibake for बमोजिम
             ("शंशोधन हुने", cs.AMENDED),
             ("आशिंक दावी पुग्ने", cs.PARTIALLY_UPHELD),
         ],
@@ -219,9 +219,7 @@ class TestTheDateComesBackToo:
         assert outcome.verdict_date_ad == date(2025, 7, 4)
 
     def test_a_devanagari_or_slashed_date_is_normalised(self):
-        outcome = cs.outcome_from_hearings(
-            [hearing("फैसला", "सदर", when="२०८२/०३/२०")]
-        )
+        outcome = cs.outcome_from_hearings([hearing("फैसला", "सदर", when="२०८२/०३/२०")])
         assert outcome.verdict_date_bs == "2082-03-20"
         assert outcome.verdict_date_ad == date(2025, 7, 4)
 
@@ -232,11 +230,13 @@ class TestTheDateComesBackToo:
 
     def test_the_last_disposing_sitting_wins_not_the_first(self):
         """A case can be decided, reopened on review, and decided again."""
-        outcome = cs.outcome_from_hearings([
-            hearing("फैसला", "सदर", when="2081-01-01"),
-            hearing("अन्तिम आदेश", "कैफियत प्रतिवेदन माग्ने", when="2081-06-01"),
-            hearing("फैसला", "उल्टी", when="2082-03-20"),
-        ])
+        outcome = cs.outcome_from_hearings(
+            [
+                hearing("फैसला", "सदर", when="2081-01-01"),
+                hearing("अन्तिम आदेश", "कैफियत प्रतिवेदन माग्ने", when="2081-06-01"),
+                hearing("फैसला", "उल्टी", when="2082-03-20"),
+            ]
+        )
         assert outcome.verdict_type == cs.REVERSED
         assert outcome.verdict_date_bs == "2082-03-20"
 
@@ -258,7 +258,9 @@ class TestTheSpecialCourtPathIsUntouched:
         ],
     )
     def test_special_court_decisions_still_map(self, decision, expected):
-        rows = [{"date": "2081-02-30", "case_status": "फैसला", "decision_type": decision}]
+        rows = [
+            {"date": "2081-02-30", "case_status": "फैसला", "decision_type": decision}
+        ]
         assert cs.verdict_from_hearings(rows) == expected
 
     def test_the_shim_still_returns_a_bare_string(self):

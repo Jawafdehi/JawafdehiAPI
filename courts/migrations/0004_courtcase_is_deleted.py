@@ -4,7 +4,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("courts", "0003_courtcase_readd_dropped_columns"),
     ]

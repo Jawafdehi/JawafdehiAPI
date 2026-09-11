@@ -203,10 +203,12 @@ def normalize_case_type(case_type: str | None) -> str | None:
         # description) so we never emit an unbalanced "(". Guarded on ``s != before``
         # so it fires ONLY as a consequence of a strip this pass — a value's own
         # pre-existing unbalanced parens are never rebalanced when nothing else changed.
-        if s != before and (s.count("(") + s.count("（")) > (s.count(")") + s.count("）")):
+        if s != before and (s.count("(") + s.count("（")) > (
+            s.count(")") + s.count("）")
+        ):
             idx = max(s.rfind("("), s.rfind("（"))
             if idx != -1 and ")" not in s[idx:] and "）" not in s[idx:]:
-                candidate = _WHITESPACE.sub(" ", s[:idx] + " " + s[idx + 1:]).strip()
+                candidate = _WHITESPACE.sub(" ", s[:idx] + " " + s[idx + 1 :]).strip()
                 if _has_devanagari_letter(candidate):
                     s = candidate
 

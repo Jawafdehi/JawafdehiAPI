@@ -76,22 +76,33 @@ def test_ported_normalization_composes_with_parse():
 
     assert (
         verdict_from_hearings(
-            [{"case_status": decided_hearing.case_status,
-              "decision_type": decided_hearing.decision_type}]
+            [
+                {
+                    "case_status": decided_hearing.case_status,
+                    "decision_type": decided_hearing.decision_type,
+                }
+            ]
         )
         == ACQUITTED
     )
     assert (
         verdict_from_hearings(
-            [{"case_status": pending_hearing.case_status,
-              "decision_type": pending_hearing.decision_type}]
+            [
+                {
+                    "case_status": pending_hearing.case_status,
+                    "decision_type": pending_hearing.decision_type,
+                }
+            ]
         )
         is None
     )
 
 
 def test_empty_table_returns_no_rows():
-    assert parse_bench_page("<html><body>no table</body></html>", date_bs="2082-01-05") == []
+    assert (
+        parse_bench_page("<html><body>no table</body></html>", date_bs="2082-01-05")
+        == []
+    )
 
 
 _DETAIL = """
@@ -130,7 +141,11 @@ def test_parse_detail_maps_core_extra_entities_hearings():
     assert enr.extra_data["category"] == "देवानी"
     # parties split on comma; sides tagged
     sides = sorted((e["side"], e["name"]) for e in enr.entities)
-    assert sides == [("defendant", "क"), ("defendant", "ख"), ("plaintiff", "नेपाल सरकार")]
+    assert sides == [
+        ("defendant", "क"),
+        ("defendant", "ख"),
+        ("plaintiff", "नेपाल सरकार"),
+    ]
     # hearing section → enrichment_hearings, which the write path turns into a verdict
     assert enr.extra_data["enrichment_hearings"][0]["decision_type"] == "सफाई"
     assert verdict_from_hearings(enr.extra_data["enrichment_hearings"]) == ACQUITTED

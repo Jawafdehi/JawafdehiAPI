@@ -1,4 +1,5 @@
 """DRF serializers for the NGM read plane."""
+
 from rest_framework import serializers
 
 from materials.jsonld import court_case_material_iri
@@ -34,11 +35,21 @@ class CourtCaseSerializer(serializers.ModelSerializer):
     class Meta:
         model = CourtCase
         fields = [
-            "case_number", "court_identifier", "registration_date_bs",
-            "registration_date_ad", "case_type", "case_status",
-            "plaintiff", "defendant", "nes_id", "document_sources",
-            "material_id", "courtcase_iri",
-            "verdict_type", "verdict_date_bs", "verdict_date_ad",
+            "case_number",
+            "court_identifier",
+            "registration_date_bs",
+            "registration_date_ad",
+            "case_type",
+            "case_status",
+            "plaintiff",
+            "defendant",
+            "nes_id",
+            "document_sources",
+            "material_id",
+            "courtcase_iri",
+            "verdict_type",
+            "verdict_date_bs",
+            "verdict_date_ad",
         ]
 
     def get_material_id(self, obj: CourtCase) -> str:
@@ -68,11 +79,21 @@ class CourtCaseHearingSerializer(serializers.ModelSerializer):
     class Meta:
         model = CourtCaseHearing
         fields = [
-            "id", "case_number", "court_identifier",
-            "hearing_date_bs", "hearing_date_ad",
-            "bench", "bench_type", "judge_names", "lawyer_names",
-            "serial_no", "case_status", "decision_type", "remarks",
-            "scraped_at", "extra_data",
+            "id",
+            "case_number",
+            "court_identifier",
+            "hearing_date_bs",
+            "hearing_date_ad",
+            "bench",
+            "bench_type",
+            "judge_names",
+            "lawyer_names",
+            "serial_no",
+            "case_status",
+            "decision_type",
+            "remarks",
+            "scraped_at",
+            "extra_data",
         ]
 
 
@@ -82,8 +103,13 @@ class CaseEntitySerializer(serializers.ModelSerializer):
     class Meta:
         model = CaseEntity
         fields = [
-            "id", "case_number", "court_identifier",
-            "side", "name", "address", "nes_id",
+            "id",
+            "case_number",
+            "court_identifier",
+            "side",
+            "name",
+            "address",
+            "nes_id",
         ]
 
 
@@ -109,10 +135,17 @@ class CourtCaseWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = CourtCase
         fields = [
-            "case_number", "court_identifier",
-            "registration_date_bs", "registration_date_ad",
-            "case_type", "case_status", "plaintiff", "defendant",
-            "nes_id", "extra_data", "document_sources",
+            "case_number",
+            "court_identifier",
+            "registration_date_bs",
+            "registration_date_ad",
+            "case_type",
+            "case_status",
+            "plaintiff",
+            "defendant",
+            "nes_id",
+            "extra_data",
+            "document_sources",
         ]
 
     def validate_nes_id(self, value):
@@ -126,10 +159,18 @@ class BlacklistedFirmSerializer(serializers.ModelSerializer):
     class Meta:
         model = BlacklistedFirm
         fields = [
-            "id", "firm_name", "proprietor_name", "address",
-            "blacklist_date_bs", "blacklist_date_ad",
-            "effective_until_bs", "effective_until_ad",
-            "duration", "reason", "recommending_office", "nes_id",
+            "id",
+            "firm_name",
+            "proprietor_name",
+            "address",
+            "blacklist_date_bs",
+            "blacklist_date_ad",
+            "effective_until_bs",
+            "effective_until_ad",
+            "duration",
+            "reason",
+            "recommending_office",
+            "nes_id",
         ]
 
 
@@ -151,9 +192,16 @@ class BlacklistedFirmWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = BlacklistedFirm
         fields = [
-            "firm_name", "proprietor_name", "address",
-            "blacklist_date_bs", "blacklist_date_ad",
-            "effective_until_bs", "effective_until_ad",
-            "duration", "reason", "recommending_office", "nes_id",
+            "firm_name",
+            "proprietor_name",
+            "address",
+            "blacklist_date_bs",
+            "blacklist_date_ad",
+            "effective_until_bs",
+            "effective_until_ad",
+            "duration",
+            "reason",
+            "recommending_office",
+            "nes_id",
         ]
         validators = []

@@ -72,15 +72,36 @@ _HC_CASE_STATUS_KEY = "raw_status_display"
 #: (the original projection + the 8 re-added columns; spec 01 §5). Excludes the
 #: composite key (court/case_number) and the auto timestamps.
 _COPY_CASE_FIELDS = (
-    "registration_date_bs", "registration_date_ad", "case_type", "case_status",
-    "plaintiff", "defendant", "status", "verdict_type", "verdict_date_bs",
-    "verdict_date_ad", "verdict_judge", "case_subject", "hearing_count",
-    "registration_number", "extra_data", "document_sources",
+    "registration_date_bs",
+    "registration_date_ad",
+    "case_type",
+    "case_status",
+    "plaintiff",
+    "defendant",
+    "status",
+    "verdict_type",
+    "verdict_date_bs",
+    "verdict_date_ad",
+    "verdict_judge",
+    "case_subject",
+    "hearing_count",
+    "registration_number",
+    "extra_data",
+    "document_sources",
 )
 _COPY_HEARING_FIELDS = (
-    "hearing_date_bs", "hearing_date_ad", "bench", "bench_type", "judge_names",
-    "lawyer_names", "serial_no", "case_status", "decision_type", "remarks",
-    "scraped_at", "extra_data",
+    "hearing_date_bs",
+    "hearing_date_ad",
+    "bench",
+    "bench_type",
+    "judge_names",
+    "lawyer_names",
+    "serial_no",
+    "case_status",
+    "decision_type",
+    "remarks",
+    "scraped_at",
+    "extra_data",
 )
 
 #: Decision markers that identify the DECISIVE sitting on a verdict date — when a
@@ -260,9 +281,24 @@ class CourtCaseImporter:
         # API).
         specs = [
             (post_save, CourtCase, "ngm_courtcase_search_index", s._index_courtcase),
-            (post_delete, CourtCase, "ngm_courtcase_search_delete", s._delete_courtcase),
-            (post_save, CaseEntity, "ngm_caseentity_reindex", s._reindex_on_party_change),
-            (post_delete, CaseEntity, "ngm_caseentity_reindex_del", s._reindex_on_party_change),
+            (
+                post_delete,
+                CourtCase,
+                "ngm_courtcase_search_delete",
+                s._delete_courtcase,
+            ),
+            (
+                post_save,
+                CaseEntity,
+                "ngm_caseentity_reindex",
+                s._reindex_on_party_change,
+            ),
+            (
+                post_delete,
+                CaseEntity,
+                "ngm_caseentity_reindex_del",
+                s._reindex_on_party_change,
+            ),
             (post_save, Material, "ngm_material_search_index", ms._index_material),
             (post_delete, Material, "ngm_material_search_delete", ms._delete_material),
         ]
@@ -311,9 +347,7 @@ class CourtCaseImporter:
             if last is not None:
                 lc, lk = last
                 qs = qs.filter(Q(court_id__gt=lc) | Q(court_id=lc, case_number__gt=lk))
-            batch = list(
-                qs.order_by("court_id", "case_number")[: self.cfg.batch_size]
-            )
+            batch = list(qs.order_by("court_id", "case_number")[: self.cfg.batch_size])
             if not batch:
                 return
             yield batch
@@ -338,7 +372,9 @@ class CourtCaseImporter:
         real copy path needs it; tests inject ``source_rows``).
         """
         if not self.cfg.source_dsn:
-            raise ValueError("--mode=copy requires --source-dsn (or injected source_rows)")
+            raise ValueError(
+                "--mode=copy requires --source-dsn (or injected source_rows)"
+            )
         try:
             import psycopg
             from psycopg.rows import dict_row
@@ -532,7 +568,8 @@ class CourtCaseImporter:
         ).delete()
         hearings = [
             CourtCaseHearing(
-                court_id=court_id, case_number=row["case_number"],
+                court_id=court_id,
+                case_number=row["case_number"],
                 **{f: h.get(f) for f in _COPY_HEARING_FIELDS if f in h},
             )
             for h in row.get("hearings") or []
@@ -542,8 +579,10 @@ class CourtCaseImporter:
         # nes_id is intentionally left NULL (not imported — see module docstring).
         entities = [
             CaseEntity(
-                court_id=court_id, case_number=row["case_number"],
-                side=e.get("side") or "", name=e.get("name") or "",
+                court_id=court_id,
+                case_number=row["case_number"],
+                side=e.get("side") or "",
+                name=e.get("name") or "",
                 address=e.get("address"),
             )
             for e in row.get("entities") or []
@@ -600,9 +639,15 @@ class CourtCaseImporter:
                 e.get("side") == "defendant" for e in (row.get("entities") or [])
             )
         else:
-            has_defendant = CaseEntity.objects.using("ngm").filter(
-                court_id=case.court_id, case_number=case.case_number, side="defendant"
-            ).exists()
+            has_defendant = (
+                CaseEntity.objects.using("ngm")
+                .filter(
+                    court_id=case.court_id,
+                    case_number=case.case_number,
+                    side="defendant",
+                )
+                .exists()
+            )
         if not has_defendant:
             return
         extra = dict(case.extra_data or {})
@@ -695,7 +740,8 @@ class CourtCaseImporter:
             return None
         if isinstance(row, dict):
             hearings = [
-                h for h in (row.get("hearings") or [])
+                h
+                for h in (row.get("hearings") or [])
                 if h.get("hearing_date_ad") == verdict_date
                 and (h.get("judge_names") or "").strip()
             ]

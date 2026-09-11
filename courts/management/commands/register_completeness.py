@@ -87,8 +87,9 @@ class Command(BaseCommand):
     help = "Report register completeness per court from held rows alone (no network)."
 
     def add_arguments(self, parser):
-        parser.add_argument("--court", default="all",
-                            help="special | district | high | supreme | all")
+        parser.add_argument(
+            "--court", default="all", help="special | district | high | supreme | all"
+        )
         parser.add_argument("--court-id", default=None, help="a single leaf court")
         parser.add_argument("--format", choices=["table", "json"], default="table")
 
@@ -108,7 +109,9 @@ class Command(BaseCommand):
         rows.sort(key=lambda r: -r["unknown"])
 
         if o["format"] == "json":
-            self.stdout.write(json.dumps({"courts": rows, "totals": _totals(rows)}, indent=2))
+            self.stdout.write(
+                json.dumps({"courts": rows, "totals": _totals(rows)}, indent=2)
+            )
             return
 
         self.stdout.write(
@@ -117,7 +120,11 @@ class Command(BaseCommand):
         )
         for r in rows:
             hit = "—" if r["hit_rate_pct"] is None else f"{r['hit_rate_pct']:.0f}"
-            seq = "—" if r["sequence_confidence_pct"] is None else f"{r['sequence_confidence_pct']:.0f}"
+            seq = (
+                "—"
+                if r["sequence_confidence_pct"] is None
+                else f"{r['sequence_confidence_pct']:.0f}"
+            )
             self.stdout.write(
                 f"{r['court']:<18}{r['held']:>10,}{r['unknown']:>10,}"
                 f"{r['never_issued']:>8,}{r['density_pct']:>9.2f}{hit:>7}{seq:>7}"

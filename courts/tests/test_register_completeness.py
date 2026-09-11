@@ -63,7 +63,9 @@ class RegisterCompletenessTests(TestCase):
         self._hold(1, 5)
         r = court_completeness("special")
         assert r["unknown"] == 3 and r["never_issued"] == 0
-        assert r["hit_rate_pct"] is None, "no evidence either way until something is probed"
+        assert r["hit_rate_pct"] is None, (
+            "no evidence either way until something is probed"
+        )
 
     def test_hit_rate_is_measured_not_assumed(self):
         # 2 slots recovered by sweeping, 1 confirmed never issued -> 67%.
@@ -86,8 +88,14 @@ class RegisterCompletenessTests(TestCase):
     def test_json_output_carries_totals(self):
         self._hold(1, 5)
         out = StringIO()
-        call_command("register_completeness", "--court-id", "special",
-                     "--format", "json", stdout=out)
+        call_command(
+            "register_completeness",
+            "--court-id",
+            "special",
+            "--format",
+            "json",
+            stdout=out,
+        )
         payload = json.loads(out.getvalue())
         assert payload["totals"]["unknown"] == 3
         assert payload["courts"][0]["court"] == "special"
@@ -102,7 +110,8 @@ class RegisterCompletenessTests(TestCase):
         """
         for seq, date_bs in [(1, "2076-04-01"), (2, "2076-04-05"), (5, "2076-05-01")]:
             CourtCase.objects.using("ngm").create(
-                court_id="special", case_number=f"076-CR-{seq:04d}",
+                court_id="special",
+                case_number=f"076-CR-{seq:04d}",
                 registration_date_bs=date_bs,
             )
         assert court_completeness("special")["sequence_confidence_pct"] == 100.0
@@ -110,10 +119,16 @@ class RegisterCompletenessTests(TestCase):
     def test_numbering_that_is_not_a_counter_scores_low(self):
         # Dates jumping around against the sequence = an opaque id, and the holes
         # it implies are fiction.
-        for seq, date_bs in [(1, "2076-09-01"), (2, "2076-04-01"), (3, "2076-12-01"),
-                             (4, "2076-05-01"), (5, "2076-01-01")]:
+        for seq, date_bs in [
+            (1, "2076-09-01"),
+            (2, "2076-04-01"),
+            (3, "2076-12-01"),
+            (4, "2076-05-01"),
+            (5, "2076-01-01"),
+        ]:
             CourtCase.objects.using("ngm").create(
-                court_id="special", case_number=f"076-CR-{seq:04d}",
+                court_id="special",
+                case_number=f"076-CR-{seq:04d}",
                 registration_date_bs=date_bs,
             )
         assert court_completeness("special")["sequence_confidence_pct"] < 60
@@ -128,4 +143,6 @@ class RegisterCompletenessTests(TestCase):
         call_command("register_completeness", "--court-id", "special", stdout=out)
         text = out.getvalue()
         assert "unknown holes" in text
-        assert "tail reads 100% dense" in text, "a caveat only in the docstring is a caveat nobody reads"
+        assert "tail reads 100% dense" in text, (
+            "a caveat only in the docstring is a caveat nobody reads"
+        )

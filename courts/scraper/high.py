@@ -82,9 +82,7 @@ def parse_bench_list(html: str) -> list[dict[str, str]]:
         # out of the middle of a cause-list parse.
         raw_onclick = row.get("onclick", "")
         onclick = (
-            raw_onclick
-            if isinstance(raw_onclick, str)
-            else " ".join(raw_onclick or [])
+            raw_onclick if isinstance(raw_onclick, str) else " ".join(raw_onclick or [])
         )
         match = _SEND_DATA_RE.search(onclick)
         if not match:

@@ -163,18 +163,30 @@ def names_a_sensitive_offence(case_type: str | None) -> bool:
 #
 # The words are ambiguous and must not be matched bare: the registers use them for
 # COMPANY renames too ("X को हाल परिवर्तित नाम Y"), and those sit on revenue and
-# corruption cases that are core scope. Excluding party names carrying a company
+# corruption cases that are core scope. Excluding parties that carry a company
 # marker separated the two cleanly across every marker-bearing case sampled from
-# the live index. Word order varies (नाम परिवर्तित, परिवर्तित संकेत नाम, नामथर).
-_ANONYMISED_PARTY_RE = re.compile(
-    r"परिवर्तित\s*(?:संकेत\s*)?नाम(?:थर)?|नाम(?:थर)?\s*परिवर्तित"
+# the live index.
+#
+# Both sides of that comparison are matched on the FOLDED form, exactly like the
+# case_type floor: a stray ZWJ, an extra space or a ब/व swap inside the pseudonym
+# must not be a way past a privacy gate. Word order varies, so the forms are
+# enumerated rather than expressed as a regex over unfolded text.
+_ANONYMISED_PARTY_TERMS = (
+    "परिवर्तित नाम",  # also covers परिवर्तित नामथर
+    "परिवर्तित संकेत नाम",
+    "नाम परिवर्तित",
+    "नामथर परिवर्तित",
 )
+_ANONYMISED_PARTY_FOLDED = tuple(fold_register_text(t) for t in _ANONYMISED_PARTY_TERMS)
+
+#: Folded, so they match the same way the pseudonym does. Bare "लि." is NOT here:
+#: folded to "लि" it is two characters and would match inside ordinary words.
 _COMPANY_MARKERS = (
     "प्रा.लि",
     "प्रा. लि",
     "प्रा.ली",
     "प्रालि",
-    "लि.",
+    "लिमिटेड",
     "कम्पनी",
     "इन्टरप्राइज",
     "उद्योग",
@@ -190,23 +202,35 @@ _COMPANY_MARKERS = (
     "सप्लायर्स",
     "मिल्स",
 )
+_COMPANY_MARKERS_FOLDED = tuple(fold_register_text(m) for m in _COMPANY_MARKERS)
+
+# A party cell describes SEVERAL parties, so the company exclusion has to be judged
+# per party. Judged per CELL it becomes a bypass: one renamed company anywhere in
+# the cell suppressed the check for an anonymised human named alongside it.
+# ``र`` ("and") needs an explicit non-Devanagari boundary — ``\b`` is meaningless
+# between Devanagari letters and would split inside ordinary words.
+_PARTY_SPLIT_RE = re.compile(r"[,;|/\n]+|(?<![ऀ-ॿ])र(?![ऀ-ॿ])")
 
 
 def has_anonymised_party(case: Any) -> bool:
     """True if the court anonymised a party — a protected complainant, not a rename.
 
     Reads the raw ``plaintiff`` / ``defendant`` cells (already loaded by every call
-    site's queryset, so this costs no extra query). A cell naming a renamed company
-    is not treated as anonymisation; a cell that mixes both is read as a rename,
-    which is the one direction this check is not conservative in.
+    site's queryset, so this costs no extra query), splits them into individual
+    parties, and asks the question of each one separately.
+
+    Where splitting is imperfect it errs toward hiding, which is the correct
+    direction for a privacy floor: a company rename wrongly split costs one search
+    result, a protected complainant wrongly kept costs them their anonymity.
     """
     for side in ("plaintiff", "defendant"):
-        value = getattr(case, side, None) or ""
-        if not _ANONYMISED_PARTY_RE.search(value):
-            continue
-        if any(marker in value for marker in _COMPANY_MARKERS):
-            continue
-        return True
+        for party in _PARTY_SPLIT_RE.split(getattr(case, side, None) or ""):
+            folded = fold_register_text(party)
+            if not any(term in folded for term in _ANONYMISED_PARTY_FOLDED):
+                continue
+            if any(marker in folded for marker in _COMPANY_MARKERS_FOLDED):
+                continue
+            return True
     return False
 
 
