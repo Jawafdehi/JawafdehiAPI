@@ -32,6 +32,24 @@ def _accused(case, outcome, name="one"):
     )
 
 
+def _ungraded_accused(case, name):
+    """An ACCUSED bind whose ``outcome`` is really NULL.
+
+    ``bulk_create`` skips ``save()``, which is the only thing that would
+    normalize it to CHARGED -- the same path a legacy row took.
+    """
+    return CaseEntityRelationship.objects.bulk_create(
+        [
+            CaseEntityRelationship(
+                case=case,
+                nes_id=f"https://jawafdehi.org/entity/person/{name}",
+                relationship_type=RelationshipType.ACCUSED,
+                outcome=None,
+            )
+        ]
+    )[0]
+
+
 @pytest.mark.django_db
 def test_rule_1_an_override_wins_over_everything():
     case = _case(
@@ -91,6 +109,38 @@ def test_rule_4_a_charged_defendant_blocks_concluded():
     _accused(case, RelationshipOutcome.ACQUITTED, "a")
     _accused(case, RelationshipOutcome.CHARGED, "b")
     assert case.status != CaseStatus.CONCLUDED
+
+
+@pytest.mark.django_db
+def test_a_null_outcome_on_an_accused_bind_blocks_concluded():
+    """A partly-graded roster is not a decided case.
+
+    ``save()`` normalizes a missing outcome to CHARGED, so this shape does not
+    arrive through the ORM -- but the ``outcome_only_on_accused`` CHECK
+    constraint permits it (it only forbids an outcome on a NON-accused bind),
+    so a bulk write or a row predating that normalization can hold it. Reading
+    CONCLUDED off the graded subset would badge the public card "Resolved"
+    over named people with no recorded verdict.
+    """
+    case = _case(
+        dates={"stages": [{"stage": "initial", "start": "2024-02-25", "end": "2025-08-13"}]}
+    )
+    _accused(case, RelationshipOutcome.CONVICTED, "graded")
+    _ungraded_accused(case, "ungraded")
+
+    assert case.status != CaseStatus.CONCLUDED
+
+
+@pytest.mark.django_db
+def test_a_null_outcome_does_not_make_a_case_ongoing_either():
+    """It is not decided, but nothing says a court is still sitting."""
+    case = _case(
+        dates={"stages": [{"stage": "initial", "start": "2024-02-25", "end": "2025-08-13"}]}
+    )
+    _accused(case, RelationshipOutcome.CONVICTED, "graded")
+    _ungraded_accused(case, "ungraded")
+
+    assert case.status == CaseStatus.OTHERS
 
 
 @pytest.mark.django_db

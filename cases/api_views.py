@@ -1450,8 +1450,13 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # record inside a list, and RFC-6902 replace on a path that does
             # not exist is an error -- so they are TRANSFORMED onto the
             # first-instance stage here rather than rewritten as paths.
-            # The columns are still written alongside, so a rollback to the
-            # previous release does not lose the edit.
+            # The columns are still written alongside FOR THOSE TWO PATHS, so
+            # a rollback to the previous release does not lose an edit that
+            # arrived on /case_start_date or /case_end_date. An edit that
+            # arrives on /dates -- which is what the new admin sends for
+            # everything -- never touches the columns, so after a rollback the
+            # old release would serve a stale case_start_date. Not data loss;
+            # the stage list is still the record.
             stage_document = validated.get("dates") or {"stages": []}
             stages = list(stage_document.get("stages") or [])
             for path, key in (("/case_start_date", "start"), ("/case_end_date", "end")):
@@ -1471,8 +1476,22 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # Re-validate WITH the case's binds. The serializer validates a
             # document and cannot see the case, so the courtcase_iri rule can
             # only be enforced here -- and this path never reaches save().
+            #
+            # The binds are the ones this patch ASKS FOR, not the ones on the
+            # row: the admin sends /court_cases and /dates in one ops array,
+            # and _sync_courtcase_references does not run until below. Reading
+            # the pre-patch join would 422 a caseworker who adds a docket and
+            # a stage citing it together -- and, worse, would let an unbind
+            # through while a stage still cites the removed docket, leaving a
+            # case that saves here and then raises on its next state
+            # transition.
+            desired_binds = (
+                validated.get("court_cases") or []
+                if court_cases_touched
+                else case.court_cases
+            )
             try:
-                validate_stages(stages, binds=case.court_cases)
+                validate_stages(stages, binds=desired_binds)
             except StageError as exc:
                 transaction.set_rollback(True)
                 return Response(

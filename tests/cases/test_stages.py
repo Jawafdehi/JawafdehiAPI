@@ -108,6 +108,19 @@ def test_notes_are_capped():
     assert validate_stages([{"stage": "appeal", "notes": "मिसिल जलेको"}])
 
 
+def test_the_forum_and_the_other_label_are_capped_too():
+    """Both are public and both live in a JSONField, which bounds nothing."""
+    with pytest.raises(StageError):
+        validate_stages([{"stage": "investigation", "body": "अ" * 201}])
+    with pytest.raises(StageError):
+        validate_stages([{"stage": "other", "label": "x" * 201}])
+
+    assert validate_stages(
+        [{"stage": "investigation", "body": "अख्तियार दुरुपयोग अनुसन्धान आयोग"}]
+    )
+    assert validate_stages([{"stage": "other", "label": "राजस्व न्यायाधिकरण"}])
+
+
 def test_the_list_itself_must_be_a_list_of_objects():
     with pytest.raises(StageError):
         validate_stages({"stage": "initial"})

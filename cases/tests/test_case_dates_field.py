@@ -7,6 +7,8 @@ from django.core.exceptions import ValidationError
 
 from cases.models import Case, CaseState, CaseType
 
+IRI_SPECIAL = "https://jawafdehi.org/courtcase/special/080-cr-0111"
+
 
 def _case(**kwargs) -> Case:
     defaults = dict(
@@ -103,6 +105,31 @@ def test_a_stage_iri_must_be_one_of_the_case_binds():
 
     with pytest.raises(ValidationError):
         case.save()
+
+
+def test_an_unbound_case_rejects_an_iri_when_the_binds_are_passed():
+    """An empty bind LIST still rejects: the caller has the case in hand."""
+    from cases.stages import StageError, validate_stages
+
+    with pytest.raises(StageError):
+        validate_stages(
+            [{"stage": "initial", "courtcase_iri": IRI_SPECIAL}], binds=[]
+        )
+
+
+def test_no_binds_argument_means_the_iri_rule_is_not_checked():
+    """The serializer validates a DOCUMENT and cannot see the case.
+
+    Collapsing "no case in hand" into "no binds" made every PATCH carrying a
+    stage with a ``courtcase_iri`` 422 before the view's own bind check ever
+    ran -- i.e. the admin could not save a stage against any court case at
+    all.
+    """
+    from cases.stages import validate_stages
+
+    stages = [{"stage": "initial", "courtcase_iri": IRI_SPECIAL}]
+
+    assert validate_stages(stages) == stages
 
 
 # ── what the deprecated columns actually hold ────────────────────────────────

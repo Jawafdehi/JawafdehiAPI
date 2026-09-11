@@ -257,6 +257,28 @@ class CaseSerializer(serializers.ModelSerializer):
     case_start_date = serializers.SerializerMethodField()
     case_end_date = serializers.SerializerMethodField()
 
+    # The stage list and everything derived from it. Read-only here -- writes
+    # go through ``CasePatchSerializer``/``CaseCreateSerializer``, which
+    # validate the records; this serializer only ever echoes them back.
+    #
+    # These are PUBLIC because the case page renders them: one row per stage
+    # (the deprecated pair above cannot describe a case that runs several
+    # dockets across several courts), and the lifecycle chip, which no client
+    # can derive -- with no single end date there is nothing to read it off.
+    dates = serializers.JSONField(read_only=True)
+    status = serializers.CharField(
+        read_only=True,
+        help_text="Derived proceeding lifecycle (ongoing / under_investigation "
+        "/ concluded / others, or a withdrawn/dormant override). NOT ``state``, "
+        "which is our editorial workflow.",
+    )
+    case_track = serializers.CharField(read_only=True, allow_null=True)
+    # Returned so the editor can render (and round-trip) the current override
+    # rather than guess it back out of the derived ``status``.
+    status_override = serializers.CharField(read_only=True, allow_null=True)
+    proceedings_started_on = serializers.DateField(read_only=True, allow_null=True)
+    proceedings_decided_on = serializers.DateField(read_only=True, allow_null=True)
+
     def get_case_start_date(self, obj):
         return first_instance_dates((obj.dates or {}).get("stages") or [])[0]
 
@@ -515,6 +537,13 @@ class CaseSerializer(serializers.ModelSerializer):
             "banner_url",
             "case_start_date",
             "case_end_date",
+            # The stage list itself, and the three values derived from it.
+            "dates",
+            "status",
+            "case_track",
+            "status_override",
+            "proceedings_started_on",
+            "proceedings_decided_on",
             "entities",
             "tags",
             "description",

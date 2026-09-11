@@ -1546,12 +1546,20 @@ class Case(models.Model):
         if open_court:
             return CaseStatus.ONGOING
 
+        # ``.all()`` then filter in Python, NOT ``.filter()``: the case list
+        # prefetches ``entity_relationships``, and a queryset filter ignores
+        # that cache and issues a fresh query -- one per card.
+        #
+        # The WHOLE accused roster, ungraded binds included. A NULL outcome is
+        # not terminal, so it blocks CONCLUDED: reading the rule off only the
+        # graded subset would badge a case "Resolved" over named people with
+        # no recorded verdict. ``save()`` normalizes a missing outcome to
+        # CHARGED, but the CHECK constraint permits NULL on an accused bind,
+        # so bulk writes and legacy rows can still hold one.
         outcomes = [
             bind.outcome
-            for bind in self.entity_relationships.filter(
-                relationship_type=RelationshipType.ACCUSED
-            )
-            if bind.outcome
+            for bind in self.entity_relationships.all()
+            if bind.relationship_type == RelationshipType.ACCUSED
         ]
         if RelationshipOutcome.REMANDED in outcomes:
             return CaseStatus.ONGOING

@@ -398,15 +398,18 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         required=False, allow_blank=True, max_length=500
     )
     banner_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
-    # DEPRECATED. Kept writable so the deployed SPA admin's PATCH still
-    # validates; the view transforms them onto the first-instance stage rather
-    # than writing the columns. Drop with the read aliases.
+    # New columns, written as columns. ``case_track`` is the route into court;
+    # ``status_override`` is the only way to record the two lifecycles no
+    # stage list can express (withdrawn, dormant).
     case_track = serializers.ChoiceField(
         choices=CaseTrack.choices, required=False, allow_null=True
     )
     status_override = serializers.ChoiceField(
         choices=StatusOverride.choices, required=False, allow_null=True
     )
+    # DEPRECATED. Kept writable so the deployed SPA admin's PATCH still
+    # validates; the view transforms these two onto the first-instance stage
+    # rather than writing the columns. Drop with the read aliases.
     case_start_date = serializers.DateField(required=False, allow_null=True)
     case_end_date = serializers.DateField(required=False, allow_null=True)
     dates = serializers.JSONField(required=False)

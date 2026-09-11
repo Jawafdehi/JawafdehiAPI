@@ -40,6 +40,14 @@ _ALLOWED_KEYS = frozenset(
 
 NOTES_MAX_CHARS = 500
 
+#: ``body`` names an investigating or arbitrating forum and ``label`` names an
+#: ``other`` stage; both are PUBLIC (they render beside the dates) and both
+#: live inside a JSONField, which has no length of its own. Bounded for the
+#: same reason ``notes`` is -- an unbounded public string in a JSON column is
+#: how the free-text ``tags`` field drifted to 144 distinct values.
+BODY_MAX_CHARS = 200
+LABEL_MAX_CHARS = 200
+
 
 class StageError(ValueError):
     """A stage list the writer must fix. Surfaces as 422, never dropped."""
@@ -71,10 +79,19 @@ def validate_stages(
     ordering rule: after a remand the new first instance starts *after* the
     appeal ended, and a case with parallel first instances is not linearly
     orderable at all, so any global ordering rule fires on correct data.
+
+    ``binds`` distinguishes three states, and the difference is load-bearing:
+    ``None`` means the caller has no case in hand and the ``courtcase_iri``
+    rule is NOT checked (the serializer validates a document, not a case);
+    a list -- including an EMPTY one -- means it is checked against exactly
+    that set, so a case with no binds rejects every IRI. Collapsing ``None``
+    into ``[]`` made the serializer reject every stage that cites a court
+    case, whatever the case was actually bound to.
     """
     if not isinstance(stages, list):
         raise StageError("stages must be a list of stage records")
 
+    check_binds = binds is not None
     bind_set = set(binds or ())
     validated: list[dict[str, Any]] = []
 
@@ -117,20 +134,27 @@ def validate_stages(
             )
 
         iri = record.get("courtcase_iri")
-        # No truthiness guard on ``bind_set``: a case with no binds has nothing
-        # a stage could legitimately point at, so an IRI there is still wrong.
-        if iri and iri not in bind_set:
+        # No truthiness guard on ``bind_set``: once the caller HAS passed a
+        # list, a case with no binds has nothing a stage could legitimately
+        # point at, so an IRI there is still wrong. ``check_binds`` is what
+        # separates that from "the caller cannot see the case at all".
+        if iri and check_binds and iri not in bind_set:
             raise StageError(
                 f"stages[{index}].courtcase_iri: {iri} is not one of this "
                 "case's court_cases"
             )
 
-        notes = record.get("notes")
-        if notes is not None and len(str(notes)) > NOTES_MAX_CHARS:
-            raise StageError(
-                f"stages[{index}].notes: {len(str(notes))} characters, "
-                f"maximum {NOTES_MAX_CHARS}"
-            )
+        for field, cap in (
+            ("notes", NOTES_MAX_CHARS),
+            ("body", BODY_MAX_CHARS),
+            ("label", LABEL_MAX_CHARS),
+        ):
+            text = record.get(field)
+            if text is not None and len(str(text)) > cap:
+                raise StageError(
+                    f"stages[{index}].{field}: {len(str(text))} characters, "
+                    f"maximum {cap}"
+                )
 
         validated.append(record)
 

@@ -187,13 +187,19 @@ def test_a_case_without_a_docket_gets_no_iri(old_apps):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_backwards_row_migrates_unchanged_and_keeps_its_missing_details(old_apps):
-    """The verdict-before-registration rows keep both dates verbatim.
+def test_a_backwards_row_keeps_its_start_and_drops_only_the_bad_end(old_apps):
+    """The stage a backwards row migrates to has to be one the model accepts.
 
-    Nulling or swapping them would destroy the only evidence a date was ever
-    entered. The defect is reported in the migration's own output, never in
-    ``missing_details``: that field is served by the public CaseSerializer and
-    holds Nepali, reader-facing lists of documents the case still lacks.
+    ``Case.save()`` validates the stage list unconditionally, and
+    ``validate_stages`` refuses ``end`` before ``start`` -- so writing the pair
+    verbatim would leave the row un-savable, and every state transition
+    (submit/publish/soft-delete) would 422 on a field the caseworker never
+    touched.
+
+    The evidence is not destroyed: the legacy ``case_end_date`` column is
+    untouched, and the row is named in the printed summary. The defect is
+    never written to ``missing_details``, which the public CaseSerializer
+    serves and which holds Nepali, reader-facing prose.
     """
     reader_note = "क) प्रतिवादीहरूले अदालतमा गरेको बयानको ब्याहोरा"
     case = _case(
@@ -207,11 +213,35 @@ def test_a_backwards_row_migrates_unchanged_and_keeps_its_missing_details(old_ap
     migrated = _reload(_migrate(MIGRATE_TO), case.pk)
 
     assert migrated.dates == {
-        "stages": [{"stage": "initial", "start": "2023-05-20", "end": "2022-02-02"}]
+        "stages": [{"stage": "initial", "start": "2023-05-20"}]
     }
     assert migrated.case_start_date == date(2023, 5, 20)
     assert migrated.case_end_date == date(2022, 2, 2)
     assert migrated.missing_details == reader_note
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_backwards_row_is_savable_through_the_real_model(old_apps):
+    """The point of the rule above, asserted against the live model.
+
+    Without it a caseworker gets ``stages[0].end: ... is before the stage
+    start`` on a publish that never mentioned dates.
+    """
+    case = _case(
+        old_apps,
+        "backwards-savable",
+        case_start_date=date(2023, 5, 20),
+        case_end_date=date(2022, 2, 2),
+    )
+    _migrate(MIGRATE_TO)
+
+    from cases.models import Case as LiveCase
+
+    live = LiveCase.objects.get(pk=case.pk)
+    live.save()  # must not raise
+
+    live.refresh_from_db()
+    assert live.dates == {"stages": [{"stage": "initial", "start": "2023-05-20"}]}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -228,7 +258,7 @@ def test_a_backwards_row_is_named_in_the_summary(old_apps, capsys):
     _migrate(MIGRATE_TO)
 
     out = capsys.readouterr().out
-    assert "migrated UNCHANGED" in out
+    assert "hold a decision date before" in out
     assert f"pk={case.pk} slug=backwards-named docket={IRI_SPECIAL}" in out
 
 
@@ -244,7 +274,7 @@ def test_an_ordered_row_is_not_named_in_the_summary(old_apps, capsys):
     migrated = _reload(_migrate(MIGRATE_TO), case.pk)
 
     out = capsys.readouterr().out
-    assert "migrated UNCHANGED" not in out
+    assert "hold a decision date before" not in out
     assert f"pk={case.pk}" not in out
     assert not (migrated.missing_details or "")
 
@@ -279,7 +309,7 @@ def test_equal_dates_are_not_out_of_order(old_apps, capsys):
 
     migrated = _reload(_migrate(MIGRATE_TO), case.pk)
 
-    assert "migrated UNCHANGED" not in capsys.readouterr().out
+    assert "hold a decision date before" not in capsys.readouterr().out
     assert migrated.proceedings_decided_on == date(2021, 4, 12)
 
 
@@ -329,7 +359,7 @@ def test_the_summary_is_printed(old_apps, capsys):
         "[0068] 3 case(s) given an initial stage; 1 cite a court case; "
         "0 already had stages" in out
     )
-    assert "1 row(s)" in out and "migrated UNCHANGED" in out
+    assert "1 row(s)" in out and "hold a decision date before" in out
 
 
 @pytest.mark.django_db(transaction=True)
@@ -349,6 +379,36 @@ def test_the_reverse_clears_the_new_columns_and_keeps_the_legacy_ones(old_apps):
     assert reverted.proceedings_decided_on is None
     assert reverted.case_start_date == date(2021, 4, 12)
     assert reverted.case_end_date == date(2023, 11, 30)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_reverse_keeps_a_hand_entered_stage_list(old_apps):
+    """The rows the forward pass left alone are not the reverse's to delete.
+
+    A caseworker's appeal stage has no other copy anywhere; an unfiltered
+    reverse would drop it on a rollback that was only meant to undo a
+    backfill.
+    """
+    hand_edited = {
+        "stages": [
+            {"stage": "initial", "start": "2021-04-12", "end": "2023-11-30"},
+            {"stage": "appeal", "start": "2024-01-15"},
+        ]
+    }
+    kept = _case(
+        old_apps,
+        "hand-edited",
+        case_start_date=date(2021, 4, 12),
+        case_end_date=date(2023, 11, 30),
+        dates=hand_edited,
+    )
+    backfilled = _case(old_apps, "backfilled", case_start_date=date(2022, 2, 2))
+    _migrate(MIGRATE_TO)
+
+    reverted_apps = _migrate(MIGRATE_FROM)
+
+    assert _reload(reverted_apps, kept.pk).dates == hand_edited
+    assert _reload(reverted_apps, backfilled.pk).dates == {"stages": []}
 
 
 @pytest.mark.django_db(transaction=True)

@@ -8,14 +8,19 @@
 #    ``end`` reads as an open court proceeding, so seeding one from a bare
 #    docket would flip the derived status of every dateless draft to ONGOING on
 #    no evidence.
-# 2. Rows whose decision date precedes their registration date migrate
-#    UNCHANGED. Nulling or swapping the pair would destroy the only evidence
-#    a date was ever entered, and the correction needs the court order, which
-#    this migration cannot read. ``derived_proceeding_dates`` is total
-#    precisely so such a row still sorts and still renders. They are NAMED in
-#    the printed summary, never written to the case: every text field on Case
-#    -- ``missing_details`` and ``notes`` included -- is served by the public
-#    serializer, and both hold Nepali prose written for readers.
+# 2. Rows whose decision date precedes their registration date keep the
+#    registration date and DROP the impossible decision date from the stage.
+#    Writing the pair verbatim would produce a record ``validate_stages``
+#    refuses, and ``Case.save()`` validates unconditionally -- so submit,
+#    publish and the soft-delete would all 422 on a field the caseworker never
+#    touched, while the scalar-edit path (``queryset.update()``) kept working.
+#    No evidence is destroyed: ``case_end_date`` is not touched by this
+#    migration or by anything after it, so the entered date is still on the
+#    row, and the correction needs the court order, which this migration
+#    cannot read. Those rows are NAMED in the printed summary, never written
+#    to the case: every text field on Case -- ``missing_details`` and
+#    ``notes`` included -- is served by the public serializer, and both hold
+#    Nepali prose written for readers.
 # 3. One stage per case regardless of how many dockets it cites. The
 #    multi-docket cases (one published case cites 12 across 8 courts) are a
 #    per-case human decision, not a rule in a script.
@@ -58,6 +63,28 @@ def _primary_iris(Reference, db):
     return primary
 
 
+def _legacy_stage(case, iri):
+    """The ONE stage record this migration derives from a row's legacy pair.
+
+    Shared with the reverse, which uses it to recognise its own work: a row
+    whose stage list is exactly this is one the forward pass wrote, and a row
+    whose list is anything else was edited by hand and must survive.
+    """
+    stage = {"stage": STAGE_INITIAL}
+    if case.case_start_date:
+        stage["start"] = case.case_start_date.isoformat()
+    # Decision #2: an end before the start is a record the model refuses, so
+    # it is left off the stage rather than written and then hit on the next
+    # save. The column keeps it.
+    if case.case_end_date and not (
+        case.case_start_date and case.case_end_date < case.case_start_date
+    ):
+        stage["end"] = case.case_end_date.isoformat()
+    if iri:
+        stage["courtcase_iri"] = iri
+    return stage
+
+
 def populate_stages(apps, schema_editor):
     Case = apps.get_model("cases", "Case")
     Reference = apps.get_model("cases", "CaseCourtCaseReference")
@@ -97,15 +124,8 @@ def populate_stages(apps, schema_editor):
             # (`Case.objects.filter().update()`) is known to leave stale.
             kept += 1
         else:
-            stage = {"stage": STAGE_INITIAL}
-            if case.case_start_date:
-                stage["start"] = case.case_start_date.isoformat()
-            if case.case_end_date:
-                stage["end"] = case.case_end_date.isoformat()
-
-            iri = primary_iri.get(case.pk)
-            if iri:
-                stage["courtcase_iri"] = iri
+            stage = _legacy_stage(case, primary_iri.get(case.pk))
+            if "courtcase_iri" in stage:
                 with_iri += 1
 
             stages = [stage]
@@ -132,7 +152,8 @@ def populate_stages(apps, schema_editor):
     if backwards:
         print(
             f"  [0068] {len(backwards)} row(s) hold a decision date before "
-            "the registration date and migrated UNCHANGED:"
+            "the registration date; the stage keeps the registration date "
+            "only, and case_end_date still holds the entered value:"
         )
         for line in backwards[:SUMMARY_LIST_CAP]:
             print(f"  [0068]   {line}")
@@ -141,19 +162,51 @@ def populate_stages(apps, schema_editor):
 
 
 def clear_stages(apps, schema_editor):
-    """Drop back to an empty stage document on every case.
+    """Drop back to an empty stage document -- on the rows THIS wrote, only.
 
-    Only the three columns this migration wrote. ``case_start_date`` /
-    ``case_end_date`` are never touched going forward, so there is nothing to
-    restore.
+    An unfiltered update would delete stage lists the forward pass
+    deliberately left alone: the appeal a caseworker entered by hand, the
+    second first instance on a remanded case. Those are not this migration's
+    to remove, and nothing else would bring them back.
+
+    A row is recognised as this migration's work when its stage list is
+    exactly the one record ``_legacy_stage`` derives from that row's legacy
+    columns. Anything else -- an added stage, an edited date, a note -- is a
+    human edit and is left intact.
+
+    ``case_start_date`` / ``case_end_date`` are never touched going forward,
+    so there is nothing to restore.
     """
     Case = apps.get_model("cases", "Case")
+    Reference = apps.get_model("cases", "CaseCourtCaseReference")
     db = schema_editor.connection.alias
-    Case.objects.using(db).update(
-        dates={"stages": []},
-        proceedings_started_on=None,
-        proceedings_decided_on=None,
+    primary_iri = _primary_iris(Reference, db)
+
+    batch = []
+    kept = 0
+    rows = (
+        Case.objects.using(db)
+        .exclude(dates={"stages": []})
+        .only("pk", "case_start_date", "case_end_date", "dates")
+        .order_by("pk")
     )
+    for case in rows.iterator(chunk_size=BATCH_SIZE):
+        stored = case.dates if isinstance(case.dates, dict) else {}
+        if (stored.get("stages") or []) != [_legacy_stage(case, primary_iri.get(case.pk))]:
+            kept += 1
+            continue
+        case.dates = {"stages": []}
+        case.proceedings_started_on = None
+        case.proceedings_decided_on = None
+        batch.append(case)
+        if len(batch) >= BATCH_SIZE:
+            Case.objects.using(db).bulk_update(batch, UPDATED_FIELDS)
+            batch = []
+    if batch:
+        Case.objects.using(db).bulk_update(batch, UPDATED_FIELDS)
+
+    if kept:
+        print(f"  [0068] reverse kept {kept} hand-edited stage list(s)")
 
 
 class Migration(migrations.Migration):

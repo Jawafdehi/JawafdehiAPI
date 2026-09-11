@@ -313,6 +313,87 @@ def test_a_start_that_precedes_an_existing_end_is_validated_after_both_apply():
         {"stage": "initial", "start": "2023-06-22", "end": "2024-06-04"}]
 
 
+# ── the court-case bind and the stage citing it, in one PATCH ────────────────
+
+SPECIAL_IRI = "https://jawafdehi.org/courtcase/special/081-cr-0060"
+SUPREME_IRI = "https://jawafdehi.org/courtcase/supreme/081-ns-1234"
+
+
+@pytest.mark.django_db
+def test_a_bind_and_a_stage_citing_it_save_together():
+    """The admin sends /court_cases and /dates in ONE ops array.
+
+    Validating the stage against the binds as they stand BEFORE the patch
+    rejects the save with "... is not one of this case's court_cases",
+    naming an IRI that is in the very patch the caseworker just sent.
+    """
+    case = _case()
+
+    response = _patch(case, [
+        {"op": "replace", "path": "/court_cases", "value": [SPECIAL_IRI]},
+        {"op": "replace", "path": "/dates", "value": {"stages": [
+            {"stage": "initial", "start": "2022-01-10",
+             "courtcase_iri": SPECIAL_IRI},
+        ]}},
+    ])
+
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.court_cases == [SPECIAL_IRI]
+    assert case.dates["stages"][0]["courtcase_iri"] == SPECIAL_IRI
+
+
+@pytest.mark.django_db
+def test_unbinding_a_court_case_a_stage_still_cites_is_refused():
+    """The reverse, which is the worse half.
+
+    Validating against the OLD binds lets the unbind through, the join is
+    rewritten, and the case keeps a stage pointing at a docket it no longer
+    holds. Nothing fails until the next ``save()`` -- i.e. the next state
+    transition -- so the case becomes unpublishable at a point that says
+    nothing about what caused it.
+    """
+    case = _case()
+    _patch(case, [
+        {"op": "replace", "path": "/court_cases", "value": [SPECIAL_IRI]},
+        {"op": "replace", "path": "/dates", "value": {"stages": [
+            {"stage": "initial", "start": "2022-01-10",
+             "courtcase_iri": SPECIAL_IRI},
+        ]}},
+    ])
+
+    response = _patch(case, [
+        {"op": "replace", "path": "/court_cases", "value": [SUPREME_IRI]},
+    ])
+
+    assert response.status_code == 422, response.data
+    assert "dates" in response.data
+    case.refresh_from_db()
+    assert case.court_cases == [SPECIAL_IRI], "the unbind must not have applied"
+
+
+@pytest.mark.django_db
+def test_unbinding_a_court_case_no_stage_cites_still_works():
+    """The guard must not block an ordinary unbind."""
+    case = _case()
+    _patch(case, [
+        {"op": "replace", "path": "/court_cases",
+         "value": [SPECIAL_IRI, SUPREME_IRI]},
+        {"op": "replace", "path": "/dates", "value": {"stages": [
+            {"stage": "initial", "start": "2022-01-10",
+             "courtcase_iri": SPECIAL_IRI},
+        ]}},
+    ])
+
+    response = _patch(case, [
+        {"op": "replace", "path": "/court_cases", "value": [SPECIAL_IRI]},
+    ])
+
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.court_cases == [SPECIAL_IRI]
+
+
 # ── create ───────────────────────────────────────────────────────────────────
 
 
