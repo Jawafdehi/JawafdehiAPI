@@ -8,7 +8,7 @@ corruption / public-accountability slice, NOT a docket mirror. The call sites
 ``court_case_public_visible(case)`` — a hidden case is simply absent from
 ``ngm-courtcases``, mirroring the ``materials`` LISTED gate (``reindex_materials``).
 
-Decision (2026-07-21). A court case is SHOWN iff — and a SENSITIVE type is NEVER
+Decision (2026-07-21). A court case is SHOWN iff — and a SENSITIVE case is NEVER
 shown, overriding everything below:
 
 1. its canonical case-type code is a financial-crime / accountability code
@@ -20,9 +20,17 @@ shown, overriding everything below:
 A ``case_type`` absent from the map is *unknown*: rule 1 fails (fail-closed on the
 code axis), but forum / publish-link can still surface it.
 
+The sensitive floor has THREE independent inputs, any one of which hides the case:
+the canonical code (``SENSITIVE_CODES``), the raw ``case_type`` TEXT
+(``names_a_sensitive_offence``), and the court's own anonymisation of a party
+(``has_anonymised_party``). The text and party checks exist because the code axis
+alone provably failed — see their sections below.
+
 The raw ``case_type`` → canonical code map lives in
 ``data/case_type_codes.json.gz`` (built offline; REGENERATE it if the importer's
 ``normalize_case_type`` changes, since the map is keyed on the stored value).
+There is no generator in the tree and no review path for its 130k classifications,
+so nothing here may depend on the map being right about a protected offence.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +77,138 @@ PROCEDURAL_CODES = frozenset(
         "UNCATEGORIZED",
     }
 )
+
+# ── sensitive floor, axis 2: the raw case_type TEXT ───────────────────────────
+# ``case_type`` is free text that frequently names SEVERAL offences at once, and
+# the map assigns exactly ONE code per string — in practice the lead offence. So a
+# composite charging cheating + kidnapping + rape codes as FRAUD_CHEATING, which is
+# in SHOW_CODES: rule 1 fired and the SENSITIVE_CODES floor was never reached,
+# because the protected charge had never become the code. Every composite of that
+# shape in the corpus was publicly searchable, and the floor above could not have
+# caught any of them.
+#
+# The floor therefore also runs over the raw string: a protected offence named
+# ANYWHERE in a composite hides the case, whatever it was coded as. Fail-closed on
+# purpose — a wrongly hidden corruption case costs us one search result, a wrongly
+# shown one costs a complainant their anonymity.
+#
+# Matching is spelling-insensitive because the registers are not consistent: the
+# same offence appears as जबरजस्ती/जवरजस्ती, मानव/मानब, बेचबिखन/बेचविखन,
+# बालविवाह/वालविवाह, and with or without internal spaces — sometimes several
+# spellings inside one composite. A literal substring list catches about half.
+_DEVANAGARI_ONLY = re.compile(r"[^ऀ-ॿ]+")
+# Register-level spelling variation, not linguistics: व/ब and ी/ि are interchanged
+# freely by data-entry, ण/न and ष/श less often. Folding them costs precision we do
+# not need and buys recall we do.
+_SPELLING_FOLD = str.maketrans({"व": "ब", "ी": "ि", "ू": "ु", "ण": "न", "ष": "श"})
+
+
+def fold_register_text(text: str | None) -> str:
+    """Fold a register string to the spelling-insensitive form used for matching.
+
+    NFC-normalises (vowel signs arrive both composed and decomposed), drops ZWNJ /
+    ZWJ, strips everything that is not Devanagari — so spacing and punctuation
+    stop mattering — then applies ``_SPELLING_FOLD``.
+    """
+    folded = unicodedata.normalize("NFC", text or "")
+    folded = folded.replace("‌", "").replace("‍", "")
+    return _DEVANAGARI_ONLY.sub("", folded).translate(_SPELLING_FOLD)
+
+
+#: Offence names that hide a case outright, written in their ordinary spelling —
+#: ``fold_register_text`` handles the variants. Deliberately NOT included:
+#:
+#: - bare ``बेचबिखन`` ("sale/trade"), which is ordinary language for land and for
+#:   drugs — only the ``मानव बेचबिखन`` (human) form is an offence against a person;
+#: - bare ``जबरजस्ती`` ("by force"), which qualifies coerced cheque-signing and
+#:   forcible lockouts as often as it qualifies करणी.
+#:
+#: Both would hide legitimate accountability cases for nothing: ``करणी`` alone
+#: already carries every rape composite in the corpus.
+SENSITIVE_OFFENCE_TERMS = (
+    "करणी",  # जबरजस्ती करणी — rape, incl. the …को उद्योग (attempt) forms
+    "बलात्कार",
+    "यौन",  # यौन दुर्व्यवहार / यौन शोषण / बालयौन
+    "अप्राकृतिक मैथुन",
+    "मानव बेचबिखन",  # human trafficking
+    # The pre-2074 statutory name for trafficking. The map codes the bare form as
+    # HOMICIDE (मास्ने read as killing) and its व-spelling as OTHER_CRIMINAL, while
+    # coding eight LONGER phrasings of the same offence correctly — so the map is
+    # wrong on precisely the shortest and most common form. Those rows are out of
+    # the index today only because HOMICIDE happens to miss SHOW_CODES, which is
+    # the same accident that already failed once for Supreme 'फौजदारी'.
+    "जिउ मास्ने",
+    "चेलीबेटी",
+    "घरेलु हिंसा",
+    "सम्बन्ध विच्छेद",
+    "बालविवाह",
+    "बहुविवाह",
+)
+_SENSITIVE_FOLDED = tuple(fold_register_text(t) for t in SENSITIVE_OFFENCE_TERMS)
+
+
+def names_a_sensitive_offence(case_type: str | None) -> bool:
+    """True if the raw ``case_type`` names a protected offence anywhere in it."""
+    folded = fold_register_text(case_type)
+    return any(term in folded for term in _SENSITIVE_FOLDED)
+
+
+# ── sensitive floor, axis 3: the court's own anonymisation ────────────────────
+# Where a complainant is legally protected, the register replaces their name with a
+# pseudonym — "परिवर्तित नाम <locality> <code>". That is the COURT telling us the
+# category, directly, and it does not depend on the charge: most such rows are
+# recorded as plain ठगी or आपराधिक लाभ, which no case_type rule can catch. We were
+# publishing the defendant's name, district, date and offence around an
+# already-anonymised victim.
+#
+# The words are ambiguous and must not be matched bare: the registers use them for
+# COMPANY renames too ("X को हाल परिवर्तित नाम Y"), and those sit on revenue and
+# corruption cases that are core scope. Excluding party names carrying a company
+# marker separated the two cleanly across every marker-bearing case sampled from
+# the live index. Word order varies (नाम परिवर्तित, परिवर्तित संकेत नाम, नामथर).
+_ANONYMISED_PARTY_RE = re.compile(
+    r"परिवर्तित\s*(?:संकेत\s*)?नाम(?:थर)?|नाम(?:थर)?\s*परिवर्तित"
+)
+_COMPANY_MARKERS = (
+    "प्रा.लि",
+    "प्रा. लि",
+    "प्रा.ली",
+    "प्रालि",
+    "लि.",
+    "कम्पनी",
+    "इन्टरप्राइज",
+    "उद्योग",
+    "इण्डष्ट्रि",
+    "इन्डष्ट्रि",
+    "इनभेस्टमेन्ट",
+    "हायर पर्चेज",
+    "सोलुसन",
+    "बैंक",
+    "फाइनान्स",
+    "सहकारी",
+    "ट्रेडर्स",
+    "सप्लायर्स",
+    "मिल्स",
+)
+
+
+def has_anonymised_party(case: Any) -> bool:
+    """True if the court anonymised a party — a protected complainant, not a rename.
+
+    Reads the raw ``plaintiff`` / ``defendant`` cells (already loaded by every call
+    site's queryset, so this costs no extra query). A cell naming a renamed company
+    is not treated as anonymisation; a cell that mixes both is read as a rename,
+    which is the one direction this check is not conservative in.
+    """
+    for side in ("plaintiff", "defendant"):
+        value = getattr(case, side, None) or ""
+        if not _ANONYMISED_PARTY_RE.search(value):
+            continue
+        if any(marker in value for marker in _COMPANY_MARKERS):
+            continue
+        return True
+    return False
+
 
 _MAP_PATH = Path(__file__).resolve().parent / "data" / "case_type_codes.json.gz"
 # CIAA case-number series (NNN-CR-NNNN), e.g. ``081-CR-0081`` (mirrors cases/models).
@@ -176,7 +317,14 @@ def court_case_public_visible(case: Any) -> bool:
     """
     if getattr(case, "is_deleted", False):
         return False
-    code = case_type_code(getattr(case, "case_type", None))
+    case_type = getattr(case, "case_type", None)
+    # The sensitive floor, all three axes, BEFORE any show rule. The code axis is
+    # checked last of the three because it is the one that provably missed.
+    if names_a_sensitive_offence(case_type):
+        return False
+    if has_anonymised_party(case):
+        return False
+    code = case_type_code(case_type)
     if code in SENSITIVE_CODES:
         return False  # sensitive floor — overrides forum + publish-link
     if code in SHOW_CODES:

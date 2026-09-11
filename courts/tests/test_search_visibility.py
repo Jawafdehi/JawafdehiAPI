@@ -5,6 +5,7 @@ Pure-function tests over lightweight fake cases + the real committed
 patched in).
 """
 
+import unicodedata
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,8 @@ def _case(
     case_number="081-CI-0001",
     is_deleted=False,
     iri="https://jawafdehi.org/courtcase/patanhc/081-ci-0001",
+    plaintiff="नेपाल सरकार",
+    defendant="प्रतिवादी",
 ):
     return SimpleNamespace(
         case_type=case_type,
@@ -26,6 +29,8 @@ def _case(
         case_number=case_number,
         is_deleted=is_deleted,
         iri=iri,
+        plaintiff=plaintiff,
+        defendant=defendant,
     )
 
 
@@ -133,29 +138,240 @@ class TestCorruptionForumIsCourtScoped:
     """
 
     def test_supreme_homicide_is_not_in_the_corruption_forum(self):
-        case = _case(court_id="supreme", case_number="081-CR-1641",
-                     case_type="कर्तव्य ज्यान")
+        case = _case(
+            court_id="supreme", case_number="081-CR-1641", case_type="कर्तव्य ज्यान"
+        )
         assert sv.in_corruption_forum(case) is False
         assert sv.court_case_public_visible(case) is False
 
     def test_special_court_cr_still_is(self):
-        case = _case(court_id="special", case_number="076-CR-0294",
-                     case_type="नक्कली प्रमाण पत्र")
+        case = _case(
+            court_id="special", case_number="076-CR-0294", case_type="नक्कली प्रमाण पत्र"
+        )
         assert sv.in_corruption_forum(case) is True
 
     def test_a_supreme_corruption_appeal_is_still_shown(self):
         """The fix costs nothing: SHOW_CODES carries it on the code axis."""
-        case = _case(court_id="supreme", case_number="071-CR-0306",
-                     case_type="भ्रष्टाचार")
+        case = _case(
+            court_id="supreme", case_number="071-CR-0306", case_type="भ्रष्टाचार"
+        )
         assert sv.in_corruption_forum(case) is False
         assert sv.court_case_public_visible(case) is True
 
     def test_a_district_criminal_docket_is_not_a_corruption_forum(self):
-        case = _case(court_id="kathmandudc", case_number="080-CR-0012",
-                     case_type="कर्तव्य ज्यान")
+        case = _case(
+            court_id="kathmandudc", case_number="080-CR-0012", case_type="कर्तव्य ज्यान"
+        )
         assert sv.court_case_public_visible(case) is False
 
     def test_the_sensitive_floor_is_unaffected(self):
-        case = _case(court_id="special", case_number="076-CR-0294",
-                     case_type="जवरजस्ती करणी")
+        case = _case(
+            court_id="special", case_number="076-CR-0294", case_type="जवरजस्ती करणी"
+        )
         assert sv.court_case_public_visible(case) is False
+
+
+class TestCompositeChargesReachTheSensitiveFloor:
+    """A composite charge is coded by its LEAD offence, so the code axis missed.
+
+    ``case_type`` is free text that often names several offences at once, and the
+    map gives one code per string. A charge of cheating + kidnapping + rape codes
+    as FRAUD_CHEATING — in SHOW_CODES — so the show rule fired and the
+    SENSITIVE_CODES floor was never reached. The protected charge had simply never
+    become the code, which is why no amount of tuning the code lists could have
+    caught it. Every composite of this shape in the corpus was publicly searchable.
+    """
+
+    @pytest.mark.parametrize(
+        "case_type",
+        [
+            "ठगी तथा जबरजस्ती करणी",
+            "ठगी, अपहरण तथा जबरजस्ती करणी",
+            "ठगी तथा मानव बेचबिखन र ओसारपसार",
+            "ठगी तथा बालविवाह",
+        ],
+    )
+    def test_a_sensitive_offence_anywhere_hides_the_case(self, case_type):
+        assert sv.case_type_code(case_type) not in sv.SENSITIVE_CODES
+        assert sv.names_a_sensitive_offence(case_type) is True
+        assert sv.court_case_public_visible(_case(case_type=case_type)) is False
+
+    def test_the_floor_beats_every_show_rule(self):
+        """Forum and publish-link must not resurrect it either."""
+        iri = "https://jawafdehi.org/courtcase/patanhc/081-ci-0404"
+        case = _case(
+            case_type="ठगी तथा जबरजस्ती करणी",
+            court_id="special",
+            case_number="081-CR-0404",
+            iri=iri,
+        )
+        assert sv.court_case_public_visible(case) is False
+
+
+class TestSpellingVariantsAreFolded:
+    """The registers spell one offence many ways, sometimes inside one string.
+
+    जबरजस्ती/जवरजस्ती, मानव/मानब, बेचबिखन/बेचविखन, बालविवाह/वालविवाह — all appear in
+    live rows. A literal substring list catches roughly half of them, which is a
+    silent, partial fix: the worst kind for a privacy gate.
+    """
+
+    @pytest.mark.parametrize(
+        "case_type",
+        [
+            "ठगी र जवरजस्ती करणी",
+            "ठगी मानब बेचबिखन तथा ओसारपसार",
+            "ठगी तथा मानव बेचविखन",
+            "ठगी तथा मानव बेच बिखन",
+            "ठगी तथा वालविवाह",
+            "सम्बन्ध बिच्छेद",
+        ],
+    )
+    def test_variant_spellings_are_caught(self, case_type):
+        assert sv.names_a_sensitive_offence(case_type) is True
+        assert sv.court_case_public_visible(_case(case_type=case_type)) is False
+
+    def test_zero_width_joiners_are_stripped(self):
+        """The registers carry stray ZWJ/ZWNJ — 'राजश्‍व चुहावट' has one mid-word."""
+        assert sv.names_a_sensitive_offence("ठगी तथा जबरज‍स्ती कर‌णी") is True
+
+    def test_nukta_forms_are_nfc_normalised(self):
+        decomposed = unicodedata.normalize("NFD", "चेलीबेटी खख़रिद")
+        assert "ख़" not in decomposed  # genuinely decomposed by NFD
+        assert sv.names_a_sensitive_offence(decomposed) is True
+
+
+class TestTheGateDoesNotTrustTheMap:
+    """The map misclassifies the commonest form of a protected offence.
+
+    ``जिउ मास्ने बेच्ने`` is the pre-2074 statutory name for human trafficking. The
+    map codes the bare form as HOMICIDE (मास्ने read as killing) and its व-spelling
+    as OTHER_CRIMINAL, while coding eight LONGER phrasings of the same offence
+    correctly as HUMAN_TRAFFICKING. Those rows are absent from the index today only
+    because HOMICIDE happens to miss SHOW_CODES — the same accident that already
+    failed once, for Supreme 'फौजदारी', the moment the data improved.
+    """
+
+    def test_the_archaic_trafficking_name_is_hidden_despite_its_code(self):
+        for case_type in ("जिउ मास्ने बेच्ने", "जिउ मास्ने वेच्ने", "जीउ मास्ने बेच्ने र ठगी"):
+            assert sv.court_case_public_visible(_case(case_type=case_type)) is False
+
+    def test_it_is_hidden_in_the_corruption_forum_too(self):
+        case = _case(
+            case_type="जिउ मास्ने वेच्ने", court_id="special", case_number="081-CR-0505"
+        )
+        assert sv.in_corruption_forum(case) is True
+        assert sv.court_case_public_visible(case) is False
+
+
+class TestTheFloorDoesNotOverreach:
+    """Terms held OUT of the list on purpose, because they are ordinary language.
+
+    Hiding these would cost real accountability cases for nothing.
+    """
+
+    @pytest.mark.parametrize(
+        "case_type",
+        [
+            # बेचबिखन is "sale/trade" — of land, and of controlled drugs.
+            "जग्गा खरिद बेचबिखन",
+            "बिना इजाजत नियन्त्रित औषधीको ओसार पसार बेचबिखन",
+            # जबरजस्ती is "by force" — it qualifies coercion as often as करणी.
+            "अपराधिक बल प्रयोग गरी जबरजस्ती चेक भर्न लगाई लिएको",
+            "जबरजस्ती संस्थाको कार्यालयमा तालाबन्दी गरेको",
+        ],
+    )
+    def test_ordinary_language_is_not_a_sensitive_offence(self, case_type):
+        assert sv.names_a_sensitive_offence(case_type) is False
+
+    def test_the_corruption_slice_is_untouched(self):
+        assert sv.court_case_public_visible(_case(case_type="भ्रष्टाचार")) is True
+        assert sv.court_case_public_visible(_case(case_type="रिसवत(घुस)")) is True
+
+
+class TestCourtAnonymisedComplainants:
+    """The court's own pseudonym is a signal the charge cannot give us.
+
+    Where a complainant is legally protected the register writes "परिवर्तित नाम
+    <locality> <code>" in place of their name. Most such rows carry an entirely
+    innocuous charge — plain ठगी or आपराधिक लाभ — so no case_type rule reaches
+    them, and we were publishing the defendant's name, district, date and offence
+    around a victim the court had already anonymised.
+    """
+
+    @pytest.mark.parametrize(
+        "plaintiff",
+        [
+            "परिवर्तित नाम बौद्ध १७ (०८०/०८१)",
+            "परिवर्तित नाम काठमाडौं ९ को जाहेरीले नेपाल सरकार",
+            "परिवर्तित संकेत नाम ताजकोट",
+            "नाम परिवर्तित सिंहदरबार २८",
+            "नामथर परिवर्तित २२ जिल्ला मलंगवा",
+        ],
+    )
+    def test_an_anonymised_complainant_hides_an_innocuous_charge(self, plaintiff):
+        case = _case(case_type="ठगी", plaintiff=plaintiff)
+        assert sv.case_type_code(case.case_type) in sv.SHOW_CODES
+        assert sv.court_case_public_visible(case) is False
+
+    @pytest.mark.parametrize(
+        "plaintiff",
+        [
+            # A COMPANY rename — the same words, an entirely different meaning.
+            "एबीसी इनभेस्टमेन्ट प्रा.लि.को परिवर्तित नाम एबीसी हायर पर्चेज प्रा.लि.",
+            "परिवर्तित नाम उदाहरण इन्टरप्राइजेज काठमाडौं",
+            # An ADDRESS change, which the registers also record with these words.
+            "जिल्ला धनुषा साविक वडा नं. १ हाल परिवर्तित शहिदनगर न.पा. वडा नं. २",
+        ],
+    )
+    def test_a_rename_is_not_an_anonymisation(self, plaintiff):
+        """These sit on revenue and corruption cases that are core scope."""
+        case = _case(case_type="आयकर", plaintiff=plaintiff)
+        assert sv.has_anonymised_party(case) is False
+
+    def test_an_anonymised_party_on_either_side_counts(self):
+        assert sv.has_anonymised_party(_case(defendant="परिवर्तित नाम ललितपुर ५")) is True
+
+    def test_a_plain_party_is_not_anonymised(self):
+        assert sv.has_anonymised_party(_case()) is False
+
+
+class TestTheMapWideInvariant:
+    """No case_type in the shipped map that NAMES a protected offence is visible.
+
+    This is the regression guard the gate never had. It runs over all ~130k keys of
+    the committed map rather than a handful of examples, so a future map
+    regeneration — or a new SHOW code — cannot quietly reopen the hole. Both
+    defects this class was written for would have failed it at CI time.
+    """
+
+    def test_no_sensitive_case_type_is_publicly_visible(self):
+        offenders = [
+            case_type
+            for case_type in sv._load_map()
+            if sv.names_a_sensitive_offence(case_type)
+            and sv.court_case_public_visible(_case(case_type=case_type))
+        ]
+        assert offenders == []
+
+    def test_the_invariant_holds_inside_the_corruption_forum(self):
+        offenders = [
+            case_type
+            for case_type in sv._load_map()
+            if sv.names_a_sensitive_offence(case_type)
+            and sv.court_case_public_visible(
+                _case(
+                    case_type=case_type, court_id="special", case_number="081-CR-0001"
+                )
+            )
+        ]
+        assert offenders == []
+
+    def test_the_accountability_slice_is_not_collateral_damage(self):
+        """Nothing coded CORRUPTION may be swept up by the text floor."""
+        swept = [
+            case_type
+            for case_type, code in sv._load_map().items()
+            if code == "CORRUPTION" and sv.names_a_sensitive_offence(case_type)
+        ]
+        assert swept == []
