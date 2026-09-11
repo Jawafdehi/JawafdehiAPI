@@ -95,7 +95,9 @@ def build_source_client(timeout: int) -> BlacklistApiClient:
     return BlacklistApiClient(timeout=timeout)
 
 
-def build_ingestion_client(base_url: str, token: str, timeout: int) -> IngestionApiClient:
+def build_ingestion_client(
+    base_url: str, token: str, timeout: int
+) -> IngestionApiClient:
     """Factory (a seam for tests to inject a fake ingestion client)."""
     return IngestionApiClient(base_url, token, timeout=timeout)
 
@@ -110,28 +112,37 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--limit", type=int, default=0,
+            "--limit",
+            type=int,
+            default=0,
             help="max firms to post (0 = no limit; the whole feed)",
         )
         parser.add_argument(
-            "--batch-size", type=int, default=200,
+            "--batch-size",
+            type=int,
+            default=200,
             help="firms per ingestion POST (default 200)",
         )
         parser.add_argument(
-            "--delay", type=float, default=0.5,
+            "--delay",
+            type=float,
+            default=0.5,
             help="seconds between ingestion POSTs (default 0.5)",
         )
         parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout (s)")
         parser.add_argument(
-            "--api-base", default=None,
+            "--api-base",
+            default=None,
             help="ingestion API base URL (default: $INGESTION_API_BASE or loopback)",
         )
         parser.add_argument(
-            "--api-token", default=None,
+            "--api-token",
+            default=None,
             help="ingestion bearer token (default: $INGESTION_API_TOKEN)",
         )
         parser.add_argument(
-            "--write", action="store_true",
+            "--write",
+            action="store_true",
             help="POST to the ingestion API (default: dry-run — fetch + parse only)",
         )
 
@@ -145,7 +156,9 @@ class Command(BaseCommand):
         payloads = [P.to_payload(f) for f in firms]
 
         mode = "WRITE" if write else "DRY-RUN"
-        self.stdout.write(f"scrape_ppmo_blacklist [{mode}] parsed={len(payloads)} firms")
+        self.stdout.write(
+            f"scrape_ppmo_blacklist [{mode}] parsed={len(payloads)} firms"
+        )
 
         if not write:
             self.stdout.write(f"done [dry-run]: {len(payloads)} firms (nothing posted)")
@@ -192,13 +205,20 @@ class Command(BaseCommand):
     def _ingestion_client(self, o):
         # Lazy import: keeps the (review) OIDC dep off the module-load path so a
         # dry-run / --help never needs it, and avoids any app-import cycle.
-        from review.oidc_client_credentials import OIDCTokenError, resolve_service_bearer
+        from review.oidc_client_credentials import (
+            OIDCTokenError,
+            resolve_service_bearer,
+        )
 
-        base = o["api_base"] or os.environ.get("INGESTION_API_BASE") or _DEFAULT_API_BASE
+        base = (
+            o["api_base"] or os.environ.get("INGESTION_API_BASE") or _DEFAULT_API_BASE
+        )
         try:
             token = resolve_service_bearer(o["api_token"])
         except OIDCTokenError as exc:
-            raise CommandError(f"--write bearer: OIDC client-credentials grant failed: {exc}") from exc
+            raise CommandError(
+                f"--write bearer: OIDC client-credentials grant failed: {exc}"
+            ) from exc
         if not token:
             raise CommandError(
                 "--write needs an ingestion bearer: set INGESTION_API_TOKEN, or the "

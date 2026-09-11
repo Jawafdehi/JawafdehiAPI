@@ -56,8 +56,14 @@ def test_parse_stated_count_no_signal():
         # A case number sits INSIDE a parenthetical alongside real text: the trailing
         # ", TOKEN)" is stripped AND the now-orphaned opening "(" is dropped, so no
         # unbalanced paren is left behind while the description is preserved.
-        ("हाजिर गराई पाउ ( ज्यान मार्ने उद्योग, 079-C1-0213)", "हाजिर गराई पाउ ज्यान मार्ने उद्योग"),
-        ("हाजिर गराई पाउ ( ज्यान मार्ने उद्योग, 079-C1-0229)", "हाजिर गराई पाउ ज्यान मार्ने उद्योग"),
+        (
+            "हाजिर गराई पाउ ( ज्यान मार्ने उद्योग, 079-C1-0213)",
+            "हाजिर गराई पाउ ज्यान मार्ने उद्योग",
+        ),
+        (
+            "हाजिर गराई पाउ ( ज्यान मार्ने उद्योग, 079-C1-0229)",
+            "हाजिर गराई पाउ ज्यान मार्ने उद्योग",
+        ),
         # A BALANCED inner paren (here from the भ्रष्टाचार wrapper unwrap) is preserved
         # verbatim — only a genuinely orphaned opening paren is removed.
         ("भ्रष्टाचार ( रिसवत(घुस) )", "रिसवत(घुस)"),

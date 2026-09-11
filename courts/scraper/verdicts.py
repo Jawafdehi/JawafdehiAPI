@@ -287,7 +287,9 @@ def order_urls(case) -> list[str]:
             candidates = [{"link": url, "role": "RAW"}, *(src.get("links") or [])]
         for link in candidates:
             if isinstance(link, dict):
-                (raw if (link.get("role") or "").upper() == "RAW" else other).append(link.get("link"))
+                (raw if (link.get("role") or "").upper() == "RAW" else other).append(
+                    link.get("link")
+                )
             elif isinstance(link, str):
                 other.append(link)
     for link in (*raw, *other):
@@ -326,7 +328,9 @@ def derived_hearing_filter() -> Q:
     return Q(**{f"extra_data__{PROVENANCE_KEY}__isnull": False})
 
 
-def build_hearing(case, extraction: VerdictExtraction, *, order_url, model, now, escalated=False):
+def build_hearing(
+    case, extraction: VerdictExtraction, *, order_url, model, now, escalated=False
+):
     """The unsaved :class:`CourtCaseHearing` for one recovered verdict.
 
     The verdict DATE comes from ``case_status`` -- that is the court's own field

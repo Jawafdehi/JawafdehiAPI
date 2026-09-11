@@ -80,7 +80,9 @@ def parse_case_number(case_number: str) -> ParsedNumber | None:
     if not m:
         return None
     year, series, seq = m.groups()
-    return ParsedNumber(key=RegisterKey(year=year, series=series), seq=int(seq), pad=len(seq))
+    return ParsedNumber(
+        key=RegisterKey(year=year, series=series), seq=int(seq), pad=len(seq)
+    )
 
 
 def format_case_number(key: RegisterKey, seq: int, pad: int) -> str:
@@ -151,13 +153,21 @@ def compute_gaps(
         for kind, group in ((0, tail), (1, interior)):
             for seq in group:
                 ranked.append(
-                    (-int(key.year), kind, key.series, seq, format_case_number(key, seq, pad))
+                    (
+                        -int(key.year),
+                        kind,
+                        key.series,
+                        seq,
+                        format_case_number(key, seq, pad),
+                    )
                 )
     ranked.sort()
     return [number for *_, number in ranked]
 
 
-def sequence_confidence(numbered_dates: Iterable[tuple[str, str | None]]) -> float | None:
+def sequence_confidence(
+    numbered_dates: Iterable[tuple[str, str | None]],
+) -> float | None:
     """Does this court number its cases as a date-ordered counter? 0–100, or ``None``.
 
     Everything built on register density assumes the sequence token is a counter the
@@ -200,7 +210,9 @@ def held_case_numbers(court_id: str, *, using: str = NGM_DB) -> list[str]:
     )
 
 
-def held_with_dates(court_id: str, *, using: str = NGM_DB) -> list[tuple[str, str | None]]:
+def held_with_dates(
+    court_id: str, *, using: str = NGM_DB
+) -> list[tuple[str, str | None]]:
     """``(case_number, registration_date_bs)`` for a court — input to confidence."""
     from courts.models import CourtCase
 

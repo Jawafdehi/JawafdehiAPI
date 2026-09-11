@@ -31,6 +31,7 @@ def validate_entity_iri(value: str) -> None:
             "(expected https://<base>/entity/<prefix>/<slug>)."
         )
 
+
 # MANAGED-TABLE NOTE: every model here pins ``Meta.db_table`` to a table that
 # ALREADY exists in the ``ngm`` Postgres schema (created/owned by the FastAPI
 # /SQLAlchemy ingestion side). We deliberately keep ``Meta.managed`` at its
@@ -69,7 +70,9 @@ class CourtCase(models.Model):
     pk = models.CompositePrimaryKey("case_number", "court")
     case_number = models.CharField(max_length=50, db_index=True)
     court = models.ForeignKey(
-        Court, on_delete=models.DO_NOTHING, db_column="court_identifier",
+        Court,
+        on_delete=models.DO_NOTHING,
+        db_column="court_identifier",
         related_name="cases",
     )
     registration_date_bs = models.CharField(max_length=20, null=True, blank=True)
@@ -99,7 +102,10 @@ class CourtCase(models.Model):
     # Canonical NES entity @id IRI (https://<base>/entity/<prefix>/<slug>) — the
     # cross-service join key. Widened to 300 for full IRIs; IRI-validated.
     nes_id = models.CharField(
-        max_length=300, null=True, blank=True, db_index=True,
+        max_length=300,
+        null=True,
+        blank=True,
+        db_index=True,
         validators=[validate_entity_iri],
     )
     extra_data = models.JSONField(null=True, blank=True)
@@ -139,7 +145,9 @@ class CourtCaseHearing(models.Model):
     id = models.AutoField(primary_key=True)
     case_number = models.CharField(max_length=50, db_index=True)
     court = models.ForeignKey(
-        Court, on_delete=models.DO_NOTHING, db_column="court_identifier",
+        Court,
+        on_delete=models.DO_NOTHING,
+        db_column="court_identifier",
         related_name="hearings",
     )
     hearing_date_bs = models.CharField(max_length=20, db_index=True)
@@ -171,7 +179,9 @@ class CaseEntity(models.Model):
     id = models.AutoField(primary_key=True)
     case_number = models.CharField(max_length=50, db_index=True)
     court = models.ForeignKey(
-        Court, on_delete=models.DO_NOTHING, db_column="court_identifier",
+        Court,
+        on_delete=models.DO_NOTHING,
+        db_column="court_identifier",
         related_name="case_entities",
     )
     side = models.CharField(max_length=20, db_index=True)  # plaintiff | defendant
@@ -180,7 +190,10 @@ class CaseEntity(models.Model):
     # Canonical NES entity @id IRI (https://<base>/entity/<prefix>/<slug>) — the
     # cross-service join key. Widened to 300 for full IRIs; IRI-validated.
     nes_id = models.CharField(
-        max_length=300, null=True, blank=True, db_index=True,
+        max_length=300,
+        null=True,
+        blank=True,
+        db_index=True,
         validators=[validate_entity_iri],
     )
     created_at = models.DateTimeField(auto_now_add=True)
@@ -211,7 +224,10 @@ class BlacklistedFirm(models.Model):
     # Canonical NES entity @id IRI (https://<base>/entity/<prefix>/<slug>) — the
     # cross-service join key. Widened to 300 for full IRIs; IRI-validated.
     nes_id = models.CharField(
-        max_length=300, null=True, blank=True, db_index=True,
+        max_length=300,
+        null=True,
+        blank=True,
+        db_index=True,
         validators=[validate_entity_iri],
     )
     scraped_at = models.DateTimeField(auto_now_add=True)
@@ -251,7 +267,9 @@ class RegisterProbe(models.Model):
 
     id = models.AutoField(primary_key=True)
     court = models.ForeignKey(
-        Court, on_delete=models.DO_NOTHING, db_column="court_identifier",
+        Court,
+        on_delete=models.DO_NOTHING,
+        db_column="court_identifier",
         related_name="register_probes",
     )
     case_number = models.CharField(max_length=50, db_index=True)
@@ -284,7 +302,9 @@ class ScrapedDate(models.Model):
 
     id = models.AutoField(primary_key=True)
     court = models.ForeignKey(
-        Court, on_delete=models.DO_NOTHING, db_column="court_identifier",
+        Court,
+        on_delete=models.DO_NOTHING,
+        db_column="court_identifier",
         related_name="scraped_dates",
     )
     date_bs = models.CharField(max_length=20, db_index=True)

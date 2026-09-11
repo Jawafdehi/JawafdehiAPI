@@ -95,12 +95,20 @@ class Command(BaseCommand):
     help = "Read court orders to recover missing verdicts (dry-run unless --write)."
 
     def add_arguments(self, parser):
-        parser.add_argument("--court", default="special", help="court_identifier (default: special)")
-        parser.add_argument("--case", help="a single case number, for smoke-testing")
-        parser.add_argument("--limit", type=int, default=25, help="max cases (default: 25)")
-        parser.add_argument("--write", action="store_true", help="persist; otherwise dry-run")
         parser.add_argument(
-            "--eval", type=int, metavar="N",
+            "--court", default="special", help="court_identifier (default: special)"
+        )
+        parser.add_argument("--case", help="a single case number, for smoke-testing")
+        parser.add_argument(
+            "--limit", type=int, default=25, help="max cases (default: 25)"
+        )
+        parser.add_argument(
+            "--write", action="store_true", help="persist; otherwise dry-run"
+        )
+        parser.add_argument(
+            "--eval",
+            type=int,
+            metavar="N",
             help="score against N cases whose verdict the court already gave us; never writes",
         )
         parser.add_argument("--tier", default="premium", choices=("premium", "cheap"))
@@ -141,7 +149,10 @@ class Command(BaseCommand):
             self.stdout.write(
                 f"        budget exhausted at {MAX_TOKENS} tokens; retrying at {ESCALATED_MAX_TOKENS}"
             )
-            return (*self._extract_one(case, tier=tier, max_tokens=ESCALATED_MAX_TOKENS), True)
+            return (
+                *self._extract_one(case, tier=tier, max_tokens=ESCALATED_MAX_TOKENS),
+                True,
+            )
 
     def _extract_one(self, case, *, tier, max_tokens=MAX_TOKENS):
         """Download the order, read it, return (extraction, url, model, chars).
@@ -167,7 +178,9 @@ class Command(BaseCommand):
             # bad artefact costs a URL, not the case.
             (res,) = convert_all([{"url": [url]}])
             if res.get("conversion_status") == "error":
-                self.stderr.write(f"    convert failed {url}: {res.get('conversion_note')}")
+                self.stderr.write(
+                    f"    convert failed {url}: {res.get('conversion_note')}"
+                )
                 continue
             text = res.get("markdown") or ""
             if text.strip():
@@ -177,7 +190,9 @@ class Command(BaseCommand):
             raise RuntimeError("no order document yielded text")
 
         model = routing.provider_for_tier(tier).model_for_tier(tier)
-        raw = invoke.invoke_text(SYSTEM_PROMPT, build_prompt(text, case.case_number), max_tokens, tier=tier)
+        raw = invoke.invoke_text(
+            SYSTEM_PROMPT, build_prompt(text, case.case_number), max_tokens, tier=tier
+        )
         return parse_response(raw), used, model, len(text)
 
     # --------------------------------------------------------------------- eval
@@ -198,11 +213,15 @@ class Command(BaseCommand):
             .order_by("case_number")
         )
         if not cases:
-            raise CommandError("no evaluable cases (need an order document + a known verdict)")
+            raise CommandError(
+                "no evaluable cases (need an order document + a known verdict)"
+            )
         step = max(1, len(cases) // n)
         sample = cases[::step][:n]
 
-        self.stdout.write(f"eval: {len(sample)} cases sampled from {len(cases)} with both an order and a known verdict\n")
+        self.stdout.write(
+            f"eval: {len(sample)} cases sampled from {len(cases)} with both an order and a known verdict\n"
+        )
         hits = miss = abst = err = esc = 0
         confusion = {}
         for i, case in enumerate(sample, 1):
@@ -216,7 +235,9 @@ class Command(BaseCommand):
                 esc += escalated
             except Exception as exc:  # noqa: BLE001
                 err += 1
-                self.stdout.write(f"  {i:>3}/{len(sample)} {case.case_number}  ERROR {exc}")
+                self.stdout.write(
+                    f"  {i:>3}/{len(sample)} {case.case_number}  ERROR {exc}"
+                )
                 continue
             if ex.abstained:
                 abst += 1
@@ -227,7 +248,9 @@ class Command(BaseCommand):
             else:
                 miss += 1
                 verdict = "WRONG"
-                confusion[(want, ex.decision_type)] = confusion.get((want, ex.decision_type), 0) + 1
+                confusion[(want, ex.decision_type)] = (
+                    confusion.get((want, ex.decision_type), 0) + 1
+                )
             self.stdout.write(
                 f"  {i:>3}/{len(sample)} {case.case_number}  want={want:<10} got={ex.decision_type or 'ABSTAIN':<10}"
                 f" conf={ex.confidence or '-':<6} {chars:>6}c  {verdict}"
@@ -241,9 +264,13 @@ class Command(BaseCommand):
         self.stdout.write(f"  wrong      {miss}")
         self.stdout.write(f"  abstained  {abst}")
         self.stdout.write(f"  errored    {err}")
-        self.stdout.write(f"  escalated  {esc}  (recovered at {ESCALATED_MAX_TOKENS} tokens)")
+        self.stdout.write(
+            f"  escalated  {esc}  (recovered at {ESCALATED_MAX_TOKENS} tokens)"
+        )
         if answered:
-            self.stdout.write(f"  accuracy on answered: {hits / answered * 100:.1f}%  (n={answered})")
+            self.stdout.write(
+                f"  accuracy on answered: {hits / answered * 100:.1f}%  (n={answered})"
+            )
         if confusion:
             self.stdout.write("  confusion (want -> got):")
             for (w, g), c in sorted(confusion.items(), key=lambda kv: -kv[1]):
@@ -267,7 +294,9 @@ class Command(BaseCommand):
         for i, case in enumerate(cases, 1):
             if not is_decided(case):
                 skipped += 1
-                self.stdout.write(f"  {i:>3} {case.case_number}  skip: case_status is not decided")
+                self.stdout.write(
+                    f"  {i:>3} {case.case_number}  skip: case_status is not decided"
+                )
                 continue
             self._gap(delay)
             try:
@@ -280,7 +309,9 @@ class Command(BaseCommand):
 
             if ex.abstained:
                 abstained += 1
-                self.stdout.write(f"  {i:>3} {case.case_number}  ABSTAIN ({chars}c) — left alone")
+                self.stdout.write(
+                    f"  {i:>3} {case.case_number}  ABSTAIN ({chars}c) — left alone"
+                )
                 continue
 
             now = timezone.now()
@@ -329,7 +360,9 @@ class Command(BaseCommand):
                 )
                 if exists:
                     skipped += 1
-                    self.stdout.write("        skip: a deciding hearing appeared since selection")
+                    self.stdout.write(
+                        "        skip: a deciding hearing appeared since selection"
+                    )
                     continue
                 hearing.save(using=NGM_DB)
                 written += 1
@@ -339,5 +372,7 @@ class Command(BaseCommand):
             f" escalated={escalated_n}"
         )
         if not opts["write"] and written == 0:
-            self.stdout.write(f"(dry-run — nothing persisted; rows would carry extra_data['{PROVENANCE_KEY}'])")
+            self.stdout.write(
+                f"(dry-run — nothing persisted; rows would carry extra_data['{PROVENANCE_KEY}'])"
+            )
         return 0

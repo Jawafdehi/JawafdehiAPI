@@ -67,7 +67,9 @@ class IngestionCasesTests(_DbAPITestCase):
         self.assertEqual(resp.data["created"], 1)
         self.assertEqual(resp.data["updated"], 0)
         self.assertTrue(
-            CourtCase.objects.filter(court_id="kathmandudc", case_number="082-OA-0503").exists()
+            CourtCase.objects.filter(
+                court_id="kathmandudc", case_number="082-OA-0503"
+            ).exists()
         )
 
         # Re-run the same batch -> updated, not created (idempotent).
@@ -181,7 +183,15 @@ class IngestionEntitiesResolveTests(_DbAPITestCase):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
             self.URL,
-            {"items": [{"court": "kathmandudc", "case_number": "082-OA-0503", "nes_id": IRI}]},
+            {
+                "items": [
+                    {
+                        "court": "kathmandudc",
+                        "case_number": "082-OA-0503",
+                        "nes_id": IRI,
+                    }
+                ]
+            },
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
@@ -202,7 +212,15 @@ class IngestionEntitiesResolveTests(_DbAPITestCase):
             with self.captureOnCommitCallbacks(execute=True):
                 resp = self.client.post(
                     self.URL,
-                    {"items": [{"court": "kathmandudc", "case_number": "082-OA-0503", "nes_id": IRI}]},
+                    {
+                        "items": [
+                            {
+                                "court": "kathmandudc",
+                                "case_number": "082-OA-0503",
+                                "nes_id": IRI,
+                            }
+                        ]
+                    },
                     format="json",
                 )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
@@ -232,15 +250,21 @@ class IngestionEntitiesResolveTests(_DbAPITestCase):
         self.entity.refresh_from_db()
         self.assertEqual(self.entity.nes_id, IRI)
         # The defendant row was NOT touched.
-        self.assertIsNone(
-            CaseEntity.objects.get(side="defendant", name="श्याम").nes_id
-        )
+        self.assertIsNone(CaseEntity.objects.get(side="defendant", name="श्याम").nes_id)
 
     def test_bad_nes_id_rejects_batch_400(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
             self.URL,
-            {"items": [{"court": "kathmandudc", "case_number": "082-OA-0503", "nes_id": BAD_NES_ID}]},
+            {
+                "items": [
+                    {
+                        "court": "kathmandudc",
+                        "case_number": "082-OA-0503",
+                        "nes_id": BAD_NES_ID,
+                    }
+                ]
+            },
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -259,7 +283,15 @@ class IngestionEntitiesResolveTests(_DbAPITestCase):
     def test_unauth_is_401(self):
         resp = self.client.post(
             self.URL,
-            {"items": [{"court": "kathmandudc", "case_number": "082-OA-0503", "nes_id": IRI}]},
+            {
+                "items": [
+                    {
+                        "court": "kathmandudc",
+                        "case_number": "082-OA-0503",
+                        "nes_id": IRI,
+                    }
+                ]
+            },
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -294,7 +326,9 @@ class IngestionFirmsTests(_DbAPITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(resp.data["failed"], 1)
-        self.assertFalse(BlacklistedFirm.objects.filter(firm_name="No Date Co").exists())
+        self.assertFalse(
+            BlacklistedFirm.objects.filter(firm_name="No Date Co").exists()
+        )
 
     def test_create_then_backfill_then_no_overwrite(self):
         self.client.force_authenticate(user=self.user)
@@ -321,4 +355,6 @@ class IngestionFirmsTests(_DbAPITestCase):
         self.assertEqual(resp.data["unchanged"], 1)
         firm.refresh_from_db()
         self.assertEqual(firm.address, "काठमाडौं")
-        self.assertEqual(BlacklistedFirm.objects.filter(firm_name="एबीसी निर्माण सेवा").count(), 1)
+        self.assertEqual(
+            BlacklistedFirm.objects.filter(firm_name="एबीसी निर्माण सेवा").count(), 1
+        )

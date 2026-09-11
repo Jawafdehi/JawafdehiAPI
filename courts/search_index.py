@@ -271,7 +271,9 @@ def build_doc(obj: Any) -> dict[str, Any]:
 
     reg_ad = getattr(obj, "registration_date_ad", None)
     if reg_ad is not None:
-        doc["date"] = reg_ad.isoformat() if hasattr(reg_ad, "isoformat") else str(reg_ad)
+        doc["date"] = (
+            reg_ad.isoformat() if hasattr(reg_ad, "isoformat") else str(reg_ad)
+        )
     reg_bs = getattr(obj, "registration_date_bs", None)
     if reg_bs:
         doc["date_bs"] = str(reg_bs)
@@ -283,7 +285,9 @@ def build_doc(obj: Any) -> dict[str, Any]:
     case_subject = getattr(obj, "case_subject", None)
     if case_subject:
         keywords.append(case_subject)  # same list object as doc["keywords"]
-        doc["body"] = f"{doc['body']} · {case_subject}" if doc.get("body") else case_subject
+        doc["body"] = (
+            f"{doc['body']} · {case_subject}" if doc.get("body") else case_subject
+        )
     status = getattr(obj, "status", None)
     if status:
         doc["status"] = status
@@ -293,7 +297,9 @@ def build_doc(obj: Any) -> dict[str, Any]:
     verdict_ad = getattr(obj, "verdict_date_ad", None)
     if verdict_ad is not None:
         doc["verdict_date"] = (
-            verdict_ad.isoformat() if hasattr(verdict_ad, "isoformat") else str(verdict_ad)
+            verdict_ad.isoformat()
+            if hasattr(verdict_ad, "isoformat")
+            else str(verdict_ad)
         )
     verdict_bs = getattr(obj, "verdict_date_bs", None)
     verdict_bs = None if is_verdict_sentinel(verdict_bs) else str(verdict_bs)
@@ -313,9 +319,13 @@ def build_doc(obj: Any) -> dict[str, Any]:
     created = getattr(obj, "created_at", None)
     updated = getattr(obj, "updated_at", None)
     if created is not None:
-        doc["created_at"] = created.isoformat() if hasattr(created, "isoformat") else created
+        doc["created_at"] = (
+            created.isoformat() if hasattr(created, "isoformat") else created
+        )
     if updated is not None:
-        doc["updated_at"] = updated.isoformat() if hasattr(updated, "isoformat") else updated
+        doc["updated_at"] = (
+            updated.isoformat() if hasattr(updated, "isoformat") else updated
+        )
     return doc
 
 

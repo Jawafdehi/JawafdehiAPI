@@ -44,16 +44,18 @@ class RepairEnrichmentTests(TestCase):
 
     def _run(self, *args):
         out = StringIO()
-        call_command("repair_enrichment", "--court", "special", *args, stdout=out, stderr=out)
+        call_command(
+            "repair_enrichment", "--court", "special", *args, stdout=out, stderr=out
+        )
         return out.getvalue()
 
     def test_finds_only_cases_with_no_enrichment_evidence(self):
-        self._case("076-CR-0001")                                  # damaged
-        self._case("076-CR-0002", extra_data={})                   # damaged: key absent
-        self._case("076-CR-0003", registration_number="0003")      # real enrichment
-        self._case("076-CR-0004", hearing_count=5)                 # real enrichment
+        self._case("076-CR-0001")  # damaged
+        self._case("076-CR-0002", extra_data={})  # damaged: key absent
+        self._case("076-CR-0003", registration_number="0003")  # real enrichment
+        self._case("076-CR-0004", hearing_count=5)  # real enrichment
         self._case("076-CR-0005", extra_data={"enrichment_hearings": [{"a": 1}]})
-        self._case("076-CR-0006", status=None)                     # _enrich_pending still reaches it
+        self._case("076-CR-0006", status=None)  # _enrich_pending still reaches it
 
         out = self._run()
         assert "2 case(s)" in out
@@ -66,18 +68,30 @@ class RepairEnrichmentTests(TestCase):
             out = self._run()
         detail.assert_not_called()
         assert "dry run" in out
-        assert CourtCase.objects.using("ngm").get(case_number="076-CR-0001").registration_number is None
+        assert (
+            CourtCase.objects.using("ngm")
+            .get(case_number="076-CR-0001")
+            .registration_number
+            is None
+        )
 
     def test_apply_re_enriches_the_damaged_case(self):
         self._case("076-CR-0001")
-        with mock.patch("courts.management.commands.repair_enrichment.Fetcher"), \
-             mock.patch.object(REGISTRY["special"], "crawl_detail", return_value=_enrichment()):
+        with (
+            mock.patch("courts.management.commands.repair_enrichment.Fetcher"),
+            mock.patch.object(
+                REGISTRY["special"], "crawl_detail", return_value=_enrichment()
+            ),
+        ):
             out = self._run("--apply", "--delay", "0")
         assert "repaired 1" in out
         case = CourtCase.objects.using("ngm").get(case_number="076-CR-0001")
         assert case.registration_number == "0294"
         assert case.extra_data["enrichment_hearings"]
-        assert CaseEntity.objects.using("ngm").filter(case_number="076-CR-0001").count() == 1
+        assert (
+            CaseEntity.objects.using("ngm").filter(case_number="076-CR-0001").count()
+            == 1
+        )
 
     def test_a_case_the_portal_still_cannot_enrich_is_left_untouched(self):
         # The whole point of the guard being fixed: an empty parse must not
@@ -86,8 +100,10 @@ class RepairEnrichmentTests(TestCase):
         empty = ParsedEnrichment(
             core_fields={}, extra_data={"enrichment_hearings": []}, entities=[]
         )
-        with mock.patch("courts.management.commands.repair_enrichment.Fetcher"), \
-             mock.patch.object(REGISTRY["special"], "crawl_detail", return_value=empty):
+        with (
+            mock.patch("courts.management.commands.repair_enrichment.Fetcher"),
+            mock.patch.object(REGISTRY["special"], "crawl_detail", return_value=empty),
+        ):
             out = self._run("--apply", "--delay", "0")
         assert "repaired 0" in out
         case = CourtCase.objects.using("ngm").get(case_number="076-CR-0001")
@@ -105,8 +121,10 @@ class RepairEnrichmentTests(TestCase):
                 raise RuntimeError("portal blew up")
             return _enrichment()
 
-        with mock.patch("courts.management.commands.repair_enrichment.Fetcher"), \
-             mock.patch.object(REGISTRY["special"], "crawl_detail", side_effect=flaky):
+        with (
+            mock.patch("courts.management.commands.repair_enrichment.Fetcher"),
+            mock.patch.object(REGISTRY["special"], "crawl_detail", side_effect=flaky),
+        ):
             out = self._run("--apply", "--delay", "0")
         assert len(calls) == 2
         assert "repaired 1" in out

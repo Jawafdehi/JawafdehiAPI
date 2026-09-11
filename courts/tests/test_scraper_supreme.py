@@ -96,7 +96,10 @@ def test_cause_list_party_fallback_without_delimiter():
 
 
 def test_empty_page_returns_no_rows():
-    assert parse_cause_list("<html><body>no table</body></html>", date_bs="2082-05-15") == []
+    assert (
+        parse_cause_list("<html><body>no table</body></html>", date_bs="2082-05-15")
+        == []
+    )
 
 
 def test_enrichment_core_fields_and_extra_data():

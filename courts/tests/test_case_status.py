@@ -83,6 +83,9 @@ def test_verdict_from_hearings_supreme_schema():
 
 
 def test_verdict_from_hearings_none_when_no_terminal_decision():
-    assert verdict_from_hearings([{"case_status": "पेशी", "decision_type": "स्थगित"}]) is None
+    assert (
+        verdict_from_hearings([{"case_status": "पेशी", "decision_type": "स्थगित"}])
+        is None
+    )
     assert verdict_from_hearings([]) is None
     assert verdict_from_hearings(None) is None

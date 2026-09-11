@@ -1,4 +1,5 @@
 """Import-smoke for the registry + command wiring (surfaces import errors)."""
+
 from courts.scraper import registry
 
 
@@ -10,6 +11,7 @@ def test_resolve_all_and_single_and_unknown():
     assert set(registry.resolve("all")) == {"special", "district", "high", "supreme"}
     assert registry.resolve("special") == ["special"]
     import pytest
+
     with pytest.raises(KeyError):
         registry.resolve("bogus")
 
@@ -30,6 +32,7 @@ def test_court_ids_counts():
 
 def test_command_imports():
     from courts.management.commands.scrape_courtcases import Command
+
     assert Command.help
 
 
@@ -51,7 +54,9 @@ def test_decode_forces_utf8_when_portal_omits_charset():
     # defaults to ISO-8859-1 and mojibakes it. decode must override to UTF-8.
     from courts.scraper.fetch import decode
 
-    resp = _FakeResp("text/html", {"utf-8-sig": "नेपाल सरकार", "ISO-8859-1": "à¤¨à¥‡à¤ª"})
+    resp = _FakeResp(
+        "text/html", {"utf-8-sig": "नेपाल सरकार", "ISO-8859-1": "à¤¨à¥‡à¤ª"}
+    )
     assert decode(resp) == "नेपाल सरकार"
     assert resp.encoding == "utf-8-sig"
 

@@ -301,9 +301,7 @@ def validate_query(query: str) -> tuple[bool, str | None]:
     # PostgreSQL Unicode-escaped identifiers are not needed by this API and are
     # parsed inconsistently across generic SQL parsers. Reject the syntax before
     # parsing so U&"pg\005fsleep" can never disguise a function or table name.
-    if re.search(r'(?i)\bu\s*&\s*"', query) or re.search(
-        r"(?i)\buescape\b", query
-    ):
+    if re.search(r'(?i)\bu\s*&\s*"', query) or re.search(r"(?i)\buescape\b", query):
         return False, "Unicode-escaped SQL identifiers are not allowed"
 
     try:

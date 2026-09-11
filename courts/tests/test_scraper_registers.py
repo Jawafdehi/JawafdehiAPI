@@ -165,7 +165,9 @@ class TestProbePriority:
     def test_sequence_order_within_a_group_is_deterministic(self):
         held = _numbers("082", "CR", [1, 5])
         assert compute_gaps(held, tail_probe=0) == [
-            "082-CR-0002", "082-CR-0003", "082-CR-0004",
+            "082-CR-0002",
+            "082-CR-0003",
+            "082-CR-0004",
         ]
 
     def test_duplicate_held_numbers_are_harmless(self):
@@ -186,7 +188,11 @@ class TestSeriesFilter:
         assert compute_gaps(held, tail_probe=0, series={"CR"}) == ["076-CR-0002"]
 
     def test_accepts_several_series(self):
-        held = _numbers("076", "CR", [1, 3]) + _numbers("076", "OA", [1, 3]) + _numbers("076", "WO", [1, 3])
+        held = (
+            _numbers("076", "CR", [1, 3])
+            + _numbers("076", "OA", [1, 3])
+            + _numbers("076", "WO", [1, 3])
+        )
         gaps = compute_gaps(held, tail_probe=0, series={"CR", "OA"})
         assert sorted(gaps) == ["076-CR-0002", "076-OA-0002"]
 

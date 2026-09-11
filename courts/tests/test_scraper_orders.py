@@ -45,8 +45,7 @@ DOCS_HTML = (
     + "</tbody></table></body></html>"
 )
 NO_RECORD_HTML = (
-    "<html><body><h3>फैसला / आदेश को पुर्ण पाठ</h3>"
-    "<p>रेकर्ड भेटिएन</p></body></html>"
+    "<html><body><h3>फैसला / आदेश को पुर्ण पाठ</h3><p>रेकर्ड भेटिएन</p></body></html>"
 )
 INVALID_CAPTCHA_HTML = (
     '<html><body><table bgcolor="#FF6600"><tr><td>Invalid CAPTCHA</td></tr>'
@@ -211,8 +210,12 @@ def test_mark_success_clears_prior_state():
     data = O.mark_success(prior, links=["https://s3/a", "https://s3/b"], now_iso=_NOW)
     assert data["court_orders"] == ["https://s3/a", "https://s3/b"]
     assert data["court_orders_scraped_at"] == _NOW
-    for key in ("orders_failed", "orders_error", "orders_too_recent",
-                "orders_transient_retries"):
+    for key in (
+        "orders_failed",
+        "orders_error",
+        "orders_too_recent",
+        "orders_transient_retries",
+    ):
         assert key not in data
 
 
@@ -274,7 +277,10 @@ class _FakeClient:
 
 
 def _fake_store(uploaded_file, role="RAW"):
-    return {"link": f"https://s3.jawafdehi.org/case_uploads/{uploaded_file.name}", "role": role}
+    return {
+        "link": f"https://s3.jawafdehi.org/case_uploads/{uploaded_file.name}",
+        "role": role,
+    }
 
 
 class _FakeRequestsResponse:
@@ -341,12 +347,15 @@ class OrdersBacklogTests(TestCase):
 
         def mk(court, num, status="फैसला भएको", **extra):
             return CourtCase.objects.create(
-                court=court, case_number=num, case_status=status,
-                registration_date_ad=date(2024, 1, 1), extra_data=extra or None,
+                court=court,
+                case_number=num,
+                case_status=status,
+                registration_date_ad=date(2024, 1, 1),
+                extra_data=extra or None,
             )
 
-        cls.eligible_special_cr = mk(cls.special, "082-CR-0001")   # priority 1
-        cls.eligible_supreme_wo = mk(cls.supreme, "082-WO-0001")   # priority 4
+        cls.eligible_special_cr = mk(cls.special, "082-CR-0001")  # priority 1
+        cls.eligible_supreme_wo = mk(cls.supreme, "082-WO-0001")  # priority 4
         # excluded: not decided
         mk(cls.supreme, "082-WO-0002", status="चालु")
         # excluded: ongoing wording despite फैसला
@@ -359,13 +368,17 @@ class OrdersBacklogTests(TestCase):
         mk(cls.district, "082-CR-0009")
         # too-recent but overdue for recheck → INCLUDED
         cls.recheck = mk(
-            cls.supreme, "082-WO-0006",
-            orders_too_recent=True, orders_too_recent_checked_at="2026-01-01T00:00:00",
+            cls.supreme,
+            "082-WO-0006",
+            orders_too_recent=True,
+            orders_too_recent_checked_at="2026-01-01T00:00:00",
         )
         # too-recent, checked yesterday → still excluded
         mk(
-            cls.supreme, "082-WO-0007",
-            orders_too_recent=True, orders_too_recent_checked_at="2026-07-23T00:00:00",
+            cls.supreme,
+            "082-WO-0007",
+            orders_too_recent=True,
+            orders_too_recent_checked_at="2026-07-23T00:00:00",
         )
         # transient failure short of the permanent-fail threshold → re-crawlable
         cls.transient = mk(cls.supreme, "082-WO-0008", orders_transient_retries=2)
@@ -384,7 +397,9 @@ class OrdersBacklogTests(TestCase):
         assert ("supreme", "082-WO-0007") not in keys  # recheck window open
         assert ("supreme", "082-WO-0008") in keys  # transient (not yet permanent)
         # Special/CR (priority 1) sorts ahead of Supreme/WO (priority 4).
-        assert keys.index(("special", "082-CR-0001")) < keys.index(("supreme", "082-WO-0001"))
+        assert keys.index(("special", "082-CR-0001")) < keys.index(
+            ("supreme", "082-WO-0001")
+        )
 
     def test_court_filter_scopes_to_one_court(self):
         rows = list(O.orders_backlog_queryset(courts=("special",), today=_TODAY))
@@ -399,23 +414,33 @@ class OrdersCommandTests(TestCase):
             identifier="supreme", court_type="supreme", full_name_nepali="सर्वोच्च"
         )
         self.case = CourtCase.objects.create(
-            court=self.court, case_number="082-WO-0123", case_status="फैसला भएको",
-            registration_date_bs="2081-05-12", registration_date_ad=date(2024, 6, 1),
+            court=self.court,
+            case_number="082-WO-0123",
+            case_status="फैसला भएको",
+            registration_date_bs="2081-05-12",
+            registration_date_ad=date(2024, 6, 1),
         )
 
     def _run(self, client, *extra):
-        with patch(f"{CMD}.build_http_client", return_value=client), patch(
-            f"{CMD}.store_file_as_link", side_effect=_fake_store
-        ), patch("time.sleep"), patch.dict(
-            "os.environ", {"ENABLE_COURT_ORDER_CAPTURE": "1"}
+        with (
+            patch(f"{CMD}.build_http_client", return_value=client),
+            patch(f"{CMD}.store_file_as_link", side_effect=_fake_store),
+            patch("time.sleep"),
+            patch.dict("os.environ", {"ENABLE_COURT_ORDER_CAPTURE": "1"}),
         ):
             call_command(
-                "scrape_court_orders", "--write", "--delay", "0",
-                "--case", "supreme:082-WO-0123", *extra,
+                "scrape_court_orders",
+                "--write",
+                "--delay",
+                "0",
+                "--case",
+                "supreme:082-WO-0123",
+                *extra,
             )
 
     def test_capture_gate_refuses_without_optin(self):
         from django.core.management.base import CommandError
+
         with patch.dict("os.environ", {"ENABLE_COURT_ORDER_CAPTURE": ""}):
             try:
                 call_command("scrape_court_orders", "--case", "supreme:082-WO-0123")
@@ -470,11 +495,15 @@ class OrdersCommandTests(TestCase):
 
     def test_no_record_old_case_marks_failed(self):
         CourtCaseHearing.objects.create(
-            court=self.court, case_number="082-WO-0123",
-            hearing_date_bs="2078-01-01", hearing_date_ad=date(2021, 4, 14),
+            court=self.court,
+            case_number="082-WO-0123",
+            hearing_date_bs="2078-01-01",
+            hearing_date_ad=date(2021, 4, 14),
             scraped_at="2026-01-01T00:00:00Z",
         )
-        client = _FakeClient(homepage=(200, COOKIE, None), search=(200, NO_RECORD_HTML, None))
+        client = _FakeClient(
+            homepage=(200, COOKIE, None), search=(200, NO_RECORD_HTML, None)
+        )
         self._run(client)
         case = self._reload()
         assert case.extra_data["orders_failed"] is True
@@ -482,11 +511,15 @@ class OrdersCommandTests(TestCase):
 
     def test_no_record_recent_case_marks_too_recent(self):
         CourtCaseHearing.objects.create(
-            court=self.court, case_number="082-WO-0123",
-            hearing_date_bs="2083-03-01", hearing_date_ad=date(2026, 6, 15),
+            court=self.court,
+            case_number="082-WO-0123",
+            hearing_date_bs="2083-03-01",
+            hearing_date_ad=date(2026, 6, 15),
             scraped_at="2026-06-15T00:00:00Z",
         )
-        client = _FakeClient(homepage=(200, COOKIE, None), search=(200, NO_RECORD_HTML, None))
+        client = _FakeClient(
+            homepage=(200, COOKIE, None), search=(200, NO_RECORD_HTML, None)
+        )
         self._run(client)
         case = self._reload()
         assert case.extra_data["orders_too_recent"] is True
@@ -498,7 +531,9 @@ class OrdersCommandTests(TestCase):
         client = _FakeClient(
             homepage=(200, COOKIE, None),
             search=(200, DOCS_HTML, None),
-            downloads={"https://supremecourt.gov.np/court/media/2081/order.pdf": (503, b"")},
+            downloads={
+                "https://supremecourt.gov.np/court/media/2081/order.pdf": (503, b"")
+            },
         )
         self._run(client)
         case = self._reload()
@@ -506,6 +541,8 @@ class OrdersCommandTests(TestCase):
         assert "orders_failed" not in case.extra_data
         assert "court_orders" not in case.extra_data
         assert case.document_sources in (None, [])
-        assert not Material.objects.using("ngm").filter(
-            iri=court_order_material_iri("supreme", "082-WO-0123")
-        ).exists()
+        assert (
+            not Material.objects.using("ngm")
+            .filter(iri=court_order_material_iri("supreme", "082-WO-0123"))
+            .exists()
+        )
