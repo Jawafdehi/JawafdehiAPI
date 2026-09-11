@@ -41,6 +41,17 @@ CASE_TYPE_VALUES = [
     "BANKING_OFFENCE",
 ]
 CASE_STATE_VALUES = ["DRAFT"]
+# A literal, like CASE_TYPE_VALUES above and the search tool's ``sort``: this
+# schema must build without Django. Pinned to ``cases.models.CaseTrack`` by
+# test_case_track_enum_tracks_the_model.
+CASE_TRACK_VALUES = [
+    "ciaa",
+    "money_laundering",
+    "public_prosecutor",
+    "writ",
+    "arbitration",
+    "other",
+]
 MAX_MATERIAL_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
@@ -94,10 +105,10 @@ AUTHOR_ITEM_INPUT_SCHEMA = {
     ]
 }
 CASE_CREATE_PROPERTIES: dict[str, Any] = {
-    "case_type": {
+    "offence_type": {
         "type": "string",
         "enum": CASE_TYPE_VALUES,
-        "description": "Case type.",
+        "description": "The offence: CORRUPTION, BRIBERY, ...",
     },
     "state": {
         "type": "string",
@@ -105,6 +116,18 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
         "default": "DRAFT",
         "description": "New cases must be created in DRAFT state.",
     },
+    "case_track": _nullable_schema(
+        {
+            "type": "string",
+            "enum": CASE_TRACK_VALUES,
+            "description": (
+                "How the case reached court: ciaa (a CIAA prosecution), "
+                "money_laundering, public_prosecutor, writ, arbitration, "
+                "other. Leave unset when the sources do not say -- null is "
+                "honest, and an empty value would be a nameless facet bucket."
+            ),
+        }
+    ),
     "title": {
         "type": "string",
         "maxLength": 200,
@@ -642,13 +665,13 @@ class CreateJawafdehiCaseTool(BaseTool):
         return {
             "type": "object",
             "properties": deepcopy(CASE_CREATE_PROPERTIES),
-            "required": ["title", "case_type"],
+            "required": ["title", "offence_type"],
             "additionalProperties": False,
         }
 
     async def execute(self, arguments: dict[str, Any]) -> list[TextContent]:
         title = arguments.get("title")
-        case_type = arguments.get("case_type")
+        offence_type = arguments.get("offence_type")
 
         if not _has_upstream_auth():
             return _error_text_content(f"Error: {_NO_AUTH_MESSAGE}")
@@ -656,8 +679,8 @@ class CreateJawafdehiCaseTool(BaseTool):
         if not title:
             return _error_text_content("Error: title is required")
 
-        if not case_type:
-            return _error_text_content("Error: case_type is required")
+        if not offence_type:
+            return _error_text_content("Error: offence_type is required")
 
         payload = {
             field: arguments[field]

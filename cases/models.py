@@ -193,7 +193,7 @@ class RelationshipOutcome(models.TextChoices):
 
     Meaningful ONLY for ``RelationshipType.ACCUSED`` — every other role leaves
     ``outcome`` NULL (enforced by the ``outcome_only_on_accused`` CHECK
-    constraint). ``CHARGED`` = "formally charged, verdict pending"; the terminal
+    constraint). ``CHARGED`` and ``REMANDED`` are non-terminal; the terminal
     outcomes (CONVICTED/ACQUITTED/ABATED) are set only from a primary court
     order — an acquitted defendant must never render as accused.
     """
@@ -202,6 +202,22 @@ class RelationshipOutcome(models.TextChoices):
     CONVICTED = "convicted", "Convicted"
     ACQUITTED = "acquitted", "Acquitted"
     ABATED = "abated", "Abated / discontinued"
+    # बदर गरी पुनः इन्साफ — the appeal court quashed the verdict and sent the
+    # case back for retrial. Non-terminal: without it a remand reads as
+    # concluded, because every other recorded outcome is final, until someone
+    # registers the new first-instance stage months later.
+    REMANDED = "remanded", "Remanded for retrial"
+
+
+#: The outcomes that end a defendant's involvement. Everything not in here
+#: leaves the case live for that person.
+TERMINAL_OUTCOMES = frozenset(
+    {
+        RelationshipOutcome.CONVICTED,
+        RelationshipOutcome.ACQUITTED,
+        RelationshipOutcome.ABATED,
+    }
+)
 
 
 class CaseEntityRelationship(models.Model):
@@ -766,6 +782,54 @@ class CaseAuthor(models.Model):
         AuthorProfile.ensure_for(self.user)
 
 
+from .stages import (  # noqa: E402  (kept beside the model it serves)
+    COURT_STAGES,
+    StageError,
+    derived_proceeding_dates,
+    validate_stages,
+)
+
+
+def _empty_stage_document() -> dict:
+    """Callable default: a shared mutable literal would leak between rows."""
+    return {"stages": []}
+
+
+class CaseStatus(models.TextChoices):
+    """Derived lifecycle. Not a column -- see ``Case.status``."""
+
+    ONGOING = "ongoing", "Ongoing"
+    UNDER_INVESTIGATION = "under_investigation", "Under investigation"
+    CONCLUDED = "concluded", "Concluded"
+    OTHERS = "others", "Others"
+
+
+class StatusOverride(models.TextChoices):
+    """The two lifecycles no stage list can express."""
+
+    WITHDRAWN = "withdrawn", "Withdrawn"
+    # A stage with a start, no end and no decision coming -- "मिसिल जलेको",
+    # a bench never constituted. Rule 2 would otherwise read it as ongoing
+    # forever.
+    DORMANT = "dormant", "Dormant"
+
+
+class CaseTrack(models.TextChoices):
+    """The route the case took into court -- distinct from the offence.
+
+    It also says how many appellate tiers to expect: one for ``ciaa`` and
+    ``money_laundering``, two for ``public_prosecutor``, none for ``writ``.
+    A validation hint, not a hard rule.
+    """
+
+    CIAA = "ciaa", "अख्तियार / CIAA"
+    MONEY_LAUNDERING = "money_laundering", "सम्पत्ति शुद्धीकरण / Money laundering"
+    PUBLIC_PROSECUTOR = "public_prosecutor", "सरकारवादी / Public prosecutor"
+    WRIT = "writ", "रिट / Writ"
+    ARBITRATION = "arbitration", "मध्यस्थता / Arbitration"
+    OTHER = "other", "Other"
+
+
 class CaseType(models.TextChoices):
     """Enum for case types."""
 
@@ -790,9 +854,9 @@ class CaseType(models.TextChoices):
 CASE_TYPES_REQUIRING_ACCUSED = frozenset({CaseType.CORRUPTION})
 
 
-def requires_accused(case_type):
+def requires_accused(offence_type):
     """Whether a case of this type must tag at least one ACCUSED entity."""
-    return case_type in CASE_TYPES_REQUIRING_ACCUSED
+    return offence_type in CASE_TYPES_REQUIRING_ACCUSED
 
 
 class CaseState(models.TextChoices):
@@ -891,10 +955,10 @@ class Case(models.Model):
     objects = CaseQuerySet.as_manager()
 
     # Core fields
-    case_type = models.CharField(
+    offence_type = models.CharField(
         max_length=20,
         choices=CaseType.choices,
-        help_text="Type of case",
+        help_text="The offence alleged in this case",
     )
     state = models.CharField(
         max_length=20,
@@ -944,15 +1008,88 @@ class Case(models.Model):
         help_text="DEPRECATED. External URL for the hero image; use banner_image",
     )
     # Date fields
+    # A case is a container of proceedings, not one proceeding: the published
+    # corpus already holds 12 dockets across 8 courts on one case. Shape and
+    # vocabulary live in ``cases/stages.py``.
+    dates = models.JSONField(
+        default=_empty_stage_document,
+        blank=True,
+        help_text=(
+            "Proceeding stages: {'stages': [{stage, start, end, courtcase_iri, "
+            "body, label, notes}]}. AD dates only; Bikram Sambat is derived on "
+            "display."
+        ),
+    )
+    # Maintained from ``dates`` on every save. A JSONField cannot sort the
+    # archive or drive a facet, so these two carry the sortable surface.
+    proceedings_started_on = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Derived: earliest start among COURT stages. Investigation is "
+            "excluded on purpose -- including it would move every case's "
+            "archive sort position backwards."
+        ),
+    )
+    proceedings_decided_on = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Derived: the last court stage's end, NULL while any court stage "
+            "is still open."
+        ),
+    )
+    case_track = models.CharField(
+        max_length=20,
+        choices=CaseTrack.choices,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "The route into court. Null until a caseworker who has read the "
+            "sources sets it -- an inferred value is worse than null, because "
+            "null is honest and queryable."
+        ),
+    )
+    status_override = models.CharField(
+        max_length=20,
+        choices=StatusOverride.choices,
+        null=True,
+        blank=True,
+        help_text=(
+            "Overrides the derived status for the two lifecycles the stage "
+            "list cannot express (withdrawn, dormant)."
+        ),
+    )
+    # These two held the COURT dates all along, whatever the old help text
+    # said: measured against NGM on ten published cases, case_start_date is
+    # the special court's registration date (seven exact, three a day out),
+    # and casework.enrich_court_record derives it from exactly that. The
+    # "alleged incident" wording was wrong for years and misread during this
+    # rework, which is why the correction is pinned by a test.
     case_start_date = models.DateField(
-        null=True, blank=True, help_text="When the alleged incident began"
+        null=True,
+        blank=True,
+        help_text=(
+            "DEPRECATED — edit the stage list instead. The first-instance "
+            "court registration date, served as an alias off the single "
+            "'initial' stage."
+        ),
     )
     case_end_date = models.DateField(
-        null=True, blank=True, help_text="When the alleged incident ended"
+        null=True,
+        blank=True,
+        help_text=(
+            "DEPRECATED — edit the stage list instead. The first-instance "
+            "court decision date, served as an alias off the single "
+            "'initial' stage."
+        ),
     )
     # The date the case was FIRST published on jawafdehi.org — about our
-    # publication, not about the alleged incident (case_start_date/case_end_date
-    # above). Nullable at the column so DRAFTs can exist without one; required
+    # publication, not about the proceedings (case_start_date/case_end_date
+    # above, and the stage list they alias). Nullable at the column so DRAFTs can exist without one; required
     # before a case may leave DRAFT (see validate()). Deliberately NOT derived
     # from created_at or from the first PUBLISHED CaseStateChange: cases are
     # routinely published here long after the research was done, and the state
@@ -1388,6 +1525,78 @@ class Case(models.Model):
 
         return slug[:50]
 
+    @property
+    def status(self) -> str:
+        """The case lifecycle, derived on read.
+
+        Deliberately NOT a stored column. Rules 3 and 4 read
+        ``CaseEntityRelationship.outcome``, so a stored value would be
+        invalidated by an entity-outcome edit -- a different endpoint from the
+        one that writes ``dates``, and one nothing would recompute. Derived on
+        read it cannot go stale, and the rule order can change in a patch
+        release instead of a backfill.
+        """
+        if self.status_override:
+            return self.status_override
+
+        stages = (self.dates or {}).get("stages") or []
+        court = [s for s in stages if isinstance(s, dict) and s.get("stage") in COURT_STAGES]
+        open_court = [s for s in court if not s.get("end")]
+
+        if open_court:
+            return CaseStatus.ONGOING
+
+        # ``.all()`` then filter in Python, NOT ``.filter()``: the case list
+        # prefetches ``entity_relationships``, and a queryset filter ignores
+        # that cache and issues a fresh query -- one per card.
+        #
+        # The WHOLE accused roster, ungraded binds included. A NULL outcome is
+        # not terminal, so it blocks CONCLUDED: reading the rule off only the
+        # graded subset would badge a case "Resolved" over named people with
+        # no recorded verdict. ``save()`` normalizes a missing outcome to
+        # CHARGED, but the CHECK constraint permits NULL on an accused bind,
+        # so bulk writes and legacy rows can still hold one.
+        outcomes = [
+            bind.outcome
+            for bind in self.entity_relationships.all()
+            if bind.relationship_type == RelationshipType.ACCUSED
+        ]
+        if RelationshipOutcome.REMANDED in outcomes:
+            return CaseStatus.ONGOING
+
+        if court and outcomes and all(o in TERMINAL_OUTCOMES for o in outcomes):
+            return CaseStatus.CONCLUDED
+
+        if not court and any(
+            isinstance(s, dict) and s.get("stage") == "investigation" and not s.get("end")
+            for s in stages
+        ):
+            return CaseStatus.UNDER_INVESTIGATION
+
+        return CaseStatus.OTHERS
+
+    def _validate_and_derive_stages(self):
+        """Validate ``dates`` and refresh the two derived columns.
+
+        The ordering rule stays here rather than becoming a CHECK constraint: a
+        Supreme Court remand restarts first instance after the appeal ended, so
+        a schema-level rule would fire on correct data and need another
+        migration to relax.
+        """
+        if self.dates is None:
+            self.dates = _empty_stage_document()
+        if not isinstance(self.dates, dict) or "stages" not in self.dates:
+            raise ValidationError({"dates": "dates must be {'stages': [...]}"})
+
+        try:
+            validate_stages(self.dates["stages"], binds=self.court_cases)
+        except StageError as exc:
+            raise ValidationError({"dates": str(exc)}) from exc
+
+        started, decided = derived_proceeding_dates(self.dates["stages"])
+        self.proceedings_started_on = started
+        self.proceedings_decided_on = decided
+
     def save(self, *args, **kwargs):
         """Override save; auto-generate the slug (case identity) for new cases."""
         # Normalize empty/whitespace slug to None to avoid unique constraint violations
@@ -1401,6 +1610,8 @@ class Case(models.Model):
         # Auto-generate slug for any case without one (slug-only API addressing).
         if not self.slug or not self.slug.strip():
             self.slug = self._generate_unique_slug()
+
+        self._validate_and_derive_stages()
 
         # Enforce slug immutability (use cached original value to avoid extra query)
         # Allow slug modification for DRAFT cases

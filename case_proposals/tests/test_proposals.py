@@ -44,7 +44,7 @@ def client_for(role):
 
 
 def make_case(slug="lalita-niwas-land-scam", title="Lalita Niwas land scam"):
-    return Case.objects.create(title=title, case_type=CaseType.CORRUPTION, slug=slug)
+    return Case.objects.create(title=title, offence_type=CaseType.CORRUPTION, slug=slug)
 
 
 def timeline_payload(slug="lalita-niwas-land-scam", dedup="docket:x:hearing:1", **over):

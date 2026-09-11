@@ -323,7 +323,7 @@ def _published_case():
         short_description="Short summary.",
         key_allegations=["Misappropriation of funds", "Forgery"],
         tags=["corruption", "budget"],
-        case_type="CORRUPTION",
+        offence_type="CORRUPTION",
         court_cases=["https://jawafdehi.org/courtcase/supreme/081-cr-0081"],
         case_start_date=None,
         created_at=None,
@@ -381,7 +381,12 @@ def test_case_should_index_only_published():
 
 
 def _card_case(**overrides):
-    """A published case with the full render-payload attributes set."""
+    """A published case with the full render-payload attributes set.
+
+    ``status`` stands in for the ``Case.status`` PROPERTY (derived on read from
+    the stage list plus the accused outcomes) — a stand-in carries it as a plain
+    attribute, which is all ``build_doc`` ever reads.
+    """
     from datetime import date
 
     base = dict(
@@ -393,8 +398,13 @@ def _card_case(**overrides):
         short_description="<b>Short</b> summary.",
         key_allegations=["Encroachment", ""],
         tags=["land", "corruption"],
-        case_type="CORRUPTION",
+        offence_type="CORRUPTION",
         court_cases=[],
+        status="ongoing",
+        case_track="ciaa",
+        dates={"stages": [{"stage": "initial", "start": "2024-01-01"}]},
+        proceedings_started_on=date(2024, 1, 1),
+        proceedings_decided_on=None,
         case_start_date=date(2024, 1, 1),
         case_end_date=None,
         thumbnail_url="https://cdn/thumb.png",
@@ -408,17 +418,6 @@ def _card_case(**overrides):
     return SimpleNamespace(**base)
 
 
-def test_case_build_doc_status_ongoing_closed_others():
-    from datetime import date
-
-    # Coarse lifecycle rides on the dedicated ``case_status`` keyword (NOT the
-    # generic ``status``, which NGM courtcases use for their enrichment flag).
-    assert case_index.build_doc(_card_case())["case_status"] == "ongoing"
-    assert "status" not in case_index.build_doc(_card_case())
-    closed = case_index.build_doc(_card_case(case_end_date=date(2024, 6, 1)))
-    assert closed["case_status"] == "closed"
-    others = case_index.build_doc(_card_case(case_start_date=None))
-    assert others["case_status"] == "others"
 
 
 def test_case_build_doc_mirrors_case_status_into_raw():
@@ -467,6 +466,8 @@ def test_case_build_doc_card_payload():
     assert card["short_description"] == "<b>Short</b> summary."
     assert card["key_allegations"] == ["Encroachment"]  # blank dropped
     assert card["tags"] == ["land", "corruption"]
+    assert card["offence_type"] == "CORRUPTION"
+    # DEPRECATED alias the deployed SPA card still reads.
     assert card["case_type"] == "CORRUPTION"
     assert card["status"] == "ongoing"
     assert card["case_start_date"] == "2024-01-01"
@@ -560,3 +561,201 @@ def test_case_build_doc_keeps_a_zero_bigo():
     and remains filterable. (No published case records one; inventing the rule
     here would make an honest zero invisible to every bound.)"""
     assert case_index.build_doc(_card_case(bigo=0))["bigo"] == 0
+
+
+# ── the stage design: sort key, status, track, derived dates ──────────────────
+
+
+def test_case_build_doc_date_is_the_derived_proceeding_start():
+    """The archive sort key is the earliest start among COURT stages."""
+    from datetime import date
+
+    doc = case_index.build_doc(_card_case(proceedings_started_on=date(2024, 3, 4)))
+    assert doc["date"] == "2024-03-04"
+
+
+def test_case_build_doc_date_falls_back_to_the_created_date():
+    """A case whose every court stage lacks a start legitimately has no
+    proceeding start — a verdict date is often known when the registration date
+    is not. It must stay sortable, so the fallback survives the move."""
+    from datetime import datetime
+
+    doc = case_index.build_doc(
+        _card_case(proceedings_started_on=None, created_at=datetime(2023, 5, 6, 7, 8))
+    )
+    assert doc["date"] == "2023-05-06"
+
+
+def test_case_build_doc_date_no_longer_reads_the_legacy_date_pair():
+    """The legacy pair is not consulted at all any more.
+
+    It holds the same value (the backfill seeds the ``initial`` stage's start
+    from ``case_start_date``), so this is invisible on a migrated row -- but
+    reading BOTH would leave two writable surfaces disagreeing the moment a
+    caseworker edits the stage list and nothing rewrites the old column.
+    """
+    from datetime import date
+
+    doc = case_index.build_doc(
+        _card_case(
+            proceedings_started_on=None,
+            case_start_date=date(2019, 1, 1),
+            created_at=None,
+        )
+    )
+    assert "date" not in doc
+
+
+def test_case_build_doc_emits_the_full_new_status_vocabulary():
+    """The new field the frontend migrates ONTO: all six lifecycles, verbatim."""
+    for value in (
+        "ongoing",
+        "under_investigation",
+        "concluded",
+        "others",
+        "withdrawn",
+        "dormant",
+    ):
+        assert case_index.build_doc(_card_case(status=value))["status"] == value
+
+
+def test_case_build_doc_down_maps_every_status_to_the_legacy_facet():
+    """Every arm pinned. ``case_status`` is what the DEPLOYED SPA filters on and
+    its vocabulary is exactly three values — a new one reaching it would produce
+    a facet bucket no deployed client can select."""
+    expected = {
+        "ongoing": "ongoing",
+        "concluded": "closed",
+        "withdrawn": "closed",
+        "under_investigation": "others",
+        "dormant": "others",
+        "others": "others",
+    }
+    for new_value, legacy in expected.items():
+        doc = case_index.build_doc(_card_case(status=new_value))
+        assert doc["case_status"] == legacy, new_value
+        assert doc["status"] == new_value, new_value
+    # No arm of the shipped map left unpinned by this test.
+    assert expected == case_index.LEGACY_CASE_STATUS
+
+
+def test_the_legacy_facet_vocabulary_is_exactly_three_values():
+    assert set(case_index.LEGACY_CASE_STATUS.values()) == {"ongoing", "closed", "others"}
+
+
+def test_case_build_doc_down_maps_an_unmapped_status_to_others():
+    """A lifecycle added to the model but not to the map must not leak into the
+    three-value facet; it still reaches the new ``status`` field verbatim."""
+    doc = case_index.build_doc(_card_case(status="teleported"))
+    assert doc["case_status"] == "others"
+    assert doc["status"] == "teleported"
+
+
+def test_case_build_doc_status_defaults_to_others_without_the_attribute():
+    """``build_doc`` shapes whatever it is handed, including records predating
+    the field. ``others`` is the honest bucket, and it costs the case nothing."""
+    doc = case_index.build_doc(_published_case())
+    assert doc["status"] == "others"
+    assert doc["case_status"] == "others"
+
+
+def test_case_build_doc_status_survives_a_raising_property():
+    """``Case.status`` reads the accused binds, so it can raise on an unsaved or
+    detached instance. Drop to ``others``, never lose the document."""
+
+    class _Exploding:
+        state = "PUBLISHED"
+        public_iri = "https://jawafdehi.org/case/x"
+        slug = "x"
+        title = "X"
+
+        @property
+        def status(self):
+            raise ValueError("instance needs a primary key")
+
+    doc = case_index.build_doc(_Exploding())
+    assert doc["status"] == "others"
+    assert doc["case_status"] == "others"
+    assert doc["iri"] == "https://jawafdehi.org/case/x"
+
+
+def test_case_build_doc_mirrors_the_legacy_status_into_raw_and_the_card():
+    """Both are the deployed SPA's read paths (``extra.case_status`` and the
+    card badge), so both keep the OLD vocabulary."""
+    doc = case_index.build_doc(_card_case(status="concluded"))
+    assert doc["raw"]["case_status"] == "closed"
+    assert doc["raw"]["card"]["status"] == "closed"
+
+
+def test_case_build_doc_indexes_case_track():
+    assert case_index.build_doc(_card_case(case_track="ciaa"))["case_track"] == "ciaa"
+
+
+def test_case_build_doc_omits_case_track_when_unset():
+    """Null is the honest value for the ~2,900 unclassified drafts. An empty
+    keyword would give the facet a nameless bucket holding all of them."""
+    for unset in (None, "", "   "):
+        assert "case_track" not in case_index.build_doc(_card_case(case_track=unset))
+    assert "case_track" not in case_index.build_doc(_published_case())
+
+
+def test_case_build_doc_indexes_the_derived_proceeding_dates():
+    from datetime import date
+
+    doc = case_index.build_doc(
+        _card_case(
+            proceedings_started_on=date(2024, 2, 25),
+            proceedings_decided_on=date(2024, 5, 22),
+        )
+    )
+    assert doc["proceedings_started_on"] == "2024-02-25"
+    assert doc["proceedings_decided_on"] == "2024-05-22"
+
+
+def test_case_build_doc_omits_the_proceeding_dates_when_null():
+    """A null against a ``date`` mapping is rejected and takes the WHOLE
+    document with it; an absent field is simply excluded by a range clause,
+    which is right for a case with no start or no decision yet."""
+    doc = case_index.build_doc(
+        _card_case(proceedings_started_on=None, proceedings_decided_on=None)
+    )
+    assert "proceedings_started_on" not in doc
+    assert "proceedings_decided_on" not in doc
+    assert "proceedings_started_on" not in case_index.build_doc(_published_case())
+
+
+def test_case_build_doc_keeps_the_stage_list_out_of_the_indexed_fields():
+    """The stage document is DISPLAY-only. Promoting it would make the shape of
+    a JSON blob part of the query contract, and OpenSearch would dynamically map
+    every key inside it."""
+    doc = case_index.build_doc(_card_case())
+    assert "dates" not in doc
+    assert "stages" not in doc
+    assert doc["raw"]["card"]["stages"] == [{"stage": "initial", "start": "2024-01-01"}]
+
+
+def test_case_build_doc_drops_non_dict_stage_records():
+    doc = case_index.build_doc(
+        _card_case(dates={"stages": [{"stage": "initial"}, "not-a-dict", None]})
+    )
+    assert doc["raw"]["card"]["stages"] == [{"stage": "initial"}]
+
+
+def test_case_build_doc_survives_a_malformed_stage_document():
+    """A legacy row migrated unchanged must still render, not abort a reindex."""
+    for junk in (None, {}, [], "nope", {"stages": None}, {"stages": "nope"}):
+        doc = case_index.build_doc(_card_case(dates=junk))
+        assert doc["raw"]["card"]["stages"] == [], junk
+
+
+def test_case_build_doc_keeps_both_case_type_and_offence_type():
+    """``case_type`` shares ONE facet bucket with the NGM courtcase docs on
+    purpose; ``offence_type`` is additive. Neither is touched by this change."""
+    doc = case_index.build_doc(_card_case())
+    assert doc["case_type"] == "CORRUPTION"
+    assert doc["offence_type"] == "CORRUPTION"
+    assert "CORRUPTION" in doc["keywords"]
+    assert doc["raw"]["case_type"] == "CORRUPTION"
+    assert doc["raw"]["offence_type"] == "CORRUPTION"
+    assert doc["raw"]["card"]["case_type"] == "CORRUPTION"
+    assert doc["raw"]["card"]["offence_type"] == "CORRUPTION"

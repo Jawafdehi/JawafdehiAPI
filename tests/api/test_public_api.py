@@ -208,7 +208,7 @@ def test_filter_by_case_type(case_data, case_type):
     Validates: Requirements 6.2, 8.1
     """
     # Set the case type
-    case_data["case_type"] = case_type
+    case_data["offence_type"] = case_type
 
     # Create and publish a case
     case = create_case_with_entities(**case_data)
@@ -510,7 +510,7 @@ def test_api_returns_empty_list_when_no_published_cases():
     create_case_with_entities(
         title="Draft Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
     )
 
@@ -535,7 +535,7 @@ def test_api_does_not_expose_contributors():
         title="Test Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test"],
         key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Test description",
         state=CaseState.PUBLISHED,
     )
@@ -563,7 +563,7 @@ def test_api_exposes_state_field():
         title="Test Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test"],
         key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Test description",
         state=CaseState.PUBLISHED,
     )

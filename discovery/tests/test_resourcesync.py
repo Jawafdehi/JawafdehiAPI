@@ -22,7 +22,7 @@ RS = "{http://www.openarchives.org/rs/terms/}"
 
 
 def _published_case(title="Pub"):
-    case = Case(case_type=CaseType.CORRUPTION, title=title)
+    case = Case(offence_type=CaseType.CORRUPTION, title=title)
     case.save()
     case.state = CaseState.PUBLISHED
     case.save()
@@ -119,7 +119,7 @@ class ResourceListTests(TestCase):
         )
 
     def test_resourcelist_excludes_draft_cases(self):
-        draft = Case(case_type=CaseType.CORRUPTION, title="Draft")
+        draft = Case(offence_type=CaseType.CORRUPTION, title="Draft")
         draft.save()  # DRAFT
         published = _published_case("Published")
         xml = resourcesync.resource_list()

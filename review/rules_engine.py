@@ -306,7 +306,7 @@ def accused_present(case):
     """
     from cases.models import requires_accused
 
-    if not requires_accused((case.get("case_type") or "").upper()):
+    if not requires_accused((case.get("offence_type") or case.get("case_type") or "").upper()):
         return 100, []
     accused = _entities_of_type(case, "accused")
     if not accused:

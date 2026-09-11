@@ -114,7 +114,7 @@ def _snapshot(case) -> dict:
     return {
         "slug": case.slug,
         "title": case.title,
-        "case_type": case.case_type,
+        "offence_type": case.offence_type,
         "state": case.state,
         "short_description": case.short_description or "",
         "description": description[:MAX_DESCRIPTION_CHARS],

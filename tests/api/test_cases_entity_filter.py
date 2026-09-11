@@ -38,14 +38,14 @@ class TestCaseEntityFilter:
             slug="ef-accused",
             title="Accused case",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[X],
         )
         create_case_with_entities(
             slug="ef-related",
             title="Related case",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             related_entities=[X],
         )
         # Published but does NOT cite X -> excluded.
@@ -53,7 +53,7 @@ class TestCaseEntityFilter:
             slug="ef-other",
             title="Other entity",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[Y],
         )
         # Cites X but IN_REVIEW -> hidden from the anonymous reverse lookup.
@@ -61,7 +61,7 @@ class TestCaseEntityFilter:
             slug="ef-inreview",
             title="In review",
             state=CaseState.IN_REVIEW,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[X],
         )
 
@@ -75,7 +75,7 @@ class TestCaseEntityFilter:
             slug="ef-lonely",
             title="Lonely",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[X],
         )
 
@@ -92,7 +92,7 @@ class TestCaseEntityFilter:
             slug="ef-multirole",
             title="Multi-role",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             related_entities=[X],
         )
         CaseEntityRelationship.objects.create(
@@ -109,7 +109,7 @@ class TestCaseEntityFilter:
             slug="ef-scoped-inreview",
             title="In review",
             state=CaseState.IN_REVIEW,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[X],
         )
 
@@ -129,21 +129,21 @@ class TestCaseEntityFilter:
             slug="ord-related",
             title="Related (newest)",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             related_entities=[X],
         )
         acc = create_case_with_entities(
             slug="ord-accused",
             title="Accused (oldest)",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[X],
         )
         alleged = Case.objects.create(
             slug="ord-alleged",
             title="Alleged (middle)",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
         )
         CaseEntityRelationship.objects.create(
             case=alleged, nes_id=X, relationship_type=RelationshipType.ALLEGED

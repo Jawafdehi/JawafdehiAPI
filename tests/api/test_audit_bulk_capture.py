@@ -18,7 +18,7 @@ from cases.models import Case, CaseState, CaseType
 def _make_case(**kwargs) -> Case:
     defaults = dict(
         title="Bulk case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         description="Original",
         short_description="Short",

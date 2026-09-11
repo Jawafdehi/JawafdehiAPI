@@ -66,7 +66,7 @@ def test_readonly_cannot_create_case():
     readonly = create_user_with_role("ro_case", "ro_case@example.com", "ReadOnly")
     response = _authed_client(readonly).post(
         "/api/cases/",
-        data={"title": "RO Should Not Create", "case_type": CaseType.CORRUPTION},
+        data={"title": "RO Should Not Create", "offence_type": CaseType.CORRUPTION},
         format="json",
     )
     assert response.status_code == 403
@@ -82,7 +82,7 @@ def test_writer_with_perm_can_create_case():
     _grant(contributor, "add_case")
     response = _authed_client(contributor).post(
         "/api/cases/",
-        data={"title": "Contributor Case", "case_type": CaseType.CORRUPTION},
+        data={"title": "Contributor Case", "offence_type": CaseType.CORRUPTION},
         format="json",
     )
     assert response.status_code == 201

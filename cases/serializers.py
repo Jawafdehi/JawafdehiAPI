@@ -12,6 +12,7 @@ from drf_spectacular.utils import extend_schema_field, inline_serializer
 from rest_framework import serializers
 
 from .image_serializers import CARD_SPECS, HERO_SPECS, SrcsetRenditionField
+from .stages import first_instance_dates
 from .models import (
     Case,
     CaseEntityRelationship,
@@ -157,7 +158,10 @@ class AuthorCaseSummarySerializer(serializers.Serializer):
     slug = serializers.CharField(read_only=True)
     title = serializers.CharField(read_only=True)
     short_description = serializers.CharField(read_only=True, allow_blank=True)
-    case_type = serializers.CharField(read_only=True)
+    offence_type = serializers.CharField(read_only=True)
+    # DEPRECATED read alias for the deployed SPA; drop one release after the
+    # frontend reads ``offence_type``.
+    case_type = serializers.CharField(source="offence_type", read_only=True)
     thumbnail = SrcsetRenditionField(specs=CARD_SPECS, source="card_image")
     thumbnail_url = serializers.CharField(read_only=True, allow_blank=True)
     case_publish_date = serializers.DateField(read_only=True, allow_null=True)
@@ -243,6 +247,43 @@ class CaseSerializer(serializers.ModelSerializer):
     SCHEMA FIX: Removed legacy alleged_entities and related_entities fields to eliminate
     schema discrepancy. The API now returns only the unified format as documented.
     """
+
+    # DEPRECATED read alias for the deployed SPA; drop one release after the
+    # frontend reads ``offence_type``.
+    case_type = serializers.CharField(source="offence_type", read_only=True)
+    # DEPRECATED read aliases. They used to be columns; they now report the
+    # single first-instance stage, and are null when the case has none or has
+    # several (the scalar shape cannot express parallel first instances).
+    case_start_date = serializers.SerializerMethodField()
+    case_end_date = serializers.SerializerMethodField()
+
+    # The stage list and everything derived from it. Read-only here -- writes
+    # go through ``CasePatchSerializer``/``CaseCreateSerializer``, which
+    # validate the records; this serializer only ever echoes them back.
+    #
+    # These are PUBLIC because the case page renders them: one row per stage
+    # (the deprecated pair above cannot describe a case that runs several
+    # dockets across several courts), and the lifecycle chip, which no client
+    # can derive -- with no single end date there is nothing to read it off.
+    dates = serializers.JSONField(read_only=True)
+    status = serializers.CharField(
+        read_only=True,
+        help_text="Derived proceeding lifecycle (ongoing / under_investigation "
+        "/ concluded / others, or a withdrawn/dormant override). NOT ``state``, "
+        "which is our editorial workflow.",
+    )
+    case_track = serializers.CharField(read_only=True, allow_null=True)
+    # Returned so the editor can render (and round-trip) the current override
+    # rather than guess it back out of the derived ``status``.
+    status_override = serializers.CharField(read_only=True, allow_null=True)
+    proceedings_started_on = serializers.DateField(read_only=True, allow_null=True)
+    proceedings_decided_on = serializers.DateField(read_only=True, allow_null=True)
+
+    def get_case_start_date(self, obj):
+        return first_instance_dates((obj.dates or {}).get("stages") or [])[0]
+
+    def get_case_end_date(self, obj):
+        return first_instance_dates((obj.dates or {}).get("stages") or [])[1]
 
     entities = serializers.SerializerMethodField(
         help_text="Entity binds for this case (NES entity id, relationship type, "
@@ -471,7 +512,8 @@ class CaseSerializer(serializers.ModelSerializer):
             "id",
             "slug",
             "public_iri",
-            "case_type",
+            "offence_type",
+            "case_type",  # DEPRECATED alias, see above
             "state",
             "title",
             "short_description",
@@ -495,6 +537,13 @@ class CaseSerializer(serializers.ModelSerializer):
             "banner_url",
             "case_start_date",
             "case_end_date",
+            # The stage list itself, and the three values derived from it.
+            "dates",
+            "status",
+            "case_track",
+            "status_override",
+            "proceedings_started_on",
+            "proceedings_decided_on",
             "entities",
             "tags",
             "description",

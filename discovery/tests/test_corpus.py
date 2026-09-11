@@ -169,7 +169,7 @@ class CorpusEnumeratorTests(TestCase):
         assert r.jsonld_url == "/api/materials/court/kathmandudc.082-oa-0503"
 
     def test_published_case_is_public(self):
-        case = Case(case_type=CaseType.CORRUPTION, title="A published case")
+        case = Case(offence_type=CaseType.CORRUPTION, title="A published case")
         case.save()
         case.state = CaseState.PUBLISHED
         case.save()
@@ -180,14 +180,14 @@ class CorpusEnumeratorTests(TestCase):
 
     def test_draft_and_in_review_cases_are_absent(self):
         # The public-only guarantee: only PUBLISHED cases appear.
-        draft = Case(case_type=CaseType.CORRUPTION, title="A DRAFT case")
+        draft = Case(offence_type=CaseType.CORRUPTION, title="A DRAFT case")
         draft.save()  # state defaults to DRAFT
-        in_review = Case(case_type=CaseType.CORRUPTION, title="An IN_REVIEW case")
+        in_review = Case(offence_type=CaseType.CORRUPTION, title="An IN_REVIEW case")
         in_review.save()
         # Force IN_REVIEW directly (bypass submit()'s strict validation).
         Case.objects.filter(pk=in_review.pk).update(state=CaseState.IN_REVIEW)
 
-        published = Case(case_type=CaseType.CORRUPTION, title="Published")
+        published = Case(offence_type=CaseType.CORRUPTION, title="Published")
         published.save()
         published.state = CaseState.PUBLISHED
         published.save()
@@ -203,7 +203,7 @@ class CorpusEnumeratorTests(TestCase):
         _make_entity()
         _make_material()
         _make_courtcase()
-        case = Case(case_type=CaseType.CORRUPTION, title="Pub")
+        case = Case(offence_type=CaseType.CORRUPTION, title="Pub")
         case.save()
         case.state = CaseState.PUBLISHED
         case.save()
@@ -253,11 +253,11 @@ class BadRowResilienceTests(TestCase):
         assert not any("082-oa-bad" in i.lower() for i in iris)
 
     def test_case_value_error_row_is_skipped_not_raised(self):
-        good = Case(case_type=CaseType.CORRUPTION, title="Good")
+        good = Case(offence_type=CaseType.CORRUPTION, title="Good")
         good.save()
         good.state = CaseState.PUBLISHED
         good.save()
-        bad = Case(case_type=CaseType.CORRUPTION, title="Bad")
+        bad = Case(offence_type=CaseType.CORRUPTION, title="Bad")
         bad.save()
         bad.state = CaseState.PUBLISHED
         bad.save()

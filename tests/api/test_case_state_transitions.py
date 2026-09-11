@@ -40,7 +40,7 @@ def _publishable_case(state=CaseState.DRAFT, **kwargs) -> Case:
     allegations + description)."""
     defaults = dict(
         title="Publishable case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=state,
         description="Detailed allegation description",
         short_description="Short",
@@ -182,7 +182,7 @@ def test_publish_rejected_when_missing_allegations_and_accused():
     # DRAFT with no allegations, no accused entity, no description.
     case = Case.objects.create(
         title="Incomplete case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         key_allegations=[],
     )
@@ -202,7 +202,7 @@ def test_publish_rejected_when_missing_accused_only():
     user = create_user_with_role("mod-gate2", "mod-gate2@example.com", "Moderator")
     case = Case.objects.create(
         title="Missing accused",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         description="Full description",
         key_allegations=["An allegation"],

@@ -41,7 +41,7 @@ def _authed_client(user) -> APIClient:
 def _publishable_case(state=CaseState.DRAFT, **kwargs) -> Case:
     defaults = dict(
         title="Publishable case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=state,
         description="Detailed allegation description",
         short_description="Short",
@@ -79,7 +79,7 @@ def test_page_size_query_param_honoured():
     for i in range(25):
         Case.objects.create(
             title=f"Case {i}",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.IN_REVIEW,
         )
 
@@ -97,7 +97,7 @@ def test_default_page_size_unchanged_at_20():
     for i in range(25):
         Case.objects.create(
             title=f"Case {i}",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.IN_REVIEW,
         )
 
@@ -114,7 +114,7 @@ def test_page_size_capped_at_max():
     for i in range(5):
         Case.objects.create(
             title=f"Case {i}",
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.IN_REVIEW,
         )
     # Asking for more than max_page_size (200) must not error; it clamps.

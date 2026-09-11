@@ -159,10 +159,10 @@ def _case_counts() -> dict:
         in_review=Count("pk", filter=Q(state=CaseState.IN_REVIEW)),
         closed=Count("pk", filter=Q(state=CaseState.CLOSED)),
         # CIAA vs non-CIAA split. CIAA corruption cases are drafted with
-        # case_type=CORRUPTION (see ciaa_draft_case_service); every other type
+        # offence_type=CORRUPTION (see ciaa_draft_case_service); every other type
         # (bribery, forgery, embezzlement, ...) runs through other bodies.
-        ciaa=Count("pk", filter=Q(case_type=CaseType.CORRUPTION)),
-        non_ciaa=Count("pk", filter=~Q(case_type=CaseType.CORRUPTION)),
+        ciaa=Count("pk", filter=Q(offence_type=CaseType.CORRUPTION)),
+        non_ciaa=Count("pk", filter=~Q(offence_type=CaseType.CORRUPTION)),
         # Total bigo (बिगो) — the summed disputed/embezzled amount (NPR) across
         # PUBLISHED cases only, matching the public framing of the other headline
         # metrics (entities_tracked is likewise published-only). Sum is NULL when

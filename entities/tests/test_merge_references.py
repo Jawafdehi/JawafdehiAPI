@@ -17,7 +17,7 @@ pytestmark = pytest.mark.django_db(databases="__all__")
 
 def _case(slug):
     return Case.objects.create(
-        title="Jhapa land revenue case", slug=slug, case_type=CaseType.CORRUPTION,
+        title="Jhapa land revenue case", slug=slug, offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="test", description="test",
     )
 

@@ -25,13 +25,13 @@ def moderator(db):
 @pytest.fixture
 def cases(db):
     published = create_case_with_entities(
-        title="Published one", case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED
+        title="Published one", offence_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED
     )
     in_review = create_case_with_entities(
-        title="In review one", case_type=CaseType.CORRUPTION, state=CaseState.IN_REVIEW
+        title="In review one", offence_type=CaseType.CORRUPTION, state=CaseState.IN_REVIEW
     )
     draft = create_case_with_entities(
-        title="Draft one", case_type=CaseType.CORRUPTION, state=CaseState.DRAFT
+        title="Draft one", offence_type=CaseType.CORRUPTION, state=CaseState.DRAFT
     )
     return {"published": published, "in_review": in_review, "draft": draft}
 

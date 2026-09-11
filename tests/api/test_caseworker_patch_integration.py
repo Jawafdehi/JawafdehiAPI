@@ -24,7 +24,7 @@ URL = "/api/cases/{}/"
 def _make_case(**kwargs):
     defaults = {
         "title": "Nagarik Land Irregularity",
-        "case_type": CaseType.CORRUPTION,
+        "offence_type": CaseType.CORRUPTION,
         "state": CaseState.DRAFT,
         "short_description": "Initial short description",
         "description": "Initial long description",

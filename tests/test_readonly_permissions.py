@@ -55,7 +55,7 @@ def _make_case(title, state=CaseState.DRAFT):
         title=title,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         key_allegations=["Test"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description=title,
     )
     case.state = state

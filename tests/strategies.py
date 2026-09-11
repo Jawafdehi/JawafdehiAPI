@@ -203,7 +203,7 @@ def minimal_case_data(draw):
     return {
         "title": title,
         "alleged_entities": draw(entity_iri_list(min_size=1, max_size=3)),
-        "case_type": draw(st.sampled_from([CaseType.CORRUPTION])),
+        "offence_type": draw(st.sampled_from([CaseType.CORRUPTION])),
     }
 
 
@@ -231,7 +231,7 @@ def complete_case_data(draw):
         "title": title,
         "alleged_entities": draw(entity_iri_list(min_size=1, max_size=3)),
         "key_allegations": draw(text_list(min_size=1, max_size=5)),
-        "case_type": draw(st.sampled_from([CaseType.CORRUPTION])),
+        "offence_type": draw(st.sampled_from([CaseType.CORRUPTION])),
         "description": description,
     }
 
@@ -266,7 +266,7 @@ def complete_case_data_with_timeline(draw):
         "related_entities": draw(entity_iri_list(min_size=0, max_size=3)),
         "locations": draw(entity_iri_list(min_size=0, max_size=2)),
         "key_allegations": draw(text_list(min_size=1, max_size=5)),
-        "case_type": draw(st.sampled_from([CaseType.CORRUPTION])),
+        "offence_type": draw(st.sampled_from([CaseType.CORRUPTION])),
         "description": description,
         "tags": draw(tag_list(min_size=0, max_size=5)),
         "timeline": draw(timeline_list(min_size=0, max_size=3)),
@@ -373,7 +373,7 @@ def simple_complete_case_data(draw):
         ),
         "alleged_entities": draw(simple_entity_iri_list(min_size=1, max_size=2)),
         "key_allegations": draw(simple_text_list(min_size=1, max_size=2)),
-        "case_type": draw(st.sampled_from([CaseType.CORRUPTION])),
+        "offence_type": draw(st.sampled_from([CaseType.CORRUPTION])),
         "description": draw(
             st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", min_size=20, max_size=100)
         ),

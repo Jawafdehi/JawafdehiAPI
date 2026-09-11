@@ -22,7 +22,7 @@ def _review(slug, **kwargs):
     Reviews key on the case FK now; the ``slug`` they expose is derived from it.
     """
     case, _ = Case.objects.get_or_create(
-        slug=slug, defaults=dict(title=slug, case_type=CaseType.CORRUPTION)
+        slug=slug, defaults=dict(title=slug, offence_type=CaseType.CORRUPTION)
     )
     return CaseReview.objects.create(case=case, **kwargs)
 

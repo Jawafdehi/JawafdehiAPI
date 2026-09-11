@@ -63,11 +63,18 @@ class Command(BaseCommand):
             help="Skip confirmation prompt before database import (requires --create-db-entry)",
         )
         parser.add_argument(
+            # Two spellings, one dest. ``Case.case_type`` was renamed to
+            # ``offence_type``; the old flag keeps working because a rename
+            # inside the codebase is no reason to break someone's shell
+            # history. The dest must match what handle() reads -- it did not,
+            # and argparse silently gave the handler a KeyError instead.
+            "--offence-type",
             "--case-type",
+            dest="offence_type",
             type=str,
             default="CORRUPTION",
             choices=["CORRUPTION"],
-            help="Case type for database entry (default: CORRUPTION)",
+            help="Offence charged, for the database entry (default: CORRUPTION)",
         )
         parser.add_argument(
             "--case-state",
@@ -145,7 +152,7 @@ class Command(BaseCommand):
                     result_file,
                     case,
                     no_confirm=options["no_confirm"],
-                    case_type=options["case_type"],
+                    offence_type=options["offence_type"],
                     case_state=options["case_state"],
                 )
 
@@ -161,7 +168,7 @@ class Command(BaseCommand):
         json_file,
         case_data,
         no_confirm=False,
-        case_type="CORRUPTION",
+        offence_type="CORRUPTION",
         case_state="DRAFT",
     ):
         """
@@ -171,7 +178,7 @@ class Command(BaseCommand):
             json_file: Path to the case-result.json file
             case_data: Parsed Case object
             no_confirm: Skip confirmation prompt if True
-            case_type: Case type (CORRUPTION)
+            offence_type: Case type (CORRUPTION)
             case_state: Initial case state (DRAFT, IN_REVIEW, or PUBLISHED)
         """
         from cases.services.case_importer import CaseImporter
@@ -182,7 +189,7 @@ class Command(BaseCommand):
             self.log_error("DATABASE IMPORT PREVIEW")
             self.log_error("=" * 60)
             self.log_error(f"Title: {case_data.title}")
-            self.log_error(f"Case Type: {case_type}")
+            self.log_error(f"Case Type: {offence_type}")
             self.log_error(f"Initial State: {case_state}")
             self.log_error(
                 f"Alleged entities: {', '.join(case_data.alleged_entities) if case_data.alleged_entities else 'None'}"
@@ -211,13 +218,13 @@ class Command(BaseCommand):
             self.log_error("\nImporting to database...")
             importer = CaseImporter(logger=self.stderr)
             db_case = importer.import_from_json(
-                json_file, case_type=case_type, case_state=case_state
+                json_file, offence_type=offence_type, case_state=case_state
             )
 
             self.log_error("\n✓ Database import successful!")
             self.log_error(f"  Case ID: {db_case.slug}")
             self.log_error(f"  State: {db_case.state}")
-            self.log_error(f"  Type: {db_case.case_type}")
+            self.log_error(f"  Type: {db_case.offence_type}")
             self.log_error(f"  Updated at: {db_case.updated_at.isoformat()}")
 
         except Exception as e:  # noqa: BLE001 - re-raised as CommandError for the CLI
