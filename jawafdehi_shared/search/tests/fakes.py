@@ -167,13 +167,22 @@ class Client:
         return {"result": "deleted"}
 
     def bulk_write(self, index: str, docs) -> int:
-        """Test-side stand-in for ``stream_bulk`` (which the tests patch out)."""
+        """Test-side stand-in for ``stream_bulk`` (which the tests patch out).
+
+        Counts while consuming rather than calling ``len``: the real
+        ``stream_bulk`` accepts any ITERABLE and is handed a lazy generator by
+        ``reindex._stream``, so a fake that demanded a sized collection would
+        force the caller to buffer — which is the allocation ``_stream`` exists
+        to avoid.
+        """
         target = self.store.resolve(index)
         if target not in self.store.indices:
             raise NotFoundError(index)
+        count = 0
         for doc in docs:
             self.store.indices[target][doc["iri"]] = doc
-        return len(docs)
+            count += 1
+        return count
 
     def bulk_delete(self, index: str, iris) -> int:
         """Stand-in for ``stream_bulk_delete``; an absent doc is a no-op."""

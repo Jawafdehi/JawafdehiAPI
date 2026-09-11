@@ -53,8 +53,12 @@ class ReindexEntitiesGateTests(TestCase):
         sent: list[str] = []
 
         def fake_stream_bulk(client, index, docs):
+            # Count while consuming: the real stream_bulk takes any iterable and
+            # is handed a lazy generator by reindex._stream, so `len` would both
+            # fail and force the buffering that _stream exists to avoid.
+            before = len(sent)
             sent.extend(d["iri"] for d in docs)
-            return len(docs)
+            return len(sent) - before
 
         with (
             patch("jawafdehi_shared.search.reindex.make_client"),

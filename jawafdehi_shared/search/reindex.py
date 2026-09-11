@@ -78,28 +78,33 @@ def _stream(
     index: str,
     records: Iterable[Any],
     build_doc: Callable[[Any], dict[str, Any]],
-    batch_size: int,
 ) -> tuple[int, int]:
-    """Bulk-index ``records`` into ``index``. Returns ``(indexed, skipped)``."""
-    indexed = 0
+    """Bulk-index ``records`` into ``index``. Returns ``(indexed, skipped)``.
+
+    Feeds ``stream_bulk`` a LAZY generator rather than accumulating a batch of
+    built docs first. ``streaming_bulk`` already bounds each request by document
+    count and by bytes, so the manual batching this replaces was a second, larger
+    buffer stacked on top of the helper's own: for ngm-materials it held 500
+    fully-built docs — each carrying an entire JSON-LD body in ``raw`` — resident
+    before the helper saw a single byte, which made it the largest client-side
+    allocation in the whole reindex path. Peak is now one chunk, not one chunk
+    plus a batch.
+
+    ``skipped`` is counted inside the generator, so it is only final once
+    ``stream_bulk`` has drained it — which it has by the time this returns.
+    """
     skipped = 0
-    batch: list[dict[str, Any]] = []
 
-    def flush() -> None:
-        nonlocal indexed
-        if batch:
-            indexed += stream_bulk(client, index, batch)
-            batch.clear()
+    def docs() -> Iterable[dict[str, Any]]:
+        nonlocal skipped
+        for record in records:
+            doc = build_doc(record)
+            if not doc.get("iri"):
+                skipped += 1
+                continue
+            yield doc
 
-    for record in records:
-        doc = build_doc(record)
-        if not doc.get("iri"):
-            skipped += 1
-            continue
-        batch.append(doc)
-        if len(batch) >= batch_size:
-            flush()
-    flush()
+    indexed = stream_bulk(client, index, docs())
     return indexed, skipped
 
 
@@ -179,7 +184,7 @@ def reindex(
 
     if not rebuild:
         create_index(client, index)
-        indexed, skipped = _stream(client, index, records, build_doc, batch_size)
+        indexed, skipped = _stream(client, index, records, build_doc)
         _refresh(client, index)
         return {
             "indexed": indexed,
@@ -200,7 +205,7 @@ def reindex(
     # a mapping migration land, since create_index no-ops on an existing index.
     create_index(client, target)
 
-    indexed, skipped = _stream(client, target, records, build_doc, batch_size)
+    indexed, skipped = _stream(client, target, records, build_doc)
     _refresh(client, target)
 
     # Count what actually LANDED, not what was submitted: `indexed` is the number

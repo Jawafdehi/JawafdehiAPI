@@ -22,6 +22,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Iterable
 
+from jawafdehi_shared.search.opensearch import (
+    get_bulk_chunk_size,
+    get_bulk_initial_backoff,
+    get_bulk_max_backoff,
+    get_bulk_max_chunk_bytes,
+    get_bulk_max_retries,
+)
 from jawafdehi_shared.search.transliterate import (
     to_devanagari,
     to_roman,
@@ -214,29 +221,124 @@ def delete_doc(client, index: str, iri: str) -> None:
         raise
 
 
-def stream_bulk(client, index: str, docs: Iterable[dict[str, Any]]) -> int:
-    """Bulk-index ``docs`` into ``index`` via the streaming bulk helper.
+#: How many failed items to quote in the error a failed bulk raises. Bounded so
+#: a chunk-wide failure cannot turn the exception message into the payload.
+_FAILURE_SAMPLE = 3
 
-    Each doc is upserted by its ``iri`` (document ``_id``). Returns the number of
-    docs submitted. Uses ``opensearchpy.helpers.bulk`` lazily so the module
-    stays importable without the optional dependency.
+
+def _bulk_kwargs() -> dict[str, Any]:
+    """The bounded ``streaming_bulk`` configuration both bulk paths share.
+
+    ``raise_on_error=False`` is what lets the caller decide which per-item
+    statuses are real failures — a 404 means something different to an upsert
+    than to an eviction — and it keeps opensearch-py from attaching the source
+    document to each error item (``_process_bulk_chunk_success`` only does that
+    on the ``raise_on_error`` branch). ``raise_on_exception=True`` is deliberate
+    and opposite: a transport error is a broken cluster, not a bad document, and
+    must fail the command loudly rather than be counted as N failed docs.
     """
-    from opensearchpy.helpers import bulk  # lazy: optional dependency
+    return {
+        "chunk_size": get_bulk_chunk_size(),
+        "max_chunk_bytes": get_bulk_max_chunk_bytes(),
+        "max_retries": get_bulk_max_retries(),
+        "initial_backoff": get_bulk_initial_backoff(),
+        "max_backoff": get_bulk_max_backoff(),
+        "raise_on_error": False,
+        "raise_on_exception": True,
+        "yield_ok": False,
+    }
+
+
+def _describe_bulk_failure(info: dict[str, Any]) -> str:
+    """One failed bulk item as a short string, keeping no reference to the doc.
+
+    Projects down to op/id/status/reason and truncates the reason, so neither a
+    wide failure nor one pathological error string can make the collected sample
+    scale with the data. (Under ``raise_on_error=False`` opensearch-py does not
+    attach the source document at all, but this must stay true if that ever
+    changes — it is the caller's only guard.)
+    """
+    action, result = next(iter(info.items())) if info else ("index", {})
+    result = result or {}
+    error = result.get("error")
+    if isinstance(error, dict):
+        reason = error.get("reason") or error.get("type") or ""
+    else:
+        reason = error or ""
+    return (
+        f"{action} _id={result.get('_id')!r} "
+        f"status={result.get('status')} {str(reason)[:200]}"
+    )
+
+
+def _item_status(info: dict[str, Any]) -> str:
+    """The HTTP status of a single bulk item result, as a string."""
+    _action, result = next(iter(info.items())) if info else ("index", {})
+    return str((result or {}).get("status"))
+
+
+def stream_bulk(client, index: str, docs: Iterable[dict[str, Any]]) -> int:
+    """Bulk-index ``docs`` into ``index``. Returns the number of docs submitted.
+
+    Each doc is upserted by its ``iri`` (document ``_id``). Imports
+    ``opensearchpy.helpers`` lazily so the module stays importable without the
+    optional dependency.
+
+    Uses ``streaming_bulk`` rather than ``helpers.bulk`` for two reasons, neither
+    of which is memory — ``bulk`` collects errors per CHUNK and raises at the end
+    of each one, so its error list was already bounded by ``chunk_size``:
+
+    * ``bulk`` hard-codes no retry, so a single ``429`` from a busy cluster
+      failed an entire reindex. Backpressure is the one failure here that is
+      expected to pass, and it is the one the old path could not survive.
+    * it gives us a per-item view, so ``stream_bulk_delete`` can treat a 404 as
+      success while this path treats it as a failure, without either of them
+      re-deriving the other's policy.
+
+    Bounding each request by BYTES as well as count (see
+    ``get_bulk_max_chunk_bytes``) is a real improvement for ngm-materials, whose
+    docs carry a whole JSON-LD body in ``raw`` — but note the caller controls the
+    larger allocation: see ``reindex._stream``.
+
+    Failures are fatal, as they were before. A reindex that silently skipped
+    documents would hand ``reindex()`` a short index and, on a rebuild, swap the
+    alias onto it.
+    """
+    from opensearchpy.helpers import streaming_bulk  # lazy: optional dependency
+
+    submitted = 0
 
     def actions() -> Iterable[dict[str, Any]]:
+        nonlocal submitted
         for doc in docs:
+            submitted += 1
             yield {"_index": index, "_id": doc["iri"], "_source": doc}
 
-    count = 0
+    failed = 0
+    sample: list[str] = []
+    for ok, info in streaming_bulk(client, actions(), **_bulk_kwargs()):
+        # Guarded rather than relying on yield_ok=False: if that flag is ever
+        # flipped (progress logging is the obvious reason to) an unguarded
+        # counter would score every SUCCESS as a failure and abort a clean run.
+        if ok:
+            continue
+        failed += 1
+        if len(sample) < _FAILURE_SAMPLE:
+            sample.append(_describe_bulk_failure(info))
 
-    def counting() -> Iterable[dict[str, Any]]:
-        nonlocal count
-        for action in actions():
-            count += 1
-            yield action
-
-    bulk(client, counting())
-    return count
+    if failed:
+        logger.error(
+            "bulk index into %s failed for %d/%d docs: %s",
+            index,
+            failed,
+            submitted,
+            sample,
+        )
+        raise RuntimeError(
+            f"bulk index into {index} failed for {failed}/{submitted} docs; "
+            f"first {len(sample)}: {sample}"
+        )
+    return submitted
 
 
 def stream_bulk_delete(client, index: str, iris: Iterable[str]) -> int:
@@ -247,22 +349,39 @@ def stream_bulk_delete(client, index: str, iris: Iterable[str]) -> int:
     COMMON case — only ~1.2% of court cases are public, so a busy window is tens
     of thousands of tombstones for docs that were mostly never indexed.
 
-    Those per-item 404s are the expected result, not a failure, so errors are
-    collected instead of raised; anything that is NOT a 404 is re-raised, since
-    that means the eviction genuinely did not happen.
+    Those per-item 404s are the expected result, not a failure. Anything else is
+    raised, since it means the eviction genuinely did not happen.
+
+    Retries a 429 with backoff, which the previous ``helpers.bulk`` call could
+    not: opensearch-py defaults per-chunk retries to 0, and 429 is not 404, so
+    ONE rejected tombstone aborted the whole pass. That matters more here than on
+    the indexing path because ``reindex`` runs this AFTER the alias swap — the
+    new generation is already live, so an aborted catch-up leaves a row that was
+    hidden mid-build still searchable, which for court cases is the sensitive-type
+    floor being undone by a reindex.
     """
-    from opensearchpy.helpers import bulk  # lazy: optional dependency
+    from opensearchpy.helpers import streaming_bulk  # lazy: optional dependency
 
     ids = list(iris)
     if not ids:
         return 0
-    actions = [{"_op_type": "delete", "_index": index, "_id": iri} for iri in ids]
-    _, errors = bulk(client, actions, raise_on_error=False, stats_only=False)
-    real = [
-        err
-        for err in errors
-        if str((err.get("delete") or {}).get("status")) not in ("404", "200")
-    ]
-    if real:
-        raise RuntimeError(f"bulk delete from {index} failed: {real[:3]}")
+
+    def actions() -> Iterable[dict[str, Any]]:
+        for iri in ids:
+            yield {"_op_type": "delete", "_index": index, "_id": iri}
+
+    failed = 0
+    sample: list[str] = []
+    for ok, info in streaming_bulk(client, actions(), **_bulk_kwargs()):
+        if ok or _item_status(info) == "404":
+            continue
+        failed += 1
+        if len(sample) < _FAILURE_SAMPLE:
+            sample.append(_describe_bulk_failure(info))
+
+    if failed:
+        raise RuntimeError(
+            f"bulk delete from {index} failed for {failed}/{len(ids)} docs; "
+            f"first {len(sample)}: {sample}"
+        )
     return len(ids)
