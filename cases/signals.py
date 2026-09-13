@@ -26,7 +26,12 @@ from django.db.models.signals import post_delete, post_save, pre_delete
 from django.dispatch import receiver
 
 from . import search_index
-from .models import Case, CaseCourtCaseReference, CaseMaterialReference
+from .models import (
+    Case,
+    CaseCourtCaseReference,
+    CaseEntityRelationship,
+    CaseMaterialReference,
+)
 
 # Attribute we stash the pre-delete material-IRI snapshot on. Set in pre_delete
 # (while the row + its CaseMaterialReference children still exist) and consumed in
@@ -35,6 +40,10 @@ _PENDING_IRIS_ATTR = "_pending_evidence_iris"
 # Same idea for the court-case references (courts.search_visibility rule 3: a court
 # case referenced by a PUBLISHED case is a hard SHOW).
 _PENDING_COURTCASE_IRIS_ATTR = "_pending_courtcase_iris"
+# And for the NES entity binds (entities.search_visibility: an entity is publicly
+# searchable iff a PUBLISHED case cites it, so a case leaving PUBLISHED — including
+# by hard delete — has to re-hide the entities nothing else cites).
+_PENDING_ENTITY_IRIS_ATTR = "_pending_entity_iris"
 
 
 @receiver(post_save, sender=Case, dispatch_uid="jawafdehi_case_search_index")
@@ -52,6 +61,12 @@ def _index_case(sender, instance, **kwargs):
     # them so a just-published case surfaces its cited court cases live.
     cc_iris = _referenced_courtcase_iris(instance)
     transaction.on_commit(lambda: _refresh_referenced_courtcases(cc_iris))
+    # A change to this case's PUBLISHED state also flips the public visibility of
+    # every NES entity it binds (entities.search_visibility) — re-index them so a
+    # just-published case surfaces the people it names, and an unpublished one
+    # re-hides those no other published case cites.
+    entity_iris = _bound_entity_iris(instance)
+    transaction.on_commit(lambda: _refresh_bound_entities(entity_iris))
 
 
 @receiver(pre_delete, sender=Case, dispatch_uid="jawafdehi_case_capture_evidence")
@@ -62,6 +77,10 @@ def _capture_case_evidence(sender, instance, **kwargs):
     setattr(instance, _PENDING_IRIS_ATTR, _referenced_material_iris(instance))
     # Same snapshot for the court-case references (join rows CASCADE-gone in post_delete).
     setattr(instance, _PENDING_COURTCASE_IRIS_ATTR, _referenced_courtcase_iris(instance))
+    # Same snapshot for the entity binds, for the same reason: CaseEntityRelationship
+    # rows CASCADE away with the case, so post_delete can no longer enumerate which
+    # entities just lost a published citation.
+    setattr(instance, _PENDING_ENTITY_IRIS_ATTR, _bound_entity_iris(instance))
 
 
 @receiver(post_delete, sender=Case, dispatch_uid="jawafdehi_case_search_delete")
@@ -77,6 +96,10 @@ def _delete_case(sender, instance, **kwargs):
     # (now-deleted) case referenced, from the pre_delete snapshot.
     cc_iris = getattr(instance, _PENDING_COURTCASE_IRIS_ATTR, [])
     transaction.on_commit(lambda: _refresh_referenced_courtcases(cc_iris))
+    # Likewise re-hide the entities this (now-deleted) case was the only published
+    # citation for, from the pre_delete snapshot.
+    entity_iris = getattr(instance, _PENDING_ENTITY_IRIS_ATTR, [])
+    transaction.on_commit(lambda: _refresh_bound_entities(entity_iris))
 
 
 def _referenced_material_iris(case) -> list[str]:
@@ -99,6 +122,83 @@ def _referenced_courtcase_iris(case) -> list[str]:
             "courtcase_iri", flat=True
         )
     )
+
+
+def _bound_entity_iris(case) -> list[str]:
+    """NES entity IRIs this case currently binds (empty if the pk is gone)."""
+    if case.pk is None:
+        return []
+    return list(
+        CaseEntityRelationship.objects.filter(case=case)
+        .values_list("nes_id", flat=True)
+        .distinct()
+    )
+
+
+@receiver(
+    post_save,
+    sender=CaseEntityRelationship,
+    dispatch_uid="jawafdehi_bind_entity_visibility",
+)
+@receiver(
+    post_delete,
+    sender=CaseEntityRelationship,
+    dispatch_uid="jawafdehi_unbind_entity_visibility",
+)
+def _refresh_entity_on_bind_change(sender, instance, **kwargs):
+    """Re-index one entity when a case bind is created or removed.
+
+    This is what makes an archived entity un-archive with no operator step. It
+    hangs off the BIND, not off ``Case``, because the bind-rewrite path
+    (``cases.api_views._rewrite_entity_binds``) deletes and recreates
+    ``CaseEntityRelationship`` rows WITHOUT saving the parent ``Case`` — so the
+    ``Case`` ``post_save`` above never fires for the most common way binds change.
+    Django's ``QuerySet.delete()`` fetches the rows and emits ``post_delete`` per
+    object, so the whole-list replace is covered.
+
+    A rewrite therefore emits one re-index per deleted row and one per created
+    row. That is redundant by design: the upsert is idempotent, a PATCH is a
+    human-scale event, and de-duplicating across a transaction would need
+    bookkeeping that could itself drop an IRI.
+    """
+    iri = getattr(instance, "nes_id", None)
+    if not iri:
+        return
+    transaction.on_commit(lambda: _refresh_bound_entities([iri]))
+
+
+def _refresh_bound_entities(iris) -> None:
+    """Re-index the given NES entities so their ``case_count`` matches the binds.
+
+    ``case_count`` is the public visibility gate (``entities.search_visibility``):
+    it is derived from the binds, so nothing in the ``StoredEntity`` row changes
+    when a case is published or bound and no entity signal fires. This is the
+    only path that tells the entity index a citation appeared or vanished.
+
+    Cross-app / cross-DB (entities → ``nes``) and best-effort, mirroring
+    ``_refresh_referenced_courtcases``: a failure must not break the case write,
+    and ``reconcile_entity_visibility`` is the periodic backstop.
+    """
+    if not iris:
+        return
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        from entities import search_index as entities_search_index
+        from entities.search_visibility import clear_cache, entity_case_count
+    except Exception:  # noqa: BLE001 — entities/opensearch stack optional in some contexts
+        return
+    # The published-bind set just changed → drop the cached copy so the recomputed
+    # counts read the new state (and so do other processes, via Redis).
+    clear_cache()
+    for iri in dict.fromkeys(iris):
+        try:
+            entities_search_index.index_by_iri(
+                iri, case_count=entity_case_count(iri)
+            )
+        except Exception:  # noqa: BLE001 — best-effort; the reconcile backstops
+            logger.exception("entity visibility reindex failed for %s", iri)
 
 
 def _refresh_referenced_courtcases(iris) -> None:
