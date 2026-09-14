@@ -443,6 +443,18 @@ def test_every_reference_deciding_a_plain_acquittal_is_acquitted():
     assert bind_outcome(records) == ACQUITTED
 
 
+def test_an_unread_reference_blocks_the_acquittal():
+    # `trial_refs` means this run never fetches the appeal docket at `supreme`,
+    # so a Special Court acquittal reads all-decided and all-acquitted on the
+    # records it DID read. An appeal is exactly the thing that makes an
+    # acquittal not final, and this value becomes a public "सफाइ दिने ठहर"
+    # line via `enrich_allegations.append_acquittal_line` -- so an unread
+    # reference has to count as undecided.
+    records = [_record(hearings=[DECIDED])]
+    assert bind_outcome(records) == ACQUITTED
+    assert bind_outcome(records, unread=1) == CHARGED
+
+
 def test_the_plan_carries_both_dates_and_the_accused_binds():
     api = _PlanApi(
         detail={"registration_date_ad": "2023-06-22"},
@@ -477,7 +489,7 @@ def test_the_new_entity_citation_comes_from_the_trial_record():
                         parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])
     cr_record["detail"]["material_id"] = "https://jawafdehi.org/material/court/special.079-cr-0151"
     api = _SlugAwareApi()
-    items, rows, skips = _accused_binds(
+    items, rows = _accused_binds(
         api, _case(), [cr_record], live_prefixes=["person"], dry_run=False)
     assert len(items) == 1
     assert api.posted[0]["citation"] == "https://jawafdehi.org/material/court/special.079-cr-0151"
@@ -491,11 +503,10 @@ def test_accused_binds_binds_the_pre_fy073_no_code_format():
     record = _record(number="93-068-0194",
                      parties=[{"side": "defendant", "name": "सिताराम यादव",
                                "nes_id": YADAV}])
-    items, rows, skips = _accused_binds(
+    items, rows = _accused_binds(
         _SearchApi(), _case(), [record],
         live_prefixes=["person"], dry_run=True)
     assert [i["nes_id"] for i in items] == [YADAV]
-    assert skips == []
 
 
 def test_accused_binds_binds_a_person_named_through_their_firm():
@@ -506,11 +517,10 @@ def test_accused_binds_binds_a_person_named_through_their_firm():
     firm_name = "अनिल गुप्ता एण्ड एशोसियटस का प्रोपराइटर अनिल कुमार गुप्ता"
     record = _record(number="079-fj-0001",
                      parties=[{"side": "defendant", "name": firm_name, "nes_id": YADAV}])
-    items, rows, skips = _accused_binds(
+    items, rows = _accused_binds(
         _SearchApi(), _case(), [record],
         live_prefixes=["person"], dry_run=True)
     assert [i["nes_id"] for i in items] == [YADAV]
-    assert skips == []
 
 
 def test_two_punctuation_variants_of_one_name_on_the_same_case_collapse_to_one_row():
@@ -524,7 +534,7 @@ def test_two_punctuation_variants_of_one_name_on_the_same_case_collapse_to_one_r
         {"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV},
         {"side": "defendant", "name": "कृष्ण  प्रसाद यादव।"},
     ])
-    items, rows, _ = _accused_binds(
+    items, rows = _accused_binds(
         _SearchApi(), _case(), [record],
         live_prefixes=["person"], dry_run=True)
     assert len(rows) == 1
@@ -1418,7 +1428,7 @@ def test_the_bind_uses_the_legal_name_not_the_raw_court_string():
     # Run b2f31c03 created `person/avasa-bhanne-abhasha-aryala` for this row --
     # a name the man holds nowhere. The entity must be built from the legal name.
     api = _SearchApi(results=[], created={"@id": YADAV})
-    items, rows, _ = _accused_binds(
+    items, rows = _accused_binds(
         api, _case(), [_record(parties=[{"side": "defendant", "name": ALIAS_RAW}])],
         live_prefixes=["person"], dry_run=False)
     assert api.posted[0]["name"] == ALIAS_LEGAL
@@ -1431,7 +1441,7 @@ def test_the_stripped_alias_is_recorded_on_the_bind_note():
     # The court called this person something. Dropping it loses the only place
     # the record says so, so it rides on the bind rather than the entity name.
     api = _SearchApi(results=[], created={"@id": YADAV})
-    items, _, _ = _accused_binds(
+    items, _ = _accused_binds(
         api, _case(), [_record(parties=[{"side": "defendant", "name": ALIAS_RAW}])],
         live_prefixes=["person"], dry_run=False)
     assert ALIAS_RAW in items[0]["notes"]
@@ -1558,7 +1568,7 @@ def test_defendants_on_one_case_settle_on_different_rungs_independently():
                {"side": "defendant", "name": "सीता देवी पौडेल"},
                {"side": "defendant", "name": "हरि प्रसाद शर्मा"}]
     api = _SlugAwareApi()
-    items, rows, _ = _accused_binds(
+    items, rows = _accused_binds(
         api, _case(entities=[already]), [_record(parties=parties)],
         live_prefixes=["person"], dry_run=True)
     assert [r["how"] for r in rows] == ["nes_id", "skipped", "created"]
@@ -1574,7 +1584,7 @@ def test_one_defendant_named_on_two_references_of_one_case_binds_once():
     party = {"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}
     records = [_record(number="079-cr-0151", parties=[party]),
                _record(number="080-cr-0002", parties=[dict(party)])]
-    items, rows, _ = _accused_binds(
+    items, rows = _accused_binds(
         _SearchApi(), _case(), records,
         live_prefixes=["person"], dry_run=True)
     assert [i["nes_id"] for i in items] == [YADAV]

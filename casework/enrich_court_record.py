@@ -321,7 +321,7 @@ def _reference_disposition(record):
     return decided, plain_acquittal
 
 
-def bind_outcome(records):
+def bind_outcome(records, unread=0):
     """The `outcome` every defendant on this case gets.
 
     ACQUITTED only when EVERY court reference on the case has decided AND every
@@ -335,9 +335,18 @@ def bind_outcome(records):
     case that is still being heard is the opposite of true. `_reference_disposition`
     is what keeps the two functions from disagreeing about what "decided" means.
 
+    `unread` counts the case's references this run did NOT fetch -- everything
+    `trial_refs` filters out. An unread reference counts as undecided, because
+    that is the only safe reading: a Special Court acquittal with a live appeal
+    at `supreme` is not an acquittal, and this value is what
+    `enrich_allegations.append_acquittal_line` turns into a public
+    "सफाइ दिने ठहर" sentence.
+
     Never `convicted`. `ठहर` on a 19-defendant case does not say who, and
     `आंशिक ठहर` means some were convicted and some cleared.
     """
+    if unread:
+        return CHARGED
     dispositions = [_reference_disposition(r) for r in records]
     if (dispositions
             and all(decided for decided, _ in dispositions)
@@ -346,22 +355,23 @@ def bind_outcome(records):
     return CHARGED
 
 
-def _accused_binds(api, case, records, *, live_prefixes, dry_run):
-    """`(items, rows, skips)` -- binds, and a report row for each defendant.
+def _accused_binds(api, case, records, *, live_prefixes, dry_run, unread=0):
+    """`(items, rows)` -- binds, and a report row for each defendant.
 
     `records` carries TRIAL dockets only; `court_record.trial_refs` does that
     filtering upstream, so the appeal docket's roster never reaches here and
-    cannot mint a second entity for a person this case already names.
+    cannot mint a second entity for a person this case already names. `unread`
+    carries the count of what that filter dropped, for `bind_outcome`.
 
     De-duplicated by normalised name WITHIN the case: one person named on two
     of the case's trial dockets is one bind. Two genuinely distinct defendants
     who share a name collapse here too -- accepted, and the reason the row
     count is reported beside the party count.
     """
-    outcome = bind_outcome(records)
+    outcome = bind_outcome(records, unread)
     citation = (records[0].get("detail") or {}).get("material_id", "") if records else ""
     bound = bound_accused_keys(case)
-    items, rows, skips, seen = [], [], [], set()
+    items, rows, seen = [], [], set()
     for record in records:
         for party in record.get("parties") or ():
             if not is_defendant(party):
@@ -398,8 +408,15 @@ def _accused_binds(api, case, records, *, live_prefixes, dry_run):
             try:
                 items.append(validate_bind_item(item))
             except ValueError as exc:
-                row.update(how="failed", reason=str(exc))
-    return items, rows, skips
+                # Unreachable today -- `resolve_defendant` validates the IRI
+                # at rung 1 and builds a canonical one otherwise. Kept
+                # self-consistent so it stays harmless if that changes: `main`
+                # reads the outcome
+                # off the first row that carries one, and `accused_table`
+                # prints it -- so leaving it set reports a bind, an outcome and
+                # an entity for a defendant no bind was written for.
+                row.update(how="failed", nes_id="", reason=str(exc))
+    return items, rows
 
 
 def plan_case(api, case, etag, *, live_prefixes, dry_run, court_record=None):
@@ -427,11 +444,12 @@ def plan_case(api, case, etag, *, live_prefixes, dry_run, court_record=None):
                                "an incomplete read"])
 
     trials = trial_refs(case)
+    others = other_refs(case)
     if court_record is not None:
         records, skips = court_record
     else:
         records, skips = court_record_for_case(api, case, refs=trials)
-    for court, number, _ in other_refs(case):
+    for court, number, _ in others:
         skips.append(f"court reference {court}/{number} is not a first-instance "
                      "prosecution: no stage written, left for the appeal enricher")
     if not trials:
@@ -460,9 +478,8 @@ def plan_case(api, case, etag, *, live_prefixes, dry_run, court_record=None):
         if merged_stages != stored:
             stages = {**document, "stages": merged_stages}
 
-    items, rows, accused_skips = _accused_binds(
-        api, case, records, live_prefixes=live_prefixes, dry_run=dry_run)
-    skips.extend(accused_skips)
+    items, rows = _accused_binds(api, case, records, live_prefixes=live_prefixes,
+                                 dry_run=dry_run, unread=len(others))
 
     # `current_entity_binds`, NOT the raw `case["entities"]` list: the read
     # shape keys the relationship type under `type`, and `relationship_type`
@@ -561,6 +578,12 @@ _NON_TRIAL_SKIP_MARKER = "is not a first-instance prosecution"
 #: facts, and the dry run printed the first under the second's name.
 _STAGE_CHANGE_MARKERS = {"->", "DROPPED", "kept", "adopted", "added"}
 
+#: Marker on the skip `plan_case` raises when the payload carries no `dates`
+#: key at all. The stage write is REFUSED there, not satisfied -- and the case
+#: can still land on `nothing-to-do`, whose ledger line would otherwise report
+#: the refusal as a confirmed match.
+_NO_DATES_KEY_MARKER = "has no 'dates' key"
+
 
 #: The ladder rung -- or hold decision -- each `plan.rows` entry settled on,
 #: spelled for the events file. It rides in the event's DETAIL, not its
@@ -584,13 +607,13 @@ _RUNG_LABELS = {"nes_id_copied": "copied", "created": "created",
 
 
 def rung_summary(rows):
-    """`"5 defendant(s): 0 copied, 1 matched, 4 created, 0 held, 0 failed"`.
+    """`"5 defendant(s): 0 copied, 4 created, 1 already bound, 0 failed"`.
 
-    EVERY rung prints, including its zero. `0 matched` is the load-bearing
-    number in this corpus: 142 of 142 defendants in the 25-case run were
-    CREATED, not matched, which is what tells an operator to expect duplicate
-    entities rather than reuse of existing ones. A tally that dropped its zeroes
-    would hide exactly the number worth reading.
+    EVERY rung prints, including its zero. `created` is the load-bearing number
+    in this corpus: nothing here matches an existing entity by name, so a high
+    created count is the expected shape and tells an operator to expect
+    duplicate entities rather than reuse. A tally that dropped its zeroes would
+    hide exactly the number worth reading.
 
     `_RUNG_WORDS[...]` is indexed, not `.get`: an unrecognised `how` is a bug in
     `resolve_defendant`, and counting it under some fallback rung would report a
@@ -870,11 +893,15 @@ def main(argv=None):
             # on `ok`-statused intermediates only and vanishes from the ledger,
             # which cannot be told apart from a run that crashed before
             # reaching it.
+            stage_note = ("the stage write was REFUSED on an incomplete read"
+                          if any(_NO_DATES_KEY_MARKER in s for s in plan.skips)
+                          else "the first-instance stage already matches the "
+                               "court record")
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                       step="idempotency", status="already",
-                      detail="nothing to add: the first-instance stage already "
-                             f"matches the court record, and {resolved_count + skipped_count} "
-                             "court-record defendant(s) are already bound")
+                      detail=f"nothing written: {stage_note}, and "
+                             f"{resolved_count + skipped_count} court-record "
+                             "defendant(s) are already bound")
             review.add(ReviewRow(slug=slug, status="nothing-to-do", before=before,
                                  generated=generated, note=note,
                                  detail=detail))
