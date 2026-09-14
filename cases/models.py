@@ -1717,11 +1717,14 @@ class Case(models.Model):
         if errors:
             raise ValidationError(errors)
 
-    def submit(self):
+    def submit(self, *, submitted_by=None):
         """
         Submit a draft case for review.
 
-        Transitions state from DRAFT to IN_REVIEW after validation.
+        Transitions state from DRAFT to IN_REVIEW after validation, then queues
+        a casework review (``review.gate.enqueue_review_on_submit``) so the case
+        carries a verdict by the time someone reaches the publish button. The
+        enqueue is best-effort and never fails the submit.
         """
         if self.state != CaseState.DRAFT:
             raise ValidationError(
@@ -1740,17 +1743,43 @@ class Case(models.Model):
 
         self.save()
 
-    def publish(self):
+        # Function-local import: review <-> cases is one of the documented
+        # cross-app pairs (see AGENTS.md); the gate module imports review.models.
+        from review.gate import enqueue_review_on_submit
+
+        enqueue_review_on_submit(self, submitted_by=submitted_by)
+
+    def publish(self, *, review_override_reason="", content_edited_at=None):
         """
         Publish this case.
 
         Sets state to PUBLISHED and updates versionInfo.
         Auto-generates slug if not already set.
+
+        THE REVIEW GATE. Publishing now requires a CURRENT review verdict
+        (``review.gate.enforce_publish_gate``): PASS proceeds; REJECT, no review,
+        or a review older than the case's last CONTENT edit are refused; REVISE
+        is allowed only with ``review_override_reason`` (the API feeds this from
+        the ``X-Transition-Reason`` header and the same reason lands in the
+        ``CaseStateChange`` log). ``content_edited_at`` lets a caller that knows
+        the row was only bumped for bookkeeping (the API's state-only PATCH)
+        supply the real last-content-edit time; ``None`` means ``updated_at``.
+        Behaviour is governed by ``settings.REVIEW_GATE_MODE``: ``off`` / ``warn``
+        (log, allow) / ``enforce`` (block). The verdict published against is
+        recorded in ``versionInfo`` either way, so a warn-mode publish is
+        auditable later.
         """
         if self.state not in [CaseState.IN_REVIEW, CaseState.DRAFT]:
             raise ValidationError(
                 f"Can only publish cases in IN_REVIEW or DRAFT state, current state is {self.state}"
             )
+
+        from review.gate import enforce_publish_gate
+
+        # Gate BEFORE any mutation so a refusal leaves the row untouched.
+        verdict = enforce_publish_gate(
+            self, review_override_reason, edited_at=content_edited_at
+        )
 
         # Set state to PUBLISHED
         self.state = CaseState.PUBLISHED
@@ -1763,10 +1792,15 @@ class Case(models.Model):
         self.validate()
 
         # Update versionInfo
-        self.versionInfo = {
+        version_info = {
             "action": "published",
             "datetime": timezone.now().isoformat(),
+            "review_id": verdict.get("review_id"),
+            "review_disposition": verdict.get("disposition"),
         }
+        if verdict.get("disposition") == "REVISE" and review_override_reason:
+            version_info["review_override_reason"] = review_override_reason[:2000]
+        self.versionInfo = version_info
 
         self.save()
 

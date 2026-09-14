@@ -1056,6 +1056,23 @@ JAZZMIN_SETTINGS = {
 # Casework Review System (VOL-3)
 # ============================================================================
 REVIEW_CASE_SOURCE = os.getenv("REVIEW_CASE_SOURCE", "local")
+
+# The publish gate (review/gate.py): does Case.publish() obey the review verdict?
+#   off     -> never consulted (test suites, emergencies)
+#   warn    -> evaluated and LOGGED, publish proceeds. The rollout default so a
+#              judge outage cannot freeze publishing while the team reads what
+#              the gate would have blocked.
+#   enforce -> REJECT / no review / stale review are refused; REVISE needs a
+#              written reason (X-Transition-Reason). Flip here after a week of
+#              clean warn-mode logs.
+REVIEW_GATE_MODE = os.getenv("REVIEW_GATE_MODE", "warn").strip().lower()
+# Case.submit() queues a review automatically so every case reaching the publish
+# button has a verdict to be judged by. Best-effort; never fails the submit.
+REVIEW_AUTO_REVIEW_ON_SUBMIT = os.getenv("REVIEW_AUTO_REVIEW_ON_SUBMIT", "1") not in (
+    "0",
+    "false",
+    "False",
+)
 JAWAFDEHI_API_BASE = os.getenv("JAWAFDEHI_API_BASE", "https://api.jawafdehi.org/api")
 JAWAFDEHI_API_TOKEN = os.getenv("JAWAFDEHI_API_TOKEN", "")
 JAWAFDEHI_S3_BASE = os.getenv("JAWAFDEHI_S3_BASE", "https://s3.jawafdehi.org")

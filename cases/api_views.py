@@ -1298,7 +1298,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
 
         return None, affected_material_iris
 
-    def _apply_state_transition(self, request, case, target_state):
+    def _apply_state_transition(self, request, case, target_state, *, content_edited_at=None):
         """Dispatch a state change to the model method that implements it.
 
         Every target dispatches to the model method that already implements +
@@ -1307,13 +1307,25 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         permission gate was applied by the caller via can_transition_case_state.
         A model ValidationError -> 422 with field-keyed messages (mirroring the
         original submit() handling). Returns a Response to send, or None.
+
+        ``content_edited_at`` is the case's last CONTENT edit as the caller knows
+        it (pre-patch ``updated_at`` for a state-only patch, else ``None``); it
+        is forwarded to ``Case.publish()`` for the review gate's staleness check.
         """
         from_state = case.state
+        # The same header the transition log records below. For PUBLISHED it
+        # doubles as the review-gate override reason (REVISE verdicts publish
+        # only with one), so the reason a moderator typed is BOTH the audit
+        # entry and the thing that unlocked the gate — never two texts.
+        reason = (request.headers.get("X-Transition-Reason") or "").strip()
+        actor = request.user if request.user.is_authenticated else None
         try:
             if target_state == CaseState.IN_REVIEW:
-                case.submit()
+                case.submit(submitted_by=actor)
             elif target_state == CaseState.PUBLISHED:
-                case.publish()
+                case.publish(
+                    review_override_reason=reason, content_edited_at=content_edited_at
+                )
             elif target_state == CaseState.CLOSED:
                 # Soft-delete (state -> CLOSED + versionInfo audit entry).
                 case.delete()
@@ -1348,12 +1360,11 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # RFC-6902 body stays a pure patch and we stop overloading the internal
         # ``/notes`` field for return reasons. Inside the same atomic block as the
         # caller, so the log row and the state change commit or roll back together.
-        reason = (request.headers.get("X-Transition-Reason") or "").strip()
         CaseStateChange.objects.create(
             case=case,
             from_state=from_state,
             to_state=case.state,
-            actor=request.user if request.user.is_authenticated else None,
+            actor=actor,
             reason=reason[:2000],  # defensive cap; TextField is unbounded
         )
         return None
@@ -1410,6 +1421,20 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         evidence_touched = self._touches(patch_ops, "/evidence")
         court_cases_touched = self._touches(patch_ops, "/court_cases")
         authors_touched = self._touches(patch_ops, "/authors")
+
+        # For the review gate (review/gate.py): a patch whose ONLY op is
+        # ``/state`` edits nothing the judge graded, yet the scalar write below
+        # still bumps ``updated_at`` (it re-derives proceeding dates on every
+        # PATCH). Publishing would then read as "edited after review" and the
+        # gate would refuse every API publish. So remember the pre-patch
+        # timestamp and hand it to publish() when no content path was touched.
+        state_only_patch = all(
+            isinstance(op, dict)
+            and isinstance(op.get("path"), str)
+            and op["path"].rstrip("/") == "/state"
+            for op in patch_ops
+        )
+        pre_patch_updated_at = case.updated_at if state_only_patch else None
 
         with transaction.atomic():
             # Re-check ``If-Match`` under a row lock, INSIDE the transaction that
@@ -1570,7 +1595,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
 
             if target_state is not None and target_state != case.state:
                 transition_response = self._apply_state_transition(
-                    request, case, target_state
+                    request, case, target_state, content_edited_at=pre_patch_updated_at
                 )
                 if transition_response is not None:
                     return transition_response
