@@ -91,6 +91,35 @@ def _adoptable(stages, proposals):
     return None
 
 
+def _refused_key(target, proposal):
+    """The proposal date to drop, or None -- judged on the pair, before either lands.
+
+    NGM carries inverted pairs: special/076-cr-0294 registers 2020-02-25 and
+    records a verdict on 2020-01-17. `validate_stages` refuses `end < start`,
+    and the enricher sends the stage document and the accused binds as ONE
+    conditional request -- so an inverted pair 422s the whole case and takes
+    the binds down with it, after the new NES entities have already been POSTed.
+
+    Both dates are judged together because either one can be the inverting
+    half: a `start` written alone on a stage that already carries an `end`
+    breaks the rule exactly as an `end` does against a stored `start`. Only a
+    date this merge is actually CHANGING can be dropped -- refusing to rewrite
+    a value that is already stored would not remove it.
+
+    The court record's date is the one that loses; when it carries both halves
+    the `end` goes, keeping the registration date, which is migration 0068's
+    decision.
+    """
+    changing = [k for k in _OWNED
+                if proposal.get(k) and proposal[k] != target.get(k)]
+    if not changing:
+        return None
+    final = {k: (proposal.get(k) or target.get(k)) for k in _OWNED}
+    if _orderable(final["start"], final["end"]):
+        return None
+    return "end" if "end" in changing else "start"
+
+
 def _apply(target, proposal, changes, label, *, fresh=False):
     """Write the proposal's dates onto `target`, reporting each decision.
 
@@ -101,6 +130,7 @@ def _apply(target, proposal, changes, label, *, fresh=False):
     the caller reports its dates once, as one "added" line. The refusal below
     still reports, because a dropped date is not visible in that summary.
     """
+    refused = _refused_key(target, proposal)
     for key in _OWNED:
         new, old = proposal.get(key), target.get(key)
         if not new:
@@ -110,15 +140,13 @@ def _apply(target, proposal, changes, label, *, fresh=False):
             continue
         if old == new:
             continue
-        if key == "end" and not _orderable(target.get("start"), new):
-            # NGM carries this: special/076-cr-0294 registers 2020-02-25 and
-            # records a verdict on 2020-01-17. `validate_stages` refuses
-            # end < start, so writing the pair would 422 the whole case.
-            # Migration 0068 took the same decision -- keep the registration
-            # date, drop the impossible decision date, and name the row.
-            changes.append(f"{label}: end {new} DROPPED -- it is before the "
-                           f"stage start {target.get('start')}, which the "
-                           "stage schema refuses")
+        if key == refused:
+            other = "end" if key == "start" else "start"
+            changes.append(
+                f"{label}: {key} {new} DROPPED -- it is "
+                f"{'after' if key == 'start' else 'before'} the stage {other} "
+                f"{proposal.get(other) or target.get(other)}, which the stage "
+                "schema refuses")
             continue
         if not fresh:
             changes.append(f"{label}: {key} {old or '(empty)'} -> {new}")

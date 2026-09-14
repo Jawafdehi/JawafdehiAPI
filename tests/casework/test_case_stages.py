@@ -204,3 +204,39 @@ def test_an_end_equal_to_the_start_is_allowed():
     record = _record(reg="2020-02-25", hearings=[_hearing("2020-02-25")])
     stages, _ = merge_trial_stages([], [trial_stage(record)])
     assert stages[0]["end"] == "2020-02-25"
+
+
+def test_a_start_that_would_postdate_a_stored_end_is_dropped():
+    # The mirror of the inverted-pair case, and the one the enricher can
+    # actually hit: the stored stage carries only an `end` (migration 0068's
+    # shape for a case that had a `case_end_date` alone), `_adoptable` adopts
+    # it, and the court record's registration date lands AFTER it. Writing the
+    # start alone would leave `end < start` on the stage -- which
+    # `validate_stages` refuses, 422ing the case and its accused binds with it.
+    existing = [{"stage": STAGE_INITIAL, "end": "2020-01-17"}]
+    record = _record(reg="2020-02-25", hearings=[_hearing("2020-01-17")])
+    stages, changes = merge_trial_stages(existing, [trial_stage(record)])
+    assert "start" not in stages[0]
+    assert stages[0]["end"] == "2020-01-17"
+    assert any("start 2020-02-25 DROPPED" in c for c in changes)
+
+
+def test_a_start_after_a_stored_end_is_dropped_on_a_matched_stage_too():
+    existing = [{"stage": STAGE_INITIAL, "start": "2019-01-01",
+                 "end": "2019-06-01", "courtcase_iri": IRI}]
+    stages, changes = merge_trial_stages(
+        existing, [trial_stage(_record(reg="2020-02-25"))])
+    assert stages[0]["start"] == "2019-01-01"
+    assert stages[0]["end"] == "2019-06-01"
+    assert any("after the stage end" in c for c in changes)
+
+
+def test_a_later_start_still_applies_when_the_court_record_moves_the_end_too():
+    # The guard must judge the PAIR, not the start against the stale stored
+    # end -- otherwise a docket that moved both dates forward loses its start.
+    existing = [{"stage": STAGE_INITIAL, "start": "2019-01-01",
+                 "end": "2019-06-01", "courtcase_iri": IRI}]
+    record = _record(reg="2020-01-01", hearings=[_hearing("2020-06-01")])
+    stages, _ = merge_trial_stages(existing, [trial_stage(record)])
+    assert stages[0]["start"] == "2020-01-01"
+    assert stages[0]["end"] == "2020-06-01"
