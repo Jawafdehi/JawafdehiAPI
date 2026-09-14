@@ -181,6 +181,41 @@ def court_ref(iri):
     return parts[0].strip(), parts[1].strip()
 
 
+#: The court whose prosecutions are first instances in this corpus. The case
+#: number cannot carry this: appeals are `-CR-` too, just at `supreme`.
+TRIAL_COURT = "special"
+
+
+def case_refs(case):
+    """`(court, number, iri)` per parseable court reference, order preserved.
+
+    Carries the IRI verbatim because a stage's `courtcase_iri` is checked
+    against the case's own `court_cases`; a rebuilt IRI would 422.
+    """
+    refs = []
+    for iri in (case.get("court_cases") or []):
+        parsed = court_ref(iri)
+        if parsed:
+            refs.append((parsed[0], parsed[1], str(iri).strip()))
+    return refs
+
+
+def is_trial_ref(court, number):
+    """Whether this reference is a first-instance prosecution."""
+    return (str(court or "").strip().lower() == TRIAL_COURT
+            and case_number_code(number) in BINDABLE_CODES)
+
+
+def trial_refs(case):
+    """The case's trial references."""
+    return [r for r in case_refs(case) if is_trial_ref(r[0], r[1])]
+
+
+def other_refs(case):
+    """The case's references that are not trials -- reported, never staged."""
+    return [r for r in case_refs(case) if not is_trial_ref(r[0], r[1])]
+
+
 def defendant_names(api, case):
     """`(names, skips)` -- the defendants the court record names, in order.
 
