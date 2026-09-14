@@ -167,3 +167,40 @@ def test_a_non_dict_entry_in_the_stored_list_is_dropped_not_carried():
     # non-record would 422 the whole write on the way back out.
     stages, _ = merge_trial_stages(["junk", None], [])
     assert stages == []
+
+
+def test_a_decision_date_before_the_registration_date_is_dropped():
+    # NGM itself carries this: special/076-cr-0294 registers 2020-02-25 and
+    # records a verdict on 2020-01-17. `validate_stages` refuses end < start,
+    # so writing the pair would 422 the whole case. Migration 0068 took the
+    # same decision -- keep the registration date, drop the impossible end.
+    record = _record(reg="2020-02-25", hearings=[_hearing("2020-01-17")])
+    stages, changes = merge_trial_stages([], [trial_stage(record)])
+    assert stages == [{"stage": STAGE_INITIAL, "start": "2020-02-25",
+                       "courtcase_iri": IRI}]
+    assert any("before the stage start" in c for c in changes)
+
+
+def test_an_impossible_end_is_dropped_against_a_stored_start_too():
+    existing = [{"stage": STAGE_INITIAL, "start": "2020-02-25",
+                 "courtcase_iri": IRI}]
+    record = _record(hearings=[_hearing("2020-01-17")])
+    stages, changes = merge_trial_stages(existing, [trial_stage(record)])
+    assert "end" not in stages[0]
+    assert any("before the stage start" in c for c in changes)
+
+
+def test_an_impossible_end_never_deletes_a_stored_good_one():
+    # The stored end is valid; the court record's is not. Keep what works.
+    existing = [{"stage": STAGE_INITIAL, "start": "2020-02-25",
+                 "end": "2021-03-01", "courtcase_iri": IRI}]
+    record = _record(reg="2020-02-25", hearings=[_hearing("2020-01-17")])
+    stages, _ = merge_trial_stages(existing, [trial_stage(record)])
+    assert stages[0]["end"] == "2021-03-01"
+
+
+def test_an_end_equal_to_the_start_is_allowed():
+    # The charge sheet can close one stage and open the next on one day.
+    record = _record(reg="2020-02-25", hearings=[_hearing("2020-02-25")])
+    stages, _ = merge_trial_stages([], [trial_stage(record)])
+    assert stages[0]["end"] == "2020-02-25"

@@ -52,9 +52,12 @@ def trial_stage(record):
     `end` is what the model reads as an open proceeding.
     """
     stage = {"stage": STAGE_INITIAL}
-    if start := reference_start(record):
+    start, end = reference_start(record), reference_end(record)
+    if start:
         stage["start"] = start
-    if end := reference_end(record):
+    # The impossible pair is dropped at the merge, not here, so the caller can
+    # report WHICH date was refused against the start it lost to.
+    if end:
         stage["end"] = end
     stage["courtcase_iri"] = record["iri"]
     return stage
@@ -64,6 +67,15 @@ def docket_label(iri):
     """`special/079-CR-0151` from a courtcase IRI, for a report line."""
     parts = str(iri or "").strip("/").split("/")
     return "/".join(parts[-2:]) if len(parts) >= 2 else str(iri or "")
+
+
+def _orderable(start, end):
+    """Whether `end` may sit on a stage starting at `start`.
+
+    Equality is fine: the charge sheet can close one stage and open the next on
+    the same day. A missing half is not a conflict.
+    """
+    return not (start and end) or str(end) >= str(start)
 
 
 def _adoptable(stages, proposals):
@@ -79,22 +91,37 @@ def _adoptable(stages, proposals):
     return None
 
 
-def _apply(target, proposal, changes, label):
+def _apply(target, proposal, changes, label, *, fresh=False):
     """Write the proposal's dates onto `target`, reporting each decision.
 
     A value replaces a value; an absence never deletes one. Blanking a stored
     `end` would reopen a case that reads as concluded.
+
+    `fresh` suppresses the ordinary per-date lines for a stage being created --
+    the caller reports its dates once, as one "added" line. The refusal below
+    still reports, because a dropped date is not visible in that summary.
     """
     for key in _OWNED:
         new, old = proposal.get(key), target.get(key)
         if not new:
-            if old:
+            if old and not fresh:
                 changes.append(f"{label}: {key} kept at {old} -- the court "
                                "record carries none")
             continue
         if old == new:
             continue
-        changes.append(f"{label}: {key} {old or '(empty)'} -> {new}")
+        if key == "end" and not _orderable(target.get("start"), new):
+            # NGM carries this: special/076-cr-0294 registers 2020-02-25 and
+            # records a verdict on 2020-01-17. `validate_stages` refuses
+            # end < start, so writing the pair would 422 the whole case.
+            # Migration 0068 took the same decision -- keep the registration
+            # date, drop the impossible decision date, and name the row.
+            changes.append(f"{label}: end {new} DROPPED -- it is before the "
+                           f"stage start {target.get('start')}, which the "
+                           "stage schema refuses")
+            continue
+        if not fresh:
+            changes.append(f"{label}: {key} {old or '(empty)'} -> {new}")
         target[key] = new
 
 
@@ -125,8 +152,10 @@ def merge_trial_stages(existing, proposals):
             _apply(target, proposal, changes, label)
             adopt = None
             continue
-        stages.append(dict(proposal))
-        dates = ", ".join(f"{k} {proposal[k]}" for k in _OWNED if proposal.get(k))
+        added = {"stage": proposal["stage"], "courtcase_iri": iri}
+        _apply(added, proposal, changes, label, fresh=True)
+        stages.append(added)
+        dates = ", ".join(f"{k} {added[k]}" for k in _OWNED if added.get(k))
         changes.append(
             f"{label}: added a first-instance stage ({dates or 'no dates'})")
     return stages, changes

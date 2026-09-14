@@ -555,6 +555,12 @@ _COURT_READ_FAILURE_PREFIX = "court reference "
 #: reference, exactly like `_COURT_READ_FAILURE_PREFIX`'s lines do.
 _NON_TRIAL_SKIP_MARKER = "is not a first-instance prosecution"
 
+#: Words that mark a `merge_trial_stages` change line, so `_log_plan` can label
+#: it `stage_change` rather than dropping it in the `no_source` catch-all --
+#: "this run would move a date" and "this case has no source" are opposite
+#: facts, and the dry run printed the first under the second's name.
+_STAGE_CHANGE_MARKERS = {"->", "DROPPED", "kept", "adopted", "added"}
+
 
 #: The ladder rung -- or hold decision -- each `plan.rows` entry settled on,
 #: spelled for the events file. It rides in the event's DETAIL, not its
@@ -718,7 +724,9 @@ def _log_plan(logger, events, run_id, plan):
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                       step="court_read", status="ok", detail=f"unreadable: {skip}")
             continue
-        kind = "no_source"
+        # A stage change line is not a missing source -- it says what this run
+        # would alter and is the line a reviewer reads before an --apply.
+        kind = "stage_change" if _STAGE_CHANGE_MARKERS & set(skip.split()) else "no_source"
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                   step="dates", status="ok", detail=f"{kind}: {skip}")
     # "resolved", not "on the court record": a skipped row and a failed row

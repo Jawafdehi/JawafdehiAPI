@@ -841,10 +841,14 @@ def test_a_partially_unreadable_court_record_is_logged_as_court_read_not_dates(
     assert any("unreadable: " in e["detail"] and "079-cr-0999" in e["detail"]
                for e in court_read)
     # The 404 must not also (or instead) show up as a `dates` event -- only
-    # the genuine date-source skip belongs there.
+    # what this run would write to the stage list belongs there.
     dates = [e for e in events if e["step"] == "dates"]
     assert not any("079-cr-0999" in e.get("detail", "") for e in dates)
-    assert any(e["detail"].startswith("no_source: ") for e in dates)
+    # The readable reference still yields a stage, reported as a CHANGE rather
+    # than dropped in the `no_source` catch-all -- "this run would move a date"
+    # and "this case has no source" are opposite facts.
+    assert any(e["detail"].startswith("stage_change: ") for e in dates)
+    assert not any(e["detail"].startswith("no_source: ") for e in dates)
     # Both are INTERMEDIATE steps, so both report `ok` and carry the
     # classification in the detail; see `_RUNG_WORDS`. A distinctive status
     # here would be recorded by `casework.ledger` as this case's outcome.
