@@ -1793,3 +1793,30 @@ def test_a_trial_docket_that_failed_to_read_also_blocks_the_acquittal():
     plan = _plan(_SearchApi(results=[], created={"@id": YADAV}), case,
                  court_record=([read], ["079-cr-0152 could not be read"]))
     assert [r["outcome"] for r in plan.rows] == [CHARGED]
+
+
+def test_a_refused_stage_write_is_not_logged_as_a_settled_case(tmp_path, monkeypatch):
+    # A payload with no `dates` key REFUSES the stage write -- absent is not
+    # empty, and `/dates` is a whole-document replace. If every defendant is
+    # already bound the case still lands on `nothing-to-do`, and the ledger
+    # used to stamp it `already`: an operator greps the status column, and a
+    # refusal reported as `already` reads as settled rather than as a case to
+    # re-run against a complete read.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case = _case(entities=[{"nes_id": YADAV, "type": "accused",
+                            "display_name": "कृष्ण प्रसाद यादव"}])
+    case.pop("dates")
+    api = _CliApi(
+        case, detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                  "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    assert main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+                 "--review-file", str(tmp_path / "review.md")]) == 0
+
+    terminal = [e for e in _events(tmp_path) if e["step"] == "idempotency"]
+    assert [e["status"] for e in terminal] == ["refused"]
+    assert "REFUSED" in terminal[0]["detail"]

@@ -898,12 +898,18 @@ def main(argv=None):
             # on `ok`-statused intermediates only and vanishes from the ledger,
             # which cannot be told apart from a run that crashed before
             # reaching it.
+            # The STATUS carries the difference too, not just the prose: an
+            # operator greps the status column, and a refused stage write
+            # reported as `already` reads as a case settled rather than one
+            # that needs re-running against a complete read.
+            refused = any(_NO_DATES_KEY_MARKER in s for s in plan.skips)
             stage_note = ("the stage write was REFUSED on an incomplete read"
-                          if any(_NO_DATES_KEY_MARKER in s for s in plan.skips)
+                          if refused
                           else "the first-instance stage already matches the "
                                "court record")
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
-                      step="idempotency", status="already",
+                      step="idempotency",
+                      status="refused" if refused else "already",
                       detail=f"nothing written: {stage_note}, and "
                              f"{resolved_count + skipped_count} court-record "
                              "defendant(s) are already bound")
