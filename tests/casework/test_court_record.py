@@ -366,3 +366,53 @@ def test_trial_and_other_refs_partition_the_case():
                  ("special", "080-OA-0012"))
     assert [r[1] for r in trial_refs(case)] == ["080-CR-0204"]
     assert [r[1] for r in other_refs(case)] == ["081-CR-2026", "080-OA-0012"]
+
+
+# ── reading only the references asked for ────────────────────────────────────
+
+class _RecordApi:
+    def __init__(self):
+        self.read = []
+
+    def get_courtcase(self, court, number):
+        self.read.append((court, number))
+        return {"registration_date_ad": "2022-08-01"}
+
+    def list_hearings(self, court, number):
+        return []
+
+    def get_court_case_entities(self, court, number):
+        return [{"side": "defendant", "name": "राम"}]
+
+
+def test_court_record_reads_only_the_refs_it_is_given():
+    api = _RecordApi()
+    case = _case(("special", "080-CR-0204"), ("supreme", "081-CR-2026"))
+    records, skips = court_record_for_case(api, case, refs=trial_refs(case))
+    assert api.read == [("special", "080-CR-0204")]
+    assert [r["number"] for r in records] == ["080-CR-0204"]
+    assert skips == []
+
+
+def test_court_record_carries_the_iri_onto_each_record():
+    api = _RecordApi()
+    case = _case(("special", "080-CR-0204"))
+    records, _ = court_record_for_case(api, case, refs=trial_refs(case))
+    assert records[0]["iri"] == (
+        "https://jawafdehi.org/courtcase/special/080-CR-0204")
+
+
+def test_an_empty_ref_list_reads_nothing_and_says_why():
+    api = _RecordApi()
+    case = _case(("supreme", "081-CR-2026"))
+    records, skips = court_record_for_case(api, case, refs=trial_refs(case))
+    assert api.read == []
+    assert records == []
+    assert skips and "no court reference" in skips[0]
+
+
+def test_refs_none_still_reads_every_reference():
+    api = _RecordApi()
+    case = _case(("special", "080-CR-0204"), ("supreme", "081-CR-2026"))
+    court_record_for_case(api, case)
+    assert api.read == [("special", "080-CR-0204"), ("supreme", "081-CR-2026")]

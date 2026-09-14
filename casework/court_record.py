@@ -262,31 +262,30 @@ def defendant_names(api, case):
     return names, skips
 
 
-def court_record_for_case(api, case):
-    """`(records, skips)` -- the full court record behind every reference on `case`.
+def court_record_for_case(api, case, refs=None):
+    """`(records, skips)` -- the full court record behind each reference.
 
-    Each record is `{"court", "number", "detail", "hearings", "parties"}`. The
-    three reads are made per reference; any one of them failing drops that
-    reference into `skips` with a human-readable reason and moves on, because 9
-    of the 49 published court references 404 and one stale number must not cost
-    a case its other references.
+    `refs` is a `case_refs`-shaped list to read; `None` reads every reference on
+    the case. Each record is
+    `{"court", "number", "iri", "detail", "hearings", "parties"}`.
 
     Deliberately separate from `defendant_names`, which answers the narrower
     "who are the defendants" question and stays the entry point for callers that
     need only names.
     """
-    refs = [ref for ref in (court_ref(raw) for raw in (case.get("court_cases") or []))
-            if ref]
+    if refs is None:
+        refs = case_refs(case)
     if not refs:
-        return [], ["no court reference on the case: neither dates nor accused "
+        return [], ["no court reference to read: neither dates nor accused "
                     "can be read from the court record"]
 
     records, skips = [], []
-    for court, number in refs:
+    for court, number, iri in refs:
         try:
             record = {
                 "court": court,
                 "number": number,
+                "iri": iri,
                 "detail": api.get_courtcase(court, number) or {},
                 "hearings": api.list_hearings(court, number) or [],
                 "parties": api.get_court_case_entities(court, number) or [],
