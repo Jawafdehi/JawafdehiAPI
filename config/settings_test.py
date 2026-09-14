@@ -100,3 +100,11 @@ MIDDLEWARE = [
     for m in MIDDLEWARE  # noqa: F405 — from `config.settings import *` above
     if m != "whitenoise.middleware.WhiteNoiseMiddleware"
 ]
+
+# The publish gate is OFF for the suite as a whole: hundreds of pre-existing
+# tests publish a case with no review row, which is exactly what the gate is for.
+# The gate's own tests (tests/api/test_review_gate_publish.py) opt in per test
+# with ``override_settings(REVIEW_GATE_MODE=...)``. Auto-review on submit is
+# also off here so submit() tests do not need the jobs tables populated.
+REVIEW_GATE_MODE = "off"
+REVIEW_AUTO_REVIEW_ON_SUBMIT = False
