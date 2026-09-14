@@ -34,6 +34,7 @@ import logging
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 log = logging.getLogger("review.gate")
 
@@ -232,20 +233,32 @@ def enqueue_review_on_submit(case, *, submitted_by=None):
     ).exists()
     if in_flight:
         return None
-    try:
-        from review.views import _enqueue_review_job
+    from review.views import _enqueue_review_job
 
-        review = CaseReview.objects.create(
-            case=case,
-            case_title=(case.title or ""),
-            case_state=(case.state or ""),
-            status=CaseReview.STATUS_PENDING,
-            submitted_by=submitted_by,
-        )
+    review = CaseReview.objects.create(
+        case=case,
+        case_title=(case.title or ""),
+        case_state=(case.state or ""),
+        status=CaseReview.STATUS_PENDING,
+        submitted_by=submitted_by,
+    )
+    try:
         _enqueue_review_job(review, submitted_by=submitted_by)
-        return review
     except Exception as exc:  # noqa: BLE001 - submit must not fail on queue trouble
+        # The row is already written and submit() must not fail, so finalize it
+        # here as FAILED. Leaving it PENDING would strand it: nothing else can
+        # ever finalize a review whose job was never created (the queue only
+        # fails a review from _case_review_on_failure, which needs a job), and
+        # the in-flight check above would then skip every later auto-review for
+        # this case. Mirrors the consumer's failure shape so the batch monitor
+        # and UI read it identically.
+        review.status = CaseReview.STATUS_FAILED
+        review.stage = "failed"
+        review.error = f"enqueue failed: {exc}"
+        review.completed_at = timezone.now()
+        review.save(update_fields=["status", "stage", "error", "completed_at"])
         log.error(
             "auto-review enqueue failed for case=%s slug=%s: %s", case.pk, case.slug, exc
         )
         return None
+    return review

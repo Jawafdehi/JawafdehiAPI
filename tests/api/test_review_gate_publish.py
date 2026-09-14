@@ -12,6 +12,8 @@ Acceptance criteria (from JD Eval Report 2, P0-1), one test each:
 * warn mode                  -> never refuses, logs the would-block
 * off mode                   -> never consulted
 * submit() enqueues exactly one review, and not a second while it is in flight
+* a queue outage on submit leaves a FAILED row, never a stranded PENDING one
+* a failed review is not a verdict (reads as "no completed review")
 * the API path: X-Transition-Reason unlocks a REVISE publish and lands in the log
 
 The suite-wide default is ``REVIEW_GATE_MODE = "off"`` (config/settings_test.py);
@@ -19,6 +21,7 @@ every test here sets the mode it means to exercise.
 """
 
 import logging
+from unittest import mock
 
 import pytest
 from django.core.exceptions import ValidationError
@@ -251,6 +254,52 @@ def test_submit_does_not_enqueue_when_disabled():
     case = _publishable_case(state=CaseState.DRAFT)
     case.submit()
     assert not CaseReview.objects.filter(case=case).exists()
+
+
+@pytest.mark.django_db
+@override_settings(REVIEW_AUTO_REVIEW_ON_SUBMIT=True)
+def test_submit_survives_a_queue_outage_and_leaves_no_stranded_pending_row():
+    """A failed enqueue must not strand the review row as PENDING.
+
+    Nothing else can finalize a review whose job was never created — the queue
+    only fails a review from its job's failure hook — so a row left PENDING
+    would make the in-flight check skip every later auto-review for this case.
+    """
+    case = _publishable_case(state=CaseState.DRAFT)
+    with mock.patch(
+        "review.views._enqueue_review_job", side_effect=RuntimeError("queue down")
+    ):
+        case.submit()  # submit itself must still succeed
+    case.refresh_from_db()
+    assert case.state == CaseState.IN_REVIEW
+
+    review = CaseReview.objects.get(case=case)
+    assert review.status == CaseReview.STATUS_FAILED
+    assert review.stage == "failed"
+    assert "queue down" in review.error
+    assert review.completed_at is not None
+
+    # The failed row is not "in flight", so a resubmit enqueues a fresh review.
+    case.state = CaseState.DRAFT
+    case.save()
+    case.submit()
+    assert CaseReview.objects.filter(
+        case=case, status=CaseReview.STATUS_PENDING
+    ).count() == 1
+
+
+@pytest.mark.django_db
+@override_settings(REVIEW_GATE_MODE="enforce", REVIEW_AUTO_REVIEW_ON_SUBMIT=True)
+def test_a_failed_enqueue_review_is_not_a_verdict():
+    """The FAILED row must read as "no completed review", never as a REJECT."""
+    case = _publishable_case(state=CaseState.DRAFT)
+    with mock.patch(
+        "review.views._enqueue_review_job", side_effect=RuntimeError("queue down")
+    ):
+        case.submit()
+    with pytest.raises(ValidationError) as exc:
+        case.publish()
+    assert "no completed review" in str(exc.value).lower()
 
 
 # ---------------------------------------------------------------------------
