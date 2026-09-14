@@ -1750,3 +1750,22 @@ def test_a_docket_carrying_no_date_at_all_produces_no_stage():
     plan = _plan(api, _case())
     assert plan.stages is None
     assert plan.entities is not None      # the defendant is still bound
+
+
+def test_a_romanised_bound_name_is_NOT_matched_by_the_devanagari_court_name():
+    # A KNOWN, ACCEPTED HOLE, pinned so nobody reads the skip rule as complete.
+    #
+    # Measured 2026-09-14 over all 3,021 prod cases: 1,951 of 4,864 accused
+    # binds (40.1%), across 263 cases, carry a ROMANISED display_name. The
+    # court record names people in Devanagari, so neither signal fires --
+    # `normalise_name` compares across scripts, and the two transliterations
+    # disagree (`entity_slug("दिपक भट्ट")` is `dipaka-bhatta`, the human wrote
+    # `deepak-bhatta`). Live example: case-082-cr-0154-deepak-bhatta.
+    #
+    # Re-running over those 263 cases therefore mints a duplicate entity for
+    # each such defendant. Accepted by decision -- duplicates are a merge --
+    # but it is not what "already bound is skipped" sounds like.
+    keys = bound_accused_keys({"entities": [
+        {"nes_id": "https://jawafdehi.org/entity/person/deepak-bhatta",
+         "display_name": "Deepak Bhatta", "type": "accused"}]})
+    assert already_bound("दिपक भट्ट", keys) is False
