@@ -1779,3 +1779,17 @@ def test_a_romanised_bound_name_is_NOT_matched_by_the_devanagari_court_name():
         {"nes_id": "https://jawafdehi.org/entity/person/deepak-bhatta",
          "display_name": "Deepak Bhatta", "type": "accused"}]})
     assert already_bound("दिपक भट्ट", keys) is False
+
+
+def test_a_trial_docket_that_failed_to_read_also_blocks_the_acquittal():
+    # Two trial dockets, one unreadable. `if not records` only catches the
+    # case where EVERY read failed, so a partial read reaches the binder with
+    # one all-acquitted record and would stamp `acquitted` on the roster --
+    # a public "सफाइ दिने ठहर" claim made on half the evidence.
+    second = "https://jawafdehi.org/courtcase/special/079-cr-0152"
+    case = _case(court_cases=[CASE_IRI, second])
+    read = _record(reg="2022-08-01", hearings=[DECIDED],
+                   parties=[{"side": "defendant", "name": "सिताराम यादव"}])
+    plan = _plan(_SearchApi(results=[], created={"@id": YADAV}), case,
+                 court_record=([read], ["079-cr-0152 could not be read"]))
+    assert [r["outcome"] for r in plan.rows] == [CHARGED]

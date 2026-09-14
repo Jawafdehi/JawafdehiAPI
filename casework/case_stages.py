@@ -91,8 +91,8 @@ def _adoptable(stages, proposals):
     return None
 
 
-def _refused_key(target, proposal):
-    """The proposal date to drop, or None -- judged on the pair, before either lands.
+def _refused_keys(target, proposal):
+    """The proposal dates to drop, as a tuple -- judged before any of them lands.
 
     NGM carries inverted pairs: special/076-cr-0294 registers 2020-02-25 and
     records a verdict on 2020-01-17. `validate_stages` refuses `end < start`,
@@ -113,11 +113,19 @@ def _refused_key(target, proposal):
     changing = [k for k in _OWNED
                 if proposal.get(k) and proposal[k] != target.get(k)]
     if not changing:
-        return None
+        return ()
     final = {k: (proposal.get(k) or target.get(k)) for k in _OWNED}
     if _orderable(final["start"], final["end"]):
-        return None
-    return "end" if "end" in changing else "start"
+        return ()
+    first = "end" if "end" in changing else "start"
+    # Dropping one half leaves the OTHER half at whatever the target already
+    # stores -- which is not the pair judged above, and can invert in its own
+    # right. Judge what will actually be written; if the court record and the
+    # stored dates cannot be reconciled, write neither and name both.
+    kept = {k: (target.get(k) if k == first else final[k]) for k in _OWNED}
+    if _orderable(kept["start"], kept["end"]):
+        return (first,)
+    return _OWNED
 
 
 def _apply(target, proposal, changes, label, *, fresh=False):
@@ -130,7 +138,7 @@ def _apply(target, proposal, changes, label, *, fresh=False):
     the caller reports its dates once, as one "added" line. The refusal below
     still reports, because a dropped date is not visible in that summary.
     """
-    refused = _refused_key(target, proposal)
+    refused = _refused_keys(target, proposal)
     for key in _OWNED:
         new, old = proposal.get(key), target.get(key)
         if not new:
@@ -140,13 +148,16 @@ def _apply(target, proposal, changes, label, *, fresh=False):
             continue
         if old == new:
             continue
-        if key == refused:
+        if key in refused:
             other = "end" if key == "start" else "start"
+            # Name the value that SURVIVES, not the one proposed: when both
+            # halves are refused the surviving other half is the stored one.
+            surviving = (target.get(other) if other in refused
+                         else proposal.get(other) or target.get(other))
             changes.append(
                 f"{label}: {key} {new} DROPPED -- it is "
                 f"{'after' if key == 'start' else 'before'} the stage {other} "
-                f"{proposal.get(other) or target.get(other)}, which the stage "
-                "schema refuses")
+                f"{surviving}, which the stage schema refuses")
             continue
         if not fresh:
             changes.append(f"{label}: {key} {old or '(empty)'} -> {new}")

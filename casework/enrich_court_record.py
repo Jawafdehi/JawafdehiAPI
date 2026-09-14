@@ -478,8 +478,13 @@ def plan_case(api, case, etag, *, live_prefixes, dry_run, court_record=None):
         if merged_stages != stored:
             stages = {**document, "stages": merged_stages}
 
+    # Every reference this run does not HOLD counts as undecided, not just the
+    # ones `trial_refs` filtered out: a trial docket whose read failed is
+    # dropped from `records` and only reported, and `if not records` above
+    # catches the total failure, never a partial one.
+    unread = len(others) + max(len(trials) - len(records), 0)
     items, rows = _accused_binds(api, case, records, live_prefixes=live_prefixes,
-                                 dry_run=dry_run, unread=len(others))
+                                 dry_run=dry_run, unread=unread)
 
     # `current_entity_binds`, NOT the raw `case["entities"]` list: the read
     # shape keys the relationship type under `type`, and `relationship_type`

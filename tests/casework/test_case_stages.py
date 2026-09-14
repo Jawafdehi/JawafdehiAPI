@@ -240,3 +240,21 @@ def test_a_later_start_still_applies_when_the_court_record_moves_the_end_too():
     stages, _ = merge_trial_stages(existing, [trial_stage(record)])
     assert stages[0]["start"] == "2020-01-01"
     assert stages[0]["end"] == "2020-06-01"
+
+
+def test_both_dates_are_refused_when_dropping_one_still_leaves_an_inversion():
+    # Dropping the proposal's `end` leaves the STORED end in place, which the
+    # new start can invert in its own right -- a pair nothing had judged.
+    # target (2019-01-01..2019-06-01) + proposal (2020-03-01..2020-01-01)
+    # yielded 2020-03-01..2019-06-01, which `validate_stages` refuses: the
+    # 422 this guard exists to prevent, reintroduced by the guard itself.
+    existing = [{"stage": STAGE_INITIAL, "start": "2019-01-01",
+                 "end": "2019-06-01", "courtcase_iri": IRI}]
+    record = _record(reg="2020-03-01", hearings=[_hearing("2020-01-01")])
+    stages, changes = merge_trial_stages(existing, [trial_stage(record)])
+    assert stages[0]["start"] == "2019-01-01"
+    assert stages[0]["end"] == "2019-06-01"
+    assert any("start 2020-03-01 DROPPED" in c and "2019-06-01" in c
+               for c in changes)
+    assert any("end 2020-01-01 DROPPED" in c and "2019-01-01" in c
+               for c in changes)
