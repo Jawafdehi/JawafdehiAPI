@@ -31,7 +31,17 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    # Pulled from quay.io, not Docker Hub: Docker Hub stopped serving
+    # `minio/minio` to anonymous clients around 2026-09-11, which broke the e2e
+    # job at stack bring-up on every PR ("pull access denied ... repository does
+    # not exist or may require 'docker login'"). quay.io still serves the image
+    # anonymously at the same digest.
+    #
+    # Pinned, not `latest`: the community repo was archived in 2025, so this is
+    # the last community release and there is nothing to float to — an unpinned
+    # tag buys no updates and is exactly what let an upstream change break CI.
+    # See docs/shared/research/COST-AUDIT.md (MinIO is on the WATCH list).
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
