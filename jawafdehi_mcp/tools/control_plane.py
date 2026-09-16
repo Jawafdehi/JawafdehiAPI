@@ -266,6 +266,13 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                 # Values are the canonical English names the response's
                 # facets.district / facets.province buckets return.
                 #
+                # Those buckets stay usable as a vocabulary AFTER you filter: a
+                # facet is computed without its own filter, so facets.district
+                # still lists every district you could switch to (with the count
+                # each would give) rather than collapsing to the one you chose.
+                # Other filters still apply, so e.g. court_type=high legitimately
+                # empties facets.district — no high court carries one.
+                #
                 # "district" is a DISTRICT COURT's own district and matches
                 # nothing else — high courts are provincial and carry no
                 # district, supreme/special carry none. "province" covers all 95

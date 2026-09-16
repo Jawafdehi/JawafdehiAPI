@@ -226,6 +226,73 @@ def test_unified_search_empty_q_is_browse_all(clients):
     assert "count" in body and "results" in body, body
 
 
+def _material_type_facet(clients, **params):
+    """``(count, {token: bucket_count})`` for a materials search."""
+    r = clients["platform"].get(
+        "/api/search/", params={"type": "material", "page_size": 1, **params}
+    )
+    skip_if_throttled(r)
+    assert r.status_code == 200, f"{params}: {r.status_code} {r.text[:200]}"
+    body = r.json()
+    buckets = body.get("facets", {}).get("material_type") or []
+    return body["count"], {b["name"]: b["count"] for b in buckets}
+
+
+def test_a_filtered_facet_keeps_its_other_options(clients):
+    """A facet is computed WITHOUT its own filter, so ticking one option leaves
+    the rest listed and a second one tickable.
+
+    This needs a REAL cluster and cannot move into ``search/tests/``: those mock
+    the OpenSearch response dict wholesale, so they can pin the emitted DSL but
+    never what OpenSearch does with it. Two things only a live index proves:
+
+      1. the widening itself — that lifting a facet's own clause out of its agg
+         really does bring the sibling buckets back; and
+      2. that ``post_filter`` narrows ``hits.total``, which is what keeps the
+         envelope's ``count`` honest. The whole design rests on it, and if it
+         were false ``count`` would silently report the UNFILTERED total on every
+         filtered search, with the unit suite still green.
+
+    Before the fix, step 2 below returned exactly one bucket.
+    """
+    baseline_count, baseline = _material_type_facet(clients)
+    if len(baseline) < 2:
+        pytest.skip(
+            f"needs >=2 material_type buckets to prove widening, got {baseline}"
+        )
+
+    token, expected = next(iter(baseline.items()))
+    filtered_count, filtered = _material_type_facet(clients, material_type=token)
+
+    # (1) Every option survives the selection — this is the actual bug fix.
+    assert set(filtered) >= set(baseline), (
+        "filtering material_type collapsed its own facet: "
+        f"{sorted(baseline)} -> {sorted(filtered)}"
+    )
+
+    # (2) ...while the RESULTS are still narrowed. If post_filter did not reach
+    # hits.total this would be the unfiltered corpus size instead.
+    assert filtered_count == expected, (
+        f"count must reflect the filter: expected {expected} for {token!r}, "
+        f"got {filtered_count} (unfiltered total is {baseline_count})"
+    )
+
+
+def test_two_values_of_one_facet_are_a_union(clients):
+    """Repeated values of the SAME facet are one ``terms`` clause, i.e. OR — a
+    reader ticking two document types wants either, and since a document carries
+    exactly one type an intersection would always be empty."""
+    _, baseline = _material_type_facet(clients)
+    if len(baseline) < 2:
+        pytest.skip(f"needs >=2 material_type buckets, got {baseline}")
+
+    (tok_a, count_a), (tok_b, count_b) = list(baseline.items())[:2]
+    both, _ = _material_type_facet(clients, material_type=[tok_a, tok_b])
+    assert both == count_a + count_b, (
+        f"{tok_a}+{tok_b} should union to {count_a + count_b}, got {both}"
+    )
+
+
 def test_old_per_service_search_surfaces_removed(clients):
     """The pre-unification search surfaces are gone.
 
