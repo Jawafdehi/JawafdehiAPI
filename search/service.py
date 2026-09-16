@@ -367,9 +367,53 @@ FACET_AGG_INNER = "values"
 # Needed only because the facet is now widened: before, a selected value was the
 # ONLY bucket and so always present. A widened facet is a top-N over a much larger
 # term space (``case_type`` has 2,332 distinct values in the NGM docket against a
-# size of 50), so a rare selection can now fall out of its own facet — the reader
-# would see a ticked box reporting zero. This agg carries its real count back.
+# size of 50), so a rare selection can now fall out of its own facet, and the
+# reader would lose the bucket it has ticked. This agg carries its real count back.
+#
+# Scope of the guarantee: it restores a selection the top-N DROPPED. A selection
+# that matches no document in the widened scope has no bucket to carry back, so it
+# is still absent from the list — rendering a ticked-but-absent value as zero is
+# the client's job, not something this agg can express.
 FACET_SELECTED_SUFFIX = "__selected"
+
+# Agg names that are NOT FACET_FIELDS facets, and so must stay distinguishable
+# from one (see the ``aggs`` dict in ``build_query``).
+_RESERVED_AGG_NAMES = frozenset({"by_index", "bigo_extent"})
+
+
+def _assert_agg_namespace_is_unambiguous() -> None:
+    """The facet aggs, their ``__selected`` companions and the hand-written aggs
+    all share ONE namespace in the request body, and the response readers resolve
+    a bucket list by name alone.
+
+    A param whose name collided with another param's companion would therefore
+    silently shadow it — the reader would hand one facet's buckets back as
+    another's, with no error anywhere. Checked at import against the registry
+    rather than left to review, in the same spirit as generating the aggs off
+    FACET_FIELDS: a facet param cannot exist without its aggregation, and now it
+    cannot exist under a name that steals someone else's either.
+    """
+    for param in FACET_FIELDS:
+        companion = param + FACET_SELECTED_SUFFIX
+        clash = (
+            "a facet param"
+            if companion in FACET_FIELDS
+            else "a reserved agg" if companion in _RESERVED_AGG_NAMES else None
+        )
+        if clash:
+            raise RuntimeError(
+                f"facet param {param!r} needs the agg name {companion!r}, which is "
+                f"already {clash}. Rename one of them: the response readers resolve "
+                f"buckets by agg name, so the collision would silently swap them."
+            )
+        if param in _RESERVED_AGG_NAMES:
+            raise RuntimeError(
+                f"facet param {param!r} collides with the hand-written agg of the "
+                f"same name; rename the facet."
+            )
+
+
+_assert_agg_namespace_is_unambiguous()
 
 
 # Lucene RegExp operator characters (the core set plus every optional-operator
@@ -941,8 +985,13 @@ def build_query(
         # ... and pin the caller's own selection back in. A widened facet is a
         # top-N over a much larger term space than the single bucket it used to
         # return, so a rare selection can now fall out of its own list; without
-        # this the reader would see their ticked box reporting zero results.
+        # this the reader would lose the very bucket they have ticked.
         # Same ``others`` scope as the widened list, so the two counts agree.
+        #
+        # It restores a selection the top-N DROPPED — it cannot invent one. A value
+        # matching no document in the widened scope has no bucket here either, so it
+        # stays absent from ``facets`` and the client decides how to draw a ticked
+        # box with nothing behind it.
         #
         # NOT when ``facet_q`` is searching this same facet, though. The pin does
         # not carry the include regex, so it would hand back a bucket that does
@@ -1476,10 +1525,16 @@ def _named_facets_from_aggs(aggs: dict[str, Any]) -> dict[str, list[dict[str, An
             key = bucket.get("key")
             if key is not None:
                 by_name.setdefault(key, bucket.get("doc_count", 0))
-        # Insertion order preserves OpenSearch's count-desc ordering, with any
-        # pinned-back selection appending last.
+        # Re-sorted count-desc so the MERGED list keeps the ordering the widened
+        # one arrived in. A pinned value is one the top-N dropped, so it is almost
+        # always the smallest count here and would have sorted last anyway — but
+        # "almost always" is not a contract, and clients that truncate the list
+        # (the SPA's "More" cut) would quietly drop the wrong bucket the one time
+        # it is not. The sort is STABLE, so buckets sharing a count keep
+        # OpenSearch's own key ordering rather than being reshuffled.
         facets[param] = [
-            {"name": name, "count": count} for name, count in by_name.items()
+            {"name": name, "count": count}
+            for name, count in sorted(by_name.items(), key=lambda kv: -kv[1])
         ]
     return facets
 

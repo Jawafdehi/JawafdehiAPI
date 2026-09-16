@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import string
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1100,6 +1100,70 @@ def test_per_type_counts_read_both_shapes():
         }
     )
     assert flat == wrapped == {"material": 4}
+
+
+def test_a_merged_facet_list_stays_count_desc():
+    """The pinned selection is merged by count, not appended blindly.
+
+    A pinned value is one the top-N dropped, so it is nearly always the smallest
+    count in the list and would land last anyway — but nothing guarantees it, and
+    a client that truncates the list (the SPA's "More" cut) would drop the wrong
+    bucket the one time it does not. Here the pin outranks two real buckets.
+    """
+    facets = svc._named_facets_from_aggs(
+        {
+            "case_type": {
+                "buckets": [
+                    {"key": "CORRUPTION", "doc_count": 90},
+                    {"key": "REVENUE", "doc_count": 5},
+                    {"key": "CUSTOMS", "doc_count": 2},
+                ]
+            },
+            "case_type" + svc.FACET_SELECTED_SUFFIX: {
+                "buckets": [{"key": "PINNED", "doc_count": 40}]
+            },
+        }
+    )
+    assert [f["count"] for f in facets["case_type"]] == [90, 40, 5, 2]
+    assert facets["case_type"][1] == {"name": "PINNED", "count": 40}
+
+
+def test_equal_counts_keep_opensearchs_own_ordering():
+    """The re-sort is STABLE, so buckets sharing a count are not reshuffled out of
+    the key ordering the terms agg already put them in."""
+    facets = svc._named_facets_from_aggs(
+        {
+            "tags": {
+                "buckets": [
+                    {"key": "alpha", "doc_count": 7},
+                    {"key": "beta", "doc_count": 7},
+                    {"key": "gamma", "doc_count": 7},
+                ]
+            }
+        }
+    )
+    assert [f["name"] for f in facets["tags"]] == ["alpha", "beta", "gamma"]
+
+
+def test_no_facet_param_can_steal_another_aggs_name():
+    """The facet aggs, their ``__selected`` companions and the hand-written aggs
+    share ONE namespace, and the readers resolve buckets by name alone — so a
+    collision would silently hand one facet's buckets back as another's. The
+    registry is checked at import; this pins that the check actually fires."""
+    # Sanity: the live registry is clean.
+    svc._assert_agg_namespace_is_unambiguous()
+
+    # A param whose companion name is another param.
+    with patch.dict(
+        svc.FACET_FIELDS, {"tags": "keywords", "tags__selected": "x"}, clear=True
+    ):
+        with pytest.raises(RuntimeError, match="already a facet param"):
+            svc._assert_agg_namespace_is_unambiguous()
+
+    # A param that collides with a hand-written agg outright.
+    with patch.dict(svc.FACET_FIELDS, {"by_index": "x"}, clear=True):
+        with pytest.raises(RuntimeError, match="hand-written agg"):
+            svc._assert_agg_namespace_is_unambiguous()
 
 
 # ── range filters (बिगो amount) ────────────────────────────────────────────────
