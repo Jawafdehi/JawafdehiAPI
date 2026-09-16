@@ -20,6 +20,8 @@ Nothing here imports Django, so it stays unit-testable with a mocked client.
 from __future__ import annotations
 
 import logging
+import os
+from datetime import datetime
 from typing import Any, Callable, Iterable
 
 from jawafdehi_shared.search.transliterate import (
@@ -214,12 +216,67 @@ def delete_doc(client, index: str, iri: str) -> None:
         raise
 
 
+def gregorian_date_or_none(value: Any) -> str | None:
+    """Return ``value`` unchanged if the cluster will accept it in a ``date``
+    field, else ``None``.
+
+    ``date`` is mapped
+    ``strict_date_time_no_millis||strict_date_optional_time||epoch_millis``.
+    A value matching none of those is not degraded data — it is a
+    ``mapper_parsing_exception``, and since ``helpers.bulk`` defaults to
+    ``raise_on_error=True`` a single one aborts the entire run. That has
+    happened: on 2026-08-15 the material ``news_shilaptra/2082`` carried the
+    Bikram Sambat date ``2081-02-29`` in ``datePublished`` (no such Gregorian
+    day) and took the whole 345k-document reindex down with it.
+
+    Deliberately at least as strict as the cluster: anything this accepts,
+    OpenSearch accepts. It may drop an exotic-but-valid format, which costs one
+    document its ``date`` facet — the alternative costs the entire index.
+    The original value is still carried verbatim in ``raw``.
+    """
+    text = str(value).strip()
+    if not text:
+        return None
+    # ``isascii`` guards the epoch_millis branch: str.isdigit() is True for
+    # Devanagari digits (२०८१), which the cluster will NOT parse as a number.
+    if text.isascii() and text.isdigit():  # epoch_millis
+        return text
+    try:
+        datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return text
+
+
+def get_max_chunk_bytes() -> int:
+    """Byte ceiling for a single ``_bulk`` request, from env.
+
+    opensearch-py defaults this to 100 MiB, which is far too large for a corpus
+    with a non-uniform document size. ``ngm-materials`` averages ~70 characters
+    of ``body`` but contains a block of OCR'd Special Court judgments averaging
+    ~56,000; a 500-document batch there serialises to ~149 MiB on the wire (the
+    JSON-LD in ``raw`` repeats the body text, and Devanagari costs 3 bytes per
+    character in UTF-8). At the 100 MiB default that batch goes out as two ~100
+    MiB requests, each of which takes the single-node cluster minutes to analyse
+    — well past the client's read timeout, so the reindex dies there every week
+    having indexed 90% of the corpus.
+
+    Capping the request instead of the batch keeps every request inside the
+    timeout without changing how many documents the caller buffers.
+    """
+    return int(os.getenv("OPENSEARCH_MAX_CHUNK_BYTES", str(10 * 1024 * 1024)))
+
+
 def stream_bulk(client, index: str, docs: Iterable[dict[str, Any]]) -> int:
     """Bulk-index ``docs`` into ``index`` via the streaming bulk helper.
 
     Each doc is upserted by its ``iri`` (document ``_id``). Returns the number of
     docs submitted. Uses ``opensearchpy.helpers.bulk`` lazily so the module
     stays importable without the optional dependency.
+
+    Requests are bounded by BYTES as well as by count (see
+    ``get_max_chunk_bytes``) — a fixed document count is not a bound on request
+    size when document sizes span three orders of magnitude.
     """
     from opensearchpy.helpers import bulk  # lazy: optional dependency
 
@@ -235,7 +292,7 @@ def stream_bulk(client, index: str, docs: Iterable[dict[str, Any]]) -> int:
             count += 1
             yield action
 
-    bulk(client, counting())
+    bulk(client, counting(), max_chunk_bytes=get_max_chunk_bytes())
     return count
 
 
