@@ -1137,6 +1137,57 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     return envelope
 
 
+def _shard_failures(response: dict[str, Any]) -> list[dict[str, str]]:
+    """Index, error type and reason for every shard that failed a **200** search.
+
+    OpenSearch answers 200 when only SOME shards fail: the survivors return their
+    hits, the failed one contributes nothing, and ``hits.total`` plus every
+    aggregation are computed as though that index were empty. The body carries no
+    other mark that the answer is incomplete — only ``_shards.failed``.
+
+    2026-09-12 is why this exists. A ``terms`` agg on ``material_type`` — declared
+    ``keyword`` in ``mappings.py`` but mapped ``text`` on the live ``ngm-materials``
+    index, which had never been rebuilt and so had picked the type up from dynamic
+    mapping — failed that one shard. A type-scoped material search failed *every*
+    shard and 503'd loudly, but every site-wide search kept answering 200 with all
+    345,934 materials absent from the results, the per-type counts and the facet,
+    for two days, with nothing logged anywhere.
+
+    ``failures`` is capped by the cluster (5 entries by default), so treat it as a
+    sample; ``_shards.failed`` is the true count and is logged alongside it.
+    """
+    shards = response.get("_shards") or {}
+    if not shards.get("failed"):
+        return []
+    failures: list[dict[str, str]] = []
+    for failure in shards.get("failures") or []:
+        reason = failure.get("reason") or {}
+        failures.append(
+            {
+                "index": failure.get("index") or "unknown",
+                "error": reason.get("type") or "unknown",
+                "reason": reason.get("reason") or "",
+            }
+        )
+    return failures
+
+
+def _partial_types(failures: list[dict[str, str]]) -> list[str]:
+    """Result types whose index failed, so a client can say WHICH source is missing.
+
+    Falls back to the raw index name when it is not one of ours (a shard failure
+    names the concrete backing index, which ``type_for_index`` already resolves
+    through the generation suffix).
+    """
+    types: list[str] = []
+    for failure in failures:
+        index = failure["index"]
+        result_type = type_for_index(index) or index
+        if result_type not in types:
+            types.append(result_type)
+    return types
+
+
 def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
     """Per-type counts from the ``by_index`` aggregation (type → doc count)."""
     counts: dict[str, int] = {}
@@ -1424,6 +1475,25 @@ class SearchService:
             logger.warning("unified search query failed", exc_info=True)
             raise SearchUnavailable(str(exc)) from exc
 
+        # A partially-failed search is a 200 whose numbers are quietly wrong (see
+        # ``_shard_failures``). ERROR level, not warning: sentry-sdk's logging
+        # integration raises an event at ERROR, and the entire failure mode here is
+        # that nothing else is loud enough to notice. The request is still served —
+        # one sick index must not take the other three down — but it is served with
+        # ``partial`` set, and it is now impossible for it to pass unremarked.
+        shard_failures = _shard_failures(response)
+        partial = _partial_types(shard_failures)
+        if shard_failures:
+            logger.error(
+                "search returned partial results",
+                extra={
+                    "searched_index": index,
+                    "partial_types": partial,
+                    "shards_failed": (response.get("_shards") or {}).get("failed"),
+                    "shard_failures": shard_failures,
+                },
+            )
+
         hits_block = response.get("hits") or {}
         hit_list = hits_block.get("hits") or []
         results = [_serialize_hit(h) for h in hit_list]
@@ -1517,6 +1587,12 @@ class SearchService:
             # (which are term buckets). Empty unless the search is case-only.
             "extents": extents,
             "results": results,
+            # Empty on a healthy search. Otherwise the result types whose index
+            # failed its shard: every number above — ``count``, ``counts``,
+            # ``facets``, ``extents`` — is computed as if those types held nothing,
+            # so a client showing totals should say the answer is incomplete rather
+            # than report a confident wrong figure.
+            "partial": partial,
             "next_cursor": next_cursor,
             # Null unless the suggester found a correction AND the result set is
             # empty or wholly fuzzy. Never applied automatically — the client

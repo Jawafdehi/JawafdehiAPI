@@ -266,7 +266,13 @@ class SearchQuerySerializer(serializers.Serializer):
         "results have no exactly-matching anchor. A correctly spelled query that "
         "found real matches never carries one. The key is always present, and the "
         "suggestion is never applied automatically — re-search only if the reader "
-        "selects it."
+        "selects it.\n\n"
+        "The envelope's 'partial' is an empty list on a healthy search. If one "
+        "index fails while the others answer, the search still returns 200 with "
+        "the surviving results, and 'partial' names the result types that are "
+        "missing — 'count', 'counts', 'facets' and 'extents' are then computed as "
+        "though those types held nothing, so a client showing totals should say so "
+        "rather than report a confident wrong figure."
     ),
     parameters=[
         OpenApiParameter("q", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True),

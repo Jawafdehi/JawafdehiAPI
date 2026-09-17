@@ -9,6 +9,7 @@ and that a transport error becomes ``SearchUnavailable`` (→ HTTP 503).
 from __future__ import annotations
 
 import json
+import logging
 import string
 from unittest.mock import MagicMock
 
@@ -328,6 +329,81 @@ def test_search_raises_unavailable_when_cluster_down():
     client.search.side_effect = ConnectionError("no route to cluster")
     with pytest.raises(SearchUnavailable):
         SearchService(client=client).search(q="x")
+
+
+# ── partial results: ONE index failed, the cluster still answered 200 ───────────
+#
+# The 2026-09-12 incident. A terms agg on a field the live ``ngm-materials`` index
+# mapped as ``text`` failed that shard. Type-scoped material search 503'd (all
+# shards failed, covered above), but every site-wide search answered 200 with all
+# 345,934 materials missing from the results AND the counts, for two days, with
+# nothing logged. These pin the two things that made it invisible.
+
+
+def _partial_response():
+    """The canned response, plus a failed materials shard — exactly OpenSearch's
+    shape: HTTP 200, hits and aggs from the survivors only, and the single mark
+    that anything went wrong buried in ``_shards``."""
+    response = _canned_response()
+    response["_shards"] = {
+        "total": 4,
+        "successful": 3,
+        "skipped": 0,
+        "failed": 1,
+        "failures": [
+            {
+                "shard": 0,
+                "index": "ngm-materials-000001",
+                "reason": {
+                    "type": "illegal_argument_exception",
+                    "reason": (
+                        "Text fields are not optimised for operations that require "
+                        "per-document field data like aggregations and sorting, so "
+                        "these operations are disabled by default. Please use a "
+                        "keyword field instead."
+                    ),
+                },
+            }
+        ],
+    }
+    return response
+
+
+def test_search_reports_which_types_a_failed_shard_removed():
+    client = MagicMock()
+    client.search.return_value = _partial_response()
+    out = SearchService(client=client).search(q="deuba", page=1, page_size=10)
+
+    # Still served: one sick index must not take the other three down.
+    assert len(out["results"]) == 3
+    # ...but the envelope now says which type's numbers are missing, resolved
+    # through the generation suffix on the concrete backing index.
+    assert out["partial"] == ["material"]
+
+
+def test_search_logs_a_partial_result_set_at_error_level(caplog):
+    client = MagicMock()
+    client.search.return_value = _partial_response()
+    with caplog.at_level(logging.ERROR, logger="jawafdehi.search"):
+        SearchService(client=client).search(q="deuba")
+
+    # ERROR, not warning: sentry-sdk's logging integration events at ERROR, and a
+    # partial search is otherwise indistinguishable from a healthy one.
+    records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert records, "a partially-failed search logged nothing"
+    assert records[0].shards_failed == 1
+    assert records[0].partial_types == ["material"]
+    assert "illegal_argument_exception" in json.dumps(records[0].shard_failures)
+
+
+def test_search_is_not_partial_when_every_shard_answered():
+    client = MagicMock()
+    healthy = _canned_response()
+    healthy["_shards"] = {"total": 4, "successful": 4, "skipped": 0, "failed": 0}
+    client.search.return_value = healthy
+
+    # Always present, like ``next_cursor`` — a client reads it without probing.
+    assert SearchService(client=client).search(q="deuba")["partial"] == []
 
 
 # ── search_after cursor deep-paging ─────────────────────────────────────────────
