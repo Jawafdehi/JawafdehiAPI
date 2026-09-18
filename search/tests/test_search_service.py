@@ -13,6 +13,7 @@ import string
 from unittest.mock import MagicMock
 
 import pytest
+from django.test import override_settings
 
 from search import service as svc
 from search.service import (
@@ -29,17 +30,28 @@ from search.service import (
 # ── query DSL ──────────────────────────────────────────────────────────────────
 
 
-#: The entity visibility clause ``build_query`` now ANDs into every filter list
-#: (see ``search.service._visibility_clauses``). Imported from the implementation
-#: rather than restated, so a change to the clause shape does not silently make
-#: these assertions test nothing. ``_narrowing`` strips it, which lets each test
-#: below keep asserting on the CALLER's own narrowing and nothing else.
-VISIBILITY_CLAUSE = _visibility_clauses(False)[0]
+def _visibility_clause():
+    """The entity visibility clause ``build_query`` ANDs into every filter list
+    when the gate is enabled (see ``search.service._visibility_clauses``).
+
+    Imported from the implementation rather than restated, so a change to the
+    clause shape does not silently make these assertions test nothing. Built
+    under a forced-on override because the gate ships DISABLED
+    (``ENTITY_VISIBILITY_GATE_ENABLED``) — this is the clause's shape, not an
+    assertion that it is currently applied. A function rather than a module
+    constant so nothing touches settings at import time.
+    """
+    with override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True):
+        return _visibility_clauses(False)[0]
 
 
 def _narrowing(body):
-    """The filter clauses a caller asked for, minus the always-on visibility gate."""
-    return [c for c in body["query"]["bool"]["filter"] if c != VISIBILITY_CLAUSE]
+    """The filter clauses a caller asked for, minus the entity visibility gate.
+
+    With the gate disabled there is nothing to strip and this is a pass-through,
+    which is exactly what the default-off tests in ``test_search_api`` assert.
+    """
+    return [c for c in body["query"]["bool"]["filter"] if c != _visibility_clause()]
 
 
 def _recall_multi_match(body):

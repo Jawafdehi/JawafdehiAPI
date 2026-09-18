@@ -474,14 +474,18 @@ class SearchQuerySerializer(serializers.Serializer):
             required=False,
             description=(
                 "Include NES entities that no PUBLISHED Jawafdehi case cites. "
-                "By default they are hidden: the entity registry holds ~187k "
-                "records against ~1.5k that a published case names, and the "
-                "remainder is bulk-imported reference data that crowded out the "
-                "curated corpus. Requires the Caseworker role; from any other "
-                "caller the flag is IGNORED (the response is a normal gated one, "
-                "not a 403). Entity detail remains publicly readable at "
-                "/api/entities/{iri} either way — this is a default browse scope, "
-                "not an access control."
+                "Where the gate is enabled they are hidden: the entity registry "
+                "holds ~190k records against ~1.6k that a published case names, "
+                "and the remainder is bulk-imported reference data that crowded "
+                "out the curated corpus. Requires the Caseworker role; from any "
+                "other caller the flag is IGNORED (the response is a normal "
+                "gated one, not a 403). Entity detail remains publicly readable "
+                "at /api/entities/{iri} either way — this is a default browse "
+                "scope, not an access control. NOTE: the gate ships DISABLED "
+                "(ENTITY_VISIBILITY_GATE_ENABLED) and is turned on per "
+                "deployment once the entities index has been rebuilt with "
+                "case_count, so on a deployment that has not flipped it this "
+                "parameter is accepted and has no effect."
             ),
         ),
     ],
