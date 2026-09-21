@@ -75,6 +75,12 @@ class SearchQuerySerializer(serializers.Serializer):
     # Exact-match refine facets. Each narrows the result set and composes with the
     # text query. ``entity_type`` filters the schema.org ``type`` token; ``tags``
     # filters the shared ``keywords`` field.
+    #
+    # Every one of these is REPEATABLE, and repeated values are a UNION: ?tags=a&
+    # tags=b returns documents carrying either. Different params still AND with
+    # each other. And a facet's own bucket list is computed WITHOUT its own filter,
+    # so the options you did not pick stay listed (with the counts you would get by
+    # switching to them) rather than disappearing the moment you pick one.
     entity_type = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )

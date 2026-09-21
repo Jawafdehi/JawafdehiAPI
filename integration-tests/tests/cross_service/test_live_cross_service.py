@@ -226,6 +226,105 @@ def test_unified_search_empty_q_is_browse_all(clients):
     assert "count" in body and "results" in body, body
 
 
+def _material_type_facet(clients, **params):
+    """``(count, {token: bucket_count})`` for a materials search."""
+    r = clients["platform"].get(
+        "/api/search/", params={"type": "material", "page_size": 1, **params}
+    )
+    skip_if_throttled(r)
+    assert r.status_code == 200, f"{params}: {r.status_code} {r.text[:200]}"
+    body = r.json()
+    buckets = body.get("facets", {}).get("material_type") or []
+    return body["count"], {b["name"]: b["count"] for b in buckets}
+
+
+def test_a_filtered_facet_keeps_its_other_options(clients):
+    """A facet is computed WITHOUT its own filter, so ticking one option leaves
+    the rest listed and a second one tickable.
+
+    This needs a REAL cluster and cannot move into ``search/tests/``: those mock
+    the OpenSearch response dict wholesale, so they can pin the emitted DSL but
+    never what OpenSearch does with it. Two things only a live index proves:
+
+      1. the widening itself — that lifting a facet's own clause out of its agg
+         really does bring the sibling buckets back; and
+      2. that ``post_filter`` narrows ``hits.total``, which is what keeps the
+         envelope's ``count`` honest. The whole design rests on it, and if it
+         were false ``count`` would silently report the UNFILTERED total on every
+         filtered search, with the unit suite still green.
+
+    Before the fix, this returned exactly one bucket.
+
+    The SECOND half of what a live cluster has to prove — that ``post_filter``
+    narrows ``hits.total`` — lives in its own test below, because it needs a
+    weaker precondition than this one does.
+    """
+    _, baseline = _material_type_facet(clients)
+    if len(baseline) < 2:
+        pytest.skip(
+            f"needs >=2 material_type buckets to prove widening, got {baseline}"
+        )
+
+    token = next(iter(baseline))
+    _, filtered = _material_type_facet(clients, material_type=token)
+
+    # Every option survives the selection — this is the actual bug fix.
+    assert set(filtered) >= set(baseline), (
+        "filtering material_type collapsed its own facet: "
+        f"{sorted(baseline)} -> {sorted(filtered)}"
+    )
+
+
+def test_post_filter_still_narrows_the_result_count(clients):
+    """``post_filter`` narrows ``hits.total``, so the envelope's ``count`` keeps
+    counting what the reader is actually looking at.
+
+    This is the design's load-bearing premise: the unit suite mocks the OpenSearch
+    response dict wholesale, so if this were false ``count`` would report the
+    UNFILTERED total on every filtered search with CI still green.
+
+    Split out of the widening test above rather than folded into it because it
+    needs only ONE bucket to assert, where widening needs two. Sharing that test's
+    ``>= 2`` skip would have retired the premise check on a sparse index silently —
+    exactly the failure mode the premise check exists to catch.
+    """
+    baseline_count, baseline = _material_type_facet(clients)
+    if not baseline:
+        pytest.skip("needs >=1 material_type bucket to filter by")
+
+    token, expected = next(iter(baseline.items()))
+    filtered_count, _ = _material_type_facet(clients, material_type=token)
+
+    assert filtered_count == expected, (
+        f"count must reflect the filter: expected {expected} for {token!r}, "
+        f"got {filtered_count} (unfiltered total is {baseline_count})"
+    )
+
+
+def test_two_values_of_one_facet_are_a_union(clients):
+    """Repeated values of the SAME facet are one ``terms`` clause, i.e. OR — a
+    reader ticking two document types wants either, and since a document carries
+    exactly one type an intersection would always be empty."""
+    _, baseline = _material_type_facet(clients)
+    if len(baseline) < 2:
+        pytest.skip(f"needs >=2 material_type buckets, got {baseline}")
+
+    (tok_a, count_a), (tok_b, count_b) = list(baseline.items())[:2]
+    both, _ = _material_type_facet(clients, material_type=[tok_a, tok_b])
+
+    # BOUNDED rather than pinned to the exact sum. The sum is what you get while a
+    # document carries exactly one material_type, which is true today — but the
+    # field is a keyword and nothing in the mapping forbids an array, and the day
+    # one document carries two, an exact-sum assertion goes red against behaviour
+    # that is still correct. The bounds below are what actually distinguishes the
+    # union from an intersection: an AND of two types would land at or below the
+    # smaller count (0, for disjoint types), well under this floor.
+    assert max(count_a, count_b) <= both <= count_a + count_b, (
+        f"{tok_a}+{tok_b} should union: expected between {max(count_a, count_b)} "
+        f"and {count_a + count_b}, got {both}"
+    )
+
+
 def test_old_per_service_search_surfaces_removed(clients):
     """The pre-unification search surfaces are gone.
 

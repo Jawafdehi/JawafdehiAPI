@@ -220,7 +220,7 @@ def test_search_api_passes_sort_and_filters_through():
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
     assert body["sort"][0] == {"date": {"order": "desc", "missing": "_last"}}
-    filters = body["query"]["bool"]["filter"]
+    filters = body["post_filter"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in filters
     assert {"terms": {"keywords": ["a", "b"]}} in filters
 
@@ -234,7 +234,7 @@ def test_search_api_case_type_filter_normalized_to_upper():
     with patch("search.service.make_client", return_value=client):
         resp = APIClient().get("/api/search/", {"q": "x", "case_type": "corruption"})
     assert resp.status_code == 200
-    filters = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    filters = client.search.call_args.kwargs["body"]["post_filter"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in filters
 
 
@@ -249,7 +249,10 @@ def test_search_api_threads_status_facet_through():
         )
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
-    assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
+    assert (
+        {"terms": {"case_status": ["ongoing"]}}
+        in body["post_filter"]["bool"]["filter"]
+    )
 
 
 @pytest.mark.django_db
@@ -409,7 +412,10 @@ def test_search_api_threads_court_type_through():
         )
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
-    assert {"terms": {"court_type": ["supreme"]}} in body["query"]["bool"]["filter"]
+    assert (
+        {"terms": {"court_type": ["supreme"]}}
+        in body["post_filter"]["bool"]["filter"]
+    )
 
 
 @pytest.mark.django_db
@@ -433,9 +439,9 @@ def test_search_api_threads_a_multi_court_selection_through():
         )
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
-    assert {"terms": {"court": ["kathmandudc", "patanhc"]}} in body["query"]["bool"][
-        "filter"
-    ]
+    assert {"terms": {"court": ["kathmandudc", "patanhc"]}} in body["post_filter"][
+        "bool"
+    ]["filter"]
 
 
 @pytest.mark.django_db
@@ -466,7 +472,7 @@ def test_search_api_threads_material_type_through():
             },
         )
     assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    clauses = client.search.call_args.kwargs["body"]["post_filter"]["bool"]["filter"]
     assert {
         "terms": {"material_type": ["press_release", "official_report"]}
     } in clauses
@@ -475,7 +481,9 @@ def test_search_api_threads_material_type_through():
 @pytest.mark.django_db
 def test_search_api_material_type_ands_with_the_date_bounds():
     """The two controls the materials tab ships — document type and a date
-    range — narrow TOGETHER, as separate clauses on the same bool filter.
+    range — narrow TOGETHER, though they now ride in different places: the
+    document type in ``post_filter`` (so its own facet can be widened out of the
+    selection), the date bounds in the query (so every facet keeps seeing them).
 
     Dates need no material-specific param: date_from/date_to already bound the
     shared ``date`` field, which a material fills from datePublished/
@@ -495,12 +503,15 @@ def test_search_api_material_type_ands_with_the_date_bounds():
             },
         )
     assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
-    assert {"terms": {"material_type": ["charge_sheet"]}} in clauses
-    # Both bounds collapse into ONE range clause on the shared date field.
+    body = client.search.call_args.kwargs["body"]
+    assert {"terms": {"material_type": ["charge_sheet"]}} in body["post_filter"][
+        "bool"
+    ]["filter"]
+    # Both bounds collapse into ONE range clause on the shared date field, and it
+    # stays in the query so the widened material_type facet is still date-bounded.
     assert {
         "range": {"date": {"gte": "2020-01-01", "lte": "2024-12-31"}}
-    } in clauses
+    } in body["query"]["bool"]["filter"]
 
 
 @pytest.mark.django_db
@@ -548,7 +559,7 @@ def test_search_api_threads_district_and_province_through():
             },
         )
     assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    clauses = client.search.call_args.kwargs["body"]["post_filter"]["bool"]["filter"]
     assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
     assert {"terms": {"court_province": ["Bagmati"]}} in clauses
 

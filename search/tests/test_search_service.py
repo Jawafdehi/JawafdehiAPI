@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import string
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -581,7 +581,7 @@ def test_build_query_no_filter_clause_by_default():
 
 def test_build_query_entity_type_filter_targets_type_field():
     body = build_query(q="x", filters={"entity_type": ["Person", "Organization"]})
-    clauses = body["query"]["bool"]["filter"]
+    clauses = body["post_filter"]["bool"]["filter"]
     assert {"terms": {"type": ["Person", "Organization"]}} in clauses
 
 
@@ -589,7 +589,7 @@ def test_build_query_case_type_and_tags_filters():
     body = build_query(
         q="x", filters={"case_type": ["CORRUPTION"], "tags": ["procurement"]}
     )
-    clauses = body["query"]["bool"]["filter"]
+    clauses = body["post_filter"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in clauses
     # tags filter the shared keywords field.
     assert {"terms": {"keywords": ["procurement"]}} in clauses
@@ -598,6 +598,8 @@ def test_build_query_case_type_and_tags_filters():
 def test_build_query_ignores_unknown_filter_and_empty_values():
     body = build_query(q="x", filters={"bogus": ["v"], "tags": []})
     assert body["query"]["bool"]["filter"] == []
+    # Nothing survived, so no post_filter is emitted at all.
+    assert "post_filter" not in body
 
 
 def test_build_query_empty_q_is_match_all_browse():
@@ -616,7 +618,7 @@ def test_build_query_empty_q_browse_still_applies_filters_sort_paging():
     )
     bq = body["query"]["bool"]
     assert bq["must"] == [{"match_all": {}}]
-    assert {"terms": {"type": ["Person"]}} in bq["filter"]
+    assert {"terms": {"type": ["Person"]}} in body["post_filter"]["bool"]["filter"]
     assert body["sort"][0] == {"date": {"order": "desc", "missing": "_last"}}
     assert body["from"] == 5  # page 2 × size 5
 
@@ -657,7 +659,10 @@ def test_search_threads_sort_and_filters_to_client():
     _, kwargs = client.search.call_args
     body = kwargs["body"]
     assert body["sort"][0] == {"date": {"order": "desc", "missing": "_last"}}
-    assert {"terms": {"case_type": ["CORRUPTION"]}} in body["query"]["bool"]["filter"]
+    assert (
+        {"terms": {"case_type": ["CORRUPTION"]}}
+        in body["post_filter"]["bool"]["filter"]
+    )
 
 
 # ── status facet (case lifecycle) + denormalized case card ─────────────────────
@@ -668,8 +673,12 @@ def test_build_query_includes_status_facet_and_filter():
     the generic ``status`` (which holds NGM's scraper enrichment flag)."""
     assert svc.FACET_FIELDS["status"] == "case_status"
     body = build_query(q="x", filters={"status": ["ongoing"]})
+    # Sole active filter, so its own agg stays flat (and widened).
     assert body["aggs"]["status"]["terms"]["field"] == "case_status"
-    assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
+    assert (
+        {"terms": {"case_status": ["ongoing"]}}
+        in body["post_filter"]["bool"]["filter"]
+    )
 
 
 def test_build_query_includes_court_type_facet_and_filter():
@@ -678,9 +687,9 @@ def test_build_query_includes_court_type_facet_and_filter():
     assert svc.FACET_FIELDS["court_type"] == "court_type"
     body = build_query(q="x", filters={"court_type": ["supreme", "special"]})
     assert body["aggs"]["court_type"]["terms"]["field"] == "court_type"
-    assert {"terms": {"court_type": ["supreme", "special"]}} in body["query"]["bool"][
-        "filter"
-    ]
+    assert {"terms": {"court_type": ["supreme", "special"]}} in body["post_filter"][
+        "bool"
+    ]["filter"]
 
 
 def test_build_query_court_filter_selects_an_arbitrary_set_of_courts():
@@ -690,9 +699,9 @@ def test_build_query_court_filter_selects_an_arbitrary_set_of_courts():
     assert svc.FACET_FIELDS["court"] == "court"
     body = build_query(q="x", filters={"court": ["kathmandudc", "patanhc", "supreme"]})
     assert body["aggs"]["court"]["terms"]["field"] == "court"
-    assert {"terms": {"court": ["kathmandudc", "patanhc", "supreme"]}} in body["query"][
-        "bool"
-    ]["filter"]
+    assert {"terms": {"court": ["kathmandudc", "patanhc", "supreme"]}} in body[
+        "post_filter"
+    ]["bool"]["filter"]
 
 
 def test_build_query_district_and_province_filters_target_court_fields():
@@ -702,18 +711,20 @@ def test_build_query_district_and_province_filters_target_court_fields():
     body = build_query(
         q="x", filters={"district": ["Kathmandu"], "province": ["Bagmati"]}
     )
-    clauses = body["query"]["bool"]["filter"]
+    clauses = body["post_filter"]["bool"]["filter"]
     assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
     assert {"terms": {"court_province": ["Bagmati"]}} in clauses
 
 
 def test_build_query_material_type_aggregates_and_filters():
     """``material_type`` is registered on the facet field, so it both
-    aggregates (the sidebar's option list) and filters (a ticked box)."""
+    aggregates (the sidebar's option list) and filters (a ticked box) — and the
+    aggregation no longer sees its own filter, so ticking one box leaves the
+    other options in place to tick as well."""
     assert svc.FACET_FIELDS["material_type"] == "material_type"
     body = build_query(q="x", filters={"material_type": ["press_release"]})
     assert body["aggs"]["material_type"]["terms"]["field"] == "material_type"
-    clauses = body["query"]["bool"]["filter"]
+    clauses = body["post_filter"]["bool"]["filter"]
     assert {"terms": {"material_type": ["press_release"]}} in clauses
 
 
@@ -886,6 +897,275 @@ def test_every_facet_field_has_an_aggregation():
         assert body["aggs"][param]["terms"]["size"] >= 1
 
 
+# ── a facet does not narrow by its OWN filter ─────────────────────────────────
+#
+# The defect these pin, measured against production before the fix:
+#   ?type=material                                -> facets.material_type  10 buckets
+#   ?type=material&material_type=official_report  -> facets.material_type   1 bucket
+# One ticked box deleted the other nine options, so a second could never be
+# ticked. Multi-select was implemented correctly all along (repeated values are
+# ONE terms clause, i.e. a union) — it was simply unreachable through the UI.
+
+
+def _inner_terms(body, param):
+    """The ``terms`` node of a facet agg in the REQUEST, flat or wrapped.
+
+    Note the asymmetry with ``_facet_buckets``, which reads the RESPONSE: a
+    request nests the sub-agg under ``aggs``, while OpenSearch returns it as a
+    bare key beside ``doc_count``.
+    """
+    node = body["aggs"][param]
+    if "aggs" in node:
+        node = node["aggs"][svc.FACET_AGG_INNER]
+    return node["terms"]
+
+
+def test_facet_does_not_narrow_by_its_own_filter():
+    """The fix, at its narrowest: the ONLY active filter is material_type, so its
+    own agg carries no wrapper at all and is computed in the widened context —
+    every document type stays listed, with the ticked one among them."""
+    body = build_query(
+        q="", types=["material"], filters={"material_type": ["official_report"]}
+    )
+    assert body["aggs"]["material_type"] == {
+        "terms": {"field": "material_type", "size": svc.DEFAULT_FACET_AGG_SIZE}
+    }
+    assert body["post_filter"]["bool"]["filter"] == [
+        {"terms": {"material_type": ["official_report"]}}
+    ]
+    # ...and the hits are still narrowed, which is what keeps ``count`` honest.
+    assert body["query"]["bool"]["filter"] == []
+
+
+def test_facet_does_not_narrow_by_its_own_multi_valued_filter():
+    """Two ticked boxes are ONE terms clause (a union, not an intersection), and
+    the facet still refuses to narrow by it — otherwise a third could never be
+    ticked either."""
+    body = build_query(
+        q="",
+        types=["material"],
+        filters={"material_type": ["official_report", "press_release"]},
+    )
+    assert "filter" not in body["aggs"]["material_type"]
+    assert body["post_filter"]["bool"]["filter"] == [
+        {"terms": {"material_type": ["official_report", "press_release"]}}
+    ]
+
+
+def test_a_filtered_facet_still_applies_every_OTHER_filter():
+    """Self-exclusion is exactly one clause wide. With two facets filtered, each
+    drops only its own and keeps the other — this is what preserves the cascading
+    the old comment (rightly) worried a bare post_filter would destroy."""
+    body = build_query(
+        q="x",
+        types=["courtcase"],
+        filters={"court_type": ["high"], "district": ["Kathmandu"]},
+    )
+    court_type_clause = {"terms": {"court_type": ["high"]}}
+    district_clause = {"terms": {"court_district": ["Kathmandu"]}}
+
+    # court_type drops its own, keeps district.
+    assert body["aggs"]["court_type"]["filter"]["bool"]["filter"] == [district_clause]
+    # district drops its own, keeps court_type.
+    assert body["aggs"]["district"]["filter"]["bool"]["filter"] == [court_type_clause]
+    # An UNfiltered facet applies both, so cascading is untouched for it.
+    assert body["aggs"]["tags"]["filter"]["bool"]["filter"] == [
+        court_type_clause,
+        district_clause,
+    ]
+
+
+def test_unfiltered_request_emits_exactly_the_pre_fix_body():
+    """The wrapper is conditional, so the overwhelmingly common case — no facet
+    ticked — pays nothing: flat aggs, no post_filter, no companion aggs."""
+    body = build_query(q="melamchi")
+    assert "post_filter" not in body
+    for param, field in svc.FACET_FIELDS.items():
+        assert "filter" not in body["aggs"][param], param
+        assert param + svc.FACET_SELECTED_SUFFIX not in body["aggs"], param
+    assert "filter" not in body["aggs"]["by_index"]
+
+
+def test_counts_still_reflect_every_filter():
+    """``by_index`` is NOT a refine facet — it drives the per-type counts (and the
+    counts_by_type telemetry), so it must keep meaning "the active result set" and
+    therefore applies every terms clause, its own included."""
+    body = build_query(q="x", filters={"material_type": ["official_report"]})
+    assert body["aggs"]["by_index"]["filter"]["bool"]["filter"] == [
+        {"terms": {"material_type": ["official_report"]}}
+    ]
+    assert _inner_terms(body, "by_index")["field"] == "_index"
+
+
+def test_a_widened_facet_pins_the_callers_own_selection():
+    """A widened facet is a top-N over a much larger term space than the single
+    bucket it used to return, so a rare selection can fall out of its own list.
+    The companion agg carries it back with its real count, so a ticked box never
+    renders as "0 results"."""
+    body = build_query(q="x", filters={"case_type": ["A_VERY_RARE_TYPE"]})
+    pinned = body["aggs"]["case_type" + svc.FACET_SELECTED_SUFFIX]
+    assert pinned["terms"]["include"] == ["A_VERY_RARE_TYPE"]
+    assert pinned["terms"]["field"] == "case_type"
+    # Sized to the selection, so it can never push a real bucket out.
+    assert pinned["terms"]["size"] == 1
+
+
+def test_the_selection_pin_is_scoped_like_the_facet_it_pins_into():
+    """The pin carries the SAME ``others`` wrapper as the widened list it is
+    merged into. Without it the pinned bucket would report a count measured over
+    a different result set than every other bucket beside it — here, Kathmandu's
+    case count across ALL court tiers rather than within court_type=high.
+    """
+    body = build_query(
+        q="x",
+        types=["courtcase"],
+        filters={"court_type": ["high"], "district": ["Kathmandu", "Lalitpur"]},
+    )
+    court_type_clause = {"terms": {"court_type": ["high"]}}
+    pinned = body["aggs"]["district" + svc.FACET_SELECTED_SUFFIX]
+    # Same scope as the widened district facet beside it...
+    assert pinned["filter"]["bool"]["filter"] == [court_type_clause]
+    assert body["aggs"]["district"]["filter"]["bool"]["filter"] == [court_type_clause]
+    # ...and it pins BOTH selected values, sized to hold them.
+    inner = pinned["aggs"][svc.FACET_AGG_INNER]["terms"]
+    assert inner["include"] == ["Kathmandu", "Lalitpur"]
+    assert inner["size"] == 2
+
+
+def test_facet_q_include_survives_the_wrapper():
+    """``facet_q`` rides the INNER terms agg, so a facet-value typeahead still
+    works while some OTHER facet is filtered."""
+    body = build_query(
+        q="x", filters={"material_type": ["press_release"]}, facet_queries={"tags": "घुस"}
+    )
+    assert _inner_terms(body, "tags")["include"] == ".*घुस.*"
+
+
+def test_facet_q_on_a_filtered_facet_is_not_polluted_by_the_pin():
+    """The selection pin is suppressed when ``facet_q`` searches the SAME facet.
+
+    The pin carries an array include, not the regex, so emitting both would hand
+    back a bucket that does NOT contain the typed text — breaking the one thing
+    facet_q promises, which the MCP tool states to a model as ground truth.
+    """
+    body = build_query(
+        q="x",
+        filters={"district": ["Bara"]},
+        facet_queries={"district": "Kath"},
+    )
+    assert _inner_terms(body, "district")["include"] == ".*[kK][aA][tT][hH].*"
+    assert "district" + svc.FACET_SELECTED_SUFFIX not in body["aggs"]
+    # A typeahead on ANOTHER facet leaves this one's pin alone.
+    other = build_query(
+        q="x", filters={"district": ["Bara"]}, facet_queries={"tags": "कर"}
+    )
+    assert "district" + svc.FACET_SELECTED_SUFFIX in other["aggs"]
+
+
+def test_named_facets_read_both_the_flat_and_wrapped_shapes():
+    """The envelope reader sniffs the shape, so a wrapped agg and a flat one
+    deserialize identically — and the pinned selection is merged in."""
+    facets = svc._named_facets_from_aggs(
+        {
+            # flat (this facet was the filtered one)
+            "material_type": {"buckets": [{"key": "press_release", "doc_count": 7}]},
+            # wrapped (some other facet was filtered)
+            "tags": {
+                svc.FACET_AGG_INNER: {"buckets": [{"key": "procurement", "doc_count": 3}]}
+            },
+            # a selection the widened top-N dropped
+            "case_type" + svc.FACET_SELECTED_SUFFIX: {
+                "buckets": [{"key": "RARE", "doc_count": 1}]
+            },
+        }
+    )
+    assert facets["material_type"] == [{"name": "press_release", "count": 7}]
+    assert facets["tags"] == [{"name": "procurement", "count": 3}]
+    assert facets["case_type"] == [{"name": "RARE", "count": 1}]
+
+
+def test_per_type_counts_read_both_shapes():
+    """``_facets_from_aggs`` sniffs the same way, so canned unfiltered fixtures
+    keep parsing while a filtered response nests one level deeper."""
+    flat = svc._facets_from_aggs(
+        {"by_index": {"buckets": [{"key": "ngm-materials", "doc_count": 4}]}}
+    )
+    wrapped = svc._facets_from_aggs(
+        {
+            "by_index": {
+                svc.FACET_AGG_INNER: {
+                    "buckets": [{"key": "ngm-materials", "doc_count": 4}]
+                }
+            }
+        }
+    )
+    assert flat == wrapped == {"material": 4}
+
+
+def test_a_merged_facet_list_stays_count_desc():
+    """The pinned selection is merged by count, not appended blindly.
+
+    A pinned value is one the top-N dropped, so it is nearly always the smallest
+    count in the list and would land last anyway — but nothing guarantees it, and
+    a client that truncates the list (the SPA's "More" cut) would drop the wrong
+    bucket the one time it does not. Here the pin outranks two real buckets.
+    """
+    facets = svc._named_facets_from_aggs(
+        {
+            "case_type": {
+                "buckets": [
+                    {"key": "CORRUPTION", "doc_count": 90},
+                    {"key": "REVENUE", "doc_count": 5},
+                    {"key": "CUSTOMS", "doc_count": 2},
+                ]
+            },
+            "case_type" + svc.FACET_SELECTED_SUFFIX: {
+                "buckets": [{"key": "PINNED", "doc_count": 40}]
+            },
+        }
+    )
+    assert [f["count"] for f in facets["case_type"]] == [90, 40, 5, 2]
+    assert facets["case_type"][1] == {"name": "PINNED", "count": 40}
+
+
+def test_equal_counts_keep_opensearchs_own_ordering():
+    """The re-sort is STABLE, so buckets sharing a count are not reshuffled out of
+    the key ordering the terms agg already put them in."""
+    facets = svc._named_facets_from_aggs(
+        {
+            "tags": {
+                "buckets": [
+                    {"key": "alpha", "doc_count": 7},
+                    {"key": "beta", "doc_count": 7},
+                    {"key": "gamma", "doc_count": 7},
+                ]
+            }
+        }
+    )
+    assert [f["name"] for f in facets["tags"]] == ["alpha", "beta", "gamma"]
+
+
+def test_no_facet_param_can_steal_another_aggs_name():
+    """The facet aggs, their ``__selected`` companions and the hand-written aggs
+    share ONE namespace, and the readers resolve buckets by name alone — so a
+    collision would silently hand one facet's buckets back as another's. The
+    registry is checked at import; this pins that the check actually fires."""
+    # Sanity: the live registry is clean.
+    svc._assert_agg_namespace_is_unambiguous()
+
+    # A param whose companion name is another param.
+    with patch.dict(
+        svc.FACET_FIELDS, {"tags": "keywords", "tags__selected": "x"}, clear=True
+    ):
+        with pytest.raises(RuntimeError, match="already a facet param"):
+            svc._assert_agg_namespace_is_unambiguous()
+
+    # A param that collides with a hand-written agg outright.
+    with patch.dict(svc.FACET_FIELDS, {"by_index": "x"}, clear=True):
+        with pytest.raises(RuntimeError, match="hand-written agg"):
+            svc._assert_agg_namespace_is_unambiguous()
+
+
 # ── range filters (बिगो amount) ────────────────────────────────────────────────
 #
 # The SECOND filter kind. Everything above is exact-match ``terms``; these emit a
@@ -990,17 +1270,25 @@ def test_build_query_keeps_a_zero_lower_bound():
 
 
 def test_build_query_range_composes_with_terms_filters():
-    """Both filter kinds are ANDed into the same bool ``filter`` — the amount
-    bound narrows a case-type/status selection rather than replacing it."""
+    """Both filter kinds still AND together — the amount bound narrows a
+    case-type/status selection rather than replacing it — but they now live in
+    DIFFERENT places, and that split is the point.
+
+    Terms go to ``post_filter`` so a facet can be widened out of its own
+    selection; ranges stay in the query because no facet owns a range, so every
+    aggregation must keep seeing them.
+    """
     body = build_query(
         q="x",
         filters={"case_type": ["CORRUPTION"], "status": ["ongoing"]},
         ranges={"bigo_min": 10_000_000},
     )
-    clauses = body["query"]["bool"]["filter"]
-    assert {"terms": {"case_type": ["CORRUPTION"]}} in clauses
-    assert {"terms": {"case_status": ["ongoing"]}} in clauses
-    assert {"range": {"bigo": {"gte": 10_000_000}}} in clauses
+    terms = body["post_filter"]["bool"]["filter"]
+    assert {"terms": {"case_type": ["CORRUPTION"]}} in terms
+    assert {"terms": {"case_status": ["ongoing"]}} in terms
+    assert body["query"]["bool"]["filter"] == [
+        {"range": {"bigo": {"gte": 10_000_000}}}
+    ]
 
 
 def test_build_query_range_applies_in_browse_mode():
