@@ -109,17 +109,22 @@ def test_in_review_validation_rejects_incomplete_data():
         offence_type=CaseType.CORRUPTION,
     )
 
-    # Try to transition to IN_REVIEW without key_allegations
+    # Try to transition to IN_REVIEW with no byline
     case.state = CaseState.IN_REVIEW
 
     # Should raise ValidationError
     with pytest.raises(ValidationError) as exc_info:
         case.validate()
 
-    assert (
-        "key_allegations" in str(exc_info.value).lower()
-        or "allegation" in str(exc_info.value).lower()
-    ), "Validation error should mention missing key_allegations"
+    # The strict gates are identity + attribution. `key_allegations` and
+    # `description` are review-quality signals scored by review.rules_engine,
+    # NOT publish blockers, so they must not appear here.
+    message = str(exc_info.value).lower()
+    assert "authors" in message or "case_publish_date" in message, (
+        "Validation error should name the missing byline gates"
+    )
+    assert "key_allegations" not in message
+    assert "description" not in message
 
 
 # ============================================================================

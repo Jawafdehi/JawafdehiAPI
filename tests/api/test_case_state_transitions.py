@@ -36,8 +36,10 @@ def _authed_client(user) -> APIClient:
 
 
 def _publishable_case(state=CaseState.DRAFT, **kwargs) -> Case:
-    """A case that satisfies the IN_REVIEW/PUBLISHED gates (accused entity +
-    allegations + description)."""
+    """A case that satisfies the IN_REVIEW/PUBLISHED gates: a non-location
+    entity, a credited author and a publish date. The extra description /
+    allegations are realistic filler, not gates (review.rules_engine scores
+    them; they no longer block publication)."""
     defaults = dict(
         title="Publishable case",
         offence_type=CaseType.CORRUPTION,
@@ -177,9 +179,9 @@ def test_caseworker_can_close():
 
 
 @pytest.mark.django_db
-def test_publish_rejected_when_missing_allegations_and_accused():
+def test_publish_rejected_reports_only_the_surviving_gates():
     user = create_user_with_role("mod-gate", "mod-gate@example.com", "Moderator")
-    # DRAFT with no allegations, no accused entity, no description.
+    # DRAFT with nothing: no entity, no byline, no allegations, no description.
     case = Case.objects.create(
         title="Incomplete case",
         offence_type=CaseType.CORRUPTION,
@@ -191,10 +193,43 @@ def test_publish_rejected_when_missing_allegations_and_accused():
 
     assert response.status_code == 422
     assert "entities" in response.data
-    assert "key_allegations" in response.data
-    assert "description" in response.data
+    # Editorial depth is a review-quality signal, not a publish blocker: the
+    # missing description / key_allegations must NOT appear as gate errors.
+    assert "key_allegations" not in response.data
+    assert "description" not in response.data
     case.refresh_from_db()
     assert case.state == CaseState.DRAFT
+
+
+@pytest.mark.django_db
+def test_publish_allowed_without_description_or_allegations():
+    """Identified + attributable is enough; editorial depth is scored, not gated.
+
+    Pins the retirement of the description / key_allegations publish blockers.
+    A court-record-backed case whose allegations exist only inside a bound court
+    order has no automated route to satisfy them, and barring it from publication
+    was the wrong lever -- ``review.rules_engine`` still scores both.
+    """
+    user = create_user_with_role("mod-gate3", "mod-gate3@example.com", "Moderator")
+    case = Case.objects.create(
+        title="Court-record-backed case",
+        offence_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT,
+        description="",
+        key_allegations=[],
+    )
+    CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id="https://jawafdehi.org/entity/person/test-accused",
+        relationship_type=RelationshipType.ACCUSED,
+    )
+    credit_author(case)  # supplies the author + publish_date gates
+
+    response = _patch_state(_authed_client(user), case, CaseState.PUBLISHED)
+
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.state == CaseState.PUBLISHED
 
 
 @pytest.mark.django_db
