@@ -1653,7 +1653,9 @@ class Case(models.Model):
         Validate case data based on current state.
 
         - DRAFT: Lenient validation (only title required)
-        - IN_REVIEW/PUBLISHED: Strict validation (all required fields must be complete)
+        - IN_REVIEW/PUBLISHED: the case must be identified (title, a named
+          non-location entity) and attributable (author, publish date).
+          Editorial depth is scored by ``review.rules_engine``, not gated here.
         """
         errors = {}
 
@@ -1681,15 +1683,18 @@ class Case(models.Model):
                     "At least one non-location entity is required for IN_REVIEW or PUBLISHED state"
                 )
 
-            if not self.key_allegations or len(self.key_allegations) == 0:
-                errors["key_allegations"] = (
-                    "At least one key allegation is required for IN_REVIEW or PUBLISHED state"
-                )
-
-            if not self.description or not self.description.strip():
-                errors["description"] = (
-                    "Description is required for IN_REVIEW or PUBLISHED state"
-                )
+            # ``key_allegations`` and ``description`` are NOT publish blockers.
+            # Retired the same way the CORRUPTION-only "at least one ACCUSED"
+            # gate above was: both remain review-quality signals scored by
+            # ``review.rules_engine`` (``additional_description`` zeroes an empty
+            # description; ``structural_completeness`` scores allegation count),
+            # so a thin case still fails review — it is just no longer barred
+            # from leaving DRAFT. The blocking version cannot express the case it
+            # was meant to catch: a court-record-backed case whose allegations
+            # exist only inside a bound court order, with no press release to
+            # generate them from, can never satisfy it by any automated route.
+            # What a case may not do is go public UNIDENTIFIED or UNATTRIBUTED,
+            # which is what the entity / author / publish-date gates enforce.
 
             # A case may not go public unattributed. Reads the ``author_ids``
             # property, not the reverse manager, so it also sees a pending

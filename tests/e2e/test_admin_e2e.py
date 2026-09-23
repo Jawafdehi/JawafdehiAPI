@@ -277,11 +277,15 @@ class TestDjangoAdminWorkflows:
         with pytest.raises(ValidationError) as exc_info:
             case.validate()
 
-        # Verify validation error mentions missing fields
+        # Verify validation error mentions missing fields. The strict gates are
+        # identity + attribution; `key_allegations` / `description` are review
+        # signals scored by review.rules_engine, not publish blockers.
         error_dict = exc_info.value.message_dict
         assert (
-            "key_allegations" in error_dict or "description" in error_dict
-        ), "Validation should fail for IN_REVIEW without required fields (Requirement 1.2)"
+            "authors" in error_dict or "case_publish_date" in error_dict
+        ), "Validation should fail for IN_REVIEW without a byline (Requirement 1.2)"
+        assert "key_allegations" not in error_dict
+        assert "description" not in error_dict
 
         # Reset state
         case.state = CaseState.DRAFT

@@ -740,7 +740,8 @@ def test_patch_422_for_draft_to_in_review_missing_required_fields():
     # messages (was 400 before the transitions were unified).
     assert response.status_code == 422
     assert "entities" in response.data
-    assert "key_allegations" in response.data
+    # Editorial depth is scored by review.rules_engine, not gated here.
+    assert "key_allegations" not in response.data
     case.refresh_from_db()
     assert case.state == CaseState.DRAFT
 
