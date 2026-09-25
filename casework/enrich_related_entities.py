@@ -139,7 +139,7 @@ from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import materials_of_type, source_chunks, source_text
 from casework.common.order_windows import Window, caption_end, start_windows
 from casework.entity_identity import entity_slug, prefix_is_creatable
-from casework.common.parse import balanced_object, parse_extraction_response, strip_fence
+from casework.common.parse import balanced_array, balanced_object, parse_extraction_response, strip_fence
 from casework.common.pipeline import (
     COURT_TYPES,
     PRESS_TYPES,
@@ -164,6 +164,7 @@ from casework.entity_resolver import (
     Decision,
     _name_vetoes,
     apply_document_veto,
+    has_devanagari,
     is_election_candidate_record,
     names_a_gazetteer_place,
     normalise_name,
@@ -345,7 +346,6 @@ Output ONLY this JSON object, no other text:
 # it was read from before anything is bound. Not yet wired into `main()` --
 # `SYSTEM_PROMPT` and `_build_content_parts` stay live until Task 7.
 COURT_ORDER_SYSTEM_PROMPT = """You are a Nepali legal research assistant helping to build a public transparency database of court cases.
-You are reading part of a Special Court judgment, labelled with its character range.
 
 You must extract THREE things in a single response:
 
@@ -1145,20 +1145,27 @@ def _settle_note_claims(slug, claims, how):
 
 
 def accused_missing_notes(case, notes):
-    """`nes_id`s of accused binds with an empty or placeholder note that `notes` does not fill.
+    """`nes_id`s of accused binds `notes` cannot yet fill, restricted to binds
+    `accused_note_updates` could EVER fill from this pipeline.
 
     "Empty or placeholder" is the SAME test `apply_accused_updates` runs before
-    it will overwrite a note (`not notes or notes.startswith(MACHINE_NOTE_PREFIX)`),
-    so the two never disagree about which binds still need one.
+    it will overwrite a note (`not notes or notes.startswith(MACHINE_NOTE_PREFIX)`).
+    "Could ever fill" narrows that to a bind `accused_binds_by_name` keeps under a
+    UNIQUE display name (a namesake is dropped there already) whose name is
+    Devanagari -- `note_match_key` folds an extracted name against the court
+    ORDER's own script, so a romanized display name (~40% of accused binds in
+    production) can never be matched and must not hold the start-window loop
+    open waiting for a note this pipeline can never supply.
     """
+    grouped, _skipped = accused_binds_by_name(case)
+    reachable = {nes_id for name, (nes_id, _entity) in grouped.items() if has_devanagari(name)}
     needing = {
         (entity.get("nes_id") or "").strip()
         for entity in (case.get("entities") or [])
         if bind_relationship_type(entity) == ACCUSED_SECTION
         and (lambda note: not note or note.startswith(MACHINE_NOTE_PREFIX))(entity.get("notes") or "")
     }
-    needing.discard("")
-    return needing - set(accused_note_updates(case, notes))
+    return (needing & reachable) - set(accused_note_updates(case, notes))
 
 
 @dataclass(frozen=True)
@@ -1170,23 +1177,39 @@ class Source:
 
 
 def _joined_source_chunks(detail, types):
-    """`source_chunks` for `types`, sorted by material IRI (`.1` before `.2`) and joined."""
-    chunks, _unmet = source_chunks(detail, types=types)
-    return "\n\n".join(text for _mtype, _iri, text in sorted(chunks, key=lambda c: c[1]))
+    """`source_chunks` for `types`, sorted by material IRI (`.1` before `.2`) and joined:
+    `(joined_text, unmet_reasons)`."""
+    chunks, unmet = source_chunks(detail, types=types)
+    text = "\n\n".join(text for _mtype, _iri, text in sorted(chunks, key=lambda c: c[1]))
+    return text, unmet
+
+
+#: The exact wording `casework.common.materials.source_chunks` uses for a fetch that
+#: raised, as opposed to a material simply not existing (`"no MARKDOWN role"`) or
+#: fetching empty (`"MARKDOWN empty"`) -- see `pick_source`.
+_FETCH_FAILED_MARKER = "MARKDOWN fetch failed"
 
 
 def pick_source(detail):
     """Court order first; the press release only when no readable court order exists.
 
-    The press release is never fetched at all while a readable court order is
-    in hand -- `source_chunks` for `PRESS_TYPES` only runs on the fallback path.
+    A court-order material that FAILED TO FETCH (a transport error, as opposed to
+    the case simply having no court-order material) refuses outright rather than
+    falling back -- a 503 must not silently swap in the press release under a
+    misleading reason, and a multi-part order must not be read with one part
+    silently missing. The press release is never fetched at all while a readable
+    court order is in hand -- `source_chunks` for `PRESS_TYPES` only runs on the
+    fallback path.
     """
-    court_text = _joined_source_chunks(detail, COURT_TYPES)
+    court_text, court_unmet = _joined_source_chunks(detail, COURT_TYPES)
+    fetch_failures = [reason for reason in court_unmet if _FETCH_FAILED_MARKER in reason]
+    if fetch_failures:
+        return Source(None, "", "; ".join(fetch_failures))
     if court_text and is_readable_devanagari(court_text):
         return Source("court_order", court_text, "")
     why = ("the case has no court order material with extracted text" if not court_text
            else "the court order text is not readable Devanagari (likely Preeti-encoded)")
-    press_text = _joined_source_chunks(detail, PRESS_TYPES)
+    press_text, _press_unmet = _joined_source_chunks(detail, PRESS_TYPES)
     if press_text and not is_teaser(press_text):
         return Source("press_release", press_text, why)
     why += ("; no press release material with text either" if not press_text
@@ -1221,26 +1244,46 @@ def _parsed_extraction_object(text):
     return (obj, True) if isinstance(obj, dict) else ({}, False)
 
 
-def _extraction_list(obj, parsed_ok, key, text):
-    """`obj[key]` from an already-parsed reply; `parse_extraction_response` only recovers
-    `key` from raw `text` when that parse failed outright.
+def _recover_key_array(text, key):
+    """Recover `key`'s own array from a reply whose object-level parse failed outright.
 
-    `parse_window_response` asks for THREE sibling keys (`locations`, `entities`,
-    `accused_notes`) on one reply, and `parse_extraction_response`'s own fallback --
-    reached whenever the requested key's list is empty -- searches the WHOLE text for
-    the first `[`, with no idea which key it was asked for. On a real reply where
-    `locations` is populated and `entities` is genuinely `[]`, that fallback returns
-    the `locations` array AS `entities`. Measured via
-    `TestExtractFromSourceCourtOrder.test_keeps_growing_until_every_accused_note_is_
-    filled_and_dedupes_the_district`, which failed with a location answer landing in
-    `accused_notes` before this existed. Reading a well-formed reply straight off the
-    parsed object sidesteps the ambiguity entirely; `parse_extraction_response` still
-    does its real job -- recovering a fenced or otherwise malformed reply.
+    NEVER `parse_extraction_response`'s whole-text first-`[` fallback: with three
+    sibling keys (`locations`, `entities`, `accused_notes`) on one reply, that
+    fallback cannot tell one key's array from another's, so a reply truncated
+    mid-`accused_notes` returned `locations` for every key that came up empty
+    (measured via `TestParseWindowResponse.test_a_truncated_reply_recovers_each_
+    key_from_its_own_array_not_a_neighbours`). Instead: locate the literal
+    `"<key>"` field name, then the `[` that follows IT, and read from there with
+    the same brace-balanced, string-aware primitive. A key whose array cannot be
+    recovered this way is logged and left empty, never borrowed from a neighbour.
     """
+    stripped = strip_fence((text or "").strip())
+    marker = stripped.find(f'"{key}"')
+    if marker == -1:
+        log.warning("malformed extraction reply: %r never appears", key)
+        return []
+    bracket = stripped.find("[", marker)
+    if bracket == -1:
+        log.warning("malformed extraction reply: %r has no following '['", key)
+        return []
+    frag = balanced_array(stripped, bracket)
+    if frag is None:
+        log.warning("malformed extraction reply: %r's array never closes", key)
+        return []
+    try:
+        entries = json.loads(frag)
+    except json.JSONDecodeError:
+        log.warning("malformed extraction reply: %r's recovered array is not valid JSON", key)
+        return []
+    return entries if isinstance(entries, list) else []
+
+
+def _extraction_list(obj, parsed_ok, key, text):
+    """`obj[key]` from an already-parsed reply, else `_recover_key_array`'s per-key recovery."""
     if parsed_ok:
         value = obj.get(key)
         return list(value) if isinstance(value, list) else []
-    return list(parse_extraction_response(text, {key}) or [])
+    return _recover_key_array(text, key)
 
 
 def parse_window_response(text):
@@ -1289,9 +1332,15 @@ def _grounded(items, window_text):
     return kept, rejected
 
 
-def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, usage, system_suffix):
+def _press_release_label(window):
+    """A press release is not a court order -- label it as what it is, same number format."""
+    return f"प्रेस विज्ञप्ति, अक्षर {window.start:,}–{window.end:,} (कुल {window.total:,})"
+
+
+def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, usage,
+                 system_suffix, label=None):
     """One window: the LLM call, evidence grounding, and location resolution."""
-    content = f"{window.label()}\n\n{window.text}"
+    content = f"{label or window.label()}\n\n{window.text}"
     response = invoke_text(
         system=system_prompt + system_suffix, content=content,
         max_tokens=EXTRACTION_MAX_TOKENS, tier=tier_for("entities"), usage=usage)
@@ -1304,19 +1353,48 @@ def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, us
     return entities, accused_notes, binds, rejected
 
 
+def _new_accused_notes(case, kept_notes, candidates):
+    """`candidates` whose matched accused bind is not already filled by `kept_notes`.
+
+    Keeps the FIRST grounded note to reach a bind: a later window's restatement
+    of the same person's role ("सचिव, कृषि मन्त्रालय" for window 1's "तत्कालीन
+    सचिव, कृषि मन्त्रालय") is dropped here, before it can reach
+    `_settle_note_claims`'s "two different roles reached this bind" refusal and
+    erase the note `kept_notes` already secured. A note that never matches a
+    bind at all (unresolved or ambiguous name) is unaffected -- it cannot erase
+    anything -- and still accumulates for later human review.
+    """
+    already = set(accused_note_updates(case, kept_notes))
+    kept = []
+    for note in candidates:
+        if not isinstance(note, dict):
+            continue
+        matched = accused_note_updates(case, [note])
+        if matched and next(iter(matched)) in already:
+            continue
+        kept.append(note)
+    return kept
+
+
 def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffix=""):
     """Read `source`: the court order in growing start-windows, the press release in one call.
 
-    The court-order loop stops once a district has bound and every accused bind
-    on `case` has a note (`accused_missing_notes`), or at `MAX_ENTITY_WINDOWS`.
-    A `LocationBind` already seen (by `nes_id`) in an earlier window is not
-    repeated; entities and accused notes accumulate across every window read.
+    The court-order loop stops once a district has bound and every reachable
+    accused bind on `case` has a note (`accused_missing_notes`), or at
+    `MAX_ENTITY_WINDOWS`. A `LocationBind` already seen (by `nes_id`) in an
+    earlier window is not repeated; entities accumulate across every window
+    read, and so do accused notes -- except a note whose bind an earlier window
+    already filled (`_new_accused_notes`). `source.kind is None` makes no call
+    at all.
     """
+    if source.kind is None:
+        return Extraction([], [], [], [], [])
+
     if source.kind == "press_release":
         window = Window(0, len(source.text), len(source.text), source.text)
         entities, accused_notes, binds, rejected = _read_window(
             api, gaz, source.text, 0, window, PRESS_RELEASE_SYSTEM_PROMPT,
-            invoke_text, usage, system_suffix)
+            invoke_text, usage, system_suffix, label=_press_release_label(window))
         return Extraction(entities, accused_notes, binds, rejected, [(window.start, window.end)])
 
     text = source.text
@@ -1328,7 +1406,7 @@ def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffi
             api, gaz, text, cap_end, window, COURT_ORDER_SYSTEM_PROMPT,
             invoke_text, usage, system_suffix)
         entities.extend(w_entities)
-        accused_notes.extend(w_notes)
+        accused_notes.extend(_new_accused_notes(case, accused_notes, w_notes))
         rejected.extend(w_rejected)
         for bind in w_binds:
             if bind.nes_id not in seen_nes_ids:

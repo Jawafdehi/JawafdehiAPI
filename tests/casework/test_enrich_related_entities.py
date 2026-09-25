@@ -44,6 +44,7 @@ from casework.common.order_windows import MAX_ENTITY_WINDOWS, start_windows
 from casework.enrich_related_entities import (
     PROMOTED_PREFIX,
     RELATIONSHIP_TYPES,
+    Extraction,
     Source,
     _build_content_parts,
     _enforce_prompt_budget,
@@ -6190,3 +6191,190 @@ class TestExtractFromSourcePressRelease:
         assert stub.calls[0]["system"] == ere.PRESS_RELEASE_SYSTEM_PROMPT
         assert any("/location/district/" in b.nes_id for b in extraction.location_binds)
         assert extraction.windows == [(0, len(text))]
+
+
+# --------------------------------------------------------------------------
+# Fix round 1 (post-review) -- six items, one test class per item.
+# --------------------------------------------------------------------------
+
+
+class TestPickSourceFetchFailure:
+    """Review item 1: a court-order fetch failure must refuse, never fall back."""
+
+    def test_a_court_order_fetch_failure_refuses_rather_than_falling_back(self, monkeypatch):
+        import casework.common.materials as m
+
+        fetched = []
+
+        def fake_fetch(link, timeout=60):
+            fetched.append(link)
+            if link == "https://x/order.md":
+                raise TimeoutError("503 Service Unavailable")
+            return READABLE_PRESS
+
+        monkeypatch.setattr(m, "fetch_markdown", fake_fetch)
+        detail = {"slug": "case-order-503", "state": "DRAFT", "evidence": [
+            _material("https://jawafdehi.org/material/ngm/court_orders/1", "court_order",
+                      "https://x/order.md"),
+            _material("https://jawafdehi.org/material/ciaa/press_releases/1", "press_release",
+                      "https://x/press.md"),
+        ]}
+
+        source = pick_source(detail)
+
+        assert source.kind is None
+        assert "MARKDOWN fetch failed" in source.reason
+        assert "503" in source.reason
+        assert fetched == ["https://x/order.md"], "the press release must never be fetched"
+
+    def test_a_missing_court_order_material_still_falls_back_normally(self, monkeypatch):
+        # The other half: a case with NO court-order material at all (as opposed to one
+        # that failed to fetch) must still fall back to a readable press release.
+        import casework.common.materials as m
+
+        monkeypatch.setattr(m, "fetch_markdown", lambda link, timeout=60: READABLE_PRESS)
+        detail = {"slug": "case-no-order", "state": "DRAFT", "evidence": [
+            _material("https://jawafdehi.org/material/ciaa/press_releases/1", "press_release",
+                      "https://x/press.md"),
+        ]}
+
+        source = pick_source(detail)
+
+        assert source.kind == "press_release"
+
+
+class TestParseWindowResponseMalformed:
+    """Review item 2: the malformed-reply recovery must not borrow a neighbour's array."""
+
+    def test_a_truncated_reply_recovers_each_key_from_its_own_array_not_a_neighbours(self):
+        full = _response(
+            locations=[{"place_as_written": BANKE_PLACE, "district": "बाँके",
+                       "evidence": BANKE_EVIDENCE, "notes": ""}],
+            entities=[{"entity_name": "संस्था", "relationship_type": "related",
+                     "evidence": "संस्था संलग्न रहेको पाइयो।", "notes": "क"}],
+            accused_notes=[{"name": "राम", "notes": "अधिकृत",
+                          "evidence": "राम अधिकृत रहेका थिए।"}],
+        )
+        truncated = full[:full.index('"accused_notes"') + 20]
+        assert not truncated.rstrip().endswith("}")  # the object never closes
+
+        answer = parse_window_response(truncated)
+
+        assert answer.locations == [{"place_as_written": BANKE_PLACE, "district": "बाँके",
+                                    "evidence": BANKE_EVIDENCE, "notes": ""}]
+        assert answer.entities == [{"entity_name": "संस्था", "relationship_type": "related",
+                                   "evidence": "संस्था संलग्न रहेको पाइयो।", "notes": "क"}]
+        assert answer.accused_notes == []
+
+    def test_a_key_truncated_before_its_own_array_opens_is_reported_empty(self, caplog):
+        full = _response(locations=[{"place_as_written": BANKE_PLACE, "district": "बाँके",
+                                     "evidence": BANKE_EVIDENCE, "notes": ""}])
+        truncated = full[:full.index('"accused_notes"')]
+
+        with caplog.at_level(logging.WARNING, logger="casework.enrich_related_entities"):
+            answer = parse_window_response(truncated)
+
+        assert answer.accused_notes == []
+        assert answer.locations  # the intact key is still recovered
+        assert any("accused_notes" in r.message for r in caplog.records)
+
+
+class TestExtractFromSourceNoteAccumulation:
+    """Review item 3: a later window's reworded note must not erase the first."""
+
+    def test_a_later_windows_reworded_note_does_not_erase_the_first(self):
+        note1_evidence = "राम बहादुर तत्कालीन सचिव, कृषि मन्त्रालय रहेका थिए भनी उल्लेख छ।"
+        text = CAPTION_SHORT + _filler(100_000 - len(CAPTION_SHORT))
+        text = _splice(text, len(CAPTION_SHORT) + 100, note1_evidence)
+        w2 = list(start_windows(text))[1]
+        note2_evidence = "राम बहादुर सचिव, कृषि मन्त्रालय रहेका थिए भनी पुनः उल्लेख छ।"
+        text = _splice(text, w2.start + 50, note2_evidence)
+        text = _splice(text, w2.start + 300, BANKE_EVIDENCE)
+        source = Source("court_order", text, "")
+        case = {"slug": "case-reword", "state": "DRAFT", "entities": [
+            {"nes_id": "https://jawafdehi.org/entity/person/ram", "type": "accused",
+             "display_name": "राम बहादुर", "notes": ere.MACHINE_NOTE_PREFIX + "079-cr-0002"},
+        ]}
+        stub = _sequenced_stub(
+            _response(accused_notes=[{"name": "राम बहादुर",
+                                     "notes": "तत्कालीन सचिव, कृषि मन्त्रालय",
+                                     "evidence": note1_evidence}]),
+            _response(locations=[{"place_as_written": BANKE_PLACE, "district": "बाँके",
+                                  "evidence": BANKE_EVIDENCE, "notes": ""}],
+                      accused_notes=[{"name": "राम बहादुर", "notes": "सचिव, कृषि मन्त्रालय",
+                                    "evidence": note2_evidence}]),
+        )
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == 2
+        assert extraction.accused_notes == [
+            {"name": "राम बहादुर", "notes": "तत्कालीन सचिव, कृषि मन्त्रालय",
+             "evidence": note1_evidence}]
+
+
+class TestAccusedMissingNotesRomanized:
+    """Review item 4: a romanized-only accused bind can never be filled from a
+    Devanagari order, so it must not hold the start-window loop open."""
+
+    def test_ignores_a_romanized_display_name(self):
+        case = {"slug": "case-roman", "state": "DRAFT", "entities": [
+            {"nes_id": "https://jawafdehi.org/entity/person/roman", "type": "accused",
+             "display_name": "Ram Bahadur",
+             "notes": ere.MACHINE_NOTE_PREFIX + "079-cr-0004"},
+        ]}
+        assert accused_missing_notes(case, []) == set()
+
+    def test_a_romanized_only_accused_bind_does_not_hold_the_loop_open(self):
+        text = _order_with_location_at(100_000, len(CAPTION_SHORT) + 100)
+        source = Source("court_order", text, "")
+        case = {"slug": "case-romanized-loop", "state": "DRAFT", "entities": [
+            {"nes_id": "https://jawafdehi.org/entity/person/roman2", "type": "accused",
+             "display_name": "Ram Bahadur",
+             "notes": ere.MACHINE_NOTE_PREFIX + "079-cr-0005"},
+        ]}
+        stub = _sequenced_stub(_response(locations=[
+            {"place_as_written": BANKE_PLACE, "district": "बाँके",
+             "evidence": BANKE_EVIDENCE, "notes": ""}]))
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == 1
+        assert any("/location/district/" in b.nes_id for b in extraction.location_binds)
+
+
+class TestExtractFromSourceNoSource:
+    """Controller ruling (item 5): `source.kind is None` makes no call at all."""
+
+    def test_a_none_source_returns_an_empty_extraction_with_no_call(self):
+        case = {"slug": "case-no-source", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub()
+
+        extraction = extract_from_source(_api(), _gaz(), case, Source(None, "", "no source"),
+                                        stub, usage=None)
+
+        assert extraction == Extraction([], [], [], [], [])
+        assert stub.calls == []
+
+
+class TestPressReleaseLabelAndPromptDuplicate:
+    """Controller ruling (item 6): the press-release call is labelled as itself, and
+    `COURT_ORDER_SYSTEM_PROMPT`'s duplicated sentence is gone."""
+
+    def test_the_press_release_call_is_labelled_as_a_press_release(self):
+        text = BANKE_EVIDENCE + " " + FILLER_SENTENCE * 20
+        source = Source("press_release", text, "")
+        case = {"slug": "case-press-label", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response())
+
+        extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        content = stub.calls[0]["content"]
+        assert content.startswith(f"प्रेस विज्ञप्ति, अक्षर 0–{len(text):,} (कुल {len(text):,})")
+        assert "अदालतको आदेश" not in content.split("\n\n", 1)[0]
+
+    def test_the_labelled_sentence_appears_only_once_and_stays_in_part_1(self):
+        prompt = ere.COURT_ORDER_SYSTEM_PROMPT
+        marker = "You are reading part of a Special Court judgment, labelled with its character range."
+        assert prompt.count(marker) == 1
+        assert marker in prompt[prompt.index("PART 1"):]
