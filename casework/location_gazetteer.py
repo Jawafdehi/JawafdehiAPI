@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 
-from casework.common.grounding import normalise_for_match
+from casework.common.grounding import location_quote_problem, normalise_for_match
 
 #: Devanagari block, used to require a form match starts at a word boundary.
 _DEVANAGARI = "ऀ-ॿ"
@@ -51,6 +51,19 @@ class PlaceDecision:
     district: str | None
     localunit: str | None
     reason: str
+
+
+#: An answer's `notes` field is truncated to this many characters on a bind.
+NOTES_MAX_CHARS = 200
+
+
+@dataclass(frozen=True)
+class LocationBind:
+    nes_id: str
+    notes: str
+    place: str
+    evidence: str
+    via: str
 
 
 def place_key(text: str) -> str:
@@ -104,8 +117,10 @@ class Gazetteer:
                 if key and key not in self._ambiguous:
                     self._district_forms[key] = d["@id"]
         self._unit_forms: dict[str, list] = {}
+        self._unit_parent: dict[str, str | None] = {}
         for u in localunits:
             parent = (u.get("containedInPlace") or {}).get("@id")
+            self._unit_parent[u["@id"]] = parent
             name = u.get("name") or {}
             forms = _alt_names(u.get("alternateName")) | {name[lang] for lang in ("ne", "en") if name.get(lang)}
             for form in forms:
@@ -138,6 +153,10 @@ class Gazetteer:
             if _matches(key, normalized):
                 found.extend(entries)
         return found
+
+    def parent_district(self, localunit_iri: str) -> str | None:
+        """The district IRI containing a localunit IRI, or None if the unit is unknown."""
+        return self._unit_parent.get(localunit_iri)
 
     def redirect(self, nes_id: str, name: str) -> str | None:
         if "/location/district/" in nes_id or "/location/localunit/" in nes_id:
@@ -199,3 +218,66 @@ def load_gazetteer(api) -> Gazetteer:
     if missing:
         raise RuntimeError(f"DISTRICT_VARIANTS stems missing from NES: {missing}")
     return gaz
+
+
+def _redirect_match(gaz: Gazetteer, candidates, query_key: str) -> str | None:
+    """The first district/localunit IRI a candidate's title redirects to, or None."""
+    for candidate in candidates:
+        title = candidate.get("title") or {}
+        forms = [f for f in (title.get("ne"), title.get("en")) if f]
+        if not any(place_key(form) == query_key for form in forms):
+            continue
+        nes_id = (candidate.get("id") or "").strip()
+        for form in forms:
+            iri = gaz.redirect(nes_id, form)
+            if iri:
+                return iri
+    return None
+
+
+def resolve_locations(
+    api, gaz: Gazetteer, answers: list[dict], source_text: str, caption_end: int
+) -> tuple[list[LocationBind], list[dict]]:
+    """Grounded location answers to district/municipality `LocationBind`s, deduped on `nes_id`."""
+    binds: list[LocationBind] = []
+    rejected: list[dict] = []
+    seen: set[str] = set()
+
+    def emit(nes_id: str, notes: str, place: str, evidence: str, via: str) -> None:
+        if nes_id not in seen:
+            seen.add(nes_id)
+            binds.append(LocationBind(nes_id, notes, place, evidence, via))
+
+    for answer in answers:
+        place = answer.get("place_as_written") or ""
+        district_claim = answer.get("district") or ""
+        evidence = answer.get("evidence") or ""
+        notes = (answer.get("notes") or "")[:NOTES_MAX_CHARS]
+        query = place or district_claim
+
+        problem = location_quote_problem(evidence, query, source_text, caption_end)
+        if problem:
+            rejected.append({"place": place, "district": district_claim, "evidence": evidence, "reason": problem})
+            continue
+
+        decision = gaz.resolve(place, district_claim)
+        if decision.district:
+            emit(decision.district, notes, place, evidence, "gazetteer")
+            if decision.localunit:
+                emit(decision.localunit, notes, place, evidence, "gazetteer")
+            continue
+
+        resolved = _redirect_match(gaz, api.search_entities(query), place_key(query))
+        if resolved is None:
+            rejected.append({"place": place, "district": district_claim, "evidence": evidence,
+                              "reason": "NES match is not a district or municipality"})
+            continue
+        if "/location/district/" in resolved:
+            emit(resolved, notes, place, evidence, "nes-redirect")
+        else:
+            parent = gaz.parent_district(resolved)
+            if parent:
+                emit(parent, notes, place, evidence, "nes-redirect")
+            emit(resolved, notes, place, evidence, "nes-redirect")
+
+    return binds, rejected

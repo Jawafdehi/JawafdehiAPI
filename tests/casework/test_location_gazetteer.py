@@ -1,5 +1,5 @@
 import pytest
-from casework.location_gazetteer import Gazetteer, load_gazetteer, place_key
+from casework.location_gazetteer import Gazetteer, load_gazetteer, place_key, resolve_locations
 
 E = "https://jawafdehi.org/entity/"
 
@@ -156,3 +156,92 @@ class _PagedApi:
 def test_load_refuses_anything_but_77_districts():
     with pytest.raises(RuntimeError, match="77"):
         load_gazetteer(_PagedApi(DISTRICTS, UNITS))
+
+
+class _StubSearchApi:
+    def __init__(self, rows=None):
+        self.rows = rows if rows is not None else []
+        self.calls: list = []
+
+    def search_entities(self, query):
+        self.calls.append(query)
+        return self.rows
+
+
+SEIZURE_PLACE = "जिल्ला बाँके, खजुरा गाँउपालिका वडा नं.४"
+SEIZURE_TEXT = f"जफत गरिएको सामान {SEIZURE_PLACE} बाट बरामद भएको हो ।"
+KHAJURA = f"{E}location/localunit/khajura-gaunpalika-50001"
+
+
+def test_a_grounded_answer_binds_district_and_municipality(gaz):
+    answers = [{"place_as_written": SEIZURE_PLACE, "district": "बाँके",
+                "evidence": f"{SEIZURE_PLACE} बाट बरामद भएको हो", "notes": "seizure site"}]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, SEIZURE_TEXT, 0)
+    assert rejected == []
+    assert [(b.nes_id, b.via) for b in binds] == [(BANKE, "gazetteer"), (KHAJURA, "gazetteer")]
+    assert binds[0].notes == "seizure site"
+
+
+def test_an_answer_quoting_the_caption_is_rejected(gaz):
+    text = ("**अध्यक्ष माननीय न्यायाधीश**\nजिल्ला कालिकोट स्थायी घर भई हाल बस्ने जयराज\n"
+            "मुद्धा:- भ्रष्टाचार\n"
+            f"5. **खानतलासी मुचुल्का:** {SEIZURE_PLACE} स्थित पूर्वमा बाटो भएको घरमा रकम बरामद भयो ।\n"
+            "आयोगको कार्यालय, कोहलपुरबाट खटिएको टोली ।\n")
+    cap = text.index("मुद्धा:") + len("मुद्धा:")
+    answers = [{"place_as_written": "कालिकोट", "district": "",
+                "evidence": "जिल्ला कालिकोट स्थायी घर भई हाल बस्ने", "notes": ""}]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, text, cap)
+    assert binds == []
+    assert "caption" in rejected[0]["reason"]
+
+
+def test_two_answers_naming_the_same_district_produce_one_bind(gaz):
+    text = "यो घटना बाँके जिल्लाको हो । अर्को विवरण पनि बाँके जिल्लामा भएको हो ।"
+    answers = [
+        {"place_as_written": "बाँके जिल्ला", "district": "बाँके",
+         "evidence": "यो घटना बाँके जिल्लाको हो", "notes": "first"},
+        {"place_as_written": "बाँके जिल्ला", "district": "बाँके",
+         "evidence": "अर्को विवरण पनि बाँके जिल्लामा भएको हो", "notes": "second"},
+    ]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, text, 0)
+    assert rejected == []
+    assert [b.nes_id for b in binds] == [BANKE]
+    assert binds[0].notes == "first"
+
+
+def test_a_twin_spelling_redirects_through_the_english_title(gaz):
+    text = "बरामद सामान काठमांडू बाट ल्याइएको थियो ।"
+    answers = [{"place_as_written": "काठमांडू", "district": "",
+                "evidence": "बरामद सामान काठमांडू बाट ल्याइएको थियो", "notes": ""}]
+    api = _StubSearchApi([{"id": f"{E}location/kathmandu-twin-1",
+                            "title": {"ne": "काठमांडू", "en": "Kathmandu"}}])
+    binds, rejected = resolve_locations(api, gaz, answers, text, 0)
+    assert rejected == []
+    assert [(b.nes_id, b.via) for b in binds] == [(KTM, "nes-redirect")]
+    assert api.calls == ["काठमांडू"]
+
+
+def test_a_twin_spelling_with_no_place_candidate_is_rejected(gaz):
+    text = "बरामद सामान काठमांडू बाट ल्याइएको थियो ।"
+    answers = [{"place_as_written": "काठमांडू", "district": "",
+                "evidence": "बरामद सामान काठमांडू बाट ल्याइएको थियो", "notes": ""}]
+    api = _StubSearchApi([{"id": f"{E}organization/kathmandu-office", "title": {"ne": "काठमांडू"}}])
+    binds, rejected = resolve_locations(api, gaz, answers, text, 0)
+    assert binds == []
+    assert rejected[0]["reason"] == "NES match is not a district or municipality"
+
+
+def test_a_gazetteer_resolved_answer_makes_no_search_call(gaz):
+    answers = [{"place_as_written": SEIZURE_PLACE, "district": "बाँके",
+                "evidence": f"{SEIZURE_PLACE} बाट बरामद भएको हो", "notes": ""}]
+    api = _StubSearchApi()
+    resolve_locations(api, gaz, answers, SEIZURE_TEXT, 0)
+    assert api.calls == []
+
+
+def test_notes_are_capped_at_200_chars(gaz):
+    answers = [{"place_as_written": SEIZURE_PLACE, "district": "बाँके",
+                "evidence": f"{SEIZURE_PLACE} बाट बरामद भएको हो", "notes": "क" * 250}]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, SEIZURE_TEXT, 0)
+    assert rejected == []
+    assert binds and all(len(b.notes) == 200 for b in binds)
