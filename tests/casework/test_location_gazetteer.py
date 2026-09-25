@@ -239,6 +239,27 @@ def test_a_gazetteer_resolved_answer_makes_no_search_call(gaz):
     assert api.calls == []
 
 
+def test_a_municipality_redirect_binds_its_parent_district_first(gaz):
+    text = "बरामद सामान खजुरागाउँपालिका बाट ल्याइएको थियो ।"
+    answers = [{"place_as_written": "खजुरागाउँपालिका", "district": "",
+                "evidence": "बरामद सामान खजुरागाउँपालिका बाट ल्याइएको थियो", "notes": ""}]
+    api = _StubSearchApi([{"id": KHAJURA, "title": {"ne": "खजुरागाउँपालिका"}}])
+    binds, rejected = resolve_locations(api, gaz, answers, text, 0)
+    assert rejected == []
+    assert [(b.nes_id, b.via) for b in binds] == [(BANKE, "nes-redirect"), (KHAJURA, "nes-redirect")]
+
+
+def test_a_municipality_redirect_with_no_known_parent_is_rejected(gaz):
+    text = "बरामद सामान अज्ञातपालिका बाट ल्याइएको थियो ।"
+    answers = [{"place_as_written": "अज्ञातपालिका", "district": "",
+                "evidence": "बरामद सामान अज्ञातपालिका बाट ल्याइएको थियो", "notes": ""}]
+    api = _StubSearchApi([{"id": f"{E}location/localunit/unknown-unit-99999",
+                            "title": {"ne": "अज्ञातपालिका"}}])
+    binds, rejected = resolve_locations(api, gaz, answers, text, 0)
+    assert binds == []
+    assert rejected[0]["reason"] == "municipality has no known district in the gazetteer"
+
+
 def test_notes_are_capped_at_200_chars(gaz):
     answers = [{"place_as_written": SEIZURE_PLACE, "district": "बाँके",
                 "evidence": f"{SEIZURE_PLACE} बाट बरामद भएको हो", "notes": "क" * 250}]

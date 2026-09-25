@@ -276,8 +276,11 @@ def resolve_locations(
             emit(resolved, notes, place, evidence, "nes-redirect")
         else:
             parent = gaz.parent_district(resolved)
-            if parent:
-                emit(parent, notes, place, evidence, "nes-redirect")
+            if parent is None:
+                rejected.append({"place": place, "district": district_claim, "evidence": evidence,
+                                  "reason": "municipality has no known district in the gazetteer"})
+                continue
+            emit(parent, notes, place, evidence, "nes-redirect")
             emit(resolved, notes, place, evidence, "nes-redirect")
 
     return binds, rejected
