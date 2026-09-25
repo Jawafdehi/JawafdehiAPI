@@ -48,6 +48,11 @@ UNITS = [
     unit("triveni-other-2", "त्रिवेणी गाउँपालिका", "Triveni Rural Municipality", DANG),
     unit("godawari-lalitpur-30803", "गोदावरी नगरपालिका", "Godawari Municipality", LALIT),
     unit("godawari-kailali-70001", "गोदावरी नगरपालिका", "Godawari Municipality", KAILALI),
+    # Two DIFFERENT municipalities that happen to share a name, both inside the
+    # SAME claimed district -- for the "several named municipalities" reason,
+    # distinct from the "sits in another district" one above.
+    unit("sunuwa-gaunpalika-1", "सुनुवा गाउँपालिका", "Sunuwa Rural Municipality", BANKE),
+    unit("sunuwa-gaunpalika-2", "सुनुवा गाउँपालिका", "Sunuwa Rural Municipality", BANKE),
 ]
 
 
@@ -111,6 +116,26 @@ def test_twin_redirect(gaz):
     assert gaz.redirect(f"{E}kalikot/kalikot-0162", "सल्यान") == SALYAN
     assert gaz.redirect(KTM, "whatever") == KTM
     assert gaz.redirect(f"{E}location/narayani-aspatala-f50002", "नारायणी अस्पताल") is None
+
+
+def test_a_disambiguated_compound_does_not_leak_the_other_half(gaz):
+    assert gaz.districts_in("रुकुम पश्चिम जिल्ला") == {RK_W}
+
+
+def test_a_self_disambiguating_text_overrides_a_different_half_claim(gaz):
+    d = gaz.resolve("रुकुम पश्चिम जिल्ला अदालतमा", "रुकुम पूर्व")
+    assert d.district is None
+
+
+def test_nawalparasi_compound_forms_resolve_to_their_own_half(gaz):
+    assert gaz.resolve("नवलपरासी पश्चिम", "नवलपरासी पूर्व").district is None
+    assert gaz.resolve("नवलपरासी पश्चिम", "नवलपरासी पश्चिम").district == NP_W
+
+
+def test_two_same_named_municipalities_in_the_claimed_district_are_not_guessed(gaz):
+    d = gaz.resolve("बाँके जिल्ला, सुनुवा गाउँपालिका वडा नं. २", "बाँके")
+    assert d.district == BANKE and d.localunit is None
+    assert "several named municipalities" in d.reason
 
 
 def test_place_key_expands_abbreviations():

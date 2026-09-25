@@ -123,7 +123,11 @@ class Gazetteer:
         normalized = place_key(text)
         found = {iri for key, iri in self._district_forms.items() if _matches(key, normalized)}
         for key, iris in self._ambiguous.items():
-            if _matches(key, normalized):
+            # A disambiguated compound (e.g. "रुकुम पश्चिम") also contains the bare
+            # ambiguous word as a word-start substring. Only add the ambiguous pair
+            # when neither half was already found through that more specific form --
+            # otherwise a self-disambiguating text would still yield both halves.
+            if _matches(key, normalized) and not (set(iris) & found):
                 found.update(iris)
         return found
 
@@ -159,6 +163,8 @@ class Gazetteer:
         matching = [u for u, p in units if p == claim_iri]
         if len(matching) == 1:
             return PlaceDecision(claim_iri, matching[0], "")
+        if len(matching) > 1:
+            return PlaceDecision(claim_iri, None, "several named municipalities in the district; not bound")
         if units:
             return PlaceDecision(claim_iri, None, "a named municipality sits in another district; not bound")
         return PlaceDecision(claim_iri, None, "")
