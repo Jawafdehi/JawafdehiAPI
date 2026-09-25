@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 from casework.location_gazetteer import Gazetteer, load_gazetteer, place_key, resolve_locations
 
@@ -243,7 +246,8 @@ def test_a_municipality_redirect_binds_its_parent_district_first(gaz):
     text = "बरामद सामान खजुरागाउँपालिका बाट ल्याइएको थियो ।"
     answers = [{"place_as_written": "खजुरागाउँपालिका", "district": "",
                 "evidence": "बरामद सामान खजुरागाउँपालिका बाट ल्याइएको थियो", "notes": ""}]
-    api = _StubSearchApi([{"id": KHAJURA, "title": {"ne": "खजुरागाउँपालिका"}}])
+    api = _StubSearchApi([{"id": f"{E}location/khajura-twin",
+                            "title": {"ne": "खजुरागाउँपालिका", "en": "Khajura Rural Municipality"}}])
     binds, rejected = resolve_locations(api, gaz, answers, text, 0)
     assert rejected == []
     assert [(b.nes_id, b.via) for b in binds] == [(BANKE, "nes-redirect"), (KHAJURA, "nes-redirect")]
@@ -253,8 +257,11 @@ def test_a_municipality_redirect_with_no_known_parent_is_rejected(gaz):
     text = "बरामद सामान अज्ञातपालिका बाट ल्याइएको थियो ।"
     answers = [{"place_as_written": "अज्ञातपालिका", "district": "",
                 "evidence": "बरामद सामान अज्ञातपालिका बाट ल्याइएको थियो", "notes": ""}]
-    api = _StubSearchApi([{"id": f"{E}location/localunit/unknown-unit-99999",
-                            "title": {"ne": "अज्ञातपालिका"}}])
+    orphan = {"@id": f"{E}location/localunit/unknown-unit-99999",
+              "name": {"ne": "अज्ञात नगरपालिका", "en": "Unknown Municipality"}}
+    gaz = Gazetteer(DISTRICTS, UNITS + [orphan])
+    api = _StubSearchApi([{"id": f"{E}location/unknown-twin",
+                            "title": {"ne": "अज्ञातपालिका", "en": "Unknown Municipality"}}])
     binds, rejected = resolve_locations(api, gaz, answers, text, 0)
     assert binds == []
     assert rejected[0]["reason"] == "municipality has no known district in the gazetteer"
@@ -295,3 +302,115 @@ def test_a_municipality_refused_beside_its_bound_district_is_a_resolution_row(ga
     assert [b.nes_id for b in binds] == [BANKE]
     assert [(r["stage"], r["reason"]) for r in rejected] == [
         ("resolution", "a named municipality sits in another district; not bound")]
+
+
+# --- The real NES snapshot (2026-09-25): all 77 districts, the municipalities these tests name. ---
+
+SNAPSHOT = json.loads((Path(__file__).parent / "fixtures" / "nes_locations_2026-09-25.json")
+                      .read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def real_gaz():
+    return Gazetteer(SNAPSHOT["districts"], SNAPSHOT["localunits"])
+
+
+def _search_rows(*stems):
+    """Snapshot rows as `search_entities` returns them: `{id, title: {ne, en}}`, snapshot order."""
+    rows = []
+    for row in SNAPSHOT["districts"] + SNAPSHOT["localunits"]:
+        if row["@id"].rsplit("/", 1)[-1] in stems:
+            rows.append({"id": row["@id"], "title": row["name"]})
+    return rows
+
+
+def _one_answer(place, claim):
+    text = f"रकम {place} मा बरामद भएको थियो ।"
+    return text, [{"place_as_written": place, "district": claim,
+                   "evidence": f"रकम {place} मा बरामद भएको थियो", "notes": ""}]
+
+
+GAZETTEER_REFUSALS = [
+    ("नवलपरासी", "", ("nawalparasi-east-np0447", "nawalparasi-west-np0547"),
+     "no single district in the place as written"),
+    ("मुसिकोट नगरपालिका", "रुकुम", ("musikot-municipality-50404", "musikot-municipality-60804"),
+     "no single district in the place as written"),
+    ("मादी गाउँपालिका", "", ("madi-gaunpalika-40501", "madi-gaunpalika-50205"),
+     "no single district in the place as written"),
+    ("सुनकोशी गाउँपालिका", "",
+     ("sunkoshi-gaunpalika-10407", "sunkoshi-gaunpalika-30212", "sunkoshi-gaunpalika-31106"),
+     "no single district in the place as written"),
+    ("खजुरा गाउँपालिका", "बर्दिया", ("khajura-gaunpalika-51104",),
+     "the place as written does not name the claimed district"),
+    ("बर्दिया", "बाँके", ("bardiya-np0558",),
+     "the place as written does not name the claimed district"),
+]
+
+
+@pytest.mark.parametrize("place,claim,stems,reason", GAZETTEER_REFUSALS,
+                         ids=[row[0] for row in GAZETTEER_REFUSALS])
+def test_a_gazetteer_refusal_is_review_never_an_nes_bind(real_gaz, place, claim, stems, reason):
+    text, answers = _one_answer(place, claim)
+    api = _StubSearchApi(_search_rows(*stems))
+    binds, rejected = resolve_locations(api, real_gaz, answers, text, 0)
+    assert binds == []
+    assert [(r["stage"], r["reason"]) for r in rejected] == [("resolution", reason)]
+    assert api.calls == []
+
+
+def test_a_coded_candidate_the_gazetteer_did_not_match_is_not_bound(gaz):
+    text = "बरामद सामान खजुरागाउँपालिका बाट ल्याइएको थियो ।"
+    answers = [{"place_as_written": "खजुरागाउँपालिका", "district": "",
+                "evidence": "बरामद सामान खजुरागाउँपालिका बाट ल्याइएको थियो", "notes": ""}]
+    api = _StubSearchApi([{"id": KHAJURA, "title": {"ne": "खजुरागाउँपालिका"}},
+                          {"id": BANKE, "title": {"ne": "खजुरागाउँपालिका"}}])
+    binds, rejected = resolve_locations(api, gaz, answers, text, 0)
+    assert binds == []
+    assert rejected[0]["reason"] == "NES match is not a district or municipality"
+
+
+def test_twins_that_redirect_to_different_districts_go_to_review(gaz):
+    text = "बरामद सामान काठमांडू बाट ल्याइएको थियो ।"
+    answers = [{"place_as_written": "काठमांडू", "district": "",
+                "evidence": "बरामद सामान काठमांडू बाट ल्याइएको थियो", "notes": ""}]
+    api = _StubSearchApi([
+        {"id": f"{E}location/kathmandu-twin-1", "title": {"ne": "काठमांडू", "en": "Kathmandu"}},
+        {"id": f"{E}location/kathmandu-twin-2", "title": {"ne": "काठमांडू", "en": "Lalitpur"}},
+    ])
+    binds, rejected = resolve_locations(api, gaz, answers, text, 0)
+    assert binds == []
+    assert [(r["stage"], r["reason"]) for r in rejected] == [("resolution", "NES twins disagree")]
+
+
+def test_twins_that_agree_on_one_district_still_bind(gaz):
+    text = "बरामद सामान काठमांडू बाट ल्याइएको थियो ।"
+    answers = [{"place_as_written": "काठमांडू", "district": "",
+                "evidence": "बरामद सामान काठमांडू बाट ल्याइएको थियो", "notes": ""}]
+    api = _StubSearchApi([
+        {"id": f"{E}location/kathmandu-twin-1", "title": {"ne": "काठमांडू", "en": "Kathmandu"}},
+        {"id": f"{E}location/kathmandu-twin-2", "title": {"ne": "काठमांडू", "en": "Kathmandu District"}},
+    ])
+    binds, rejected = resolve_locations(api, gaz, answers, text, 0)
+    assert rejected == []
+    assert [(b.nes_id, b.via) for b in binds] == [(KTM, "nes-redirect")]
+
+
+KV = f"{E}location/district/"
+
+
+@pytest.mark.parametrize("place,district,localunit", [
+    ("का.जि. वडा नं. ४", f"{KV}kathmandu-np0327", None),
+    ("का.म.न.पा. वडा नं. ४", f"{KV}kathmandu-np0327", None),
+    ("ल.पु.उ.म.न.पा. वडा नं. ४", f"{KV}lalitpur-np0325", None),
+    ("भ.न.पा. वडा नं. ४", f"{KV}bhaktapur-np0326", f"{E}location/localunit/bhaktapur-municipality-30702"),
+])
+def test_kathmandu_valley_abbreviations_resolve_on_the_real_snapshot(real_gaz, place, district, localunit):
+    d = real_gaz.resolve(place, "")
+    assert (d.district, d.localunit) == (district, localunit)
+
+
+def test_valley_abbreviations_expand_before_their_shorter_suffixes():
+    assert place_key("का.म.न.पा.") == "काठमाडौं महानगरपालिका"
+    assert place_key("ल.पु.उ.म.न.पा.") == "ललितपुर उपमहानगरपालिका"
+    assert place_key("भ.न.पा.") == "भक्तपुर नगरपालिका"
+    assert place_key("का.जि. वडा") == "काठमाडौं जिल्ला वडा"

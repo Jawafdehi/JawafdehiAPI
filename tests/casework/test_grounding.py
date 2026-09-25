@@ -1,3 +1,4 @@
+import pytest
 from casework.common.grounding import (
     evidence_found, is_readable_devanagari, is_teaser, location_quote_problem,
     normalise_for_match,
@@ -55,3 +56,22 @@ def test_preeti_ascii_is_not_readable():
 def test_teaser_detection():
     assert is_teaser("अनुसन्धान हुँदा। क्रमश...\n(नोट: थप जानकारीको लागि डाउनलोडमा थिच्नुहोला)")
     assert not is_teaser("क" * 1_000)
+
+
+REGIONAL_OFFICE_QUOTES = [
+    ("अख्तियार दुरुपयोग अनुसन्धान आयोग मध्यमाञ्चल क्षेत्रीय कार्यालय महोत्तरीको च.नं.946", "महोत्तरी"),
+    ("अख्तियार दुरुपयोग अनुसन्धान आयोगको क्षेत्रीय कार्यालय सुर्खेतमा उजुरी परेको", "सुर्खेत"),
+    ("गरिदिएको कागज अ.दु.आयोग म.प.क्षेत्रीय कार्यालय सुर्खेत सम्पर्क कार्यालय", "सुर्खेत"),
+]
+
+
+@pytest.mark.parametrize("ev,place", REGIONAL_OFFICE_QUOTES)
+def test_every_ciaa_regional_office_form_is_refused(ev, place):
+    text = f"मुद्दा: भ्रष्टाचार\n{ev} ।\n"
+    assert "क्षेत्रीय कार्यालय" in location_quote_problem(ev, place, text, 0)
+
+
+def test_a_permanent_home_vatan_is_refused():
+    ev = "निजहरुको वतन बाँके जिल्लाको खजुरा गाउँपालिका वडा नं. २ मा"
+    text = f"मुद्दा: भ्रष्टाचार\n{ev} देखिन्छ ।\n"
+    assert "वतन" in location_quote_problem(ev, "बाँके", text, 0)

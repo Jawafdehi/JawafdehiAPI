@@ -10,9 +10,13 @@ _DEVANAGARI = "ऀ-ॿ"
 
 #: Abbreviation expansions, longest key first so a shorter one never fires inside a longer one.
 _ABBREVIATIONS = (
+    ("ल.पु.उ.म.न.पा.", "ललितपुर उपमहानगरपालिका"),
+    ("का.म.न.पा.", "काठमाडौं महानगरपालिका"),
     ("उ.म.न.पा.", "उपमहानगरपालिका"),
+    ("भ.न.पा.", "भक्तपुर नगरपालिका"),
     ("म.न.पा.", "महानगरपालिका"),
     ("गा.पा.", "गाउंपालिका"),
+    ("का.जि.", "काठमाडौं जिल्ला"),
     ("न.पा.", "नगरपालिका"),
 )
 
@@ -188,6 +192,11 @@ class Gazetteer:
             return PlaceDecision(claim_iri, None, "a named municipality sits in another district; not bound")
         return PlaceDecision(claim_iri, None, "")
 
+    def has_no_match(self, place: str, district_claim: str) -> bool:
+        """True when neither the place nor the claim names any district or municipality."""
+        return not (self.districts_in(place) or self.localunits_in(place)
+                    or self.districts_in(district_claim))
+
     def missing_variant_keys(self) -> list:
         return [stem for stem in self.variants if stem not in self._by_stem]
 
@@ -220,19 +229,37 @@ def load_gazetteer(api) -> Gazetteer:
     return gaz
 
 
-def _redirect_match(gaz: Gazetteer, candidates, query_key: str) -> str | None:
-    """The first district/localunit IRI a candidate's title redirects to, or None."""
+def _is_coded(nes_id: str) -> bool:
+    return "/location/district/" in nes_id or "/location/localunit/" in nes_id
+
+
+def _redirect_match(gaz: Gazetteer, candidates, query_key: str) -> tuple[str | None, str]:
+    """The one IRI the un-coded exact-title twins redirect to, or `(None, why)`.
+
+    A coded candidate is skipped: the gazetteer already indexes every coded
+    place, so one it did not match is not the place as written.
+    """
+    resolved: set[str] = set()
     for candidate in candidates:
+        nes_id = (candidate.get("id") or "").strip()
+        if _is_coded(nes_id):
+            continue
         title = candidate.get("title") or {}
         forms = [f for f in (title.get("ne"), title.get("en")) if f]
         if not any(place_key(form) == query_key for form in forms):
             continue
-        nes_id = (candidate.get("id") or "").strip()
-        for form in forms:
-            iri = gaz.redirect(nes_id, form)
-            if iri:
-                return iri
-    return None
+        iri = next((i for i in (gaz.redirect(nes_id, form) for form in forms) if i), None)
+        if iri:
+            resolved.add(iri)
+    if not resolved:
+        return None, "NES match is not a district or municipality"
+    districts = {iri if "/location/district/" in iri else gaz.parent_district(iri)
+                 for iri in resolved}
+    if len(districts) > 1:
+        return None, "NES twins disagree"
+    if len(resolved) > 1:
+        return next(iter(districts)), ""
+    return next(iter(resolved)), ""
 
 
 #: `stage` on a rejected row: the quote failed grounding, or the grounded place did not resolve.
@@ -281,9 +308,12 @@ def resolve_locations(
                 reject(decision.reason)
             continue
 
-        resolved = _redirect_match(gaz, api.search_entities(query), place_key(query))
+        if not gaz.has_no_match(place, district_claim):
+            reject(decision.reason)
+            continue
+        resolved, why = _redirect_match(gaz, api.search_entities(query), place_key(query))
         if resolved is None:
-            reject("NES match is not a district or municipality", gazetteer_reason=decision.reason)
+            reject(why, gazetteer_reason=decision.reason)
             continue
         if "/location/district/" in resolved:
             emit(resolved, notes, place, evidence, "nes-redirect")
