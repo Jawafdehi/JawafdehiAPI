@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """`manage.py run_consumers`.
 
 Read-only by default, and that default is the point: the bare command tells you

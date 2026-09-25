@@ -108,7 +108,10 @@ def extract_captcha(cookie_value: str | None) -> str | None:
 
 
 def order_form_data(
-    court_identifier: str, case_number: str, registration_date_bs: str | None, captcha: str
+    court_identifier: str,
+    case_number: str,
+    registration_date_bs: str | None,
+    captcha: str,
 ) -> dict[str, str]:
     """The POST body for the ``/cp`` order search (mirrors the retired spider)."""
     court_type, court_id = court_form_params(court_identifier)
@@ -169,9 +172,9 @@ def parse_order_results(html: str, *, base_url: str = HOMEPAGE_URL) -> OrderResu
     if NO_RECORD_MARKER in html:
         return OrderResult(NO_RECORD)
 
-    table = soup.find(
-        "table", class_="table table-bordered sc-table"
-    ) or soup.find("table", class_="table")
+    table = soup.find("table", class_="table table-bordered sc-table") or soup.find(
+        "table", class_="table"
+    )
     tbody = table.find("tbody") if table is not None else None
     if tbody is None:
         return OrderResult(NOT_RESULTS_PAGE)
@@ -246,9 +249,7 @@ _TOO_RECENT_KEYS = (K_TOO_RECENT, K_TOO_RECENT_AT)
 _TRANSIENT_KEYS = (K_TRANSIENT_ERROR, K_TRANSIENT_AT, K_TRANSIENT_RETRIES)
 
 
-def mark_success(
-    extra_data: dict | None, *, links: list[str], now_iso: str
-) -> dict:
+def mark_success(extra_data: dict | None, *, links: list[str], now_iso: str) -> dict:
     """Clear all failure/too-recent/transient state and stamp the capture.
 
     ``court_orders`` holds the durable file URLs (non-null → excluded from the

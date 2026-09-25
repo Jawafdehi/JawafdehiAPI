@@ -27,7 +27,7 @@ ORG_IRI = "https://jawafdehi.org/entity/organization/napi-office-def456"
 def _case() -> Case:
     return Case.objects.create(
         title="Outcome guard test",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
     )
 

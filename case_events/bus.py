@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Publishing to the bus from synchronous Django code.
 
 ``nats-py`` is asyncio-only; Django's request path is not. The bridge is one

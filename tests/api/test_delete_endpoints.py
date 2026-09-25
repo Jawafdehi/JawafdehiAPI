@@ -35,7 +35,7 @@ def _authed_client(user):
 def _make_case(**kwargs) -> Case:
     defaults = dict(
         title="Deletable case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         description="Some description",
         short_description="Short",

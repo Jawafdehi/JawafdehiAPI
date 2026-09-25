@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The decision publisher, and the guarantee that it can never break an approval.
 
 Uses ``django_capture_on_commit_callbacks`` so the on_commit hook actually runs
@@ -37,7 +37,7 @@ def caseworker_client():
 
 def make_case(slug="lalita-niwas-land-scam"):
     return Case.objects.create(
-        title="Lalita Niwas land scam", case_type=CaseType.CORRUPTION, slug=slug
+        title="Lalita Niwas land scam", offence_type=CaseType.CORRUPTION, slug=slug
     )
 
 

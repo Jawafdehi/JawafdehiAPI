@@ -30,7 +30,7 @@ from .models import SUPPORTED_INTENT_TYPES
 logger = structlog.get_logger(__name__)
 
 # Scalar Case fields a raw_patch may touch. Excludes identity/workflow/join
-# fields (id, state, case_type, slug, evidence, entities, court_cases): those
+# fields (id, state, offence_type, slug, evidence, entities, court_cases): those
 # have their own transition/side-effect paths and must not be smuggled in via a
 # generic patch.
 RAW_PATCH_FIELDS = frozenset(

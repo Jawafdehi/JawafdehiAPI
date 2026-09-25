@@ -301,7 +301,7 @@ def test_caseworker_can_publish_case():
         title="Test Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Test description",
         state=CaseState.IN_REVIEW,
     )
@@ -328,7 +328,7 @@ def test_admin_can_publish_case():
         title="Test Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Test description",
         state=CaseState.IN_REVIEW,
     )

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Write the site-wide Open Graph banner to a file.
 
 The author cards are served live from ``/api/authors/<slug>/og-card.jpg``, but the

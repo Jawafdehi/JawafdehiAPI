@@ -70,7 +70,7 @@ def _store_corpus(source, ident, material_type="court_order", visibility=Visibil
 
 def _case(slug, state):
     return Case.objects.create(
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=state,
         title="T",
         slug=slug,

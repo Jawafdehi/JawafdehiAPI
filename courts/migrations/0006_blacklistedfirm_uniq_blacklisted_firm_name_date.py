@@ -4,14 +4,16 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('courts', '0005_scrapeddate'),
+        ("courts", "0005_scrapeddate"),
     ]
 
     operations = [
         migrations.AddConstraint(
-            model_name='blacklistedfirm',
-            constraint=models.UniqueConstraint(fields=('firm_name', 'blacklist_date_bs'), name='uniq_blacklisted_firm_name_date'),
+            model_name="blacklistedfirm",
+            constraint=models.UniqueConstraint(
+                fields=("firm_name", "blacklist_date_bs"),
+                name="uniq_blacklisted_firm_name_date",
+            ),
         ),
     ]

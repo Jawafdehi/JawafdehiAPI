@@ -67,7 +67,9 @@ def run_crawl(
                 continue
             if on_progress is not None:
                 on_progress(court_id, date_bs)
-            rows = module.crawl_date(fetch, court_id, date_bs, nepalidate.from_date(ad_date))
+            rows = module.crawl_date(
+                fetch, court_id, date_bs, nepalidate.from_date(ad_date)
+            )
             stats.dates += 1
             stats.per_date.append(date_bs)
             if write:
@@ -78,7 +80,9 @@ def run_crawl(
                 touched.update(c.case_number for c, _ in rows)
                 base.mark_scraped(court_id, date_bs, note=f"{len(rows)} rows")
             else:
-                stats.cases += len({(c.court_identifier, c.case_number) for c, _ in rows})
+                stats.cases += len(
+                    {(c.court_identifier, c.case_number) for c, _ in rows}
+                )
                 stats.hearings += len(rows)
             if limit_dates and stats.dates >= limit_dates:
                 break
@@ -109,6 +113,8 @@ def _enrich_pending(module, court_id: str, fetch, *, only=None) -> int:
         pending = pending.filter(case_number__in=only)
     for case_number in list(pending):
         enrichment = module.crawl_detail(fetch, court_id, case_number)
-        if enrichment is not None and base.apply_enrichment(court_id, case_number, enrichment):
+        if enrichment is not None and base.apply_enrichment(
+            court_id, case_number, enrichment
+        ):
             n += 1
     return n

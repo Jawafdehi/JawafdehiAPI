@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Announcing a proposal decision to an outbound webhook.
 
 Separate from :mod:`case_events.consumers.handlers` because the interesting parts

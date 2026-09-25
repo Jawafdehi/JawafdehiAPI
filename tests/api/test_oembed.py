@@ -17,7 +17,7 @@ def published_case(db):
         title="Test Published Case",
         slug="test-published-case",
         state=CaseState.PUBLISHED,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
 
 
@@ -27,7 +27,7 @@ def draft_case(db):
         title="Test Draft Case",
         slug="test-draft-case",
         state=CaseState.DRAFT,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
 
 
@@ -37,7 +37,7 @@ def in_review_case(db):
         title="Test In Review Case",
         slug="test-in-review-case",
         state=CaseState.IN_REVIEW,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
 
 
@@ -247,7 +247,7 @@ class TestOEmbedRenderableAttributes:
             title="Case With Thumbnail",
             slug="case-with-thumbnail",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             thumbnail_url="https://example.com/thumb.png",
         )
         resp = client.get(

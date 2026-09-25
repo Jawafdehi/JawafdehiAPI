@@ -55,7 +55,7 @@ def test_the_command_runs_a_merge_the_endpoint_would_refuse(monkeypatch):
     _seed("location/district", "jhapa-np0104", "AdministrativeArea")
     _seed("location", "jhapa", "Place")
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-overcap", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-overcap", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(

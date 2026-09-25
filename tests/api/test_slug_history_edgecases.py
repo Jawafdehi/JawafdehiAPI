@@ -22,7 +22,7 @@ URL = "/api/cases/{}/"
 def _make_case(slug, state=CaseState.PUBLISHED, title="A case") -> Case:
     return Case.objects.create(
         title=title,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=state,
         slug=slug,
         description="x" * 5000,  # large text columns — .only() must skip these

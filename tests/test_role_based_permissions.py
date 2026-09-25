@@ -130,7 +130,7 @@ def test_caseworker_can_transition_to_published_or_closed(
     form_data = {
         "slug": case.slug,
         "title": case.title,
-        "case_type": case.case_type,
+        "offence_type": case.offence_type,
         "state": target_state,
         "key_allegations": case.key_allegations,
         "description": case.description,
@@ -452,7 +452,7 @@ def test_user_without_role_has_no_access():
         title="Test Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Test description",
     )
 
@@ -485,7 +485,7 @@ def test_caseworker_can_access_multiple_cases():
         title="Case 1",
         alleged_entities=["https://jawafdehi.org/entity/person/person1"],
         key_allegations=["Allegation 1"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Description 1",
     )
 
@@ -493,7 +493,7 @@ def test_caseworker_can_access_multiple_cases():
         title="Case 2",
         alleged_entities=["https://jawafdehi.org/entity/person/person2"],
         key_allegations=["Allegation 2"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Description 2",
     )
 

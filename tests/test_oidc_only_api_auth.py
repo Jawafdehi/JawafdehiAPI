@@ -37,7 +37,7 @@ CASES_URL = "/api/cases/"
 
 _SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
-VALID_CASE_PAYLOAD = {"title": "OIDC created case", "case_type": CaseType.CORRUPTION}
+VALID_CASE_PAYLOAD = {"title": "OIDC created case", "offence_type": CaseType.CORRUPTION}
 
 
 class _FakeSigningKey:

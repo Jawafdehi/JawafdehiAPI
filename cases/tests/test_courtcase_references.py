@@ -31,7 +31,7 @@ SUPREME_0007 = "https://jawafdehi.org/courtcase/supreme/080-cr-0007"
 def _make_case(**kwargs) -> Case:
     defaults = dict(
         title="Court ref test case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
     )
     defaults.update(kwargs)
@@ -146,7 +146,7 @@ def test_assign_none_clears_references():
 
 
 def test_setter_rejects_non_iri_refs():
-    case = Case(title="x", case_type=CaseType.CORRUPTION)
+    case = Case(title="x", offence_type=CaseType.CORRUPTION)
     with pytest.raises(ValidationError):
         case.court_cases = ["special:080-CR-0111"]  # short form: IRIs only
     with pytest.raises(ValidationError):

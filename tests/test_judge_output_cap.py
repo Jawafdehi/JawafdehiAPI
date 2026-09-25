@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """A rule whose grade does not fit its output budget.
 
 The production shape (2026-09-02): nine rules, a batch reply that truncated, and

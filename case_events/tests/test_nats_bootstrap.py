@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Tests for `manage.py nats_bootstrap`.
 
 The property worth protecting is the inverse of the publisher's: this command

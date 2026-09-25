@@ -19,11 +19,14 @@ from jawafdehi_shared.entities.ids import (
 
 from .fields import edit_history_date_error, parse_edit_history_date
 from .image_serializers import ImageIdField
+from .stages import StageError, validate_stages
 from .models import (
     CaseState,
+    CaseTrack,
     CaseType,
     RelationshipOutcome,
     RelationshipType,
+    StatusOverride,
 )
 from .validators import validate_courtcase_iri, validate_slug
 
@@ -56,6 +59,9 @@ class CaseInsensitiveChoiceField(serializers.ChoiceField):
 BLOCKED_PATH_PREFIXES = frozenset(
     [
         "/id",
+        "/offence_type",
+        # DEPRECATED spelling: blocked before the rename, so it stays blocked
+        # rather than falling through and being silently dropped.
         "/case_type",
         "/version",
         "/created_at",
@@ -362,10 +368,10 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     ``dict(base_fields + fields)``, so these 17 now come first and each
     subclass's own declarations follow:
 
-        create: title…bigo, case_type, state, alleged_entities, related_entities
-        PATCH : title…bigo, state, case_type, entities
+        create: title…bigo, offence_type, state, alleged_entities, related_entities
+        PATCH : title…bigo, state, offence_type, entities
 
-    Previously `case_type` led on create and sat 9th on PATCH. This is
+    Previously `offence_type` led on create and sat 9th on PATCH. This is
     positional only — the same field names with the same types, validators and
     required/allow_null/default flags, verified field-by-field against the
     pre-refactor serializers. JSON object key order carries no meaning for
@@ -392,8 +398,21 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         required=False, allow_blank=True, max_length=500
     )
     banner_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
+    # New columns, written as columns. ``case_track`` is the route into court;
+    # ``status_override`` is the only way to record the two lifecycles no
+    # stage list can express (withdrawn, dormant).
+    case_track = serializers.ChoiceField(
+        choices=CaseTrack.choices, required=False, allow_null=True
+    )
+    status_override = serializers.ChoiceField(
+        choices=StatusOverride.choices, required=False, allow_null=True
+    )
+    # DEPRECATED. Kept writable so the deployed SPA admin's PATCH still
+    # validates; the view transforms these two onto the first-instance stage
+    # rather than writing the columns. Drop with the read aliases.
     case_start_date = serializers.DateField(required=False, allow_null=True)
     case_end_date = serializers.DateField(required=False, allow_null=True)
+    dates = serializers.JSONField(required=False)
     tags = serializers.ListField(child=serializers.CharField(), required=False)
     key_allegations = serializers.ListField(
         child=serializers.CharField(), required=False
@@ -477,12 +496,39 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         return value
 
 
+    def validate_dates(self, value):
+        """Reject an unknown stage or key with 422 rather than dropping it.
+
+        The bind check is deliberately NOT done here: the serializer validates
+        a document, not a case, so it cannot see the case's court_cases. The
+        model's save() re-runs the full rule with the binds in hand.
+        """
+        if not isinstance(value, dict) or "stages" not in value:
+            raise serializers.ValidationError("dates must be {'stages': [...]}")
+        try:
+            validate_stages(value["stages"])
+        except StageError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+        return value
+
+
 class CaseCreateSerializer(
     CourtCaseRefsValidationMixin,
     CaseEntityValidationMixin,
     CaseWriteFieldsSerializer,
 ):
-    case_type = serializers.ChoiceField(choices=CaseType.choices)
+    # ``offence_type`` is required, but not at the field level: a caller may
+    # supply it under the deprecated ``case_type`` name instead, and the
+    # requirement is enforced in ``validate`` once both have been considered.
+    offence_type = serializers.ChoiceField(choices=CaseType.choices, required=False)
+    # DEPRECATED create alias. The note calls POST create a hard cut, but the
+    # deployed SPA admin creates cases with ``case_type``. Declared as a real
+    # field, not stripped in ``to_internal_value``, because the create view
+    # rejects any key absent from ``CaseCreateSerializer().fields``. Drop it
+    # together with the read alias in ``CaseSerializer``.
+    case_type = serializers.ChoiceField(
+        choices=CaseType.choices, required=False, write_only=True
+    )
     state = serializers.ChoiceField(
         choices=CaseState.choices,
         required=False,
@@ -495,8 +541,36 @@ class CaseCreateSerializer(
         child=serializers.CharField(), required=False
     )
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        deprecated = attrs.pop("case_type", None)
+        if not attrs.get("offence_type") and deprecated:
+            attrs["offence_type"] = deprecated
+        if not attrs.get("offence_type"):
+            raise serializers.ValidationError(
+                {"offence_type": ["This field is required."]}
+            )
+
+        # A create that supplies the deprecated dates has to land as a stage,
+        # not just as the vestigial columns -- otherwise the case reads as
+        # having no proceedings at all and sorts by created_at.
+        start = attrs.get("case_start_date")
+        end = attrs.get("case_end_date")
+        if (start or end) and not attrs.get("dates"):
+            stage = {"stage": "initial"}
+            if start:
+                stage["start"] = str(start)
+            if end:
+                stage["end"] = str(end)
+            try:
+                validate_stages([stage])
+            except StageError as exc:
+                raise serializers.ValidationError({"case_end_date": [str(exc)]}) from exc
+            attrs["dates"] = {"stages": [stage]}
+        return attrs
+
 
 class CasePatchSerializer(CourtCaseRefsValidationMixin, CaseWriteFieldsSerializer):
     state = serializers.ChoiceField(choices=CaseState.choices, required=False)
-    case_type = serializers.ChoiceField(choices=CaseType.choices)
+    offence_type = serializers.ChoiceField(choices=CaseType.choices)
     entities = EntityPatchItemSerializer(many=True, required=False)

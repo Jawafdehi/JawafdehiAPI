@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Loading prompt text from template files.
 
 Prompt text lives in ``<app>/prompt_templates/*.md`` rather than in Python

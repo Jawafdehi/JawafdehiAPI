@@ -28,8 +28,14 @@ NGM_DB = "ngm"
 # runs once per case and the verdict usually lands later, so without that
 # promotion a decided case reads as ongoing forever.
 _ENRICH_COLUMNS = {
-    "case_status", "verdict_type", "verdict_date_bs", "verdict_date_ad",
-    "verdict_judge", "case_subject", "hearing_count", "registration_number",
+    "case_status",
+    "verdict_type",
+    "verdict_date_bs",
+    "verdict_date_ad",
+    "verdict_judge",
+    "case_subject",
+    "hearing_count",
+    "registration_number",
 }
 
 
@@ -43,7 +49,9 @@ def anchor(value: str | None) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def iter_bs_dates(lookback_days: int, *, today: date, offset_days: int = 1) -> Iterator[tuple[date, str]]:
+def iter_bs_dates(
+    lookback_days: int, *, today: date, offset_days: int = 1
+) -> Iterator[tuple[date, str]]:
     """Yield ``(ad_date, bs_date_str)`` from ``today-offset`` back ``lookback_days``.
 
     ``today`` is injected (never ``date.today()``) so callers/tests are
@@ -70,7 +78,9 @@ def scraped_dates_for(court_id: str, *, using: str = NGM_DB) -> set[str]:
     )
 
 
-def mark_scraped(court_id: str, date_bs: str, note: str | None = None, *, using: str = NGM_DB) -> None:
+def mark_scraped(
+    court_id: str, date_bs: str, note: str | None = None, *, using: str = NGM_DB
+) -> None:
     # Marking a date scraped for a court implies the court exists. Ensure it here
     # so a date with an EMPTY cause-list (no cases → upsert_causelist never ran
     # _ensure_court) doesn't fail the ScrapedDate → Court FK. Real courts already
@@ -159,7 +169,9 @@ def _causelist_verdict(
 
 
 @transaction.atomic(using=NGM_DB)
-def upsert_causelist(rows: list[tuple[ParsedCase, ParsedHearing]], *, using: str = NGM_DB) -> dict[str, int]:
+def upsert_causelist(
+    rows: list[tuple[ParsedCase, ParsedHearing]], *, using: str = NGM_DB
+) -> dict[str, int]:
     """Persist one date's cause-list ``(case, hearing)`` rows.
 
     Cases are upserted on the natural key ``(court, case_number)`` writing listing
@@ -238,7 +250,11 @@ def _fallback_date() -> date:
 
 
 def apply_enrichment(
-    court_id: str, case_number: str, enrichment: ParsedEnrichment, *, using: str = NGM_DB
+    court_id: str,
+    case_number: str,
+    enrichment: ParsedEnrichment,
+    *,
+    using: str = NGM_DB,
 ) -> bool:
     """Apply a detail-page enrichment to an existing case, normalising at write time.
 
@@ -281,8 +297,10 @@ def apply_enrichment(
     parsed = cs.parse_case_status(raw_status)
     if cs.is_status_artifact(raw_status) or parsed.lifecycle_status == cs.UNKNOWN:
         core.pop("case_status", None)  # never store a header/blank as a status
-    verdict = core.get("verdict_type") or parsed.verdict_type or cs.verdict_from_hearings(
-        extra.get("enrichment_hearings")
+    verdict = (
+        core.get("verdict_type")
+        or parsed.verdict_type
+        or cs.verdict_from_hearings(extra.get("enrichment_hearings"))
     )
     if verdict:
         core["verdict_type"] = verdict
@@ -302,7 +320,11 @@ def apply_enrichment(
 
 
 def upsert_from_detail(
-    court_id: str, case_number: str, enrichment: ParsedEnrichment, *, using: str = NGM_DB
+    court_id: str,
+    case_number: str,
+    enrichment: ParsedEnrichment,
+    *,
+    using: str = NGM_DB,
 ) -> bool:
     """Create a case the register sweep discovered, then enrich it.
 
@@ -353,7 +375,11 @@ def upsert_from_detail(
 
 
 def materialise_detail_hearings(
-    court_id: str, case_number: str, enrichment: ParsedEnrichment, *, using: str = NGM_DB
+    court_id: str,
+    case_number: str,
+    enrichment: ParsedEnrichment,
+    *,
+    using: str = NGM_DB,
 ) -> int:
     """Turn a detail page's hearing list into ``CourtCaseHearing`` rows.
 

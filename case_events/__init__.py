@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The case-enrichment event bus (NATS + JetStream).
 
 Producers publish observed facts to ``jaw.signal.>``; consumers turn them into

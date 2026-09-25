@@ -23,8 +23,12 @@ class _NgmTestCase(TestCase):
 
 def _case(cn="082-CR-0015", **extra):
     return ParsedCase(
-        case_number=cn, court_identifier="special", case_type="भ्रष्टाचार",
-        plaintiff="नेपाल सरकार", defendant="क", extra_data={"category": "फाँट क", **extra},
+        case_number=cn,
+        court_identifier="special",
+        case_type="भ्रष्टाचार",
+        plaintiff="नेपाल सरकार",
+        defendant="क",
+        extra_data={"category": "फाँट क", **extra},
     )
 
 
@@ -32,9 +36,12 @@ def _hearing(cn="082-CR-0015", date_bs="2082-01-05", serial="1", **kw):
     # hearing_date_ad is overridable (via kw) so the verdict-promotion tests can
     # pin a BS/AD pair, or drop the AD date to exercise the undated path.
     return ParsedHearing(
-        case_number=cn, court_identifier="special", hearing_date_bs=date_bs,
+        case_number=cn,
+        court_identifier="special",
+        hearing_date_bs=date_bs,
         hearing_date_ad=kw.pop("hearing_date_ad", date(2025, 4, 18)),
-        serial_no=serial, **kw,
+        serial_no=serial,
+        **kw,
     )
 
 
@@ -42,11 +49,16 @@ class CauselistUpsertTests(_NgmTestCase):
     def test_upsert_creates_case_and_hearing(self):
         stats = upsert_causelist([(_case(), _hearing(case_status="पेशी"))])
         self.assertEqual(stats, {"cases": 1, "hearings": 1, "verdicts_promoted": 0})
-        case = CourtCase.objects.using("ngm").get(court_id="special", case_number="082-CR-0015")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="special", case_number="082-CR-0015"
+        )
         self.assertEqual(case.case_type, "भ्रष्टाचार")
         self.assertEqual(case.extra_data["category"], "फाँट क")
         self.assertEqual(
-            CourtCaseHearing.objects.using("ngm").filter(case_number="082-CR-0015").count(), 1
+            CourtCaseHearing.objects.using("ngm")
+            .filter(case_number="082-CR-0015")
+            .count(),
+            1,
         )
 
     def test_relist_unions_extra_data_and_keeps_enrichment(self):
@@ -94,8 +106,18 @@ class CauselistVerdictPromotionTests(_NgmTestCase):
     def _decided(self, cn, date_bs=_VERDICT_BS, decision="सफाई", **kw):
         kw.setdefault("hearing_date_ad", self._VERDICT_AD)
         return upsert_causelist(
-            [(_case(cn), _hearing(cn, date_bs=date_bs, case_status="फैसला",
-                                  decision_type=decision, **kw))]
+            [
+                (
+                    _case(cn),
+                    _hearing(
+                        cn,
+                        date_bs=date_bs,
+                        case_status="फैसला",
+                        decision_type=decision,
+                        **kw,
+                    ),
+                )
+            ]
         )
 
     def _row(self, cn):
@@ -123,10 +145,16 @@ class CauselistVerdictPromotionTests(_NgmTestCase):
         self.assertEqual(case.verdict_type, ACQUITTED)
 
     def test_interlocutory_sitting_promotes_nothing(self):
-        stats = upsert_causelist([
-            (_case("083-CR-0003"),
-             _hearing("083-CR-0003", case_status="आदेश", decision_type="साक्षी बुझ्ने")),
-        ])
+        stats = upsert_causelist(
+            [
+                (
+                    _case("083-CR-0003"),
+                    _hearing(
+                        "083-CR-0003", case_status="आदेश", decision_type="साक्षी बुझ्ने"
+                    ),
+                ),
+            ]
+        )
         self.assertEqual(stats["verdicts_promoted"], 0)
         case = self._row("083-CR-0003")
         self.assertIsNone(case.case_status)
@@ -150,8 +178,11 @@ class CauselistVerdictPromotionTests(_NgmTestCase):
         # and decided again. The earlier sitting must not overwrite the later one.
         self._decided("083-CR-0006", decision="ठहर")
         self._decided(
-            "083-CR-0006", date_bs="2082-05-03", decision="सफाई",
-            hearing_date_ad=date(2025, 8, 19), serial="2",
+            "083-CR-0006",
+            date_bs="2082-05-03",
+            decision="सफाई",
+            hearing_date_ad=date(2025, 8, 19),
+            serial="2",
         )
         case = self._row("083-CR-0006")
         self.assertEqual(case.verdict_type, CONVICTED)
@@ -160,8 +191,11 @@ class CauselistVerdictPromotionTests(_NgmTestCase):
     def test_undated_sitting_never_clobbers_a_held_verdict_date(self):
         self._decided("083-CR-0007", decision="ठहर")
         stats = self._decided(
-            "083-CR-0007", date_bs="", decision="सफाई",
-            hearing_date_ad=None, serial="3",
+            "083-CR-0007",
+            date_bs="",
+            decision="सफाई",
+            hearing_date_ad=None,
+            serial="3",
         )
         self.assertEqual(stats["verdicts_promoted"], 0)
         case = self._row("083-CR-0007")
@@ -190,8 +224,11 @@ class CauselistVerdictPromotionTests(_NgmTestCase):
         case.verdict_date_ad = None
         case.save(using="ngm")
         stats = self._decided(
-            "083-CR-0010", date_bs="", decision="सफाई",
-            hearing_date_ad=None, serial="4",
+            "083-CR-0010",
+            date_bs="",
+            decision="सफाई",
+            hearing_date_ad=None,
+            serial="4",
         )
         self.assertEqual(stats["verdicts_promoted"], 0)
         case.refresh_from_db()
@@ -207,8 +244,11 @@ class CauselistVerdictPromotionTests(_NgmTestCase):
         case.verdict_date_ad = None
         case.save(using="ngm")
         stats = self._decided(
-            "083-CR-0011", date_bs="2082-05-03", decision="सफाई",
-            hearing_date_ad=date(2025, 8, 19), serial="5",
+            "083-CR-0011",
+            date_bs="2082-05-03",
+            decision="सफाई",
+            hearing_date_ad=date(2025, 8, 19),
+            serial="5",
         )
         self.assertEqual(stats["verdicts_promoted"], 0)
         case.refresh_from_db()
@@ -229,7 +269,8 @@ class CauselistVerdictPromotionTests(_NgmTestCase):
 class FrontierTests(_NgmTestCase):
     def test_mark_and_read_frontier(self):
         Court.objects.using("ngm").get_or_create(
-            identifier="special", defaults={"court_type": "special", "full_name_nepali": "x"}
+            identifier="special",
+            defaults={"court_type": "special", "full_name_nepali": "x"},
         )
         self.assertEqual(scraped_dates_for("special"), set())
         mark_scraped("special", "2082-01-05", note="1 bench")
@@ -242,25 +283,37 @@ class FrontierTests(_NgmTestCase):
         # court FK must not fail just because no cases were written and the court
         # is not yet in the DB. Regression: district courts with empty days threw
         # IntegrityError (FOREIGN KEY constraint failed) on a fresh/unseeded DB.
-        self.assertFalse(Court.objects.using("ngm").filter(identifier="achhamdc").exists())
+        self.assertFalse(
+            Court.objects.using("ngm").filter(identifier="achhamdc").exists()
+        )
         mark_scraped("achhamdc", "2082-01-06")
-        self.assertTrue(Court.objects.using("ngm").filter(identifier="achhamdc").exists())
+        self.assertTrue(
+            Court.objects.using("ngm").filter(identifier="achhamdc").exists()
+        )
         self.assertEqual(scraped_dates_for("achhamdc"), {"2082-01-06"})
 
 
 class EnrichmentTests(_NgmTestCase):
     def _seed(self, cn="082-CR-0020"):
         Court.objects.using("ngm").get_or_create(
-            identifier="special", defaults={"court_type": "special", "full_name_nepali": "x"}
+            identifier="special",
+            defaults={"court_type": "special", "full_name_nepali": "x"},
         )
-        CourtCase.objects.using("ngm").create(court_id="special", case_number=cn, status="pending")
+        CourtCase.objects.using("ngm").create(
+            court_id="special", case_number=cn, status="pending"
+        )
 
     def test_enrichment_drops_header_and_derives_verdict(self):
         self._seed()
         enr = ParsedEnrichment(
-            core_fields={"case_status": "आदेश /फैसलाको किसिम", "case_subject": "घुस लिएको"},
+            core_fields={
+                "case_status": "आदेश /फैसलाको किसिम",
+                "case_subject": "घुस लिएको",
+            },
             extra_data={
-                "enrichment_hearings": [{"case_status": "फैसला", "decision_type": "सफाई"}],
+                "enrichment_hearings": [
+                    {"case_status": "फैसला", "decision_type": "सफाई"}
+                ],
                 "division": "रिट १",
             },
             entities=[

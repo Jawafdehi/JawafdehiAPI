@@ -146,7 +146,7 @@ class ReindexEntitiesCaseCountTests(TestCase):
         with patch("cases.search_index.index"):
             case = Case.objects.create(
                 title="Reindex count test",
-                case_type=CaseType.CORRUPTION,
+                offence_type=CaseType.CORRUPTION,
                 state=CaseState.PUBLISHED,
             )
             CaseEntityRelationship.objects.create(

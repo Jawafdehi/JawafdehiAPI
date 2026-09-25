@@ -39,7 +39,7 @@ def moderator(db):
 def published_case(db):
     return create_case_with_entities(
         title="Bhrastachar Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.PUBLISHED,
     )
 
@@ -48,7 +48,7 @@ def published_case(db):
 def draft_assigned(db, contributor):
     case = create_case_with_entities(
         title="Mero Draft Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
     )
     return case
@@ -58,7 +58,7 @@ def draft_assigned(db, contributor):
 def draft_unassigned(db):
     return create_case_with_entities(
         title="Arkako Draft Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
     )
 
@@ -67,7 +67,7 @@ def draft_unassigned(db):
 def in_review_assigned(db, contributor):
     case = create_case_with_entities(
         title="Samiksha Adheen Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.IN_REVIEW,
     )
     return case
@@ -77,7 +77,7 @@ def in_review_assigned(db, contributor):
 def closed_case(db):
     return create_case_with_entities(
         title="Banda Garieko Case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.CLOSED,
     )
 

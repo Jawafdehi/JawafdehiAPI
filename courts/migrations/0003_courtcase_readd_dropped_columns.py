@@ -25,18 +25,18 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ("courts", "0002_alter_blacklistedfirm_nes_id_alter_caseentity_nes_id_and_more"),
+        (
+            "courts",
+            "0002_alter_blacklistedfirm_nes_id_alter_caseentity_nes_id_and_more",
+        ),
     ]
 
     operations = [
         migrations.AddField(
             model_name="courtcase",
             name="status",
-            field=models.CharField(
-                max_length=50, null=True, blank=True, db_index=True
-            ),
+            field=models.CharField(max_length=50, null=True, blank=True, db_index=True),
         ),
         migrations.AddField(
             model_name="courtcase",

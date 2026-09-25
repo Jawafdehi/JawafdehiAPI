@@ -82,7 +82,9 @@ def parse_daily_list(
                 bench_td = bench_row.find("td", align="right")
                 judge_td = bench_row.find("td", class_="judge")
                 if bench_td:
-                    current_bench = normalize_whitespace(bench_td.get_text())[:100] or None
+                    current_bench = (
+                        normalize_whitespace(bench_td.get_text())[:100] or None
+                    )
                 if judge_td:
                     # District benches are single-judge today, but keep the shared
                     # ", "-separated extractor so a co-signed bench never runs on.

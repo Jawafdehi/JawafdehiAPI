@@ -25,7 +25,9 @@ from jobs import queue as jobs_queue
 from jobs.models import Job
 
 
-def least_recently_swept(targets: list[tuple[str, str]], limit: int) -> list[tuple[str, str]]:
+def least_recently_swept(
+    targets: list[tuple[str, str]], limit: int
+) -> list[tuple[str, str]]:
     """The ``limit`` courts whose last sweep finished longest ago, never-swept first.
 
     A recurring sweep cannot queue all 99 courts at once: ``scrape_worker --once``
@@ -38,9 +40,8 @@ def least_recently_swept(targets: list[tuple[str, str]], limit: int) -> list[tup
     stays at the front of the queue rather than losing its turn.
     """
     swept_at: dict[str, object] = {}
-    rows = (
-        Job.objects.filter(kind="court_scrape", payload__sweep=True)
-        .values_list("payload__court_id", "completed_at")
+    rows = Job.objects.filter(kind="court_scrape", payload__sweep=True).values_list(
+        "payload__court_id", "completed_at"
     )
     for court_id, completed_at in rows:
         if completed_at is None:
@@ -51,7 +52,11 @@ def least_recently_swept(targets: list[tuple[str, str]], limit: int) -> list[tup
     # Stable within a tier: courts never swept keep their registry order.
     ordered = sorted(
         enumerate(targets),
-        key=lambda item: (swept_at.get(item[1][1]) is not None, swept_at.get(item[1][1]), item[0]),
+        key=lambda item: (
+            swept_at.get(item[1][1]) is not None,
+            swept_at.get(item[1][1]),
+            item[0],
+        ),
     )
     return [target for _, target in ordered[:limit]]
 
@@ -60,37 +65,71 @@ class Command(BaseCommand):
     help = "Enqueue one court_scrape job per leaf court onto the central queue."
 
     def add_arguments(self, parser):
-        parser.add_argument("--court", default="all",
-                            help="special | district | high | supreme | all")
-        parser.add_argument("--lookback-days", type=int, default=None,
-                            help="override the court's default lookback window")
-        parser.add_argument("--limit-dates", type=int, default=None,
-                            help="cap dates per court (smoke/testing)")
-        parser.add_argument("--enrich", action="store_true",
-                            help="follow each touched case's detail page")
-        parser.add_argument("--priority", type=int, default=100,
-                            help="queue priority (lower runs sooner)")
-        parser.add_argument("--sweep", action="store_true",
-                            help="enqueue REGISTER-SWEEP jobs instead of cause-list "
-                                 "ones: walk each court's docket numbering and fetch "
-                                 "the cases that never reached a hearing list")
-        parser.add_argument("--sweep-budget", type=int, default=None,
-                            help="max probes per court per run "
-                                 "(default: courts.scraper.sweep.DEFAULT_BUDGET)")
-        parser.add_argument("--sweep-series", default=None,
-                            help="restrict the sweep to named registers, comma separated "
-                                 "(e.g. CR). Series differ sharply in value and cost — on "
-                                 "the special court CR is 72 holes of corruption cases, OA "
-                                 "is 575 mostly-procedural ones")
-        parser.add_argument("--sweep-tail", type=int, default=None,
-                            help="probe this far past each register's high-water mark "
-                                 "(default: courts.scraper.registers.DEFAULT_TAIL_PROBE). "
-                                 "Raise it for a one-off backfill; the default is sized for "
-                                 "a recurring run across thousands of registers")
-        parser.add_argument("--sweep-courts", type=int, default=None,
-                            help="sweep only the N least-recently-swept courts, so a "
-                                 "recurring run rotates through the fleet on a bounded "
-                                 "budget instead of queueing all 99 at once")
+        parser.add_argument(
+            "--court", default="all", help="special | district | high | supreme | all"
+        )
+        parser.add_argument(
+            "--lookback-days",
+            type=int,
+            default=None,
+            help="override the court's default lookback window",
+        )
+        parser.add_argument(
+            "--limit-dates",
+            type=int,
+            default=None,
+            help="cap dates per court (smoke/testing)",
+        )
+        parser.add_argument(
+            "--enrich",
+            action="store_true",
+            help="follow each touched case's detail page",
+        )
+        parser.add_argument(
+            "--priority",
+            type=int,
+            default=100,
+            help="queue priority (lower runs sooner)",
+        )
+        parser.add_argument(
+            "--sweep",
+            action="store_true",
+            help="enqueue REGISTER-SWEEP jobs instead of cause-list "
+            "ones: walk each court's docket numbering and fetch "
+            "the cases that never reached a hearing list",
+        )
+        parser.add_argument(
+            "--sweep-budget",
+            type=int,
+            default=None,
+            help="max probes per court per run "
+            "(default: courts.scraper.sweep.DEFAULT_BUDGET)",
+        )
+        parser.add_argument(
+            "--sweep-series",
+            default=None,
+            help="restrict the sweep to named registers, comma separated "
+            "(e.g. CR). Series differ sharply in value and cost — on "
+            "the special court CR is 72 holes of corruption cases, OA "
+            "is 575 mostly-procedural ones",
+        )
+        parser.add_argument(
+            "--sweep-tail",
+            type=int,
+            default=None,
+            help="probe this far past each register's high-water mark "
+            "(default: courts.scraper.registers.DEFAULT_TAIL_PROBE). "
+            "Raise it for a one-off backfill; the default is sized for "
+            "a recurring run across thousands of registers",
+        )
+        parser.add_argument(
+            "--sweep-courts",
+            type=int,
+            default=None,
+            help="sweep only the N least-recently-swept courts, so a "
+            "recurring run rotates through the fleet on a bounded "
+            "budget instead of queueing all 99 at once",
+        )
 
     def handle(self, *args, **o):
         try:
@@ -128,7 +167,11 @@ class Command(BaseCommand):
                 if o["sweep_tail"] is not None:
                     payload["sweep_tail"] = o["sweep_tail"]
                 if o["sweep_series"]:
-                    series = [x.strip().upper() for x in o["sweep_series"].split(",") if x.strip()]
+                    series = [
+                        x.strip().upper()
+                        for x in o["sweep_series"].split(",")
+                        if x.strip()
+                    ]
                     payload["sweep_series"] = series
                     # Its own dedup namespace: a CR sweep must not be deduped away
                     # by an in-flight all-series one, or vice versa.
@@ -141,7 +184,9 @@ class Command(BaseCommand):
                 dedup_key=f"court_scrape:{tier}:{court_id}{suffix}",
                 priority=o["priority"],
             )
-            self.stdout.write(f"  {tier}/{court_id}{suffix}: job {job.pk} [{job.status}]")
+            self.stdout.write(
+                f"  {tier}/{court_id}{suffix}: job {job.pk} [{job.status}]"
+            )
 
         label = "register-sweep" if o["sweep"] else "cause-list"
         self.stdout.write(f"enqueued {len(targets)} {label} court_scrape job(s).")

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Docket signals, read out of the NGM lake the scrapers already write.
 
 No scraper changes. ``scrape_courtcases`` and ``scrape_worker`` keep filling the

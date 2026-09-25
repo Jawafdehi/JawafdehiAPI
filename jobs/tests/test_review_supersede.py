@@ -26,7 +26,7 @@ def _review(slug, **kwargs):
     ``case_id`` and the supersede/regrade paths (now keyed on case_id) group them.
     """
     case, _ = Case.objects.get_or_create(
-        slug=slug, defaults=dict(title=slug, case_type=CaseType.CORRUPTION)
+        slug=slug, defaults=dict(title=slug, offence_type=CaseType.CORRUPTION)
     )
     return CaseReview.objects.create(case=case, **kwargs)
 

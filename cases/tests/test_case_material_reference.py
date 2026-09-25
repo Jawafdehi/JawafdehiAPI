@@ -26,7 +26,7 @@ VALID_IRI = "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
 class TestCaseMaterialReferenceModel:
     def _case(self, **overrides):
         defaults = {
-            "case_type": CaseType.CORRUPTION,
+            "offence_type": CaseType.CORRUPTION,
             "state": CaseState.DRAFT,
             "title": "Test Case",
             "slug": "cmr-case-001",

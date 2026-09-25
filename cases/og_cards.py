@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Composed Open Graph share cards, rendered with Pillow.
 
 Sharing an author page used to unfurl the site-wide banner, so every author

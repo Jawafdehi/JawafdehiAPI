@@ -40,7 +40,10 @@ DAMAGED = (
     Q(status="enriched")
     & Q(registration_number__isnull=True)
     & Q(hearing_count__isnull=True)
-    & (Q(extra_data__enrichment_hearings=[]) | Q(extra_data__enrichment_hearings__isnull=True))
+    & (
+        Q(extra_data__enrichment_hearings=[])
+        | Q(extra_data__enrichment_hearings__isnull=True)
+    )
 )
 
 
@@ -48,16 +51,33 @@ class Command(BaseCommand):
     help = "Re-enrich cases falsely marked enriched by the empty-parse bug."
 
     def add_arguments(self, parser):
-        parser.add_argument("--court", required=True,
-                            help="registry key: special | district | high | supreme")
-        parser.add_argument("--court-id", default=None,
-                            help="restrict to one leaf court (default: every court in the tier)")
-        parser.add_argument("--apply", action="store_true",
-                            help="actually re-fetch and write (default: dry run)")
-        parser.add_argument("--limit", type=int, default=None,
-                            help="cap the number of cases repaired this run")
-        parser.add_argument("--delay", type=float, default=1.0,
-                            help="seconds between cases (default 1.0)")
+        parser.add_argument(
+            "--court",
+            required=True,
+            help="registry key: special | district | high | supreme",
+        )
+        parser.add_argument(
+            "--court-id",
+            default=None,
+            help="restrict to one leaf court (default: every court in the tier)",
+        )
+        parser.add_argument(
+            "--apply",
+            action="store_true",
+            help="actually re-fetch and write (default: dry run)",
+        )
+        parser.add_argument(
+            "--limit",
+            type=int,
+            default=None,
+            help="cap the number of cases repaired this run",
+        )
+        parser.add_argument(
+            "--delay",
+            type=float,
+            default=1.0,
+            help="seconds between cases (default 1.0)",
+        )
 
     def handle(self, *args, **o):
         try:

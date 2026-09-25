@@ -36,8 +36,16 @@ def _enrichment(**over):
         },
         extra_data={
             "enrichment_hearings": [
-                {"hearing_date": "2076-10-03", "case_status": "पेशी", "decision_type": ""},
-                {"hearing_date": "2080-01-15", "case_status": "फैसला", "decision_type": "ठहर"},
+                {
+                    "hearing_date": "2076-10-03",
+                    "case_status": "पेशी",
+                    "decision_type": "",
+                },
+                {
+                    "hearing_date": "2080-01-15",
+                    "case_status": "फैसला",
+                    "decision_type": "ठहर",
+                },
             ]
         },
         entities=[{"side": "defendant", "name": "क", "address": None}],
@@ -49,7 +57,9 @@ def _enrichment(**over):
 class TestUpsertFromDetail(_NgmTestCase):
     def test_creates_a_case_the_causelist_never_saw(self):
         assert upsert_from_detail("special", "076-CR-0294", _enrichment()) is True
-        case = CourtCase.objects.using("ngm").get(court_id="special", case_number="076-CR-0294")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="special", case_number="076-CR-0294"
+        )
         assert case.registration_date_bs == "2076-11-13"
         assert case.case_type == "नक्कली प्रमाण पत्र"
         assert case.extra_data.get("source") == "register_sweep"
@@ -58,12 +68,16 @@ class TestUpsertFromDetail(_NgmTestCase):
         # registration_date_* / case_type are outside _ENRICH_COLUMNS, so if the
         # create path didn't set them a swept case would have no dates at all.
         upsert_from_detail("special", "076-CR-0294", _enrichment())
-        case = CourtCase.objects.using("ngm").get(court_id="special", case_number="076-CR-0294")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="special", case_number="076-CR-0294"
+        )
         assert case.registration_date_ad == date(2020, 2, 25)
 
     def test_still_applies_enrichment_columns(self):
         upsert_from_detail("special", "076-CR-0294", _enrichment())
-        case = CourtCase.objects.using("ngm").get(court_id="special", case_number="076-CR-0294")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="special", case_number="076-CR-0294"
+        )
         assert case.status == "enriched"
         assert case.verdict_type  # derived from the decisive hearing / status
 
@@ -84,7 +98,11 @@ class TestUpsertFromDetail(_NgmTestCase):
             entities=[],
         )
         assert upsert_from_detail("special", "076-CR-0999", empty) is False
-        assert not CourtCase.objects.using("ngm").filter(case_number="076-CR-0999").exists()
+        assert (
+            not CourtCase.objects.using("ngm")
+            .filter(case_number="076-CR-0999")
+            .exists()
+        )
 
     def test_never_touches_an_existing_case(self):
         """The nes_id guard — the whole reason the sweep is add-only.
@@ -97,13 +115,18 @@ class TestUpsertFromDetail(_NgmTestCase):
             court_id="special", case_number="076-CR-0294", case_type="पुरानो"
         )
         CaseEntity.objects.using("ngm").create(
-            court_id="special", case_number="076-CR-0294",
-            side="defendant", name="क", nes_id=NES_IRI,
+            court_id="special",
+            case_number="076-CR-0294",
+            side="defendant",
+            name="क",
+            nes_id=NES_IRI,
         )
 
         assert upsert_from_detail("special", "076-CR-0294", _enrichment()) is False
 
-        case = CourtCase.objects.using("ngm").get(court_id="special", case_number="076-CR-0294")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="special", case_number="076-CR-0294"
+        )
         assert case.case_type == "पुरानो", "an existing case must not be rewritten"
         entity = CaseEntity.objects.using("ngm").get(case_number="076-CR-0294")
         assert entity.nes_id == NES_IRI, "resolved entity link was destroyed"
@@ -115,14 +138,18 @@ class TestUpsertFromDetail(_NgmTestCase):
             court_id="special", case_number="076-CR-0294", is_deleted=True
         )
         assert upsert_from_detail("special", "076-CR-0294", _enrichment()) is False
-        case = CourtCase.objects.using("ngm").get(court_id="special", case_number="076-CR-0294")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="special", case_number="076-CR-0294"
+        )
         assert case.is_deleted is True
 
 
 class TestMaterialiseDetailHearings(_NgmTestCase):
     def test_creates_relational_rows_so_the_case_is_not_hearing_invisible(self):
         upsert_from_detail("special", "076-CR-0294", _enrichment())
-        hearings = CourtCaseHearing.objects.using("ngm").filter(case_number="076-CR-0294")
+        hearings = CourtCaseHearing.objects.using("ngm").filter(
+            case_number="076-CR-0294"
+        )
         assert hearings.count() == 2
         assert {h.hearing_date_bs for h in hearings} == {"2076-10-03", "2080-01-15"}
         assert all(h.extra_data.get("source") == "register_sweep" for h in hearings)
@@ -141,28 +168,45 @@ class TestMaterialiseDetailHearings(_NgmTestCase):
     def test_skips_unconvertible_dates_instead_of_sentinelling(self):
         # hearing_date_ad is NOT NULL and the cause-list path falls back to
         # 1900-01-01; seeding that here would pollute a clean column.
-        e = _enrichment(extra_data={"enrichment_hearings": [
-            {"hearing_date": "not-a-date"}, {"hearing_date": ""}, {},
-        ]})
+        e = _enrichment(
+            extra_data={
+                "enrichment_hearings": [
+                    {"hearing_date": "not-a-date"},
+                    {"hearing_date": ""},
+                    {},
+                ]
+            }
+        )
         upsert_from_detail("special", "076-CR-0295", e)
-        assert not CourtCaseHearing.objects.using("ngm").filter(
-            case_number="076-CR-0295"
-        ).exists()
-        assert not CourtCaseHearing.objects.using("ngm").filter(
-            hearing_date_ad=date(1900, 1, 1)
-        ).exists()
+        assert (
+            not CourtCaseHearing.objects.using("ngm")
+            .filter(case_number="076-CR-0295")
+            .exists()
+        )
+        assert (
+            not CourtCaseHearing.objects.using("ngm")
+            .filter(hearing_date_ad=date(1900, 1, 1))
+            .exists()
+        )
 
     def test_same_date_hearings_collapse_to_one_row(self):
         # Documented limitation: with no serial_no to separate them, two hearings
         # on one date dedupe. The full list survives in extra_data JSON.
-        e = _enrichment(extra_data={"enrichment_hearings": [
-            {"hearing_date": "2080-01-15", "case_status": "क"},
-            {"hearing_date": "2080-01-15", "case_status": "ख"},
-        ]})
+        e = _enrichment(
+            extra_data={
+                "enrichment_hearings": [
+                    {"hearing_date": "2080-01-15", "case_status": "क"},
+                    {"hearing_date": "2080-01-15", "case_status": "ख"},
+                ]
+            }
+        )
         upsert_from_detail("special", "076-CR-0296", e)
-        assert CourtCaseHearing.objects.using("ngm").filter(
-            case_number="076-CR-0296"
-        ).count() == 1
+        assert (
+            CourtCaseHearing.objects.using("ngm")
+            .filter(case_number="076-CR-0296")
+            .count()
+            == 1
+        )
         case = CourtCase.objects.using("ngm").get(case_number="076-CR-0296")
         assert len(case.extra_data["enrichment_hearings"]) == 2
 
@@ -170,6 +214,9 @@ class TestMaterialiseDetailHearings(_NgmTestCase):
         upsert_from_detail("special", "076-CR-0294", _enrichment())
         again = materialise_detail_hearings("special", "076-CR-0294", _enrichment())
         assert again == 0
-        assert CourtCaseHearing.objects.using("ngm").filter(
-            case_number="076-CR-0294"
-        ).count() == 2
+        assert (
+            CourtCaseHearing.objects.using("ngm")
+            .filter(case_number="076-CR-0294")
+            .count()
+            == 2
+        )

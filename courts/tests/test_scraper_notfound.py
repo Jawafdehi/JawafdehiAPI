@@ -28,11 +28,19 @@ def _html(name):
 # tier -> (parser, found fixture, not-found fixture)
 _TIERS = {
     "special": (special.parse_detail, "special_found.html", "special_missing.html"),
-    "district": (district.parse_district_detail, "district_found.html", "district_missing.html"),
+    "district": (
+        district.parse_district_detail,
+        "district_found.html",
+        "district_missing.html",
+    ),
     "high": (high.parse_high_detail, "high_found.html", "high_missing.html"),
     # Supreme's not-found is the search LIST with "Total 0 Records Found"; its
     # found page is only reachable via the stage-2 link (see TestSupremeTwoStage).
-    "supreme": (supreme.parse_supreme_detail, "supreme_detail_found.html", "supreme_search_missing.html"),
+    "supreme": (
+        supreme.parse_supreme_detail,
+        "supreme_detail_found.html",
+        "supreme_search_missing.html",
+    ),
 }
 
 
@@ -61,10 +69,14 @@ def test_extra_data_alone_would_have_passed_a_not_found_page(tier):
     """
     parser, _, missing = _TIERS[tier]
     parsed = parser(_html(missing))
-    old_guard_would_apply = bool(parsed.core_fields or parsed.extra_data or parsed.entities)
+    old_guard_would_apply = bool(
+        parsed.core_fields or parsed.extra_data or parsed.entities
+    )
     assert parsed.identifies_a_case() is False
     if tier != "special":
-        assert old_guard_would_apply is True, "fixture no longer exercises the regression"
+        assert old_guard_would_apply is True, (
+            "fixture no longer exercises the regression"
+        )
 
 
 class TestSupremeTwoStage:
@@ -75,7 +87,10 @@ class TestSupremeTwoStage:
         assert href and "caseno=" in href and "mode=view" in href
 
     def test_no_records_found_yields_no_link(self):
-        assert supreme.parse_search_result_link(_html("supreme_search_missing.html")) is None
+        assert (
+            supreme.parse_search_result_link(_html("supreme_search_missing.html"))
+            is None
+        )
 
     def test_follows_the_row_that_matches_the_docket_not_the_first(self):
         """Row selection keys on the docket cell, not document order.
@@ -93,9 +108,12 @@ class TestSupremeTwoStage:
     def test_a_list_without_our_docket_is_a_miss(self):
         # The portal answering with rows that are all other cases means it does
         # not have ours — not "take whatever is on top".
-        assert supreme.parse_search_result_link(
-            _html("supreme_search_multi.html"), "081-WO-9999"
-        ) is None
+        assert (
+            supreme.parse_search_result_link(
+                _html("supreme_search_multi.html"), "081-WO-9999"
+            )
+            is None
+        )
 
     def test_a_page_that_is_not_a_result_list_raises(self):
         """A WAF challenge / maintenance page must not read as "no such docket".
@@ -121,7 +139,11 @@ class TestSupremeTwoStage:
 
         def fake_fetch(url, data=None):
             calls.append(url)
-            return _html("supreme_search_found.html") if data else _html("supreme_detail_found.html")
+            return (
+                _html("supreme_search_found.html")
+                if data
+                else _html("supreme_detail_found.html")
+            )
 
         parsed = REGISTRY["supreme"].crawl_detail(fake_fetch, "supreme", "081-WO-0001")
         assert len(calls) == 2, "must search, then follow the result link"
@@ -135,7 +157,10 @@ class TestSupremeTwoStage:
             calls.append(url)
             return _html("supreme_search_missing.html")
 
-        assert REGISTRY["supreme"].crawl_detail(fake_fetch, "supreme", "081-WO-99999") is None
+        assert (
+            REGISTRY["supreme"].crawl_detail(fake_fetch, "supreme", "081-WO-99999")
+            is None
+        )
         assert len(calls) == 1, "a 0-record search must not fetch a detail page"
 
 
@@ -165,7 +190,10 @@ class TestSupremeChargeVsClass:
         assert core["case_subject"] == "कर्तव्य ज्यान"
 
     def test_the_coarse_class_is_kept_not_discarded(self):
-        assert supreme.parse_supreme_detail(self._PAGE).extra_data["case_class"] == "फौजदारी"
+        assert (
+            supreme.parse_supreme_detail(self._PAGE).extra_data["case_class"]
+            == "फौजदारी"
+        )
 
     def test_a_page_without_a_charge_falls_back_to_the_class(self):
         page = self._PAGE.replace("<tr><td>मुद्दा:</td><td>कर्तव्य ज्यान</td></tr>", "")

@@ -170,7 +170,9 @@ def detect(case):
     tt = _titles_and_types(case)
     court_cases = case.get("court_cases") or []
     forum = _court_forum(court_cases)
-    case_type = (case.get("case_type") or "").upper()
+    # Reads the API payload, not the ORM. ``offence_type`` first so this keeps
+    # working when the deprecated ``case_type`` read alias is dropped.
+    case_type = (case.get("offence_type") or case.get("case_type") or "").upper()
 
     has_press_release = any(
         st == "PRESS_RELEASE" or (_any(t, _PRESS_RELEASE) and _any(t, _CIAA))

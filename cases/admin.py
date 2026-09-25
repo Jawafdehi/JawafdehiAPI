@@ -270,31 +270,18 @@ class CaseAdminForm(forms.ModelForm):
                         "Case state transitions require the Caseworker role."
                     )
 
-        # Validate required fields based on state
-        new_state = cleaned_data.get("state")
-
         # Always require title
         if not cleaned_data.get("title", "").strip():
             errors["title"] = "Title is required"
 
         # Strict validation for IN_REVIEW and PUBLISHED states
-        if new_state in [CaseState.IN_REVIEW, CaseState.PUBLISHED]:
-            # Note: Alleged entity validation is performed in CaseAdmin.save_related()
-            # after inline formsets are saved, not here in clean()
-
-            # Check key_allegations
-            key_allegations = cleaned_data.get("key_allegations")
-            if not key_allegations or len(key_allegations) == 0:
-                errors["key_allegations"] = (
-                    "At least one key allegation is required for IN_REVIEW or PUBLISHED state"
-                )
-
-            # Check description
-            description = cleaned_data.get("description", "").strip()
-            if not description:
-                errors["description"] = (
-                    "Description is required for IN_REVIEW or PUBLISHED state"
-                )
+        # Note: Alleged entity validation is performed in CaseAdmin.save_related()
+        # after inline formsets are saved, not here in clean().
+        # `key_allegations` and `description` are NOT checked here: they were
+        # retired as publish blockers in `Case.validate()` (review.rules_engine
+        # scores them instead), and this form duplicated that list rather than
+        # calling it -- so leaving the copy behind would reinstate the gate for
+        # anyone who re-enables admin writes.
 
         if errors:
             raise ValidationError(errors)
@@ -520,7 +507,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
     list_display = [
         "title_with_view_link",
-        "case_type",
+        "offence_type",
         "state_badge",
         "weight",
         "created_at",
@@ -529,7 +516,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
     list_filter = [
         "state",
-        "case_type",
+        "offence_type",
         "created_at",
     ]
 
@@ -568,7 +555,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "banner_image",
                     "thumbnail_url",
                     "banner_url",
-                    "case_type",
+                    "offence_type",
                     "state",
                     "bigo",
                     "weight",

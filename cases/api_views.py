@@ -23,6 +23,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.cache import patch_vary_headers
 from django.views import View
+import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
@@ -65,11 +66,18 @@ from .models import (
     CaseSlugHistory,
     CaseState,
     CaseStateChange,
+    CaseType,
     Feedback,
     FeedbackType,
     RelationshipOutcome,
     RelationshipType,
     StatisticsSnapshot,
+)
+from .stages import (
+    StageError,
+    apply_legacy_date,
+    derived_proceeding_dates,
+    validate_stages,
 )
 from .rules.predicates import (
     can_change_case,
@@ -121,6 +129,11 @@ _PATCH_SCALAR_FIELDS = frozenset(
         "banner_url",
         "case_start_date",
         "case_end_date",
+        # ``dates`` is a Case column like any other scalar. The two derived
+        # columns are NOT patchable by a client -- they are recomputed below
+        # and injected into the same UPDATE, because this write path skips
+        # save() and nothing else would refresh them.
+        "dates",
         "tags",
         "key_allegations",
         "timeline",
@@ -139,6 +152,12 @@ _PATCH_SCALAR_FIELDS = frozenset(
         # it is a join, written by _sync_author_credits like court_cases.
         "case_publish_date",
         "public_edit_history",
+        # The two columns this rework added. Missing here, a patch
+        # validates, returns 200 and is then dropped when the bulk
+        # UPDATE is assembled -- the silent drop this list already
+        # records for ``notes`` (BB-28).
+        "case_track",
+        "status_override",
     ]
 )
 
@@ -237,6 +256,23 @@ def _if_match_matches(request, case) -> bool:
     return False
 
 
+
+class CaseFilterSet(django_filters.FilterSet):
+    """``?offence_type=`` plus the deprecated ``?case_type=`` the SPA still sends.
+
+    A plain ``filterset_fields`` list cannot express the alias. Drop
+    ``case_type`` together with the read alias in ``CaseSerializer``.
+    """
+
+    case_type = django_filters.ChoiceFilter(
+        field_name="offence_type", choices=CaseType.choices
+    )
+
+    class Meta:
+        model = Case
+        fields = ["offence_type", "state"]
+
+
 @extend_schema_view(
     create=extend_schema(
         summary="Create a draft case",
@@ -264,7 +300,7 @@ def _if_match_matches(request, case) -> bool:
         Results are ordered by creation date (newest first).
 
         **Filtering:**
-        - `case_type`: Filter by case type (CORRUPTION)
+        - `offence_type`: Filter by case type (CORRUPTION)
         - `state`: Filter by workflow state (DRAFT / IN_REVIEW / PUBLISHED). Applied
           after visibility scoping, so callers only ever see states they may view
           (e.g. `?state=IN_REVIEW` is the moderation queue for casework roles).
@@ -279,7 +315,7 @@ def _if_match_matches(request, case) -> bool:
         """,
         parameters=[
             OpenApiParameter(
-                name="case_type",
+                name="offence_type",
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 description="Filter by case type",
@@ -391,7 +427,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     - Patch endpoint: PATCH /api/cases/{id}/ (authenticated; gated by can_change_case)
 
     Filtering:
-    - case_type: Filter by case type
+    - offence_type: Filter by case type
     - tags: Filter by tags
 
     Search:
@@ -415,7 +451,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     # plan §G1). Filtering runs AFTER get_queryset()'s visibility scoping, so a
     # public caller filtering ?state=IN_REVIEW still gets nothing (the base
     # queryset is PUBLISHED-only) — visibility is preserved.
-    filterset_fields = ["case_type", "state"]
+    filterset_class = CaseFilterSet
     search_fields = ["title", "description", "key_allegations"]
     # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view
     # pin). Unauthenticated reads still work because the actions use
@@ -659,7 +695,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     # handled separately as binds/joins below.
     _CREATE_MODEL_FIELDS = frozenset(
         [
-            "case_type",
+            "offence_type",
             "state",
             "title",
             "short_description",
@@ -670,6 +706,14 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "banner_url",
             "case_start_date",
             "case_end_date",
+            # ``dates`` carries the stage list, and the create
+            # serializer also folds the two deprecated dates above into
+            # it. Missing here, BOTH were dropped after validating: the
+            # case was created with the legacy column set and no stage,
+            # so the read alias served null for a date just typed.
+            "dates",
+            "case_track",
+            "status_override",
             "tags",
             "key_allegations",
             "timeline",
@@ -1401,12 +1445,74 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 resp["ETag"] = _version_token(locked)
                 return resp
 
+            # The deployed SPA admin emits /case_start_date and
+            # /case_end_date. Those addressed columns; the dates now live on a
+            # record inside a list, and RFC-6902 replace on a path that does
+            # not exist is an error -- so they are TRANSFORMED onto the
+            # first-instance stage here rather than rewritten as paths.
+            # The columns are still written alongside FOR THOSE TWO PATHS, so
+            # a rollback to the previous release does not lose an edit that
+            # arrived on /case_start_date or /case_end_date. An edit that
+            # arrives on /dates -- which is what the new admin sends for
+            # everything -- never touches the columns, so after a rollback the
+            # old release would serve a stale case_start_date. Not data loss;
+            # the stage list is still the record.
+            stage_document = validated.get("dates") or {"stages": []}
+            stages = list(stage_document.get("stages") or [])
+            for path, key in (("/case_start_date", "start"), ("/case_end_date", "end")):
+                if not self._touches(patch_ops, path):
+                    continue
+                try:
+                    stages = apply_legacy_date(
+                        stages, key, validated.get(path.lstrip("/"))
+                    )
+                except StageError as exc:
+                    transaction.set_rollback(True)
+                    return Response(
+                        {path.lstrip("/"): [str(exc)]},
+                        status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    )
+
+            # Re-validate WITH the case's binds. The serializer validates a
+            # document and cannot see the case, so the courtcase_iri rule can
+            # only be enforced here -- and this path never reaches save().
+            #
+            # The binds are the ones this patch ASKS FOR, not the ones on the
+            # row: the admin sends /court_cases and /dates in one ops array,
+            # and _sync_courtcase_references does not run until below. Reading
+            # the pre-patch join would 422 a caseworker who adds a docket and
+            # a stage citing it together -- and, worse, would let an unbind
+            # through while a stage still cites the removed docket, leaving a
+            # case that saves here and then raises on its next state
+            # transition.
+            desired_binds = (
+                validated.get("court_cases") or []
+                if court_cases_touched
+                else case.court_cases
+            )
+            try:
+                validate_stages(stages, binds=desired_binds)
+            except StageError as exc:
+                transaction.set_rollback(True)
+                return Response(
+                    {"dates": [str(exc)]},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            validated["dates"] = {**stage_document, "stages": stages}
+
             # Persist scalar field changes
             scalar_updates = {
                 field: validated[field]
                 for field in _PATCH_SCALAR_FIELDS
                 if field in validated
             }
+            # Derived from ``dates``, never from the client. This bulk UPDATE
+            # bypasses save(), which is where the model normally refreshes
+            # them, so they are recomputed and injected here or the archive
+            # silently misorders after every date edit.
+            started, decided = derived_proceeding_dates(stages)
+            scalar_updates["proceedings_started_on"] = started
+            scalar_updates["proceedings_decided_on"] = decided
             if scalar_updates:
                 case = self.get_object()
                 # ``QuerySet.update()`` bypasses the model's ``auto_now`` on
@@ -1555,7 +1661,13 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 str(case.case_start_date) if case.case_start_date else None
             ),
             "case_end_date": str(case.case_end_date) if case.case_end_date else None,
-            "case_type": case.case_type,
+            "dates": case.dates or {"stages": []},
+            # Present in the snapshot or an RFC-6902 ``replace`` on the
+            # path 400s with "can't replace a non-existent object" --
+            # the field never reaches validation at all.
+            "case_track": case.case_track,
+            "status_override": case.status_override,
+            "offence_type": case.offence_type,
             "tags": list(case.tags) if case.tags else [],
             "key_allegations": (
                 list(case.key_allegations) if case.key_allegations else []
@@ -1824,7 +1936,7 @@ class CaseAuthorCandidateView(ListAPIView):
     - `cases_in_review`: Number of cases with state IN_REVIEW (subset of
       under-investigation — cases being prepared for publication)
     - `cases_closed`: Number of cases with state CLOSED
-    - `cases_ciaa`: Number of CIAA corruption cases (case_type CORRUPTION)
+    - `cases_ciaa`: Number of CIAA corruption cases (offence_type CORRUPTION)
     - `cases_non_ciaa`: Number of cases handled outside CIAA (all other types)
     - `entities_tracked`: Number of unique entities involved in published cases
     - `total_bigo`: Sum of the bigo (बिगो — the disputed/embezzled amount, NPR)

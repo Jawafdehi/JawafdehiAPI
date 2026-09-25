@@ -58,7 +58,9 @@ def _entity(iri: str, *, is_deleted: bool = False) -> StoredEntity:
 
 
 def _case(state: str = CaseState.PUBLISHED, title: str = "Gate test") -> Case:
-    return Case.objects.create(title=title, case_type=CaseType.CORRUPTION, state=state)
+    return Case.objects.create(
+        title=title, offence_type=CaseType.CORRUPTION, state=state
+    )
 
 
 def _bind(case: Case, iri: str, role: str = RelationshipType.ACCUSED):

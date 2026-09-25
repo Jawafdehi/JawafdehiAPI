@@ -91,7 +91,9 @@ class CourtWriteTests(_DbAPITestCase):
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_read_courts_still_public(self):
-        Court.objects.create(identifier="sc", court_type="supreme", full_name_nepali="स")
+        Court.objects.create(
+            identifier="sc", court_type="supreme", full_name_nepali="स"
+        )
         resp = self.client.get("/api/courts/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
@@ -118,7 +120,10 @@ class CourtCaseWriteTests(_DbAPITestCase):
             "defendant": "श्याम",
             "nes_id": IRI,
             "document_sources": [
-                {"document_id": "d1", "url": [{"link": "https://r2/raw.pdf", "role": "RAW"}]}
+                {
+                    "document_id": "d1",
+                    "url": [{"link": "https://r2/raw.pdf", "role": "RAW"}],
+                }
             ],
         }
         body.update(overrides)
@@ -219,7 +224,9 @@ class BlacklistedFirmWriteTests(_DbAPITestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
-        self.assertTrue(BlacklistedFirm.objects.filter(firm_name="Acme Builders").exists())
+        self.assertTrue(
+            BlacklistedFirm.objects.filter(firm_name="Acme Builders").exists()
+        )
 
     def test_update_firm_patch(self):
         firm = BlacklistedFirm.objects.create(firm_name="Acme Builders")
@@ -231,9 +238,7 @@ class BlacklistedFirmWriteTests(_DbAPITestCase):
         self.assertEqual(BlacklistedFirm.objects.get(pk=firm.id).reason, "fraud")
 
     def test_create_unauth_is_401(self):
-        resp = self.client.post(
-            "/api/firms/", {"firm_name": "X"}, format="json"
-        )
+        resp = self.client.post("/api/firms/", {"firm_name": "X"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
@@ -286,7 +291,10 @@ class MaterialWriteTests(_DbAPITestCase):
     def test_put_material_replaces(self):
         iri = "https://jawafdehi.org/material/nkp/2080-act-1"
         Material.objects.create(
-            iri=iri, material_type="legal_corpus", source="nkp", ident="2080-act-1",
+            iri=iri,
+            material_type="legal_corpus",
+            source="nkp",
+            ident="2080-act-1",
             data=self._doc(iri),
         )
         self.client.force_authenticate(user=self.user)
@@ -310,7 +318,11 @@ class MaterialWriteTests(_DbAPITestCase):
         # Unknown @type -> validator rejects.
         resp = self.client.post(
             "/api/materials/",
-            {"@type": "Banana", "@id": "https://jawafdehi.org/material/x/y", "name": "n"},
+            {
+                "@type": "Banana",
+                "@id": "https://jawafdehi.org/material/x/y",
+                "name": "n",
+            },
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -327,7 +339,10 @@ class MaterialWriteTests(_DbAPITestCase):
     def test_get_material_remains_public_no_regression(self):
         iri = "https://jawafdehi.org/material/nkp/2080-act-1"
         Material.objects.create(
-            iri=iri, material_type="legal_corpus", source="nkp", ident="2080-act-1",
+            iri=iri,
+            material_type="legal_corpus",
+            source="nkp",
+            ident="2080-act-1",
             data=self._doc(iri),
         )
         # No auth.
@@ -341,9 +356,14 @@ class MaterialWriteTests(_DbAPITestCase):
             identifier="kathmandudc", court_type="district", full_name_nepali="ज"
         )
         CourtCase.objects.create(
-            case_number="082-OA-0503", court=court, case_status="चालु",
+            case_number="082-OA-0503",
+            court=court,
+            case_status="चालु",
             document_sources=[
-                {"document_id": "d1", "url": [{"link": "https://r2/raw.pdf", "role": "RAW"}]}
+                {
+                    "document_id": "d1",
+                    "url": [{"link": "https://r2/raw.pdf", "role": "RAW"}],
+                }
             ],
         )
         iri = court_case_material_iri("kathmandudc", "082-OA-0503")

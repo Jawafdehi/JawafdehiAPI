@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The ``case_proposal_intent`` job kind: server-side hooks.
 
 Intent generation is a *job*, not something a bus consumer does inline. A model
@@ -114,7 +114,7 @@ def _snapshot(case) -> dict:
     return {
         "slug": case.slug,
         "title": case.title,
-        "case_type": case.case_type,
+        "offence_type": case.offence_type,
         "state": case.state,
         "short_description": case.short_description or "",
         "description": description[:MAX_DESCRIPTION_CHARS],

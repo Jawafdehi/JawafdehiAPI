@@ -14,7 +14,7 @@ def test_case_auto_generates_slug_on_save():
         title="Test Case for Slug Generation",
         alleged_entities=["https://jawafdehi.org/entity/person/test-person-3"],
         key_allegations=["Yet another allegation"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         description="Test description 3",
         state=CaseState.DRAFT,
     )

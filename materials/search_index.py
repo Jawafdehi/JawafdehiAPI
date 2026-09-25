@@ -3,27 +3,31 @@
 Projects a ``Material`` (schema.org JSON-LD document keyed by its ``@id`` IRI)
 into the common index doc. Mirrors the NES entity indexer; the material doc adds
 ``text`` (OCR/full-text body), the material ``identifier``/``ident`` to the
-``identifiers`` field, and the dates (``dateCreated``/``datePublished`` and the
+``identifiers`` field, the dates (``dateCreated``/``datePublished`` and the
 Bikram Sambat ``jawafdehi:registrationDateBS`` carried verbatim into
-``date_bs``).
+``date_bs``), and ``material_type`` promoted from the column of that name.
 
 Best-effort: an OpenSearch error is logged and swallowed.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from jawafdehi_shared.search.indexing import (
     best_effort,
     delete_doc,
     flatten_strings,
+    gregorian_date_or_none,
     name_to_titles,
     title_translit,
     type_token,
     upsert_doc,
 )
 from jawafdehi_shared.search.opensearch import MATERIAL_INDEX, make_client
+
+logger = logging.getLogger("jawafdehi.search.index")
 
 SOURCE_APP = "ngm"
 
@@ -69,10 +73,30 @@ def build_doc(obj: Any) -> dict[str, Any]:
         "raw": data,
     }
 
+    # The document-form facet, straight off the promoted column rather than
+    # re-parsed from the IRI — ``Material.clean`` already guarantees the two
+    # agree. Omitted when blank so a doc missing it is excluded by a filter on
+    # it, rather than matching an "" bucket (a nameless option in the facet).
+    material_type = getattr(obj, "material_type", None)
+    if material_type:
+        doc["material_type"] = str(material_type)
+
     # Gregorian dates (ISO). Carry Bikram Sambat verbatim (never coerced).
+    # ``date`` is validated rather than passed through: this is JSON-LD from an
+    # external scrape, and one row carrying a BS date here (``2081-02-29``)
+    # aborted an entire reindex on 2026-08-15. A dropped facet beats a dead
+    # index, and the original value survives in ``raw`` either way.
     date = data.get("datePublished") or data.get("dateCreated")
     if date:
-        doc["date"] = str(date)
+        usable = gregorian_date_or_none(date)
+        if usable is None:
+            logger.warning(
+                "material %s: dropping unparseable date %r from the index",
+                iri,
+                str(date)[:40],
+            )
+        else:
+            doc["date"] = usable
     date_bs = data.get("jawafdehi:registrationDateBS") or data.get(
         "jawafdehi:publicationDateBS"
     )

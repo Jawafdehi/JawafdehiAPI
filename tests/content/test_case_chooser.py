@@ -18,13 +18,13 @@ def cases(db):
         title="Ncell tax dispute",
         slug="ncell-tax-case",
         state=CaseState.PUBLISHED,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
     omni = Case.objects.create(
         title="Omni scandal",
         slug="omni-procurement",
         state=CaseState.PUBLISHED,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
     return ncell, omni
 

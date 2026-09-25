@@ -16,7 +16,7 @@ name = "jawafdehi"
 version = "0.1.0"
 description = "Jawafdehi platform — ONE Django project running NES, NGM and Jawafdehi as apps in one process (database-per-service preserved via DB routers)."
 license = "LicenseRef-Hippocratic-3.0"
-license-files = ["jawafdehi_mcp/LICENSE"]
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     # --- core web stack ---

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Durable pull consumers: the registry, and the rules for what to do with a message.
 
 Everything in this module is pure and synchronous on purpose. The parts that

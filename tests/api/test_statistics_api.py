@@ -106,17 +106,17 @@ class TestStatisticsCounting:
         """Test that published cases are counted correctly."""
         # Create cases in different states
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published Case 1",
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published Case 2",
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft Case"
+            offence_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft Case"
         )
 
         response = api_client.get("/api/statistics/")
@@ -127,18 +127,18 @@ class TestStatisticsCounting:
     def test_cases_under_investigation_count(self, api_client):
         """Test that draft and in-review cases are counted as under investigation."""
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft Case 1"
+            offence_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft Case 1"
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft Case 2"
+            offence_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft Case 2"
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.IN_REVIEW,
             title="In Review Case",
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published Case",
         )
@@ -151,22 +151,22 @@ class TestStatisticsCounting:
     def test_cases_under_investigation_excludes_published_and_closed(self, api_client):
         """Test that only DRAFT and IN_REVIEW cases count as under investigation."""
         draft_case = Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.DRAFT,
             title="Draft Investigation Case",
         )
         review_case = Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.IN_REVIEW,
             title="Review Investigation Case",
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published Case",
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.CLOSED,
             title="Closed Case",
         )
@@ -180,13 +180,13 @@ class TestStatisticsCounting:
     def test_cases_closed_count(self, api_client):
         """Test that closed cases are counted correctly."""
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.CLOSED, title="Closed Case 1"
+            offence_type=CaseType.CORRUPTION, state=CaseState.CLOSED, title="Closed Case 1"
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.CLOSED, title="Closed Case 2"
+            offence_type=CaseType.CORRUPTION, state=CaseState.CLOSED, title="Closed Case 2"
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published Case",
         )
@@ -203,7 +203,7 @@ class TestStatisticsCounting:
         of distinct nes_ids referenced by published cases' binds.
         """
         published = Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published Case",
         )
@@ -233,7 +233,7 @@ class TestStatisticsCounting:
         """Test statistics with cases in all different states."""
         # Only entities bound to PUBLISHED cases are tracked.
         published_case = Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published Case",
         )
@@ -244,7 +244,7 @@ class TestStatisticsCounting:
         )
 
         draft_case = Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft Case"
+            offence_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft Case"
         )
         # A bind on a non-published case is NOT counted.
         CaseEntityRelationship.objects.create(
@@ -253,12 +253,12 @@ class TestStatisticsCounting:
             relationship_type=RelationshipType.ACCUSED,
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.IN_REVIEW,
             title="In Review Case",
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.CLOSED, title="Closed Case"
+            offence_type=CaseType.CORRUPTION, state=CaseState.CLOSED, title="Closed Case"
         )
 
         response = api_client.get("/api/statistics/")
@@ -276,16 +276,16 @@ class TestStatisticsCounting:
     def test_ciaa_split_by_case_type(self, api_client):
         """CIAA count = CORRUPTION cases; every other case_type is non-CIAA."""
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="Corruption 1"
+            offence_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="Corruption 1"
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Corruption 2"
+            offence_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Corruption 2"
         )
         Case.objects.create(
-            case_type=CaseType.BRIBERY, state=CaseState.PUBLISHED, title="Bribery"
+            offence_type=CaseType.BRIBERY, state=CaseState.PUBLISHED, title="Bribery"
         )
         Case.objects.create(
-            case_type=CaseType.EMBEZZLEMENT, state=CaseState.CLOSED, title="Embezzlement"
+            offence_type=CaseType.EMBEZZLEMENT, state=CaseState.CLOSED, title="Embezzlement"
         )
 
         data = api_client.get("/api/statistics/").json()
@@ -296,13 +296,13 @@ class TestStatisticsCounting:
     def test_cases_in_review_is_subset_of_under_investigation(self, api_client):
         """cases_in_review counts only IN_REVIEW; under-investigation keeps DRAFT+IN_REVIEW."""
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.IN_REVIEW, title="Review 1"
+            offence_type=CaseType.CORRUPTION, state=CaseState.IN_REVIEW, title="Review 1"
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.IN_REVIEW, title="Review 2"
+            offence_type=CaseType.CORRUPTION, state=CaseState.IN_REVIEW, title="Review 2"
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft"
+            offence_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft"
         )
 
         data = api_client.get("/api/statistics/").json()
@@ -314,26 +314,26 @@ class TestStatisticsCounting:
         """total_bigo sums the bigo (disputed/embezzled NPR) of PUBLISHED cases,
         skips cases with no amount recorded, and ignores unpublished cases."""
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published bigo 1",
             bigo=10_000_000,
         )
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published bigo 2",
             bigo=5_000_000,
         )
         # Published but no amount recorded (bigo NULL) — contributes nothing.
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published no bigo",
         )
         # A large amount on an unpublished case must NOT be counted.
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.DRAFT,
             title="Draft bigo",
             bigo=999_000_000,
@@ -346,7 +346,7 @@ class TestStatisticsCounting:
     def test_total_bigo_zero_when_no_published_amounts(self, api_client):
         """total_bigo is 0 (never None) when no published case carries a bigo."""
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Published no bigo",
         )
@@ -489,7 +489,7 @@ class TestStatisticsSnapshot:
         """Data changes do NOT show up until the snapshot is refreshed."""
         # Create initial case
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Initial Case",
         )
@@ -501,7 +501,7 @@ class TestStatisticsSnapshot:
 
         # Create another case
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="New Case"
+            offence_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="New Case"
         )
 
         # Second request - still the stored snapshot (still 1)
@@ -516,7 +516,7 @@ class TestStatisticsSnapshot:
         """The refresh_statistics management command recomputes the snapshot."""
         # Create initial case
         Case.objects.create(
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="Initial Case",
         )
@@ -528,7 +528,7 @@ class TestStatisticsSnapshot:
 
         # Create another case
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="New Case"
+            offence_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="New Case"
         )
 
         # Refresh out-of-band, the way the scheduled job does
@@ -556,7 +556,7 @@ class TestStatisticsSnapshot:
     def test_snapshot_stores_complete_response(self, api_client):
         """Test that all fields survive the snapshot round-trip."""
         case = Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="Test Case"
+            offence_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="Test Case"
         )
         CaseEntityRelationship.objects.create(
             case=case,
@@ -589,7 +589,7 @@ class TestStatisticsPerformance:
         # Create multiple published cases, each binding a distinct NES entity.
         for i in range(5):
             case = Case.objects.create(
-                case_type=CaseType.CORRUPTION,
+                offence_type=CaseType.CORRUPTION,
                 state=CaseState.PUBLISHED,
                 title=f"Published Case {i}",
             )
@@ -601,14 +601,14 @@ class TestStatisticsPerformance:
 
         for i in range(3):
             Case.objects.create(
-                case_type=CaseType.CORRUPTION,
+                offence_type=CaseType.CORRUPTION,
                 state=CaseState.DRAFT,
                 title=f"Draft Case {i}",
             )
 
         for i in range(2):
             Case.objects.create(
-                case_type=CaseType.CORRUPTION,
+                offence_type=CaseType.CORRUPTION,
                 state=CaseState.CLOSED,
                 title=f"Closed Case {i}",
             )
@@ -626,7 +626,7 @@ class TestStatisticsPerformance:
     def test_multiple_concurrent_requests(self, api_client):
         """Test that multiple requests return consistent results."""
         Case.objects.create(
-            case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="Test Case"
+            offence_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="Test Case"
         )
 
         # Make multiple requests

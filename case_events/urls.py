@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Signal-filing endpoints.
 
 Only one, and only one is expected: every other producer watches something

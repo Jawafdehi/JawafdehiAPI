@@ -35,13 +35,24 @@ class CrawlOrchestrationTests(_NgmTestCase):
         self.assertEqual(s.hearings, 1)
         self.assertEqual(s.enriched, 1)
 
-        case = CourtCase.objects.using("ngm").get(court_id="special", case_number="082-CR-0015")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="special", case_number="082-CR-0015"
+        )
         self.assertEqual(case.case_type, "भ्रष्टाचार")
         self.assertEqual(case.status, "enriched")
         self.assertIsNone(case.case_status)  # header artifact dropped at write time
-        self.assertEqual(case.verdict_type, ACQUITTED)  # derived from the detail hearing
-        self.assertEqual(CourtCaseHearing.objects.using("ngm").filter(case_number="082-CR-0015").count(), 1)
-        self.assertEqual(ScrapedDate.objects.using("ngm").filter(court_id="special").count(), 1)
+        self.assertEqual(
+            case.verdict_type, ACQUITTED
+        )  # derived from the detail hearing
+        self.assertEqual(
+            CourtCaseHearing.objects.using("ngm")
+            .filter(case_number="082-CR-0015")
+            .count(),
+            1,
+        )
+        self.assertEqual(
+            ScrapedDate.objects.using("ngm").filter(court_id="special").count(), 1
+        )
 
     def test_enrich_is_scoped_to_this_crawls_cases(self):
         # A pre-existing non-enriched case from an earlier crawl must NOT be
@@ -50,23 +61,39 @@ class CrawlOrchestrationTests(_NgmTestCase):
         from courts.models import Court
 
         Court.objects.using("ngm").get_or_create(
-            identifier="special", defaults={"court_type": "special", "full_name_nepali": "x"}
+            identifier="special",
+            defaults={"court_type": "special", "full_name_nepali": "x"},
         )
         CourtCase.objects.using("ngm").create(
             court_id="special", case_number="070-CR-9999", status="pending"
         )
-        run_crawl(special, fetch=fake_fetch, today=date(2025, 4, 20),
-                  lookback_days=2, limit_dates=1, write=True, enrich=True)
-        self.assertEqual(
-            CourtCase.objects.using("ngm").get(case_number="082-CR-0015").status, "enriched"
+        run_crawl(
+            special,
+            fetch=fake_fetch,
+            today=date(2025, 4, 20),
+            lookback_days=2,
+            limit_dates=1,
+            write=True,
+            enrich=True,
         )
         self.assertEqual(
-            CourtCase.objects.using("ngm").get(case_number="070-CR-9999").status, "pending"
+            CourtCase.objects.using("ngm").get(case_number="082-CR-0015").status,
+            "enriched",
+        )
+        self.assertEqual(
+            CourtCase.objects.using("ngm").get(case_number="070-CR-9999").status,
+            "pending",
         )
 
     def test_dry_run_writes_nothing(self):
-        stats = run_crawl(special, fetch=fake_fetch, today=date(2025, 4, 20),
-                          lookback_days=2, limit_dates=1, write=False)
+        stats = run_crawl(
+            special,
+            fetch=fake_fetch,
+            today=date(2025, 4, 20),
+            lookback_days=2,
+            limit_dates=1,
+            write=False,
+        )
         self.assertEqual(stats[0].cases, 1)  # parsed
         self.assertEqual(CourtCase.objects.using("ngm").count(), 0)  # but not written
         self.assertEqual(ScrapedDate.objects.using("ngm").count(), 0)

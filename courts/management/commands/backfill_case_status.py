@@ -65,12 +65,19 @@ _WRITE_BATCH_SIZE = 500
 # Columns loaded per row (composite PK + the scraper-owned typed columns this
 # pass may touch, plus extra_data for the hearing-based verdict fallback).
 _LOAD = (
-    "case_number", "court", "case_status", "verdict_type",
-    "verdict_date_bs", "verdict_date_ad", "extra_data",
+    "case_number",
+    "court",
+    "case_status",
+    "verdict_type",
+    "verdict_date_bs",
+    "verdict_date_ad",
+    "extra_data",
 )
 
 
-def compute_case_updates(case_status, verdict_type, verdict_date_bs, verdict_date_ad, hearings):
+def compute_case_updates(
+    case_status, verdict_type, verdict_date_bs, verdict_date_ad, hearings
+):
     """Pure transform: ``(column_updates, parsed)`` for one row. No DB access.
 
     ``column_updates`` holds only the columns whose value should change; an empty
@@ -117,7 +124,9 @@ def _hearings_of(case: CourtCase):
     return (case.extra_data or {}).get("enrichment_hearings")
 
 
-def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on_batch=None):
+def run_backfill(
+    *, batch_size=2000, limit=None, execute=False, using=NGM_DB, on_batch=None
+):
     """Iterate court_cases keyset-paginated, tally (and optionally apply) updates.
 
     Keyset pagination on the composite natural key ``(court, case_number)`` keeps
@@ -158,15 +167,12 @@ def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on
     last_key = None
     while True:
         qs = (
-            CourtCase.objects.using(using)
-            .only(*_LOAD)
-            .order_by("court", "case_number")
+            CourtCase.objects.using(using).only(*_LOAD).order_by("court", "case_number")
         )
         if last_key is not None:
             court, number = last_key
             qs = qs.filter(
-                Q(court_id__gt=court)
-                | (Q(court_id=court) & Q(case_number__gt=number))
+                Q(court_id__gt=court) | (Q(court_id=court) & Q(case_number__gt=number))
             )
         rows = list(qs[:batch_size])
         if not rows:
@@ -179,8 +185,11 @@ def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on
         for case in rows:
             stats["scanned"] += 1
             updates, parsed = compute_case_updates(
-                case.case_status, case.verdict_type,
-                case.verdict_date_bs, case.verdict_date_ad, _hearings_of(case),
+                case.case_status,
+                case.verdict_type,
+                case.verdict_date_bs,
+                case.verdict_date_ad,
+                _hearings_of(case),
             )
             if parsed.unmapped:
                 stats["unmapped"] += 1
@@ -206,7 +215,9 @@ def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on
             # distinct sets → a handful of statements, never one per row).
             for group_fields, cases in changed.items():
                 CourtCase.objects.using(using).bulk_update(
-                    cases, [*group_fields, "updated_at"], batch_size=_WRITE_BATCH_SIZE,
+                    cases,
+                    [*group_fields, "updated_at"],
+                    batch_size=_WRITE_BATCH_SIZE,
                 )
 
         last_key = (rows[-1].court_id, rows[-1].case_number)
@@ -225,15 +236,26 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
-        parser.add_argument("--batch-size", type=int, default=2000,
-                            help="rows per keyset page (SELECT window; default 2000).")
-        parser.add_argument("--limit", type=int, default=None,
-                            help="stop after N rows (smoke tests).")
-        parser.add_argument("--execute", action="store_true",
-                            help="apply changes (default: dry-run, no writes).")
-        parser.add_argument("--i-understand-this-writes-prod", action="store_true",
-                            dest="confirm",
-                            help="required second flag to actually write.")
+        parser.add_argument(
+            "--batch-size",
+            type=int,
+            default=2000,
+            help="rows per keyset page (SELECT window; default 2000).",
+        )
+        parser.add_argument(
+            "--limit", type=int, default=None, help="stop after N rows (smoke tests)."
+        )
+        parser.add_argument(
+            "--execute",
+            action="store_true",
+            help="apply changes (default: dry-run, no writes).",
+        )
+        parser.add_argument(
+            "--i-understand-this-writes-prod",
+            action="store_true",
+            dest="confirm",
+            help="required second flag to actually write.",
+        )
 
     def handle(self, *args, **o):
         execute = o["execute"]
@@ -256,13 +278,19 @@ class Command(BaseCommand):
                 )
 
         stats = run_backfill(
-            batch_size=o["batch_size"], limit=o["limit"],
-            execute=execute, on_batch=_progress,
+            batch_size=o["batch_size"],
+            limit=o["limit"],
+            execute=execute,
+            on_batch=_progress,
         )
 
         self.stdout.write(self.style.SUCCESS(f"\n=== backfill_case_status {mode} ==="))
         for key in (
-            "scanned", "rows_changed", "header_cleared",
-            "verdict_type_set", "verdict_date_set", "unmapped",
+            "scanned",
+            "rows_changed",
+            "header_cleared",
+            "verdict_type_set",
+            "verdict_date_set",
+            "unmapped",
         ):
             self.stdout.write(f"  {key:16s}: {stats[key]:,}")

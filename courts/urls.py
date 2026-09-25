@@ -10,6 +10,7 @@ paths are declared explicitly *before* the router's ``courtcases`` registration 
 the router only handles the bare ``/courtcases`` list. Path converters are kept
 liberal (``[^/]+``) because case numbers contain hyphens.
 """
+
 from django.urls import path, re_path
 from rest_framework.routers import DefaultRouter
 
@@ -72,7 +73,9 @@ urlpatterns = [
     # NOTE: the NGM 501 search stub was removed in the unified-search cutover.
     # Platform search lives at ``GET /api/search/`` (the ``search`` app), which
     # indexes NGM materials + court cases alongside entities and cases.
-    path("ingestion/cases/", views.IngestionCasesView.as_view(), name="ingestion-cases"),
+    path(
+        "ingestion/cases/", views.IngestionCasesView.as_view(), name="ingestion-cases"
+    ),
     path(
         "ingestion/entities/resolve/",
         views.IngestionEntitiesResolveView.as_view(),
@@ -83,7 +86,9 @@ urlpatterns = [
         views.IngestionDocumentsView.as_view(),
         name="ingestion-documents",
     ),
-    path("ingestion/firms/", views.IngestionFirmsView.as_view(), name="ingestion-firms"),
+    path(
+        "ingestion/firms/", views.IngestionFirmsView.as_view(), name="ingestion-firms"
+    ),
     *composite_case_urls,
     *router.urls,
 ]

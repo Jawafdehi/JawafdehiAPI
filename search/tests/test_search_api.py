@@ -36,6 +36,25 @@ def _narrowing(client):
     return [c for c in clauses if c not in visibility]
 
 
+def _facet_clauses(client):
+    """The exact-match facet ``terms`` from the last query.
+
+    These live in the top-level ``post_filter``, not the bool ``filter``, so that
+    a facet is not narrowed by its own selection (see the aggs argument in
+    ``search.service.build_query``). Returns ``[]`` when nothing was filtered,
+    because ``post_filter`` is omitted entirely rather than emitted empty —
+    without that, every no-filter assertion here would KeyError.
+
+    Separate from ``_narrowing`` on purpose: that one answers "what did the
+    caller narrow the QUERY by" (ranges, and the visibility gate it strips), and
+    the two lists stopped being the same thing when the facet clauses moved.
+    """
+    body = client.search.call_args.kwargs["body"]
+    if "post_filter" not in body:
+        return []
+    return body["post_filter"]["bool"]["filter"]
+
+
 def _canned():
     return {
         "hits": {
@@ -243,7 +262,7 @@ def test_search_api_passes_sort_and_filters_through():
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
     assert body["sort"][0] == {"date": {"order": "desc", "missing": "_last"}}
-    filters = body["query"]["bool"]["filter"]
+    filters = body["post_filter"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in filters
     assert {"terms": {"keywords": ["a", "b"]}} in filters
 
@@ -257,7 +276,7 @@ def test_search_api_case_type_filter_normalized_to_upper():
     with patch("search.service.make_client", return_value=client):
         resp = APIClient().get("/api/search/", {"q": "x", "case_type": "corruption"})
     assert resp.status_code == 200
-    filters = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    filters = client.search.call_args.kwargs["body"]["post_filter"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in filters
 
 
@@ -272,7 +291,10 @@ def test_search_api_threads_status_facet_through():
         )
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
-    assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
+    assert (
+        {"terms": {"case_status": ["ongoing"]}}
+        in body["post_filter"]["bool"]["filter"]
+    )
 
 
 @pytest.mark.django_db
@@ -431,7 +453,10 @@ def test_search_api_threads_court_type_through():
         )
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
-    assert {"terms": {"court_type": ["supreme"]}} in body["query"]["bool"]["filter"]
+    assert (
+        {"terms": {"court_type": ["supreme"]}}
+        in body["post_filter"]["bool"]["filter"]
+    )
 
 
 @pytest.mark.django_db
@@ -455,9 +480,9 @@ def test_search_api_threads_a_multi_court_selection_through():
         )
     assert resp.status_code == 200
     body = client.search.call_args.kwargs["body"]
-    assert {"terms": {"court": ["kathmandudc", "patanhc"]}} in body["query"]["bool"][
-        "filter"
-    ]
+    assert {"terms": {"court": ["kathmandudc", "patanhc"]}} in body["post_filter"][
+        "bool"
+    ]["filter"]
 
 
 @pytest.mark.django_db
@@ -470,6 +495,93 @@ def test_search_api_400_on_unknown_court_identifier():
     assert APIClient().get(
         "/api/search/", {"q": "x", "court": "district"}
     ).status_code == 400
+
+
+@pytest.mark.django_db
+def test_search_api_threads_material_type_through():
+    """?material_type reaches the DSL as a terms filter, and repeats as an OR
+    within the one clause (a reader ticking two boxes wants either)."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {
+                "q": "",
+                "type": "material",
+                "material_type": ["press_release", "official_report"],
+            },
+        )
+    assert resp.status_code == 200
+    clauses = client.search.call_args.kwargs["body"]["post_filter"]["bool"]["filter"]
+    assert {
+        "terms": {"material_type": ["press_release", "official_report"]}
+    } in clauses
+
+
+@pytest.mark.django_db
+def test_search_api_material_type_ands_with_the_date_bounds():
+    """The two controls the materials tab ships — document type and a date
+    range — narrow TOGETHER, though they now ride in different places: the
+    document type in ``post_filter`` (so its own facet can be widened out of the
+    selection), the date bounds in the query (so every facet keeps seeing them).
+
+    Dates need no material-specific param: date_from/date_to already bound the
+    shared ``date`` field, which a material fills from datePublished/
+    dateCreated. Pinned here so the tab's one request shape cannot regress to
+    dropping a clause silently."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/",
+            {
+                "q": "",
+                "type": "material",
+                "material_type": "charge_sheet",
+                "date_from": "2020-01-01",
+                "date_to": "2024-12-31",
+            },
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert {"terms": {"material_type": ["charge_sheet"]}} in body["post_filter"][
+        "bool"
+    ]["filter"]
+    # Both bounds collapse into ONE range clause on the shared date field, and it
+    # stays in the query so the widened material_type facet is still date-bounded.
+    assert {
+        "range": {"date": {"gte": "2020-01-01", "lte": "2024-12-31"}}
+    } in body["query"]["bool"]["filter"]
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_unknown_material_type():
+    """material_type is a CLOSED vocabulary, so a typo is a 400 rather than a
+    confident empty page."""
+    resp = APIClient().get("/api/search/", {"q": "x", "material_type": "presrelease"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_search_api_rejects_material_source_as_an_unknown_param():
+    """``Material.source`` is NOT a filter. It conflates the publishing office
+    with the document form — 10 of its 30 production tokens just restate the
+    form ("court_order", 23,399 rows), and the CIAA is split across
+    ciaa_press_release and ciaa_annual_report — so faceting it would offer
+    "Court order" as a publisher. Unknown params are ignored, so this asserts
+    the filter is absent rather than expecting a 400."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "x", "material_source": "ciaa_press_release"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    clauses = body["query"]["bool"]["filter"]
+    assert not any("material_source" in str(clause) for clause in clauses)
+    assert "material_source" not in body["aggs"]
 
 
 @pytest.mark.django_db
@@ -488,7 +600,7 @@ def test_search_api_threads_district_and_province_through():
             },
         )
     assert resp.status_code == 200
-    clauses = _narrowing(client)
+    clauses = _facet_clauses(client)
     assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
     assert {"terms": {"court_province": ["Bagmati"]}} in clauses
 

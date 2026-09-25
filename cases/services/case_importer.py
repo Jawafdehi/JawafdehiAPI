@@ -123,13 +123,13 @@ class CaseImporter:
         except (ValueError, TypeError):
             return None
 
-    def import_from_json(self, json_file, case_type="CORRUPTION", case_state="DRAFT"):
+    def import_from_json(self, json_file, offence_type="CORRUPTION", case_state="DRAFT"):
         """
         Import a case from JSON file.
 
         Args:
             json_file: Path to case-result.json file
-            case_type: Case type (CORRUPTION)
+            offence_type: Case type (CORRUPTION)
             case_state: Initial case state (DRAFT, IN_REVIEW, or PUBLISHED)
 
         Returns:
@@ -160,7 +160,7 @@ class CaseImporter:
         with transaction.atomic():
             # Create case
             case = Case(
-                case_type=getattr(CaseType, case_type),
+                offence_type=getattr(CaseType, offence_type),
                 state=getattr(CaseState, case_state),
                 title=title,
                 description=data.get("description", ""),

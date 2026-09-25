@@ -90,7 +90,7 @@ class CIAADraftCaseService:
 
             with transaction.atomic():
                 case = Case.objects.create(
-                    case_type=case_data["case_type"],
+                    offence_type=case_data["offence_type"],
                     state=case_data["state"],
                     title=case_data["title"][:200],
                     case_start_date=case_data.get("case_start_date"),
@@ -194,7 +194,7 @@ class CIAADraftCaseService:
         case_data["title"] = (
             f"{title_base} ({case_no})"[:200] if case_no else title_base[:200]
         )
-        case_data["case_type"] = CaseType.CORRUPTION
+        case_data["offence_type"] = CaseType.CORRUPTION
         case_data["state"] = CaseState.DRAFT
 
         court_case = ciaa_json.get("court_case", {})

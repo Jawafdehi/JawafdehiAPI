@@ -119,7 +119,7 @@ def test_committed_publish_cannot_index_to_a_real_cluster(monkeypatch):
 
     Case.objects.create(
         title="isolation probe",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.PUBLISHED,
         slug="search-isolation-probe",
         short_description="probe",

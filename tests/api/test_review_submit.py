@@ -39,7 +39,7 @@ def case(db):
     return Case.objects.create(
         slug=CASE_SLUG,
         title="Alpha land fraud",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.IN_REVIEW,
         court_cases=[COURTCASE_IRI],
     )
@@ -111,7 +111,7 @@ def test_ambiguous_courtcase_iri_is_rejected(caseworker, case):
     other = Case.objects.create(
         slug="case-080-cr-0111-beta-revenue",
         title="Beta revenue",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.IN_REVIEW,
         court_cases=[COURTCASE_IRI],
     )

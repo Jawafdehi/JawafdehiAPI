@@ -24,7 +24,7 @@ from tests.conftest import create_case_with_entities, create_user_with_role
 def _make_published_case(i):
     return create_case_with_entities(
         title=f"Bhrastachar Case {i}",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.PUBLISHED,
         alleged_entities=[f"https://jawafdehi.org/entity/person/accused-{i}"],
         locations=[f"https://jawafdehi.org/entity/location/place-{i}"],

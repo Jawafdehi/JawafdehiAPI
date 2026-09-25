@@ -14,6 +14,7 @@ from jawafdehi_mcp.request_context import (
 from jawafdehi_mcp.server import TOOL_MAP
 from jawafdehi_mcp.tools.jawafdehi_cases import (
     CASE_CREATE_FIELDS,
+    CASE_TRACK_VALUES,
     CASE_TYPE_VALUES,
     CreateJawafdehiCaseTool,
     DeleteJawafdehiCaseTool,
@@ -84,11 +85,11 @@ class TestCreateJawafdehiCaseTool:
     def test_tool_metadata(self):
         assert self.tool.name == "create_jawafdehi_case"
         assert "draft Jawafdehi case" in self.tool.description
-        assert self.tool.input_schema["required"] == ["title", "case_type"]
+        assert self.tool.input_schema["required"] == ["title", "offence_type"]
 
-    def test_case_type_schema_matches_the_control_plane(self):
+    def test_offence_type_schema_matches_the_control_plane(self):
         assert CASE_TYPE_VALUES == [value for value, _label in CaseType.choices]
-        assert self.tool.input_schema["properties"]["case_type"]["enum"] == (
+        assert self.tool.input_schema["properties"]["offence_type"]["enum"] == (
             CASE_TYPE_VALUES
         )
 
@@ -98,6 +99,21 @@ class TestCreateJawafdehiCaseTool:
             for name, field in CaseCreateSerializer().fields.items()
             if not field.read_only
         }
+        # Three deliberate differences. ``case_type`` is the deprecated create
+        # alias the REST serializer keeps for the deployed SPA, while the MCP
+        # takes the hard cut the note prescribes for create. ``dates`` is not
+        # offered on MCP create -- a case is created without stages and they
+        # are patched in afterwards. The deprecated
+        # ``case_start_date``/``case_end_date`` stay on BOTH, and both fold
+        # into a first-instance stage.
+        #
+        # ``status_override`` is withheld deliberately. It exists for the two
+        # lifecycles the stage list cannot express (withdrawn, dormant), which
+        # are editorial judgements made about an existing case after reading
+        # its sources -- never a property of a case at the moment it is
+        # created. ``case_track`` IS offered: it is a classification of the
+        # case, knowable from the very sources that justify creating it.
+        serializer_fields -= {"case_type", "dates", "status_override"}
 
         assert set(CASE_CREATE_FIELDS) == serializer_fields
         assert set(self.tool.input_schema["properties"]) == serializer_fields
@@ -105,11 +121,23 @@ class TestCreateJawafdehiCaseTool:
             CaseState.DRAFT
         ]
 
+    def test_case_track_enum_tracks_the_model(self):
+        """The MCP copy is a literal so the schema builds without Django."""
+        from cases.models import CaseTrack
+
+        assert CASE_TRACK_VALUES == [value for value, _label in CaseTrack.choices]
+        # Nullable, so the enum sits inside the ``anyOf`` arm rather than at
+        # the top of the property -- unset is a real answer for the ~2,900
+        # drafts nobody has read the sources for.
+        arms = self.tool.input_schema["properties"]["case_track"]["anyOf"]
+        assert [arm for arm in arms if arm.get("type") == "null"], "must accept null"
+        assert next(arm["enum"] for arm in arms if "enum" in arm) == CASE_TRACK_VALUES
+
     @pytest.mark.asyncio
     async def test_requires_token(self, monkeypatch):
         monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
 
-        result = await self.tool.execute({"title": "Case", "case_type": "CORRUPTION"})
+        result = await self.tool.execute({"title": "Case", "offence_type": "CORRUPTION"})
 
         assert "JAWAFDEHI_API_TOKEN" in result[0].text
 
@@ -129,7 +157,7 @@ class TestCreateJawafdehiCaseTool:
             result = await self.tool.execute(
                 {
                     "title": "Road contract case",
-                    "case_type": "CORRUPTION",
+                    "offence_type": "CORRUPTION",
                     "short_description": "Tender irregularities",
                     "tags": ["procurement"],
                     "key_allegations": ["Bid steering"],
@@ -147,7 +175,7 @@ class TestCreateJawafdehiCaseTool:
         _, kwargs = client.post.await_args
         assert kwargs["headers"]["Authorization"] == "Bearer test-token"
         assert kwargs["json"]["title"] == "Road contract case"
-        assert kwargs["json"]["case_type"] == "CORRUPTION"
+        assert kwargs["json"]["offence_type"] == "CORRUPTION"
         assert kwargs["json"]["short_description"] == "Tender irregularities"
         assert kwargs["json"]["tags"] == ["procurement"]
         assert kwargs["json"]["key_allegations"] == ["Bid steering"]
@@ -172,7 +200,7 @@ class TestCreateJawafdehiCaseTool:
             return_value=context_manager,
         ):
             result = await self.tool.execute(
-                {"title": "x" * 201, "case_type": "CORRUPTION"}
+                {"title": "x" * 201, "offence_type": "CORRUPTION"}
             )
 
         payload = json.loads(result[0].text)
@@ -196,7 +224,7 @@ class TestCreateJawafdehiCaseTool:
             return_value=context_manager,
         ):
             result = await self.tool.execute(
-                {"title": "Case", "case_type": "CORRUPTION"}
+                {"title": "Case", "offence_type": "CORRUPTION"}
             )
 
         payload = json.loads(result[0].text)

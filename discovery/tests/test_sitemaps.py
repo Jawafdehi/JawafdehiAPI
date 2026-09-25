@@ -23,7 +23,7 @@ SM_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 
 
 def _published_case(title="Pub case"):
-    case = Case(case_type=CaseType.CORRUPTION, title=title)
+    case = Case(offence_type=CaseType.CORRUPTION, title=title)
     case.save()
     case.state = CaseState.PUBLISHED
     case.save()
@@ -78,7 +78,7 @@ class SitemapIndexTests(TestCase):
         assert "https://jawafdehi.org/entity/person/ram-bahadur" in locs
 
     def test_draft_case_absent_from_sitemap(self):
-        draft = Case(case_type=CaseType.CORRUPTION, title="Draft")
+        draft = Case(offence_type=CaseType.CORRUPTION, title="Draft")
         draft.save()  # DRAFT
         # The case section yields an empty (but well-formed) urlset — the public
         # -only guarantee: the DRAFT case's IRI must not appear anywhere.

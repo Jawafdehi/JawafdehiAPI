@@ -25,7 +25,7 @@ SECRET_TITLE = "SECRET un-verified allegation against a sitting official"
 
 def _make_case(state, slug, title=SECRET_TITLE):
     case = Case.objects.create(
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         title=title,
         slug=slug,
         description="d",

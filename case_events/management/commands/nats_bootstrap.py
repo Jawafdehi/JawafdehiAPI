@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Assert the JetStream stream topology.
 
 Run once per deploy, in the same place ``manage.py migrate`` is run, and

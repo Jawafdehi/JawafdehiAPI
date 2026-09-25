@@ -132,7 +132,9 @@ def _record_absence(court_id: str, case_number: str, *, using: str) -> None:
     if bump():
         return
     try:
-        RegisterProbe.objects.using(using).create(court_id=court_id, case_number=case_number)
+        RegisterProbe.objects.using(using).create(
+            court_id=court_id, case_number=case_number
+        )
     except IntegrityError:
         bump()
 
@@ -195,7 +197,8 @@ def run_sweep(
                 stats.deferred = len(candidates) - index - 1
                 logger.error(
                     "sweep: %s aborting after %d consecutive errors (likely blocked)",
-                    court_id, consecutive_errors,
+                    court_id,
+                    consecutive_errors,
                 )
                 break
             if delay:
@@ -220,7 +223,9 @@ def run_sweep(
         except Exception:
             # A DB failure on one candidate must not lose the rest of the run's
             # work; the job's own retry covers a genuinely broken database.
-            logger.exception("sweep: %s %s could not be recorded", court_id, case_number)
+            logger.exception(
+                "sweep: %s %s could not be recorded", court_id, case_number
+            )
 
         if on_progress is not None:
             on_progress(court_id, case_number)

@@ -25,7 +25,7 @@ def _draft_case():
     return create_case_with_entities(
         title="Truncation Guard Case",
         alleged_entities=["https://jawafdehi.org/entity/person/test-accused-1"],
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
 
 

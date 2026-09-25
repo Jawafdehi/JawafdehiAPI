@@ -40,36 +40,75 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
-        parser.add_argument("--court", action="append", dest="courts",
-                            help="Restrict to a court (repeatable). Mutually exclusive with --all-courts.")
-        parser.add_argument("--all-courts", action="store_true",
-                            help="Import every court.")
-        parser.add_argument("--mode", choices=["inplace", "copy"], default="inplace",
-                            help="inplace (prod, rows already present) | copy (fresh-target ETL).")
-        parser.add_argument("--source-dsn",
-                            help="Legacy Postgres DSN to read from. REQUIRED for --mode=copy.")
-        parser.add_argument("--since",
-                            help="Only rows with updated_at >= this AD date/ISO datetime.")
-        parser.add_argument("--batch-size", type=int, default=1000,
-                            help="Rows per transaction/commit (default 1000).")
-        parser.add_argument("--limit", type=int,
-                            help="Cap total cases scanned (smoke tests).")
-        parser.add_argument("--dry-run", action="store_true",
-                            help="Transform + count, no writes, no index.")
-        parser.add_argument("--materialize-orders", action="store_true",
-                            help="Also upsert standalone court_order Materials (supreme/special only).")
-        parser.add_argument("--reindex", choices=["none", "incremental", "rebuild"],
-                            default="incremental",
-                            help="Post-load OpenSearch reindex (default incremental). "
-                                 "rebuild is a search-outage window — requires --yes.")
-        parser.add_argument("--allow-nonempty-target", action="store_true",
-                            help="(copy) allow writing into a target that already has rows.")
-        parser.add_argument("--strict", action="store_true",
-                            help="Fail the run on any per-record transform/validation error.")
-        parser.add_argument("--yes", action="store_true",
-                            help="Confirm a destructive --reindex=rebuild.")
-        parser.add_argument("--json", dest="as_json", action="store_true",
-                            help="Emit a machine-readable summary.")
+        parser.add_argument(
+            "--court",
+            action="append",
+            dest="courts",
+            help="Restrict to a court (repeatable). Mutually exclusive with --all-courts.",
+        )
+        parser.add_argument(
+            "--all-courts", action="store_true", help="Import every court."
+        )
+        parser.add_argument(
+            "--mode",
+            choices=["inplace", "copy"],
+            default="inplace",
+            help="inplace (prod, rows already present) | copy (fresh-target ETL).",
+        )
+        parser.add_argument(
+            "--source-dsn",
+            help="Legacy Postgres DSN to read from. REQUIRED for --mode=copy.",
+        )
+        parser.add_argument(
+            "--since", help="Only rows with updated_at >= this AD date/ISO datetime."
+        )
+        parser.add_argument(
+            "--batch-size",
+            type=int,
+            default=1000,
+            help="Rows per transaction/commit (default 1000).",
+        )
+        parser.add_argument(
+            "--limit", type=int, help="Cap total cases scanned (smoke tests)."
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Transform + count, no writes, no index.",
+        )
+        parser.add_argument(
+            "--materialize-orders",
+            action="store_true",
+            help="Also upsert standalone court_order Materials (supreme/special only).",
+        )
+        parser.add_argument(
+            "--reindex",
+            choices=["none", "incremental", "rebuild"],
+            default="incremental",
+            help="Post-load OpenSearch reindex (default incremental). "
+            "rebuild is a search-outage window — requires --yes.",
+        )
+        parser.add_argument(
+            "--allow-nonempty-target",
+            action="store_true",
+            help="(copy) allow writing into a target that already has rows.",
+        )
+        parser.add_argument(
+            "--strict",
+            action="store_true",
+            help="Fail the run on any per-record transform/validation error.",
+        )
+        parser.add_argument(
+            "--yes",
+            action="store_true",
+            help="Confirm a destructive --reindex=rebuild.",
+        )
+        parser.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help="Emit a machine-readable summary.",
+        )
 
     def handle(self, *args, **o):
         if o["mode"] == "copy" and not o["source_dsn"]:
@@ -84,10 +123,12 @@ class Command(BaseCommand):
         if o["materialize_orders"] and o["courts"]:
             no_orders = [c for c in o["courts"] if c not in ORDER_COURTS]
             if no_orders:
-                self.stderr.write(self.style.WARNING(
-                    f"--materialize-orders is a no-op for {', '.join(no_orders)} "
-                    f"(only {', '.join(sorted(ORDER_COURTS))} have orders)."
-                ))
+                self.stderr.write(
+                    self.style.WARNING(
+                        f"--materialize-orders is a no-op for {', '.join(no_orders)} "
+                        f"(only {', '.join(sorted(ORDER_COURTS))} have orders)."
+                    )
+                )
 
         cfg = ImportConfig(
             mode=ImportMode(o["mode"]),
@@ -124,15 +165,19 @@ class Command(BaseCommand):
             self.stdout.write(json.dumps(summary))
             return
         prefix = "(dry-run) " if dry_run else ""
-        self.stdout.write(self.style.SUCCESS(
-            f"{prefix}import_courtcases: scanned={result.scanned} "
-            f"upserted={result.upserted} orders={result.orders_materialized} "
-            f"dq_verdict={result.dq_verdict_nulled} dq_hc={result.dq_hc_recovered} "
-            f"dq_special={result.dq_special_flagged} skipped={result.skipped} "
-            f"failed={result.failed}"
-        ))
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"{prefix}import_courtcases: scanned={result.scanned} "
+                f"upserted={result.upserted} orders={result.orders_materialized} "
+                f"dq_verdict={result.dq_verdict_nulled} dq_hc={result.dq_hc_recovered} "
+                f"dq_special={result.dq_special_flagged} skipped={result.skipped} "
+                f"failed={result.failed}"
+            )
+        )
         if index_summary is not None:
-            self.stdout.write(self.style.SUCCESS(
-                f"reindex: indexed={index_summary['indexed']} "
-                f"skipped={index_summary['skipped']}"
-            ))
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"reindex: indexed={index_summary['indexed']} "
+                    f"skipped={index_summary['skipped']}"
+                )
+            )

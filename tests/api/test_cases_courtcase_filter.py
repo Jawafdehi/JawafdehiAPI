@@ -27,7 +27,7 @@ def _make(slug, title, state, court_cases):
         slug=slug,
         title=title,
         state=state,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         court_cases=court_cases,
     )
 
@@ -158,7 +158,7 @@ class TestCourtCaseFilterComposesWithEntity:
             slug="cf-both",
             title="Both",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[ENTITY],
             court_cases=[CC],
         )
@@ -167,7 +167,7 @@ class TestCourtCaseFilterComposesWithEntity:
             slug="cf-entity-only",
             title="Entity only",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[ENTITY],
             court_cases=[OTHER_CC],
         )
@@ -186,7 +186,7 @@ class TestCourtCaseFilterComposesWithEntity:
             slug="cf-combo-pub",
             title="Published",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[ENTITY],
             court_cases=[CC],
         )
@@ -194,7 +194,7 @@ class TestCourtCaseFilterComposesWithEntity:
             slug="cf-combo-inreview",
             title="In review",
             state=CaseState.IN_REVIEW,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[ENTITY],
             court_cases=[CC],
         )
@@ -221,7 +221,7 @@ class TestCourtCaseFilterComposesWithEntity:
             slug="cf-junk-combo",
             title="Cites entity",
             state=CaseState.PUBLISHED,
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             alleged_entities=[ENTITY],
             court_cases=[CC],
         )

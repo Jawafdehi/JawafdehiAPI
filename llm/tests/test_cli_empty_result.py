@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """An empty result inside a SUCCESS envelope.
 
 `_finalize` validated that `result` EXISTS and never that it said anything. So

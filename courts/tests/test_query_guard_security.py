@@ -443,12 +443,7 @@ class TestLegitimateSelectAllowed(_QuerySecurityBase):
 
         resp = self.client.post(
             QUERY_URL,
-            {
-                "query": (
-                    "SELECT case_number FROM court_cases "
-                    "ORDER BY case_number"
-                )
-            },
+            {"query": ("SELECT case_number FROM court_cases ORDER BY case_number")},
             format="json",
         )
 

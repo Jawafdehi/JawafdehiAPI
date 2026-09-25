@@ -176,7 +176,7 @@ def test_over_the_reference_cap_is_rejected_before_anything_is_written(monkeypat
     from entities.services.merge import service as svc
     monkeypatch.setattr(svc, "MAX_REFERENCES", 0)
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-cap", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-cap", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -193,7 +193,7 @@ def test_over_the_reference_cap_is_rejected_before_anything_is_written(monkeypat
 def test_conflicting_terminal_verdicts_are_rejected_before_anything_is_written():
     _seed_pair()
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-verdicts", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-verdicts", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -217,7 +217,7 @@ def test_a_crash_during_repointing_retires_nothing(monkeypatch):
     # duplicate live, so no case renders bound to an invisible entity.
     _seed_pair()
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-crash", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-crash", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -241,7 +241,7 @@ def test_resending_after_a_crash_completes_the_merge(monkeypatch):
     _seed("location", "damak", "Place", containedInPlace={"@id": LOOSE})
     damak = "https://jawafdehi.org/entity/location/damak"
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-resend", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-resend", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -271,7 +271,7 @@ def test_resending_after_a_crash_completes_the_merge(monkeypatch):
 def test_a_dry_run_after_a_crash_writes_nothing(monkeypatch):
     _seed_pair()
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-drycrash", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-drycrash", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -292,7 +292,7 @@ def test_references_a_crashed_attempt_moved_follow_the_survivor(monkeypatch):
     _seed("location/district", "jhapa-far-east", "AdministrativeArea")
     final = "https://jawafdehi.org/entity/location/district/jhapa-far-east"
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-followed", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-followed", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -310,7 +310,7 @@ def test_references_a_crashed_attempt_moved_follow_the_survivor(monkeypatch):
 def test_a_search_outage_warns_instead_of_failing_a_finished_merge(monkeypatch):
     _seed_pair()
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-index", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-index", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -381,7 +381,7 @@ def test_the_survivors_own_reference_to_a_duplicate_is_dropped():
 
 def _case_with_bind(slug, nes_id):
     case = Case.objects.create(
-        title="Jhapa case", slug=slug, case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug=slug, offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -410,7 +410,7 @@ def test_every_case_bound_to_the_merge_is_reindexed():
     on_survivor = _case_with_bind("jhapa-on-survivor", JHAPA)
     on_duplicate = _case_with_bind("jhapa-on-duplicate", LOOSE)
     unrelated = Case.objects.create(
-        title="Jhapa case", slug="jhapa-unrelated", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-unrelated", offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
 

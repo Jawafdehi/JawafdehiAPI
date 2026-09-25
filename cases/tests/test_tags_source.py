@@ -21,7 +21,7 @@ def published_case(db) -> Case:
     return Case.objects.create(
         title="बागमती नगर जग्गा प्रकरण",
         slug="tags-source-fixture",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.PUBLISHED,
         tags=["Land Management", "Bagmati"],
     )

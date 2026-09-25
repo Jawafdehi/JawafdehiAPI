@@ -10,25 +10,36 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('courts', '0006_blacklistedfirm_uniq_blacklisted_firm_name_date'),
+        ("courts", "0006_blacklistedfirm_uniq_blacklisted_firm_name_date"),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='RegisterProbe',
+            name="RegisterProbe",
             fields=[
-                ('id', models.AutoField(primary_key=True, serialize=False)),
-                ('case_number', models.CharField(db_index=True, max_length=50)),
-                ('miss_count', models.IntegerField(default=1)),
-                ('last_probed_at', models.DateTimeField(auto_now=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('court', models.ForeignKey(db_column='court_identifier', on_delete=django.db.models.deletion.DO_NOTHING, related_name='register_probes', to='courts.court')),
+                ("id", models.AutoField(primary_key=True, serialize=False)),
+                ("case_number", models.CharField(db_index=True, max_length=50)),
+                ("miss_count", models.IntegerField(default=1)),
+                ("last_probed_at", models.DateTimeField(auto_now=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                (
+                    "court",
+                    models.ForeignKey(
+                        db_column="court_identifier",
+                        on_delete=django.db.models.deletion.DO_NOTHING,
+                        related_name="register_probes",
+                        to="courts.court",
+                    ),
+                ),
             ],
             options={
-                'db_table': 'court_register_probes',
-                'constraints': [models.UniqueConstraint(fields=('court', 'case_number'), name='uniq_register_probe')],
+                "db_table": "court_register_probes",
+                "constraints": [
+                    models.UniqueConstraint(
+                        fields=("court", "case_number"), name="uniq_register_probe"
+                    )
+                ],
             },
         ),
     ]

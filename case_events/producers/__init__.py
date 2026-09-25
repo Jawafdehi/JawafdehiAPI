@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Producers: the things that put observed facts on ``jaw.signal.>``.
 
 A producer's whole job is to notice that something happened in the world and say

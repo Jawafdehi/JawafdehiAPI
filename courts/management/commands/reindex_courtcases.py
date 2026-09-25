@@ -75,9 +75,7 @@ class Command(BaseCommand):
             # above, and a case published in between changes which court cases the
             # gate lets through.
             published_referenced_iris(refresh=True)
-            qs = CourtCase.objects.select_related("court").filter(
-                updated_at__gte=since
-            )
+            qs = CourtCase.objects.select_related("court").filter(updated_at__gte=since)
             for case in qs.order_by("court_id", "case_number").iterator():
                 yield case.iri, (case if court_case_public_visible(case) else None)
 

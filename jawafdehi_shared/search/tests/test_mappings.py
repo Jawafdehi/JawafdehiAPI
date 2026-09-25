@@ -155,3 +155,34 @@ def test_returns_fresh_copies():
     s = index_settings()
     s["analysis"]["analyzer"]["devanagari"]["tokenizer"] = "MUTATED"
     assert index_settings()["analysis"]["analyzer"]["devanagari"]["tokenizer"] == "icu_tokenizer"
+
+
+def test_case_lifecycle_and_track_facets_are_keywords():
+    """The stage-design facets: the full ``status`` vocabulary, the legacy
+    three-value ``case_status``, and the route into court.
+
+    All three are exact-match facets — an analyzed ``text`` mapping would
+    tokenize ``under_investigation`` and ``money_laundering`` and split each of
+    them into two buckets that no ``terms`` filter would ever match.
+    """
+    props = common_mappings()["properties"]
+    for field in ("status", "case_status", "case_track"):
+        assert props[field]["type"] == "keyword", field
+
+
+def test_derived_proceeding_dates_are_real_dates():
+    """``proceedings_started_on`` also backs the ``newest``/``oldest`` sort via
+    ``date``; a keyword mapping would sort these lexically and range-filter on
+    them not at all."""
+    props = common_mappings()["properties"]
+    assert props["proceedings_started_on"] == {"type": "date"}
+    assert props["proceedings_decided_on"] == {"type": "date"}
+
+
+def test_the_stage_document_itself_is_not_a_mapped_field():
+    """The stage list is display-only, carried inside the ``enabled: false``
+    ``raw`` payload. Mapping ``dates``/``stages`` as a searchable field would
+    make the shape of a JSON document part of the query contract."""
+    props = common_mappings()["properties"]
+    assert "dates" not in props
+    assert "stages" not in props

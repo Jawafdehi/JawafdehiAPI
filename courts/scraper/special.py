@@ -30,7 +30,9 @@ COURT_ID = "special"
 COURT_IDS = ("special",)
 LOOKBACK_DAYS = 15 * 365  # accountability-critical: crawl the full history
 BASE_URL = "https://supremecourt.gov.np/special/syspublic.php?d=reports&f=daily_public"
-DETAIL_URL = "https://supremecourt.gov.np/special/syspublic.php?d=reports&f=case_details"
+DETAIL_URL = (
+    "https://supremecourt.gov.np/special/syspublic.php?d=reports&f=case_details"
+)
 
 
 def court_ids(fetch) -> list[str]:
@@ -42,31 +44,46 @@ def crawl_detail(fetch, court_id, case_number) -> "ParsedEnrichment | None":
     """Fetch + parse one case's detail page for enrichment."""
     html = fetch(
         DETAIL_URL,
-        data={"syy": "", "smm": "", "sdd": "", "mode": "show",
-              "regno": case_number, "submit": " Search "},
+        data={
+            "syy": "",
+            "smm": "",
+            "sdd": "",
+            "mode": "show",
+            "regno": case_number,
+            "submit": " Search ",
+        },
     )
     return parse_detail(html) if html else None
 
 
-def crawl_date(fetch, court_id, date_bs, nepali_date) -> list[tuple[ParsedCase, ParsedHearing]]:
+def crawl_date(
+    fetch, court_id, date_bs, nepali_date
+) -> list[tuple[ParsedCase, ParsedHearing]]:
     """Fetch + parse one date across all benches. ``fetch(url, data=...) -> html``
     is injected so the orchestration is testable without the network. ``court_id``
     is always ``special`` here (single court); kept for a uniform crawl interface."""
     syy = str(nepali_date.year)
     smm = f"{nepali_date.month:02d}"
     sdd = f"{nepali_date.day:02d}"
-    bench_html = fetch(BASE_URL, data={"mode": "showbench", "syy": syy, "smm": smm, "sdd": sdd})
+    bench_html = fetch(
+        BASE_URL, data={"mode": "showbench", "syy": syy, "smm": smm, "sdd": sdd}
+    )
     rows: list[tuple[ParsedCase, ParsedHearing]] = []
     for bench in parse_bench_options(bench_html):
         page = fetch(
             BASE_URL,
-            data={"mode": "show", "syy": syy, "smm": smm, "sdd": sdd,
-                  "bench_type": bench["value"], "yo": "1"},
+            data={
+                "mode": "show",
+                "syy": syy,
+                "smm": smm,
+                "sdd": sdd,
+                "bench_type": bench["value"],
+                "yo": "1",
+            },
         )
-        rows.extend(
-            parse_bench_page(page, date_bs=date_bs, bench_label=bench["label"])
-        )
+        rows.extend(parse_bench_page(page, date_bs=date_bs, bench_label=bench["label"]))
     return rows
+
 
 # Detail-page main-table labels → typed columns. Low-value legacy fields
 # (category/division) are routed to extra_data, not columns.
@@ -180,7 +197,8 @@ def _parse_row(
         # Low-value legacy fields → extra_data, not v2 columns.
         extra_data={
             "category": normalize_whitespace(cells[1].get_text()) or None,
-            "original_case_number": fix_parenthesis_spacing(cells[7].get_text()) or None,
+            "original_case_number": fix_parenthesis_spacing(cells[7].get_text())
+            or None,
         },
     )
 
@@ -245,7 +263,9 @@ def parse_detail(html: str) -> ParsedEnrichment:
                     side = "plaintiff" if label == "वादीहरु" else "defendant"
                     for name in (n.strip() for n in value.split(",")):
                         if name:
-                            entities.append({"side": side, "name": name[:500], "address": None})
+                            entities.append(
+                                {"side": side, "name": name[:500], "address": None}
+                            )
 
     hearings = _parse_hearing_section(soup)
     if hearings:

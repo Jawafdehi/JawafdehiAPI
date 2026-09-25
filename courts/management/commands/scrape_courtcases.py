@@ -28,18 +28,36 @@ class Command(BaseCommand):
     help = "Crawl court cause-lists (and optionally enrich) into the ngm lake."
 
     def add_arguments(self, parser):
-        parser.add_argument("--court", default="all",
-                            help="special | district | high | supreme | all")
-        parser.add_argument("--lookback-days", type=int, default=None,
-                            help="override the court's default lookback")
-        parser.add_argument("--limit-dates", type=int, default=None,
-                            help="cap dates per court (smoke/testing)")
-        parser.add_argument("--today", default=None,
-                            help="AD anchor date YYYY-MM-DD (default: today, KTM)")
-        parser.add_argument("--write", action="store_true",
-                            help="persist to the ngm DB (default: dry-run)")
-        parser.add_argument("--enrich", action="store_true",
-                            help="also fetch+apply each case's detail page (implies --write)")
+        parser.add_argument(
+            "--court", default="all", help="special | district | high | supreme | all"
+        )
+        parser.add_argument(
+            "--lookback-days",
+            type=int,
+            default=None,
+            help="override the court's default lookback",
+        )
+        parser.add_argument(
+            "--limit-dates",
+            type=int,
+            default=None,
+            help="cap dates per court (smoke/testing)",
+        )
+        parser.add_argument(
+            "--today",
+            default=None,
+            help="AD anchor date YYYY-MM-DD (default: today, KTM)",
+        )
+        parser.add_argument(
+            "--write",
+            action="store_true",
+            help="persist to the ngm DB (default: dry-run)",
+        )
+        parser.add_argument(
+            "--enrich",
+            action="store_true",
+            help="also fetch+apply each case's detail page (implies --write)",
+        )
 
     def handle(self, *args, **o):
         try:
@@ -57,9 +75,13 @@ class Command(BaseCommand):
         for key in keys:
             spec = registry.REGISTRY[key]
             stats = run_crawl(
-                spec, fetch=fetch, today=today,
-                lookback_days=o["lookback_days"], limit_dates=o["limit_dates"],
-                write=write, enrich=enrich,
+                spec,
+                fetch=fetch,
+                today=today,
+                lookback_days=o["lookback_days"],
+                limit_dates=o["limit_dates"],
+                write=write,
+                enrich=enrich,
             )
             for s in stats:
                 self.stdout.write(

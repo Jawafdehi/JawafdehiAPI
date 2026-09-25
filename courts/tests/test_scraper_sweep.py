@@ -34,7 +34,8 @@ def _not_found():
     # What supreme/district/high actually return for an absent docket: empty
     # core/entities but a truthy extra_data.
     return ParsedEnrichment(
-        core_fields={}, extra_data={"enrichment_hearings": [], "enrichment_timeline": []},
+        core_fields={},
+        extra_data={"enrichment_hearings": [], "enrichment_timeline": []},
         entities=[],
     )
 
@@ -89,7 +90,11 @@ class TestSweepDiscovery(_SweepTestCase):
         self._hold(1, 3)
         stats = self._sweep(_Spec(default=_found()), write=False)
         assert stats.probed == 1 and stats.created == 0
-        assert not CourtCase.objects.using("ngm").filter(case_number="076-CR-0002").exists()
+        assert (
+            not CourtCase.objects.using("ngm")
+            .filter(case_number="076-CR-0002")
+            .exists()
+        )
 
     def test_nothing_to_do_when_the_register_is_dense(self):
         self._hold(1, 2, 3)
@@ -107,7 +112,11 @@ class TestNegativeCache(_SweepTestCase):
         self._hold(1, 3)
         stats = self._sweep(_Spec(default=_not_found()), write=True)
         assert stats.missing == 1 and stats.created == 0
-        assert not CourtCase.objects.using("ngm").filter(case_number="076-CR-0002").exists()
+        assert (
+            not CourtCase.objects.using("ngm")
+            .filter(case_number="076-CR-0002")
+            .exists()
+        )
         probe = RegisterProbe.objects.using("ngm").get(case_number="076-CR-0002")
         assert probe.miss_count == 1
 
@@ -116,7 +125,9 @@ class TestNegativeCache(_SweepTestCase):
         self._sweep(_Spec(default=_not_found()), write=True)
         spec = _Spec(default=_not_found())
         assert self._sweep(spec, write=True).probed == 0
-        assert spec.calls == [], "070-CR-0084-style never-issued numbers must not loop forever"
+        assert spec.calls == [], (
+            "070-CR-0084-style never-issued numbers must not loop forever"
+        )
 
     def test_an_absence_is_re_probed_after_the_horizon(self):
         # "Missing" is provisional — a court can issue a number late.
@@ -167,7 +178,10 @@ class TestNegativeCache(_SweepTestCase):
             last_probed_at=timezone.now() - timedelta(days=400)
         )
         self._sweep(_Spec(default=_not_found()), write=True)
-        assert RegisterProbe.objects.using("ngm").get(case_number="076-CR-0002").miss_count == 2
+        assert (
+            RegisterProbe.objects.using("ngm").get(case_number="076-CR-0002").miss_count
+            == 2
+        )
 
 
 class TestBudget(_SweepTestCase):
@@ -193,7 +207,9 @@ class TestBudget(_SweepTestCase):
         cron window shared with the cause-list crawl.
         """
         self._hold(1, 30)
-        spec = _Spec(default=_found(), raises={f"076-CR-{s:04d}" for s in range(2, 30, 2)})
+        spec = _Spec(
+            default=_found(), raises={f"076-CR-{s:04d}" for s in range(2, 30, 2)}
+        )
         stats = self._sweep(spec, write=True, budget=6)
         assert len(spec.calls) == 6
         assert stats.attempts == 6
@@ -245,8 +261,11 @@ class TestFailureHandling(_SweepTestCase):
                     court_id=court_id, case_number=case_number, case_type="पुरानो"
                 )
                 CaseEntity.objects.using("ngm").create(
-                    court_id=court_id, case_number=case_number,
-                    side="defendant", name="क", nes_id=NES_IRI,
+                    court_id=court_id,
+                    case_number=case_number,
+                    side="defendant",
+                    name="क",
+                    nes_id=NES_IRI,
                 )
                 return super().crawl_detail(fetch, court_id, case_number)
 
@@ -255,6 +274,7 @@ class TestFailureHandling(_SweepTestCase):
         assert stats.existing == 1
         case = CourtCase.objects.using("ngm").get(case_number="076-CR-0002")
         assert case.case_type == "पुरानो", "the racing writer's row must survive"
-        assert CaseEntity.objects.using("ngm").get(
-            case_number="076-CR-0002"
-        ).nes_id == NES_IRI
+        assert (
+            CaseEntity.objects.using("ngm").get(case_number="076-CR-0002").nes_id
+            == NES_IRI
+        )

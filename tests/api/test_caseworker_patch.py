@@ -40,7 +40,7 @@ URL = "/api/cases/{}/"
 def _make_case(**kwargs) -> Case:
     defaults = dict(
         title="Test case",
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
         description="Some description",
         short_description="Short",
@@ -740,7 +740,8 @@ def test_patch_422_for_draft_to_in_review_missing_required_fields():
     # messages (was 400 before the transitions were unified).
     assert response.status_code == 422
     assert "entities" in response.data
-    assert "key_allegations" in response.data
+    # Editorial depth is scored by review.rules_engine, not gated here.
+    assert "key_allegations" not in response.data
     case.refresh_from_db()
     assert case.state == CaseState.DRAFT
 
@@ -765,7 +766,7 @@ def test_patch_rejects_removed_case_id_path():
 @pytest.mark.django_db
 def test_patch_422_for_blocked_path_case_type():
     user = _contributor("nisha")
-    case = _make_case(case_type=CaseType.CORRUPTION)
+    case = _make_case(offence_type=CaseType.CORRUPTION)
 
     client = _authed_client(user)
     response = client.patch(
@@ -775,7 +776,7 @@ def test_patch_422_for_blocked_path_case_type():
     )
     assert response.status_code == 422
     case.refresh_from_db()
-    assert case.case_type == CaseType.CORRUPTION
+    assert case.offence_type == CaseType.CORRUPTION
 
 
 @pytest.mark.django_db

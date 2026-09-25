@@ -208,8 +208,16 @@ def test_parse_high_detail_core_extra_and_entities():
     assert enr.extra_data["case_type_display"] == "भ्रष्टाचार"
 
     # entities flattened to {side, name, address}
-    assert {"side": "plaintiff", "name": "नेपाल सरकार", "address": "काठमाडौं"} in enr.entities
-    assert {"side": "defendant", "name": "राम बहादुर", "address": "ललितपुर"} in enr.entities
+    assert {
+        "side": "plaintiff",
+        "name": "नेपाल सरकार",
+        "address": "काठमाडौं",
+    } in enr.entities
+    assert {
+        "side": "defendant",
+        "name": "राम बहादुर",
+        "address": "ललितपुर",
+    } in enr.entities
     # panel header row (नाम/ठेगाना) not captured as a party
     assert all(e["name"] != "नाम" for e in enr.entities)
 

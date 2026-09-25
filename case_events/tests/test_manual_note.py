@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The manual-note endpoint.
 
 The property worth guarding is honesty about what happened. This endpoint's
@@ -36,7 +36,7 @@ def _broker(settings):
 
 
 def make_case(slug="lalita-niwas-land-scam"):
-    return Case.objects.create(title="Lalita Niwas", case_type=CaseType.CORRUPTION, slug=slug)
+    return Case.objects.create(title="Lalita Niwas", offence_type=CaseType.CORRUPTION, slug=slug)
 
 
 _seq = iter(range(1, 10_000))

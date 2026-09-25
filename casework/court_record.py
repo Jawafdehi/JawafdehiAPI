@@ -181,6 +181,41 @@ def court_ref(iri):
     return parts[0].strip(), parts[1].strip()
 
 
+#: The court whose prosecutions are first instances in this corpus. The case
+#: number cannot carry this: appeals are `-CR-` too, just at `supreme`.
+TRIAL_COURT = "special"
+
+
+def case_refs(case):
+    """`(court, number, iri)` per parseable court reference, order preserved.
+
+    Carries the IRI verbatim because a stage's `courtcase_iri` is checked
+    against the case's own `court_cases`; a rebuilt IRI would 422.
+    """
+    refs = []
+    for iri in (case.get("court_cases") or []):
+        parsed = court_ref(iri)
+        if parsed:
+            refs.append((parsed[0], parsed[1], str(iri).strip()))
+    return refs
+
+
+def is_trial_ref(court, number):
+    """Whether this reference is a first-instance prosecution."""
+    return (str(court or "").strip().lower() == TRIAL_COURT
+            and case_number_code(number) in BINDABLE_CODES)
+
+
+def trial_refs(case):
+    """The case's trial references."""
+    return [r for r in case_refs(case) if is_trial_ref(r[0], r[1])]
+
+
+def other_refs(case):
+    """The case's references that are not trials -- reported, never staged."""
+    return [r for r in case_refs(case) if not is_trial_ref(r[0], r[1])]
+
+
 def defendant_names(api, case):
     """`(names, skips)` -- the defendants the court record names, in order.
 
@@ -227,31 +262,30 @@ def defendant_names(api, case):
     return names, skips
 
 
-def court_record_for_case(api, case):
-    """`(records, skips)` -- the full court record behind every reference on `case`.
+def court_record_for_case(api, case, refs=None):
+    """`(records, skips)` -- the full court record behind each reference.
 
-    Each record is `{"court", "number", "detail", "hearings", "parties"}`. The
-    three reads are made per reference; any one of them failing drops that
-    reference into `skips` with a human-readable reason and moves on, because 9
-    of the 49 published court references 404 and one stale number must not cost
-    a case its other references.
+    `refs` is a `case_refs`-shaped list to read; `None` reads every reference on
+    the case. Each record is
+    `{"court", "number", "iri", "detail", "hearings", "parties"}`.
 
     Deliberately separate from `defendant_names`, which answers the narrower
     "who are the defendants" question and stays the entry point for callers that
     need only names.
     """
-    refs = [ref for ref in (court_ref(raw) for raw in (case.get("court_cases") or []))
-            if ref]
+    if refs is None:
+        refs = case_refs(case)
     if not refs:
-        return [], ["no court reference on the case: neither dates nor accused "
+        return [], ["no court reference to read: neither dates nor accused "
                     "can be read from the court record"]
 
     records, skips = [], []
-    for court, number in refs:
+    for court, number, iri in refs:
         try:
             record = {
                 "court": court,
                 "number": number,
+                "iri": iri,
                 "detail": api.get_courtcase(court, number) or {},
                 "hearings": api.list_hearings(court, number) or [],
                 "parties": api.get_court_case_entities(court, number) or [],

@@ -125,7 +125,9 @@ class CopyModeLoadTests(_NgmTestCase):
     def test_dry_run_writes_nothing_but_counts(self):
         row = _src_row(
             verdict_date_bs="**** ** **",
-            entities=[{"side": "plaintiff", "name": "Ram", "nes_id": "entity:person/ram"}],
+            entities=[
+                {"side": "plaintiff", "name": "Ram", "nes_id": "entity:person/ram"}
+            ],
         )
         res = _copy([row], dry_run=True).run()
         self.assertEqual(CourtCase.objects.using("ngm").count(), 0)
@@ -142,20 +144,29 @@ class CopyModeLoadTests(_NgmTestCase):
 
     def test_special_defendants_flagged_untrusted(self):
         row = _src_row(
-            court="special", court_type="special", case="080-CR-0007",
+            court="special",
+            court_type="special",
+            case="080-CR-0007",
             entities=[{"side": "defendant", "name": "प्रतिवादी क…", "nes_id": None}],
         )
         res = CourtCaseImporter(
             ImportConfig(mode=ImportMode.COPY, courts=["special"], source_rows=[row])
         ).run()
-        case = CourtCase.objects.using("ngm").get(court_id="special", case_number="080-CR-0007")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="special", case_number="080-CR-0007"
+        )
         self.assertTrue(case.extra_data["_dq"]["special_defendants_untrusted"])
         self.assertEqual(res.dq_special_flagged, 1)
 
     def test_high_court_devanagari_fields_recovered(self):
         row = _src_row(
-            court="hcpatan", court_type="high", case="081-CR-0099",
-            plaintiff=None, defendant=None, case_type=None, case_status=None,
+            court="hcpatan",
+            court_type="high",
+            case="081-CR-0099",
+            plaintiff=None,
+            defendant=None,
+            case_type=None,
+            case_status=None,
             extra_data={
                 "वादीहरु": "वादी नाम",
                 "प्रतिवादीहरु": "प्रतिवादी नाम",
@@ -166,7 +177,9 @@ class CopyModeLoadTests(_NgmTestCase):
         res = CourtCaseImporter(
             ImportConfig(mode=ImportMode.COPY, courts=["hcpatan"], source_rows=[row])
         ).run()
-        case = CourtCase.objects.using("ngm").get(court_id="hcpatan", case_number="081-CR-0099")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="hcpatan", case_number="081-CR-0099"
+        )
         self.assertEqual(case.plaintiff, "वादी नाम")
         self.assertEqual(case.defendant, "प्रतिवादी नाम")
         self.assertEqual(case.case_type, "रिट")
@@ -216,7 +229,8 @@ class CopyModeLoadTests(_NgmTestCase):
         # A malformed non-dict _dq must not crash the row: it is replaced with a
         # proper dict carrying the archived raw value.
         row = _src_row(
-            case="081-CR-0303", case_type="080-cp-1852 लेनदेन",
+            case="081-CR-0303",
+            case_type="080-cp-1852 लेनदेन",
             extra_data={"_dq": "junk", "keep": 1},
         )
         res = _copy([row]).run()
@@ -232,7 +246,9 @@ class CopyModeLoadTests(_NgmTestCase):
     def test_verdict_sentinel_not_surfaced(self):
         row = _src_row(case="081-CR-0042", verdict_date_bs="**** ** **")
         res = _copy([row]).run()
-        case = CourtCase.objects.using("ngm").get(court_id="supreme", case_number="081-CR-0042")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0042"
+        )
         # physical column left as the scraper wrote it …
         self.assertEqual(case.verdict_date_bs, "**** ** **")
         self.assertEqual(res.dq_verdict_nulled, 1)
@@ -252,7 +268,9 @@ class CopyModeLoadTests(_NgmTestCase):
     def test_party_nes_id_is_ignored_loaded_null(self):
         row = _src_row(
             case="081-CR-0050",
-            entities=[{"side": "plaintiff", "name": "Ram", "nes_id": "entity:person/ram"}],
+            entities=[
+                {"side": "plaintiff", "name": "Ram", "nes_id": "entity:person/ram"}
+            ],
         )
         res = _copy([row]).run()
         # The source nes_id is ignored entirely (assumed null) — party loads null.
@@ -275,11 +293,16 @@ class VerdictJudgeDeriveTests(_NgmTestCase):
         # Decided case, no verdict_judge; the verdict-date hearing carries the bench
         # (glued, as legacy hearings are) → filled, de-run-on to ", "-separated.
         row = _src_row(
-            case="081-CR-0091", verdict_date_ad=self._VDATE, verdict_judge=None,
+            case="081-CR-0091",
+            verdict_date_ad=self._VDATE,
+            verdict_judge=None,
             hearings=[
-                _hearing(hearing_date_ad=date(2024, 5, 15), judge_names="मा. न्या. श्री क"),
                 _hearing(
-                    hearing_date_ad=self._VDATE, decision_type="फैसला",
+                    hearing_date_ad=date(2024, 5, 15), judge_names="मा. न्या. श्री क"
+                ),
+                _hearing(
+                    hearing_date_ad=self._VDATE,
+                    decision_type="फैसला",
                     judge_names="मा. न्या. श्री राममा. न्या. श्री श्याम",
                 ),
             ],
@@ -292,9 +315,12 @@ class VerdictJudgeDeriveTests(_NgmTestCase):
 
     def test_does_not_overwrite_existing_verdict_judge(self):
         row = _src_row(
-            case="081-CR-0092", verdict_date_ad=self._VDATE,
+            case="081-CR-0092",
+            verdict_date_ad=self._VDATE,
             verdict_judge="मा. न्या. श्री मौजुदा",
-            hearings=[_hearing(hearing_date_ad=self._VDATE, judge_names="मा. न्या. श्री अर्को")],
+            hearings=[
+                _hearing(hearing_date_ad=self._VDATE, judge_names="मा. न्या. श्री अर्को")
+            ],
         )
         res = _copy([row]).run()
         case = CourtCase.objects.using("ngm").get(case_number="081-CR-0092")
@@ -304,23 +330,47 @@ class VerdictJudgeDeriveTests(_NgmTestCase):
     def test_undecided_or_no_matching_hearing_leaves_null(self):
         # Not decided (no verdict_date_ad) → skip; and decided but the only hearing
         # with a judge is on a DIFFERENT date → nothing to derive.
-        undecided = _src_row(case="081-CR-0093", verdict_date_ad=None, verdict_judge=None,
-                             hearings=[_hearing(hearing_date_ad=self._VDATE, judge_names="मा. न्या. श्री क")])
-        no_hit = _src_row(case="081-CR-0094", verdict_date_ad=self._VDATE, verdict_judge=None,
-                          hearings=[_hearing(hearing_date_ad=date(2024, 1, 1), judge_names="मा. न्या. श्री क")])
+        undecided = _src_row(
+            case="081-CR-0093",
+            verdict_date_ad=None,
+            verdict_judge=None,
+            hearings=[
+                _hearing(hearing_date_ad=self._VDATE, judge_names="मा. न्या. श्री क")
+            ],
+        )
+        no_hit = _src_row(
+            case="081-CR-0094",
+            verdict_date_ad=self._VDATE,
+            verdict_judge=None,
+            hearings=[
+                _hearing(hearing_date_ad=date(2024, 1, 1), judge_names="मा. न्या. श्री क")
+            ],
+        )
         res = _copy([undecided, no_hit]).run()
-        self.assertIsNone(CourtCase.objects.using("ngm").get(case_number="081-CR-0093").verdict_judge)
-        self.assertIsNone(CourtCase.objects.using("ngm").get(case_number="081-CR-0094").verdict_judge)
+        self.assertIsNone(
+            CourtCase.objects.using("ngm").get(case_number="081-CR-0093").verdict_judge
+        )
+        self.assertIsNone(
+            CourtCase.objects.using("ngm").get(case_number="081-CR-0094").verdict_judge
+        )
         self.assertEqual(res.dq_verdict_judge_derived, 0)
 
     def test_prefers_decisive_sitting_when_several_on_verdict_date(self):
         row = _src_row(
-            case="081-CR-0095", verdict_date_ad=self._VDATE, verdict_judge=None,
+            case="081-CR-0095",
+            verdict_date_ad=self._VDATE,
+            verdict_judge=None,
             hearings=[
-                _hearing(hearing_date_ad=self._VDATE, case_status="पेशी",
-                         judge_names="मा. न्या. श्री पेशी"),
-                _hearing(hearing_date_ad=self._VDATE, decision_type="फैसला",
-                         judge_names="मा. न्या. श्री फैसला"),
+                _hearing(
+                    hearing_date_ad=self._VDATE,
+                    case_status="पेशी",
+                    judge_names="मा. न्या. श्री पेशी",
+                ),
+                _hearing(
+                    hearing_date_ad=self._VDATE,
+                    decision_type="फैसला",
+                    judge_names="मा. न्या. श्री फैसला",
+                ),
             ],
         )
         _copy([row]).run()
@@ -332,12 +382,17 @@ class VerdictJudgeDeriveTests(_NgmTestCase):
             identifier="special", court_type="special", full_name_nepali="वि"
         )
         CourtCase.objects.using("ngm").create(
-            court=court, case_number="082-CR-0007", verdict_date_ad=self._VDATE,
+            court=court,
+            case_number="082-CR-0007",
+            verdict_date_ad=self._VDATE,
             verdict_judge=None,
         )
         CourtCaseHearing.objects.using("ngm").create(
-            court=court, case_number="082-CR-0007", hearing_date_ad=self._VDATE,
-            decision_type="अन्तिम आदेश", judge_names="मा. न्या. श्री एकमा. न्या. श्री दुई",
+            court=court,
+            case_number="082-CR-0007",
+            hearing_date_ad=self._VDATE,
+            decision_type="अन्तिम आदेश",
+            judge_names="मा. न्या. श्री एकमा. न्या. श्री दुई",
             scraped_at=_SCRAPED,
         )
         cfg: dict[str, Any] = dict(mode=ImportMode.INPLACE, courts=["special"])
@@ -357,12 +412,17 @@ class InplaceModeTests(_NgmTestCase):
             identifier="supreme", court_type="supreme", full_name_nepali="स"
         )
         CourtCase.objects.using("ngm").create(
-            court=court, case_number="081-CR-0081", status="enriched",
+            court=court,
+            case_number="081-CR-0081",
+            status="enriched",
             verdict_date_bs="**** ** **",
         )
         CaseEntity.objects.using("ngm").create(
-            court=court, case_number="081-CR-0081", side="defendant",
-            name="Shyam", nes_id="entity:person/shyam",
+            court=court,
+            case_number="081-CR-0081",
+            side="defendant",
+            name="Shyam",
+            nes_id="entity:person/shyam",
         )
         res = CourtCaseImporter(
             ImportConfig(mode=ImportMode.INPLACE, courts=["supreme"])
@@ -370,7 +430,9 @@ class InplaceModeTests(_NgmTestCase):
         # nes_id is not imported/re-keyed → left exactly as it was.
         ent = CaseEntity.objects.using("ngm").get(name="Shyam")
         self.assertEqual(ent.nes_id, "entity:person/shyam")
-        case = CourtCase.objects.using("ngm").get(court_id="supreme", case_number="081-CR-0081")
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0081"
+        )
         # scraper-owned status NEVER overwritten in inplace.
         self.assertEqual(case.status, "enriched")
         self.assertEqual(res.dq_verdict_nulled, 1)
@@ -380,11 +442,16 @@ class InplaceModeTests(_NgmTestCase):
             identifier="supreme", court_type="supreme", full_name_nepali="स"
         )
         CourtCase.objects.using("ngm").create(
-            court=court, case_number="081-CR-0081", verdict_date_bs="**** ** **",
+            court=court,
+            case_number="081-CR-0081",
+            verdict_date_bs="**** ** **",
         )
         CaseEntity.objects.using("ngm").create(
-            court=court, case_number="081-CR-0081", side="defendant",
-            name="Shyam", nes_id="entity:person/shyam",
+            court=court,
+            case_number="081-CR-0081",
+            side="defendant",
+            name="Shyam",
+            nes_id="entity:person/shyam",
         )
         res = CourtCaseImporter(
             ImportConfig(mode=ImportMode.INPLACE, courts=["supreme"], dry_run=True)
@@ -401,7 +468,9 @@ class InplaceModeTests(_NgmTestCase):
             identifier="supreme", court_type="supreme", full_name_nepali="स"
         )
         CourtCase.objects.using("ngm").create(
-            court=court, case_number="081-CR-0400", status="enriched",
+            court=court,
+            case_number="081-CR-0400",
+            status="enriched",
             case_type="080-cp-1852 लेनदेन",
         )
         cfg: dict[str, Any] = dict(mode=ImportMode.INPLACE, courts=["supreme"])
@@ -441,7 +510,8 @@ class SignalAndReindexTests(_NgmTestCase):
     def test_reindex_drives_the_shared_driver_with_subset(self):
         imp = CourtCaseImporter(
             ImportConfig(
-                mode=ImportMode.INPLACE, courts=["supreme"],
+                mode=ImportMode.INPLACE,
+                courts=["supreme"],
                 since="2026-06-01T00:00:00+00:00",
             )
         )
@@ -473,14 +543,18 @@ class CommandArgValidationTests(_NgmTestCase):
 
     def test_rebuild_requires_yes(self):
         with self.assertRaises(CommandError):
-            call_command(
-                "import_courtcases", "--all-courts", "--reindex", "rebuild"
-            )
+            call_command("import_courtcases", "--all-courts", "--reindex", "rebuild")
 
     def test_inplace_empty_db_exits_clean(self):
         out = StringIO()
         call_command(
-            "import_courtcases", "--all-courts", "--mode", "inplace",
-            "--reindex", "none", "--json", stdout=out,
+            "import_courtcases",
+            "--all-courts",
+            "--mode",
+            "inplace",
+            "--reindex",
+            "none",
+            "--json",
+            stdout=out,
         )
         self.assertIn('"scanned": 0', out.getvalue())

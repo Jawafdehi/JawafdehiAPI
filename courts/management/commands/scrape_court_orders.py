@@ -63,8 +63,7 @@ _USER_AGENTS = (
 _ENCODING = {
     ".pdf": "application/pdf",
     ".doc": "application/msword",
-    ".docx": "application/vnd.openxmlformats-officedocument"
-    ".wordprocessingml.document",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
 #: Homepage GETs tolerated when the CAPTCHA cookie fails to appear.
@@ -107,7 +106,11 @@ class OrdersHttpClient:
         """GET the homepage → ``(status, court_session_cookie_value, retry_after)``."""
         try:
             resp = self._session.get(O.HOMEPAGE_URL, timeout=self._timeout)
-            return resp.status_code, self._court_session(), resp.headers.get("Retry-After")
+            return (
+                resp.status_code,
+                self._court_session(),
+                resp.headers.get("Retry-After"),
+            )
         except Exception:  # noqa: BLE001 - any portal/parse failure is a miss, not a crash
             return None, None, None
 
@@ -192,11 +195,14 @@ class Command(BaseCommand):
             "--limit", type=int, default=3000, help="max cases per run (default 3000)"
         )
         parser.add_argument(
-            "--delay", type=float, default=3.0,
+            "--delay",
+            type=float,
+            default=3.0,
             help="seconds between cases (default 3.0; the proven-polite prod rate)",
         )
         parser.add_argument(
-            "--case", default=None,
+            "--case",
+            default=None,
             help="a single 'court:case_number' (smoke test; ignores backlog filters)",
         )
         parser.add_argument(
@@ -204,12 +210,17 @@ class Command(BaseCommand):
         )
         parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout (s)")
         parser.add_argument(
-            "--write", action="store_true",
+            "--write",
+            action="store_true",
             help="download + persist (default: dry-run — GET/POST/parse only)",
         )
 
     def handle(self, *args, **o):
-        if os.environ.get(CAPTURE_ENABLED_ENV, "").strip().lower() not in ("1", "true", "yes"):
+        if os.environ.get(CAPTURE_ENABLED_ENV, "").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+        ):
             raise CommandError(
                 "court-order capture is DISABLED. This command drives a "
                 "CAPTCHA-gated search against supremecourt.gov.np; set "
@@ -242,10 +253,7 @@ class Command(BaseCommand):
             if delay and i < len(cases):
                 time.sleep(delay)
 
-        self.stdout.write(
-            "done: "
-            + " ".join(f"{k}={v}" for k, v in tally.items())
-        )
+        self.stdout.write("done: " + " ".join(f"{k}={v}" for k, v in tally.items()))
 
     # ── case selection ───────────────────────────────────────────────────────
 
@@ -271,7 +279,9 @@ class Command(BaseCommand):
             return O.ORDER_COURTS
         if value in O.ORDER_COURTS:
             return (value,)
-        raise CommandError(f"--court must be one of {('all', *O.ORDER_COURTS)}, got {value!r}")
+        raise CommandError(
+            f"--court must be one of {('all', *O.ORDER_COURTS)}, got {value!r}"
+        )
 
     # ── per-case capture cycle ───────────────────────────────────────────────
 
@@ -286,7 +296,9 @@ class Command(BaseCommand):
             return self._apply_transient(case, "captcha_unresolved", write)
 
         if result.status == O.SERVER_ERROR:
-            return self._apply_transient(case, f"server_error: {result.detail}"[:200], write)
+            return self._apply_transient(
+                case, f"server_error: {result.detail}"[:200], write
+            )
         if result.status == O.NOT_RESULTS_PAGE:
             return self._apply_transient(case, "not_results_page", write)
         if result.status == O.NO_RECORD:
@@ -342,9 +354,13 @@ class Command(BaseCommand):
             status, content = client.download(url)
             if status is None or status >= 500:
                 backoff.server_error()
-                return self._apply_transient(case, f"download {status} {url}"[:200], write)
+                return self._apply_transient(
+                    case, f"download {status} {url}"[:200], write
+                )
             if status != 200 or not content:
-                return self._apply_transient(case, f"download {status} {url}"[:200], write)
+                return self._apply_transient(
+                    case, f"download {status} {url}"[:200], write
+                )
             ext = (posixpath.splitext(urlparse(url).path)[1] or ".doc").lower()
             files.append(
                 {
@@ -426,7 +442,9 @@ class Command(BaseCommand):
                 case.extra_data, error="no_document_old_case", now_iso=self._now_iso()
             )
         else:
-            case.extra_data = O.mark_too_recent(case.extra_data, now_iso=self._now_iso())
+            case.extra_data = O.mark_too_recent(
+                case.extra_data, now_iso=self._now_iso()
+            )
         case.save(using="ngm", update_fields=["extra_data", "updated_at"])
         return outcome, "no document"
 

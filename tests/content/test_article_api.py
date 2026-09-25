@@ -54,7 +54,7 @@ def case(db):
         title="एनसेल कर विवाद परीक्षण मुद्दा",
         slug="ncell-tax-test-case",
         state=CaseState.PUBLISHED,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
     )
 
 

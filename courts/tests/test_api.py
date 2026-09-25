@@ -64,7 +64,9 @@ class ReadPlaneTests(_DbAPITestCase):
             case_status="चालु",
             plaintiff="X",
             defendant="Y",
-            document_sources=[{"document_id": "ngm:doc:1", "url": [{"link": "u", "role": "RAW"}]}],
+            document_sources=[
+                {"document_id": "ngm:doc:1", "url": [{"link": "u", "role": "RAW"}]}
+            ],
         )
         CourtCaseHearing.objects.create(
             case_number="082-OA-0503",
@@ -131,7 +133,10 @@ class ReadPlaneTests(_DbAPITestCase):
 
         e = self.client.get("/api/courtcases/kathmandudc/082-OA-0503/entities")
         self.assertEqual(e.status_code, status.HTTP_200_OK)
-        self.assertEqual(e.data["results"][0]["nes_id"], "https://jawafdehi.org/entity/person/ram-bahadur")
+        self.assertEqual(
+            e.data["results"][0]["nes_id"],
+            "https://jawafdehi.org/entity/person/ram-bahadur",
+        )
 
         d = self.client.get("/api/courtcases/kathmandudc/082-OA-0503/documents")
         self.assertEqual(d.status_code, status.HTTP_200_OK)
@@ -143,7 +148,10 @@ class ReadPlaneTests(_DbAPITestCase):
         self.assertEqual(resp.data["results"][0]["firm_name"], "Acme Builders")
 
     def test_entities_search(self):
-        resp = self.client.get("/api/courtcase-entities/", {"nes_id": "https://jawafdehi.org/entity/person/ram-bahadur"})
+        resp = self.client.get(
+            "/api/courtcase-entities/",
+            {"nes_id": "https://jawafdehi.org/entity/person/ram-bahadur"},
+        )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["results"]), 1)
 
@@ -184,7 +192,9 @@ class VerdictExposureTests(_DbAPITestCase):
         )
         # Scrape garbage, likewise seen in prod.
         CourtCase.objects.create(
-            case_number="067-WO-0527", court=cls.court, verdict_type="।।।।।।।",
+            case_number="067-WO-0527",
+            court=cls.court,
+            verdict_type="।।।।।।।",
         )
         # Never enriched at all.
         CourtCase.objects.create(case_number="081-CR-1318", court=cls.court)

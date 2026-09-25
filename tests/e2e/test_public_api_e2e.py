@@ -41,7 +41,7 @@ class TestPublicAPIWorkflows:
                 "Illegally acquired public land",
                 "Failed to disclose assets",
             ],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="A detailed description of the corruption case involving land encroachment.",
             tags=["land-encroachment", "public-land"],
             timeline=[
@@ -72,7 +72,7 @@ class TestPublicAPIWorkflows:
             title="Broken Promise - Infrastructure Project",
             alleged_entities=["https://jawafdehi.org/entity/person/test-politician"],
             key_allegations=["Failed to deliver promised infrastructure"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Election promise to build hospital was not fulfilled.",
             tags=["infrastructure", "healthcare"],
             state=CaseState.PUBLISHED,
@@ -83,7 +83,7 @@ class TestPublicAPIWorkflows:
             title="Draft Case - Should Not Appear",
             alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="This is a draft case",
             state=CaseState.DRAFT,
         )
@@ -93,7 +93,7 @@ class TestPublicAPIWorkflows:
             title="Closed Case - Should Not Appear",
             alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="This is a closed case",
             state=CaseState.CLOSED,
         )
@@ -220,7 +220,7 @@ class TestPublicAPIWorkflows:
             title="In Review Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="This is an in-review case",
             state=CaseState.IN_REVIEW,
         )
@@ -269,7 +269,7 @@ class TestPublicAPIWorkflows:
             title="Case with Notes",
             alleged_entities=["https://jawafdehi.org/entity/person/test-official"],
             key_allegations=["Initial allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="A case with markdown notes.",
             state=CaseState.PUBLISHED,
         )
@@ -410,7 +410,7 @@ class TestPublicAPIWorkflows:
             title="Single Row Case - Original Title",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Original allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Original description",
             state=CaseState.PUBLISHED,
         )
@@ -456,7 +456,7 @@ class TestPublicAPIWorkflows:
                 title=f"Pagination Test Case {i}",
                 alleged_entities=["https://jawafdehi.org/entity/person/test"],
                 key_allegations=["Test allegation"],
-                case_type=CaseType.CORRUPTION,
+                offence_type=CaseType.CORRUPTION,
                 description=f"Test case {i}",
                 state=CaseState.PUBLISHED,
             )

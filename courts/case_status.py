@@ -67,13 +67,28 @@ PARTIALLY_REVERSED = "PARTIALLY_REVERSED"
 # rendered as an outcome would tell a reader a live case was decided. Anything
 # crossing a public boundary must therefore be filtered through this set; see
 # ``courts.serializers.CourtCaseSerializer.get_verdict_type``.
-VERDICT_TYPES = frozenset({
-    CONVICTED, ACQUITTED, PARTIALLY_CONVICTED,
-    CLAIM_UPHELD, CLAIM_DENIED, PARTIALLY_UPHELD,
-    SETTLED, WITHDRAWN, DISMISSED, QUASHED,
-    PROCEDURAL, ABEYANCE, STRUCK_OFF, AMENDED, OTHER,
-    AFFIRMED, REVERSED, PARTIALLY_REVERSED,
-})
+VERDICT_TYPES = frozenset(
+    {
+        CONVICTED,
+        ACQUITTED,
+        PARTIALLY_CONVICTED,
+        CLAIM_UPHELD,
+        CLAIM_DENIED,
+        PARTIALLY_UPHELD,
+        SETTLED,
+        WITHDRAWN,
+        DISMISSED,
+        QUASHED,
+        PROCEDURAL,
+        ABEYANCE,
+        STRUCK_OFF,
+        AMENDED,
+        OTHER,
+        AFFIRMED,
+        REVERSED,
+        PARTIALLY_REVERSED,
+    }
+)
 
 
 # --- vocabulary --------------------------------------------------------------
@@ -183,7 +198,7 @@ _ZERO_WIDTH = dict.fromkeys((0x200C, 0x200D), None)
 #: (वन्दीप्रत्येक्षीकरण) is folded identically and still matches.
 _ORDER_SPELLING = (
     ("व", "ब"),
-    ("अनुमती", "अनुमति"),   # 16,677 entries hang on this one vowel length
+    ("अनुमती", "अनुमति"),  # 16,677 entries hang on this one vowel length
     ("कानुन", "कानून"),
     ("शंशोधन", "संशोधन"),
     ("आंशीक", "आंशिक"),
@@ -205,12 +220,12 @@ _APPELLATE_OUTCOME_MAP = {
     "पुनरावेदनको आदेश सदर": AFFIRMED,
     "आदेश बदर": REVERSED,
     "उल्टी": REVERSED,
-    "उल्टि": REVERSED,                      # portal typo for उल्टी
+    "उल्टि": REVERSED,  # portal typo for उल्टी
     "उल्टी फैसला": REVERSED,
     "पुनरावेदन उल्टी": REVERSED,
     "आंशिक बदर": PARTIALLY_REVERSED,
     "केही उल्टी": PARTIALLY_REVERSED,
-    "केहि उल्टी": PARTIALLY_REVERSED,       # spelling variant of केही
+    "केहि उल्टी": PARTIALLY_REVERSED,  # spelling variant of केही
     # writ relief: "जारी" = granted (petitioner won), "खारेज" = refused
     "रिट जारी": CLAIM_UPHELD,
     "परमादेश जारी": CLAIM_UPHELD,
@@ -284,53 +299,57 @@ _APPELLATE_COMPOUND_MAP = {
 
 #: Orders that leave the case LIVE. Enumerated rather than inferred so that a new
 #: portal value falls through to "unknown" instead of silently counting as decided.
-_APPELLATE_INTERLOCUTORY = frozenset({
-    "कैफियत प्रतिवेदन माग्ने",
-    "कैफियत प्रतिवेदन माग्ने, अल्पकालीन अन्तरकालिन आदेश",
-    "लिखित जवाफ माग्ने",
-    "प्रत्यर्थी झिकाउने",
-    "बयान गराउने",
-    "मिसिल झिकाउने",
-    "साधारण तारेखमा राख्‍ने",
-    "अन्तरिम आदेश जारी",
-    "अन्तरिम आदेश जारी, लिखित जवाफ माग्ने",
-    "अन्तरिम आदेश जारी नहुने, लिखित जवाफ माग्ने",
-    "अवहेलना दर्ता गरी लिखित जवाफ माग्ने",
-    "अवहेलना दर्ता गर्ने",
-    "धरौटी घटाएको",
-    "आदेश बदर धरौटी माग गर्ने",
-    "मुल्तवी जगाउने",
-    "कानून बमोजिम गर्नु र ध्यानाकर्षण गरिएको",
-    # bail/custody rulings and show-cause: the case itself carries on
-    "धरौटमा छोड्ने",
-    "धरौट कम लिने",
-    "कारण देखाउ",
-    "साधारण तारेखमा राख्ने",
-})
+_APPELLATE_INTERLOCUTORY = frozenset(
+    {
+        "कैफियत प्रतिवेदन माग्ने",
+        "कैफियत प्रतिवेदन माग्ने, अल्पकालीन अन्तरकालिन आदेश",
+        "लिखित जवाफ माग्ने",
+        "प्रत्यर्थी झिकाउने",
+        "बयान गराउने",
+        "मिसिल झिकाउने",
+        "साधारण तारेखमा राख्‍ने",
+        "अन्तरिम आदेश जारी",
+        "अन्तरिम आदेश जारी, लिखित जवाफ माग्ने",
+        "अन्तरिम आदेश जारी नहुने, लिखित जवाफ माग्ने",
+        "अवहेलना दर्ता गरी लिखित जवाफ माग्ने",
+        "अवहेलना दर्ता गर्ने",
+        "धरौटी घटाएको",
+        "आदेश बदर धरौटी माग गर्ने",
+        "मुल्तवी जगाउने",
+        "कानून बमोजिम गर्नु र ध्यानाकर्षण गरिएको",
+        # bail/custody rulings and show-cause: the case itself carries on
+        "धरौटमा छोड्ने",
+        "धरौट कम लिने",
+        "कारण देखाउ",
+        "साधारण तारेखमा राख्ने",
+    }
+)
 
 #: Sent to a larger bench, or back down for fresh decision. The case continues
 #: elsewhere, so this court has entered no verdict.
-_APPELLATE_REFERRAL = frozenset({
-    "पूर्ण इजलासमा पेस हुने",
-    "पूर्ण ईजलाशमा जाने",
-    "पुर्णमा जाने",
-    "संवै‌धानिक इजलासमा पेस हुने",
-    "संयुक्त इजलासमा पेस हुने",
-    "बृहत् पूर्ण इजलासमा पेस हुने",
-    "पुनरावेदन जाने",
-    "पुनः निर्णयका लागि पठाउने",
-    "बदर, सुरु अदालतमा पठाउने",
-    "अन्तरिम आदेश जारी नहुने, पूर्ण इजलासमा पेस हुने",
-    "अन्तरिम आदेश जारी हुने, पूर्ण इजलासमा पेस हुने",
-    "अ।आ। निरन्तरता हुने , पूर्ण इजलास मा पेस गर्ने",
-    "जारी",
-    # remands and transfers found only in the older corpus
-    "बदर, उच्च अदालतमा पठाउने",
-    "उल्टी शुरु पठाउने",
-    "पूर्ण इजलास जाने",
-    "संवै‌धानिक इजलासले हेर्ने",
-    "विशेषमा जाने",
-})
+_APPELLATE_REFERRAL = frozenset(
+    {
+        "पूर्ण इजलासमा पेस हुने",
+        "पूर्ण ईजलाशमा जाने",
+        "पुर्णमा जाने",
+        "संवै‌धानिक इजलासमा पेस हुने",
+        "संयुक्त इजलासमा पेस हुने",
+        "बृहत् पूर्ण इजलासमा पेस हुने",
+        "पुनरावेदन जाने",
+        "पुनः निर्णयका लागि पठाउने",
+        "बदर, सुरु अदालतमा पठाउने",
+        "अन्तरिम आदेश जारी नहुने, पूर्ण इजलासमा पेस हुने",
+        "अन्तरिम आदेश जारी हुने, पूर्ण इजलासमा पेस हुने",
+        "अ।आ। निरन्तरता हुने , पूर्ण इजलास मा पेस गर्ने",
+        "जारी",
+        # remands and transfers found only in the older corpus
+        "बदर, उच्च अदालतमा पठाउने",
+        "उल्टी शुरु पठाउने",
+        "पूर्ण इजलास जाने",
+        "संवै‌धानिक इजलासले हेर्ने",
+        "विशेषमा जाने",
+    }
+)
 
 #: ``status`` values that MIGHT be terminal — a necessary condition, never a
 #: sufficient one (see the note above). ``order_type`` decides.
@@ -553,7 +572,11 @@ def outcome_from_hearings(hearings) -> HearingOutcome | None:
             # discarded, which is how 62 partial dispositions were being lost.
             decision = _order_key(raw)
             verdict = next(
-                (v for k, v in _HEARING_DECISION_MAP.items() if _order_key(k) in decision),
+                (
+                    v
+                    for k, v in _HEARING_DECISION_MAP.items()
+                    if _order_key(k) in decision
+                ),
                 None,
             )
         # Hoisted out of the fallback branch so it guards BOTH paths with one check.

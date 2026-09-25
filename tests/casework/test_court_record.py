@@ -16,11 +16,15 @@ from casework.court_record import (
     BINDABLE_CODES,
     UNPARSEABLE,
     case_number_code,
+    case_refs,
     court_record_for_case,
     court_ref,
     defendant_names,
+    is_trial_ref,
+    other_refs,
     party_legal_name,
     split_alias,
+    trial_refs,
 )
 
 
@@ -303,3 +307,112 @@ def test_party_legal_name_strips_the_alias_from_a_party_row():
     party = {"side": "defendant", "name": "  आवास भन्ने आभाश अर्याल  "}
     assert party_legal_name(party) == "आभाश अर्याल"
     assert party_legal_name({"side": "defendant"}) == ""
+
+
+# ── which docket is the trial ────────────────────────────────────────────────
+
+IRI = "https://jawafdehi.org/courtcase/{}/{}"
+
+
+def _case(*pairs):
+    return {"court_cases": [IRI.format(c, n) for c, n in pairs]}
+
+
+def test_a_special_court_prosecution_is_a_trial():
+    assert is_trial_ref("special", "079-CR-0151") is True
+
+
+def test_a_supreme_court_cr_number_is_not_a_trial():
+    # Measured: all 1,824 mapped appeals are -CR- at supreme. The number
+    # cannot discriminate; the court can.
+    assert is_trial_ref("supreme", "081-CR-2026") is False
+
+
+def test_a_special_court_writ_or_oa_is_not_a_trial():
+    assert is_trial_ref("special", "080-OA-0012") is False
+
+
+def test_a_high_court_prosecution_code_is_not_a_trial():
+    assert is_trial_ref("patanhc", "076-CB-3493") is False
+
+
+def test_the_pre_fy073_all_digit_number_is_a_trial_at_special():
+    assert is_trial_ref("special", "93-068-0194") is True
+
+
+def test_an_unparseable_number_is_not_a_trial():
+    assert is_trial_ref("special", "nonsense") is False
+
+
+def test_case_refs_keeps_the_iri_verbatim():
+    case = _case(("special", "079-CR-0151"))
+    assert case_refs(case) == [
+        ("special", "079-CR-0151",
+         "https://jawafdehi.org/courtcase/special/079-CR-0151")
+    ]
+
+
+def test_case_refs_drops_an_unparseable_entry_and_keeps_the_rest():
+    case = {"court_cases": ["not-an-iri", IRI.format("special", "079-CR-0151")]}
+    assert [r[1] for r in case_refs(case)] == ["079-CR-0151"]
+
+
+def test_case_refs_is_empty_when_the_case_cites_nothing():
+    assert case_refs({}) == []
+
+
+def test_trial_and_other_refs_partition_the_case():
+    case = _case(("special", "080-CR-0204"), ("supreme", "081-CR-2026"),
+                 ("special", "080-OA-0012"))
+    assert [r[1] for r in trial_refs(case)] == ["080-CR-0204"]
+    assert [r[1] for r in other_refs(case)] == ["081-CR-2026", "080-OA-0012"]
+
+
+# ── reading only the references asked for ────────────────────────────────────
+
+class _RecordApi:
+    def __init__(self):
+        self.read = []
+
+    def get_courtcase(self, court, number):
+        self.read.append((court, number))
+        return {"registration_date_ad": "2022-08-01"}
+
+    def list_hearings(self, court, number):
+        return []
+
+    def get_court_case_entities(self, court, number):
+        return [{"side": "defendant", "name": "राम"}]
+
+
+def test_court_record_reads_only_the_refs_it_is_given():
+    api = _RecordApi()
+    case = _case(("special", "080-CR-0204"), ("supreme", "081-CR-2026"))
+    records, skips = court_record_for_case(api, case, refs=trial_refs(case))
+    assert api.read == [("special", "080-CR-0204")]
+    assert [r["number"] for r in records] == ["080-CR-0204"]
+    assert skips == []
+
+
+def test_court_record_carries_the_iri_onto_each_record():
+    api = _RecordApi()
+    case = _case(("special", "080-CR-0204"))
+    records, _ = court_record_for_case(api, case, refs=trial_refs(case))
+    assert records[0]["iri"] == (
+        "https://jawafdehi.org/courtcase/special/080-CR-0204")
+
+
+def test_an_empty_ref_list_reads_nothing_and_says_why():
+    api = _RecordApi()
+    case = _case(("supreme", "081-CR-2026"))
+    records, skips = court_record_for_case(api, case, refs=trial_refs(case))
+    assert api.read == []
+    assert records == []
+    assert skips and "no court reference" in skips[0]
+
+
+def test_refs_none_still_reads_every_reference():
+    api = _RecordApi()
+    case = _case(("special", "080-CR-0204"), ("supreme", "081-CR-2026"))
+    court_record_for_case(api, case)
+    assert api.read == [("special", "080-CR-0204"), ("supreme", "081-CR-2026")]

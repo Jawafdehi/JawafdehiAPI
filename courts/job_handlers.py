@@ -110,14 +110,16 @@ def handle_court_scrape(payload, on_stage=None, fetch=None) -> dict:
             totals["cases"] += s.cases
             totals["hearings"] += s.hearings
             totals["enriched"] += s.enriched
-            per_court.append({
-                "court": key,
-                "court_id": s.court_id,
-                "dates": s.dates,
-                "cases": s.cases,
-                "hearings": s.hearings,
-                "enriched": s.enriched,
-            })
+            per_court.append(
+                {
+                    "court": key,
+                    "court_id": s.court_id,
+                    "dates": s.dates,
+                    "cases": s.cases,
+                    "hearings": s.hearings,
+                    "enriched": s.enriched,
+                }
+            )
 
     if sweep:
         # Register enumeration: the dockets that never reached a cause list and so

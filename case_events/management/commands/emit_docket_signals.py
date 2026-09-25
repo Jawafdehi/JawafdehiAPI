@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Publish docket signals from the NGM lake.
 
     manage.py emit_docket_signals                    # READ-ONLY: count what would go

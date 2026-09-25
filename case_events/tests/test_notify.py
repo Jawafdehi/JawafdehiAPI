@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The outbound webhook, and what it is not allowed to carry.
 
 Most of these are about restraint rather than function: a PENDING proposal is

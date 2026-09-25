@@ -88,7 +88,7 @@ class CourtViewSet(
 ):
     queryset = Court.objects.all().order_by("identifier")
     serializer_class = CourtSerializer
-    pagination_class = None           # small fixed set (~97 rows)
+    pagination_class = None  # small fixed set (~97 rows)
 
 
 class CourtCaseViewSet(
@@ -123,15 +123,15 @@ class CourtCaseViewSet(
         # Soft-deleted cases are excluded from the read plane.
         qs = CourtCase.objects.filter(is_deleted=False).order_by("-created_at")
         params = self.request.query_params
-        if (court := params.get("court")):
+        if court := params.get("court"):
             qs = qs.filter(court_id=court)
-        if (case_type := params.get("type")):
+        if case_type := params.get("type"):
             qs = qs.filter(case_type=case_type)
-        if (case_status := params.get("status")):
+        if case_status := params.get("status"):
             qs = qs.filter(case_status=case_status)
-        if (date_from := params.get("date_from")):
+        if date_from := params.get("date_from"):
             qs = qs.filter(registration_date_ad__gte=date_from)
-        if (date_to := params.get("date_to")):
+        if date_to := params.get("date_to"):
             qs = qs.filter(registration_date_ad__lte=date_to)
         return qs
 
@@ -242,9 +242,9 @@ class CaseEntityViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     def get_queryset(self):
         qs = CaseEntity.objects.all().order_by("id")
         params = self.request.query_params
-        if (nes_id := params.get("nes_id")):
+        if nes_id := params.get("nes_id"):
             qs = qs.filter(nes_id=nes_id)
-        if (name := params.get("name")):
+        if name := params.get("name"):
             qs = qs.filter(name__icontains=name)
         return qs
 
@@ -264,9 +264,9 @@ class BlacklistedFirmViewSet(
     def get_queryset(self):
         qs = BlacklistedFirm.objects.all().order_by("-blacklist_date_ad", "id")
         params = self.request.query_params
-        if (nes_id := params.get("nes_id")):
+        if nes_id := params.get("nes_id"):
             qs = qs.filter(nes_id=nes_id)
-        if (name := params.get("name")):
+        if name := params.get("name"):
             qs = qs.filter(firm_name__icontains=name)
         return qs
 
@@ -422,14 +422,17 @@ class QueryView(APIView):
                 while batch := cursor.fetchmany(50):
                     for raw_row in batch:
                         row = list(raw_row)
-                        response_bytes += len(
-                            json.dumps(
-                                row,
-                                cls=DjangoJSONEncoder,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            ).encode("utf-8")
-                        ) + 1
+                        response_bytes += (
+                            len(
+                                json.dumps(
+                                    row,
+                                    cls=DjangoJSONEncoder,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            )
+                            + 1
+                        )
                         if response_bytes > response_limit:
                             raise QueryResultTooLarge
                         rows.append(row)
@@ -506,7 +509,12 @@ class IngestionCasesView(_IngestionView):
             results.append({"index": index, "status": outcome})
 
         return Response(
-            {"created": created, "updated": updated, "failed": failed, "results": results}
+            {
+                "created": created,
+                "updated": updated,
+                "failed": failed,
+                "results": results,
+            }
         )
 
     @staticmethod
@@ -628,9 +636,9 @@ class IngestionEntitiesResolveView(_IngestionView):
             court_id=court_identifier,
             case_number=best_effort_normalize(str(case_number)),
         )
-        if (side := raw.get("side")):
+        if side := raw.get("side"):
             qs = qs.filter(side=side)
-        if (name := raw.get("name")):
+        if name := raw.get("name"):
             qs = qs.filter(name=name)
         matched = qs.update(nes_id=nes_id)
         # A bulk .update() bypasses the CaseEntity post_save reindex signal, so
@@ -753,9 +761,15 @@ class IngestionFirmsView(_IngestionView):
     #: Detail fields back-filled onto an existing row only when it lacks them
     #: (the natural-key fields are never touched on update).
     _FILL_FIELDS = (
-        "proprietor_name", "address", "blacklist_date_ad",
-        "effective_until_bs", "effective_until_ad",
-        "duration", "reason", "recommending_office", "nes_id",
+        "proprietor_name",
+        "address",
+        "blacklist_date_ad",
+        "effective_until_bs",
+        "effective_until_ad",
+        "duration",
+        "reason",
+        "recommending_office",
+        "nes_id",
     )
 
     def post(self, request, *args, **kwargs):

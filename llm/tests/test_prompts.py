@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Tests for the PromptSpec registry.
 
 No DB and no model calls: every test either exercises validation or asserts on

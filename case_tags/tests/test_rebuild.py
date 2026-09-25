@@ -81,7 +81,7 @@ def _case(
     return Case.objects.create(
         title=slug,
         slug=slug,
-        case_type=CaseType.CORRUPTION,
+        offence_type=CaseType.CORRUPTION,
         state=state,
         tags=tags,
     )

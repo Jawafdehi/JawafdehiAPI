@@ -301,7 +301,34 @@ FACET_FIELDS: dict[str, str] = {
     "court_type": "court_type",
     "district": "court_district",
     "province": "court_province",
+    "material_type": "material_type",
 }
+
+# The closed vocabulary behind the ``material_type`` facet — every
+# ``Material.material_type`` token.
+#
+# A LITERAL, not a comprehension over ``MaterialType``, for the same reason
+# ``ALL_COURT_TYPES`` above is one: three consumers must agree (the
+# serializer's ``ChoiceField``, which is what 400s; the OpenAPI enum, which is
+# what the SPA reads; the MCP tool's schema, which is what a model reads), and
+# ``search/service.py`` deliberately imports from no sibling app. Pinned to
+# ``materials.jsonld.MaterialType`` by
+# ``test_material_type_enum_tracks_material_types`` — add a type there and that
+# test fails here until this list catches up.
+ALL_MATERIAL_TYPES: tuple[str, ...] = (
+    "charge_sheet",
+    "court_case",
+    "court_order",
+    "document",
+    "legal_corpus",
+    "manuscript",
+    "news",
+    "official_report",
+    "precedent",
+    "press_release",
+    "procurement_notice",
+    "social_media",
+)
 
 # The closed vocabulary behind the ``court_type`` facet: Nepal's constitutional
 # court tiers, and the only four values ``Court.court_type`` holds (verified
@@ -330,7 +357,68 @@ FACET_AGG_SIZES: dict[str, int] = {
     "district": 100,
     # 7 provinces + NATIONAL.
     "province": 10,
+    # No entry for ``material_type``: 12 tokens against a default of 50, the
+    # same reason ``court_type``'s four tiers have none.
 }
+
+# Sub-agg name holding the bucket list when a facet agg is WRAPPED in its
+# self-excluding ``filter`` agg (see ``_scoped``). A fixed string rather than the
+# param name so the response reader walks one path per shape, not one per facet.
+FACET_AGG_INNER = "values"
+
+# Suffix of the companion agg that pins the caller's OWN selected values into a
+# widened facet's bucket list.
+#
+# Needed only because the facet is now widened: before, a selected value was the
+# ONLY bucket and so always present. A widened facet is a top-N over a much larger
+# term space (``case_type`` has 2,332 distinct values in the NGM docket against a
+# size of 50), so a rare selection can now fall out of its own facet, and the
+# reader would lose the bucket it has ticked. This agg carries its real count back.
+#
+# Scope of the guarantee: it restores a selection the top-N DROPPED. A selection
+# that matches no document in the widened scope has no bucket to carry back, so it
+# is still absent from the list — rendering a ticked-but-absent value as zero is
+# the client's job, not something this agg can express.
+FACET_SELECTED_SUFFIX = "__selected"
+
+# Agg names that are NOT FACET_FIELDS facets, and so must stay distinguishable
+# from one (see the ``aggs`` dict in ``build_query``).
+_RESERVED_AGG_NAMES = frozenset({"by_index", "bigo_extent"})
+
+
+def _assert_agg_namespace_is_unambiguous() -> None:
+    """The facet aggs, their ``__selected`` companions and the hand-written aggs
+    all share ONE namespace in the request body, and the response readers resolve
+    a bucket list by name alone.
+
+    A param whose name collided with another param's companion would therefore
+    silently shadow it — the reader would hand one facet's buckets back as
+    another's, with no error anywhere. Checked at import against the registry
+    rather than left to review, in the same spirit as generating the aggs off
+    FACET_FIELDS: a facet param cannot exist without its aggregation, and now it
+    cannot exist under a name that steals someone else's either.
+    """
+    for param in FACET_FIELDS:
+        companion = param + FACET_SELECTED_SUFFIX
+        clash = (
+            "a facet param"
+            if companion in FACET_FIELDS
+            else "a reserved agg" if companion in _RESERVED_AGG_NAMES else None
+        )
+        if clash:
+            raise RuntimeError(
+                f"facet param {param!r} needs the agg name {companion!r}, which is "
+                f"already {clash}. Rename one of them: the response readers resolve "
+                f"buckets by agg name, so the collision would silently swap them."
+            )
+        if param in _RESERVED_AGG_NAMES:
+            raise RuntimeError(
+                f"facet param {param!r} collides with the hand-written agg of the "
+                f"same name; rename the facet."
+            )
+
+
+_assert_agg_namespace_is_unambiguous()
 
 
 # Lucene RegExp operator characters (the core set plus every optional-operator
@@ -507,6 +595,22 @@ def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
             continue
         bounds.setdefault(field, {})[bound] = value
     return [{"range": {field: b}} for field, b in bounds.items()]
+
+
+def _scoped(
+    agg: dict[str, Any], others: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """``agg`` re-narrowed by ``others`` — the terms filters ``post_filter`` took
+    out of the query context.
+
+    An EMPTY ``others`` returns ``agg`` UNWRAPPED, which is what makes the common
+    cases free: a request with no terms filter at all emits exactly the pre-
+    ``post_filter`` DSL, and a facet that is the only one filtered keeps its flat
+    agg (now evaluated in the widened context — that IS the fix).
+    """
+    if not others:
+        return agg
+    return {"filter": {"bool": {"filter": others}}, "aggs": {FACET_AGG_INNER: agg}}
 
 
 class SearchError(Exception):
@@ -752,26 +856,45 @@ def build_query(
     page = max(1, page)
     page_size = max(1, min(page_size, MAX_PAGE_SIZE))
 
-    # Exact-match facet filters (entity_type/case_type/tags) compose with the text
-    # query as bool ``filter`` clauses (no scoring impact, just narrowing).
+    # Exact-match facet filters (entity_type/case_type/tags/…). These NO LONGER
+    # live in the main query's bool ``filter``: they are emitted as a top-level
+    # ``post_filter`` (applied to the hits after the aggregations are collected)
+    # plus a per-facet ``filter`` agg re-applying every filter EXCEPT that facet's
+    # own. That is what stops a facet being narrowed by its own selection — see
+    # the aggs comment below for the whole argument.
     #
-    # The two clause KINDS are built apart because they merge differently: bounds
-    # sharing a field collapse into ONE ``range`` clause, so ?bigo_min=X&bigo_max=Y
-    # is a single bounded interval rather than two unrelated constraints.
-    terms_clauses: list[dict[str, Any]] = []
-    for param, values in (filters or {}).items():
-        field = FACET_FIELDS.get(param)
-        if field and values:
-            terms_clauses.append({"terms": {field: list(values)}})
-    # Range filters (bigo_min/bigo_max) narrow the same way — ANDed alongside the
-    # exact-match ones, and equally inert for scoring.
+    # Kept KEYED BY PARAM so exactly one clause can be dropped per facet, and
+    # built by iterating FACET_FIELDS rather than the caller's dict so the emitted
+    # body is byte-stable regardless of query-string order — the same reasoning
+    # ``_range_clauses`` states, and it matters more here because the clause list
+    # is now repeated up to eleven times in one body.
+    terms_by_param: dict[str, dict[str, Any]] = {}
+    for param, field in FACET_FIELDS.items():
+        values = (filters or {}).get(param)
+        if values:
+            terms_by_param[param] = {"terms": {field: list(values)}}
+    terms_clauses: list[dict[str, Any]] = list(terms_by_param.values())
+    # Range filters (bigo_min/bigo_max, date_from/date_to) STAY in the query. No
+    # facet owns a range, so no facet may drop one; leaving them here means they
+    # narrow the hits and every aggregation alike, exactly as before.
     range_clauses = _range_clauses(ranges)
     # Entity visibility gate — ANDed alongside the caller's own narrowing, and
     # applied at EVERY type selection (an entity must stay hidden on the default
     # "All records" tab too, not only on ?type=entity).
+    #
+    # It rides with the RANGES, in the query's bool ``filter``, and deliberately
+    # NOT in the ``post_filter`` the facet terms moved to. Two reasons, and both
+    # are the reason the facet change and this one can coexist at all:
+    #   1. ``post_filter`` runs after the aggregations are collected, so a gate
+    #      placed there would hide archived entities from the hit list while still
+    #      COUNTING them in the ``_index`` facet — the type tab would advertise
+    #      187k entities and then page through 1.5k. Only a query-level clause
+    #      narrows counts and hits together.
+    #   2. The per-facet self-exclusion aggs rebuild the terms clauses minus the
+    #      facet's own; visibility is not a facet and no caller may drop it, so it
+    #      must never enter that droppable set.
     visibility_clauses = _visibility_clauses(include_unreferenced)
     filter_clauses: list[dict[str, Any]] = [
-        *terms_clauses,
         *range_clauses,
         *visibility_clauses,
     ]
@@ -843,7 +966,9 @@ def build_query(
         # Recall clause: at least one of the bilingual fields must match, or
         # match_all when browsing.
         "must": must_clauses,
-        # Exact-match facet + range narrowing (empty when nothing is requested).
+        # RANGE narrowing plus the entity visibility gate (empty when nothing is
+        # requested and the gate is off). The exact-match facet clauses moved to
+        # ``post_filter`` — see the aggs comment below.
         "filter": filter_clauses,
     }
     if has_query:
@@ -865,22 +990,38 @@ def build_query(
     # facets (entity_type via the schema.org ``type`` token, case_type, and tags
     # via ``keywords``).
     #
-    # Facet counts reflect the active FILTERS as well as the query: the filters
-    # are ``bool.filter`` clauses on the main query (not a ``post_filter``), so
-    # every agg is computed over the narrowed result set. Two consequences worth
-    # knowing before changing this:
-    #   - CASCADING, which callers rely on: filtering ``court_type=high`` empties
-    #     the ``district`` facet outright, because no high-court doc carries a
-    #     ``court_district`` — that empty bucket list is how a client knows the
-    #     district refine does not apply to the current selection.
-    #   - COLLAPSING, the cost of the same behaviour: a facet also narrows by its
-    #     OWN filter, so selecting one court leaves ``facets.court`` with a single
-    #     bucket and no sibling counts to widen the selection with. Clients drive
-    #     a court picker off GET /api/courts/ (all 97, with names) and read this
-    #     facet for counts only. Fixing that properly means a per-facet ``filter``
-    #     agg applying every filter EXCEPT its own; a ``post_filter`` is NOT a
-    #     substitute, as it would make every facet ignore every filter and so
-    #     destroy the cascading above.
+    # Facet counts reflect the active filters as well as the query, with ONE
+    # deliberate exception: a facet does not apply its OWN filter to itself.
+    #
+    #   - CASCADING is preserved, and callers rely on it: filtering
+    #     ``court_type=high`` still empties the ``district`` facet outright,
+    #     because no high-court doc carries a ``court_district`` — that empty
+    #     bucket list is how a client knows the district refine does not apply to
+    #     the current selection. Every facet still applies every OTHER filter, so
+    #     this is untouched.
+    #   - COLLAPSING is what this shape fixes. A facet used to narrow by its own
+    #     filter too, so ticking one document type left ``facets.material_type``
+    #     holding a single bucket with no siblings to widen the selection with —
+    #     the second box could never be ticked, because the API had already
+    #     deleted it. Measured before the fix: ``?type=material`` returned 10
+    #     buckets, ``?type=material&material_type=official_report`` returned 1.
+    #
+    # WHY ``post_filter`` and not a plain ``filter`` sub-agg. Aggregations run
+    # inside the query context, so a ``filter`` agg can only ever INTERSECT it —
+    # it cannot widen back out to re-expose values the main query already removed.
+    # The facet clauses therefore have to leave the query, which is what
+    # ``post_filter`` is for: it narrows the hits (and ``hits.total``, so the
+    # envelope's ``count`` is unaffected) after the aggs are collected.
+    #
+    # An EARLIER version of this comment warned that ``post_filter`` "is NOT a
+    # substitute, as it would make every facet ignore every filter and so destroy
+    # the cascading". That is true of ``post_filter`` ALONE, and it is why the
+    # per-facet wrappers below are not optional: each one re-applies every filter
+    # except its own, so the only thing any facet stops seeing is itself.
+    #
+    # Ranges (बिगो, date) deliberately stay in ``bool.filter``: no facet owns a
+    # range, so none may drop one, and the range control has its own widening
+    # mechanism in the ``global`` ``bigo_extent`` agg below.
     #
     # Built as its own ``dict[str, Any]`` rather than inline in ``body``: the
     # nested literal would otherwise pin a narrow value type that the extent agg
@@ -890,7 +1031,16 @@ def build_query(
         # backing index, and mid-swap an alias can briefly resolve to two
         # generations. At exactly len(ALL_TYPES) the extra bucket would push
         # a real one out and silently zero that type's facet count.
-        "by_index": {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
+        #
+        # Wrapped with ALL the terms clauses, unlike the refine facets below.
+        # ``counts`` is not a refine control — it must keep meaning "the active
+        # result set", and it is emitted as the ``counts_by_type`` telemetry
+        # series (search/analytics.py). Left unwrapped it would quietly start
+        # reporting un-narrowed per-index totals, with no test able to see it.
+        "by_index": _scoped(
+            {"terms": {"field": "_index", "size": 2 * len(ALL_TYPES)}},
+            terms_clauses,
+        ),
     }
     # One ``terms`` agg per exposed refine facet, GENERATED from FACET_FIELDS so a
     # facet param can never exist without its aggregation. These used to be
@@ -900,7 +1050,7 @@ def build_query(
     # off the registry closes that by construction (``by_index`` and the extent
     # agg below stay hand-written: they are not FACET_FIELDS facets).
     for param, field in FACET_FIELDS.items():
-        aggs[param] = {
+        inner: dict[str, Any] = {
             "terms": {"field": field, "size": FACET_AGG_SIZES.get(param, DEFAULT_FACET_AGG_SIZE)}
         }
         # ``facet_q``: recompute ONLY this facet's bucket list to the top buckets
@@ -909,9 +1059,53 @@ def build_query(
         # default top-N slice — and it touches nothing but this one agg: the
         # query, count, hits and every other facet are computed exactly as
         # without it. Ordering stays the terms-agg default (count desc).
+        #
+        # It rides on the INNER terms agg, so it lands in the right place whether
+        # or not this facet ends up wrapped. One consequence of the widening: with
+        # a filter active on the SAME facet the include now runs over the widened
+        # term set — a typeahead over what you could switch to, rather than over
+        # the one bucket you already picked.
         text = (facet_queries or {}).get(param)
         if text:
-            aggs[param]["terms"]["include"] = _facet_include_regex(text)
+            inner["terms"]["include"] = _facet_include_regex(text)
+
+        # Every OTHER active terms filter. Dropping this facet's own clause is
+        # the whole fix; keeping the rest is what preserves the cascading.
+        others = [c for p, c in terms_by_param.items() if p != param]
+        aggs[param] = _scoped(inner, others)
+
+        # ... and pin the caller's own selection back in. A widened facet is a
+        # top-N over a much larger term space than the single bucket it used to
+        # return, so a rare selection can now fall out of its own list; without
+        # this the reader would lose the very bucket they have ticked.
+        # Same ``others`` scope as the widened list, so the two counts agree.
+        #
+        # It restores a selection the top-N DROPPED — it cannot invent one. A value
+        # matching no document in the widened scope has no bucket here either, so it
+        # stays absent from ``facets`` and the client decides how to draw a ticked
+        # box with nothing behind it.
+        #
+        # NOT when ``facet_q`` is searching this same facet, though. The pin does
+        # not carry the include regex, so it would hand back a bucket that does
+        # not contain the typed text — breaking the one thing facet_q promises
+        # ("only buckets whose key contains the text"), which the MCP tool states
+        # to a model as ground truth. A typeahead asks what you could switch TO;
+        # what you are already on is not part of that answer.
+        own = terms_by_param.get(param)
+        if own is not None and not text:
+            selected = own["terms"][field]
+            aggs[param + FACET_SELECTED_SUFFIX] = _scoped(
+                {
+                    # An ARRAY ``include``, never the facet_q regex — a separate
+                    # agg, so the two includes cannot collide.
+                    "terms": {
+                        "field": field,
+                        "include": list(selected),
+                        "size": len(selected),
+                    }
+                },
+                others,
+            )
 
     # बिगो extent: the smallest and largest recorded amount, how many documents
     # carry one at all — the three numbers the SPA's slider ladder is cut from.
@@ -975,6 +1169,13 @@ def build_query(
         },
         "aggs": aggs,
     }
+
+    # The exact-match facet narrowing, applied to the HITS after the aggs above
+    # are collected. ``hits.total`` reflects it, so the envelope's ``count`` still
+    # counts what the reader is actually looking at. Omitted entirely when nothing
+    # is selected, so an unfiltered body is byte-identical to the pre-fix one.
+    if terms_clauses:
+        body["post_filter"] = {"bool": {"filter": terms_clauses}}
 
     # Did-you-mean vocabulary lookup (design §11), on the SAME request — no extra
     # round trip, and ``suggest_mode: missing`` makes it near-free when the query is
@@ -1135,6 +1336,30 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
         if raw.get(key) is not None:
             extra[key] = raw[key]
 
+    # Case-only, and gated on the doc type rather than copied with the block
+    # above, because ``status`` carries TWO vocabularies: Jawafdehi cases write
+    # the derived lifecycle, NGM courtcase docs write their scraper enrichment
+    # flag (pending/enriched/failed). Copying it unconditionally would publish
+    # an internal pipeline state on every court-case hit and give one envelope
+    # key two unrelated meanings.
+    #
+    # ``case_status`` above stays exactly as it was -- it is the legacy
+    # three-value facet the deployed SPA badges on, and this adds the full
+    # vocabulary alongside so the frontend can migrate on its own schedule.
+    #
+    # The three stage-era fields are OMITTED by the indexer when unset, so a
+    # doc written before the ``reindex_all --rebuild`` this needs simply lacks
+    # them; the None guard keeps that a missing key rather than a null.
+    if result_type == "case":
+        for key in (
+            "status",
+            "case_track",
+            "proceedings_started_on",
+            "proceedings_decided_on",
+        ):
+            if source.get(key) is not None:
+                extra[key] = source[key]
+
     envelope: dict[str, Any] = {
         "type": result_type,
         "id": source.get("iri"),
@@ -1163,10 +1388,25 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     return envelope
 
 
+def _facet_buckets(node: Any) -> list[dict[str, Any]]:
+    """Bucket list from a facet agg, whether it came back FLAT or wrapped in the
+    self-excluding ``filter`` agg :func:`_scoped` adds.
+
+    Shape-sniffed rather than re-derived from the request: these readers never see
+    the request, and sniffing means every canned response that models the flat
+    shape keeps parsing unchanged.
+    """
+    node = node if isinstance(node, dict) else {}
+    inner = node.get(FACET_AGG_INNER)
+    if isinstance(inner, dict):
+        node = inner
+    return node.get("buckets") or []
+
+
 def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
     """Per-type counts from the ``by_index`` aggregation (type → doc count)."""
     counts: dict[str, int] = {}
-    buckets = (aggs.get("by_index") or {}).get("buckets") or []
+    buckets = _facet_buckets(aggs.get("by_index"))
     for bucket in buckets:
         # Buckets are keyed by the CONCRETE backing index, not the alias we
         # queried — so this needs the same generation-aware resolution as a hit.
@@ -1357,15 +1597,36 @@ def _extents_from_aggs(aggs: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def _named_facets_from_aggs(aggs: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """The exposed refine facets (entity_type/case_type/tags) as ``{name, count}``
-    lists from their ``terms`` aggregations. Display names are derived client-side.
+    lists. Display names are derived client-side.
+
+    Each facet's buckets come from its ``terms`` agg — flat, or nested inside the
+    self-excluding ``filter`` agg when some OTHER facet is filtered — merged with
+    its ``<param>__selected`` companion, which carries the caller's own selected
+    values in case the widened top-N dropped one.
     """
     facets: dict[str, list[dict[str, Any]]] = {}
     for param in FACET_FIELDS:
-        buckets = (aggs.get(param) or {}).get("buckets") or []
+        by_name: dict[str, int] = {}
+        for bucket in _facet_buckets(aggs.get(param)):
+            key = bucket.get("key")
+            if key is not None:
+                by_name[key] = bucket.get("doc_count", 0)
+        # ``setdefault``: where both carry a value the widened list wins — it is
+        # the same scope, and this one exists only to fill a gap.
+        for bucket in _facet_buckets(aggs.get(param + FACET_SELECTED_SUFFIX)):
+            key = bucket.get("key")
+            if key is not None:
+                by_name.setdefault(key, bucket.get("doc_count", 0))
+        # Re-sorted count-desc so the MERGED list keeps the ordering the widened
+        # one arrived in. A pinned value is one the top-N dropped, so it is almost
+        # always the smallest count here and would have sorted last anyway — but
+        # "almost always" is not a contract, and clients that truncate the list
+        # (the SPA's "More" cut) would quietly drop the wrong bucket the one time
+        # it is not. The sort is STABLE, so buckets sharing a count keep
+        # OpenSearch's own key ordering rather than being reshuffled.
         facets[param] = [
-            {"name": b.get("key"), "count": b.get("doc_count", 0)}
-            for b in buckets
-            if b.get("key") is not None
+            {"name": name, "count": count}
+            for name, count in sorted(by_name.items(), key=lambda kv: -kv[1])
         ]
     return facets
 

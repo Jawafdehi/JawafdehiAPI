@@ -51,7 +51,7 @@ class TestTokenAuthDraftCases:
             title="Draft Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.DRAFT,
         )
@@ -68,7 +68,7 @@ class TestTokenAuthDraftCases:
             title="Draft Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.DRAFT,
         )
@@ -88,7 +88,7 @@ class TestTokenAuthDraftCases:
             title="Draft Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.DRAFT,
         )
@@ -110,7 +110,7 @@ class TestTokenAuthDraftCases:
             title="Draft Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.DRAFT,
         )
@@ -129,7 +129,7 @@ class TestTokenAuthDraftCases:
             title="Published Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.PUBLISHED,
         )
@@ -152,7 +152,7 @@ class TestTokenAuthDraftCases:
             title="In Review Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.IN_REVIEW,
         )
@@ -178,7 +178,7 @@ class TestTokenAuthDraftCases:
             title="Draft Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.DRAFT,
         )
@@ -187,7 +187,7 @@ class TestTokenAuthDraftCases:
             title="Published Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
-            case_type=CaseType.CORRUPTION,
+            offence_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.PUBLISHED,
         )

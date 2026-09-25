@@ -32,11 +32,13 @@ class Fetcher:
         import requests
 
         self._s = requests.Session()
-        self._s.headers.update({
-            "User-Agent": _UA,
-            "Referer": "https://supremecourt.gov.np/",
-            "Origin": "https://supremecourt.gov.np",
-        })
+        self._s.headers.update(
+            {
+                "User-Agent": _UA,
+                "Referer": "https://supremecourt.gov.np/",
+                "Origin": "https://supremecourt.gov.np",
+            }
+        )
         self._timeout = timeout
 
     def __call__(self, url, data=None):

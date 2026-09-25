@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The pull-consumer machinery, exercised without a broker.
 
 The property that matters most is the one a live NATS would make hardest to

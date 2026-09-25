@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Job failures reaching Sentry.
 
 They did not. `_process_job` catches every exception and hands it to the queue, so

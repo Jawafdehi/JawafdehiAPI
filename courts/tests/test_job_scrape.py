@@ -102,17 +102,17 @@ class EnqueueTests(_NgmTestCase):
 class ScrapeWorkerTests(_NgmTestCase):
     def test_readonly_does_not_claim(self):
         jobs_queue.enqueue(
-            kind="court_scrape", payload=_SPECIAL_PAYLOAD,
+            kind="court_scrape",
+            payload=_SPECIAL_PAYLOAD,
             dedup_key="court_scrape:special",
         )
         call_command("scrape_worker")  # no --apply
-        self.assertEqual(
-            Job.objects.get(kind="court_scrape").status, Job.QUEUED
-        )
+        self.assertEqual(Job.objects.get(kind="court_scrape").status, Job.QUEUED)
 
     def test_apply_once_claims_runs_and_finalizes(self):
         jobs_queue.enqueue(
-            kind="court_scrape", payload=_SPECIAL_PAYLOAD,
+            kind="court_scrape",
+            payload=_SPECIAL_PAYLOAD,
             dedup_key="court_scrape:special",
         )
         with patch("courts.job_handlers.Fetcher", lambda: fake_fetch):
@@ -129,7 +129,8 @@ class ScrapeWorkerTests(_NgmTestCase):
         # An unknown court is a BadCourtScrapePayload (non-retryable): the worker
         # finalizes it FAILED on the first attempt rather than re-queuing.
         jobs_queue.enqueue(
-            kind="court_scrape", payload={"court": "bogus"},
+            kind="court_scrape",
+            payload={"court": "bogus"},
             dedup_key="court_scrape:bogus",
         )
         call_command("scrape_worker", "--apply", "--once")
@@ -140,7 +141,8 @@ class ScrapeWorkerTests(_NgmTestCase):
 
     def test_max_jobs_zero_finalizes_nothing(self):
         jobs_queue.enqueue(
-            kind="court_scrape", payload=_SPECIAL_PAYLOAD,
+            kind="court_scrape",
+            payload=_SPECIAL_PAYLOAD,
             dedup_key="court_scrape:special",
         )
         with patch("courts.job_handlers.Fetcher", lambda: fake_fetch):
@@ -154,8 +156,12 @@ class SweepJobWiringTests(_NgmTestCase):
     no new CronJob. It is the cause-list job with its listing half switched off."""
 
     _SWEEP_PAYLOAD = {
-        "court": "special", "court_id": "special",
-        "sweep": True, "causelist": False, "sweep_budget": 5, "sweep_delay": 0,
+        "court": "special",
+        "court_id": "special",
+        "sweep": True,
+        "causelist": False,
+        "sweep_budget": 5,
+        "sweep_delay": 0,
         "today": "2025-04-20",
     }
 
@@ -177,7 +183,9 @@ class SweepJobWiringTests(_NgmTestCase):
             )
         result = handle_court_scrape(self._SWEEP_PAYLOAD, fetch=fake_fetch)
         self.assertEqual(result["swept"], 5)
-        self.assertGreater(result["deferred"], 0, "a capped run must not read as complete")
+        self.assertGreater(
+            result["deferred"], 0, "a capped run must not read as complete"
+        )
 
     def test_cause_list_job_is_unchanged_by_default(self):
         from courts.job_handlers import handle_court_scrape
@@ -191,12 +199,16 @@ class SweepJobWiringTests(_NgmTestCase):
         # the cause-list job (or vice versa).
         call_command("enqueue_scrape", "--court", "special")
         call_command("enqueue_scrape", "--court", "special", "--sweep")
-        keys = set(Job.objects.filter(kind="court_scrape").values_list("dedup_key", flat=True))
+        keys = set(
+            Job.objects.filter(kind="court_scrape").values_list("dedup_key", flat=True)
+        )
         self.assertIn("court_scrape:special:special", keys)
         self.assertIn("court_scrape:special:special:sweep", keys)
 
     def test_sweep_enqueue_sets_the_payload_flags(self):
-        call_command("enqueue_scrape", "--court", "special", "--sweep", "--sweep-budget", "7")
+        call_command(
+            "enqueue_scrape", "--court", "special", "--sweep", "--sweep-budget", "7"
+        )
         job = Job.objects.get(dedup_key="court_scrape:special:special:sweep")
         self.assertTrue(job.payload["sweep"])
         self.assertFalse(job.payload["causelist"])
@@ -210,33 +222,52 @@ class SweepJobWiringTests(_NgmTestCase):
         rotation is what makes an automated sweep bounded per tick.
         """
         out = StringIO()
-        call_command("enqueue_scrape", "--court", "high", "--sweep",
-                     "--sweep-courts", "3", stdout=out)
+        call_command(
+            "enqueue_scrape",
+            "--court",
+            "high",
+            "--sweep",
+            "--sweep-courts",
+            "3",
+            stdout=out,
+        )
         queued = Job.objects.filter(kind="court_scrape")
         self.assertEqual(queued.count(), 3)
         self.assertIn("wait for a later run", out.getvalue())
 
     def test_the_rotation_advances_to_courts_not_yet_swept(self):
-        call_command("enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "3")
+        call_command(
+            "enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "3"
+        )
         first = set(Job.objects.values_list("payload__court_id", flat=True))
         # Finish them, which both frees the dedup keys and stamps the cursor.
         Job.objects.update(status=Job.DONE, completed_at=timezone.now())
 
-        call_command("enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "3")
+        call_command(
+            "enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "3"
+        )
         second = set(
-            Job.objects.filter(status=Job.QUEUED).values_list("payload__court_id", flat=True)
+            Job.objects.filter(status=Job.QUEUED).values_list(
+                "payload__court_id", flat=True
+            )
         )
         self.assertEqual(len(second), 3)
-        self.assertFalse(second & first, "a second run must move on, not re-sweep the same courts")
+        self.assertFalse(
+            second & first, "a second run must move on, not re-sweep the same courts"
+        )
 
     def test_a_court_whose_sweep_never_finished_keeps_its_turn(self):
         # Self-correcting cursor: a failed sweep leaves completed_at NULL, so the
         # court stays at the front rather than silently losing its slot.
-        call_command("enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "1")
+        call_command(
+            "enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "1"
+        )
         stuck = Job.objects.get().payload["court_id"]
         Job.objects.update(status=Job.FAILED, completed_at=None, dedup_key=None)
 
-        call_command("enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "1")
+        call_command(
+            "enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "1"
+        )
         retried = Job.objects.filter(status=Job.QUEUED).get().payload["court_id"]
         self.assertEqual(retried, stuck)
 
@@ -256,8 +287,12 @@ class SweepJobWiringTests(_NgmTestCase):
                     court_id="special", case_number=f"076-{series}-{seq:04d}"
                 )
         result = handle_court_scrape(
-            {**self._SWEEP_PAYLOAD, "sweep_series": ["CR"], "sweep_tail": 0,
-             "sweep_budget": 50},
+            {
+                **self._SWEEP_PAYLOAD,
+                "sweep_series": ["CR"],
+                "sweep_tail": 0,
+                "sweep_budget": 50,
+            },
             fetch=fake_fetch,
         )
         # 3 interior holes in CR; OA's 3 are left alone. sweep_tail=0 must be
@@ -265,15 +300,25 @@ class SweepJobWiringTests(_NgmTestCase):
         self.assertEqual(result["swept"], 3)
 
     def test_enqueue_sets_series_and_tail_and_dedups_them_apart(self):
-        call_command("enqueue_scrape", "--court", "special", "--sweep",
-                     "--sweep-series", "cr", "--sweep-tail", "100")
+        call_command(
+            "enqueue_scrape",
+            "--court",
+            "special",
+            "--sweep",
+            "--sweep-series",
+            "cr",
+            "--sweep-tail",
+            "100",
+        )
         job = Job.objects.get(dedup_key="court_scrape:special:special:sweep:CR")
         self.assertEqual(job.payload["sweep_series"], ["CR"])
         self.assertEqual(job.payload["sweep_tail"], 100)
 
         # An all-series sweep must not be deduped away by the CR one.
         call_command("enqueue_scrape", "--court", "special", "--sweep")
-        self.assertTrue(Job.objects.filter(dedup_key="court_scrape:special:special:sweep").exists())
+        self.assertTrue(
+            Job.objects.filter(dedup_key="court_scrape:special:special:sweep").exists()
+        )
 
     def test_the_budget_is_shared_across_courts_not_granted_to_each(self):
         """A tier payload with no ``court_id`` sweeps every leaf court under ONE

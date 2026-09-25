@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """What each consumer does with a message.
 
 The bus is stubbed throughout — these assert on the messages a handler WOULD
@@ -44,7 +44,7 @@ def make_case(slug="lalita-niwas-land-scam", title="Lalita Niwas land scam", sta
     supposed to ignore, and they would all fail for the same uninformative
     reason.
     """
-    return Case.objects.create(title=title, case_type=CaseType.CORRUPTION, slug=slug, state=state)
+    return Case.objects.create(title=title, offence_type=CaseType.CORRUPTION, slug=slug, state=state)
 
 
 def signal_envelope(**overrides):

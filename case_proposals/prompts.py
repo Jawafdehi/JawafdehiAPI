@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Prompts owned by the proposals app. Registered at app-ready.
 
 One so far: ``case_proposal.intent``, which turns an observed signal plus a case

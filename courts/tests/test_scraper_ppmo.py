@@ -43,8 +43,8 @@ _API_JSON = {
             "start_date": "2025-01-10",
             "end_date": None,
         },
-        {"id": 3, "company_name": "", "start_date": "2025-01-10"},   # no name → skip
-        {"id": 4, "company_name": "No Date Co", "start_date": ""},    # no start → skip
+        {"id": 3, "company_name": "", "start_date": "2025-01-10"},  # no name → skip
+        {"id": 4, "company_name": "No Date Co", "start_date": ""},  # no start → skip
     ],
 }
 
@@ -59,11 +59,11 @@ def test_parse_company_list_maps_and_skips():
     assert names == ["श्री ग्लोबल ट्रेडिङ्ग प्रा.लि.", "ABC Builders Pvt Ltd"]
 
     g = firms[0]
-    assert g.proprietor_name == "आशिष अग्रवाल"          # श्री honorific stripped
+    assert g.proprietor_name == "आशिष अग्रवाल"  # श्री honorific stripped
     assert g.recommending_office == "नेपाल वायुसेवा निगम"  # श्री stripped
     assert "<p>" not in g.reason and "दफा ६३" in g.reason  # HTML flattened
     assert g.blacklist_date_ad.isoformat() == "2026-07-28"
-    assert g.blacklist_date_bs == "2083-04-12"            # AD→BS derived
+    assert g.blacklist_date_bs == "2083-04-12"  # AD→BS derived
     assert g.effective_until_ad.isoformat() == "2027-07-27"
     assert g.effective_until_bs is not None
     assert g.duration == f"{g.blacklist_date_bs} to {g.effective_until_bs}"
@@ -72,8 +72,8 @@ def test_parse_company_list_maps_and_skips():
 def test_parse_single_date_firm_has_no_until():
     abc = P.parse_company_list(_API_JSON)[1]
     assert abc.firm_name == "ABC Builders Pvt Ltd"
-    assert abc.proprietor_name is None      # empty owner
-    assert abc.effective_until_bs is None   # end_date null
+    assert abc.proprietor_name is None  # empty owner
+    assert abc.effective_until_bs is None  # end_date null
     assert abc.duration == abc.blacklist_date_bs
 
 
@@ -88,7 +88,7 @@ def test_to_payload_omits_none_and_isoformats_dates():
     assert payload["firm_name"] == "ABC Builders Pvt Ltd"
     assert payload["blacklist_date_bs"] == firm.blacklist_date_bs
     assert isinstance(payload["blacklist_date_ad"], str)
-    assert "proprietor_name" not in payload      # None omitted
+    assert "proprietor_name" not in payload  # None omitted
     assert "effective_until_bs" not in payload
 
 
@@ -109,17 +109,31 @@ class _FakeIngestion:
 
     def post_firms(self, items):
         self.batches.append(items)
-        return {"created": len(items), "updated": 0, "unchanged": 0, "failed": 0, "results": []}
+        return {
+            "created": len(items),
+            "updated": 0,
+            "unchanged": 0,
+            "failed": 0,
+            "results": [],
+        }
 
 
 class PpmoCommandClientTests(SimpleTestCase):
     def _run(self, source, ingestion, *extra):
-        with patch(f"{CMD}.build_source_client", return_value=source), patch(
-            f"{CMD}.build_ingestion_client", return_value=ingestion
-        ), patch("time.sleep"):
+        with (
+            patch(f"{CMD}.build_source_client", return_value=source),
+            patch(f"{CMD}.build_ingestion_client", return_value=ingestion),
+            patch("time.sleep"),
+        ):
             call_command(
-                "scrape_ppmo_blacklist", "--delay", "0",
-                "--api-token", "t", "--api-base", "http://api", *extra,
+                "scrape_ppmo_blacklist",
+                "--delay",
+                "0",
+                "--api-token",
+                "t",
+                "--api-base",
+                "http://api",
+                *extra,
             )
 
     def test_write_posts_parsed_firms(self):
@@ -127,7 +141,8 @@ class PpmoCommandClientTests(SimpleTestCase):
         self._run(_FakeSource(_API_JSON), ing, "--write")
         posted = [item for batch in ing.batches for item in batch]
         assert {p["firm_name"] for p in posted} == {
-            "श्री ग्लोबल ट्रेडिङ्ग प्रा.लि.", "ABC Builders Pvt Ltd",
+            "श्री ग्लोबल ट्रेडिङ्ग प्रा.लि.",
+            "ABC Builders Pvt Ltd",
         }
         g = next(p for p in posted if p["firm_name"].startswith("श्री ग्लोबल"))
         assert g["blacklist_date_bs"] == "2083-04-12"

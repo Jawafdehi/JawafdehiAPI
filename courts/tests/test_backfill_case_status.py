@@ -26,7 +26,9 @@ from courts.models import Court, CourtCase
 class ComputeCaseUpdatesTests(TestCase):
     def test_header_artifact_row_is_cleared(self):
         # DQ-01: the ~103k Supreme rows whose status is the column header.
-        updates, parsed = compute_case_updates("आदेश /फैसलाको किसिम", None, None, None, None)
+        updates, parsed = compute_case_updates(
+            "आदेश /फैसलाको किसिम", None, None, None, None
+        )
         self.assertEqual(updates, {"case_status": None})
         self.assertEqual(parsed.lifecycle_status, UNKNOWN)
 
@@ -40,14 +42,18 @@ class ComputeCaseUpdatesTests(TestCase):
 
     def test_paren_row_fills_verdict_date(self):
         # DQ-03: Special-court shape — recover the verdict date from case_status.
-        updates, parsed = compute_case_updates("फैसला (मिती: २०८२/०९/२८)", None, None, None, None)
+        updates, parsed = compute_case_updates(
+            "फैसला (मिती: २०८२/०९/२८)", None, None, None, None
+        )
         self.assertEqual(updates["verdict_date_bs"], "2082-09-28")
         self.assertIsNotNone(updates["verdict_date_ad"])
         self.assertEqual(parsed.lifecycle_status, DECIDED)
 
     def test_paren_row_uses_hearing_fallback_for_verdict_type(self):
         hearings = [{"case_status": "फैसला", "decision_type": "सफाई"}]
-        updates, _ = compute_case_updates("फैसला (मिती: २०८२/०९/२८)", None, None, None, hearings)
+        updates, _ = compute_case_updates(
+            "फैसला (मिती: २०८२/०९/२८)", None, None, None, hearings
+        )
         self.assertEqual(updates["verdict_type"], ACQUITTED)
         self.assertEqual(updates["verdict_date_bs"], "2082-09-28")
 
@@ -68,7 +74,11 @@ class ComputeCaseUpdatesTests(TestCase):
 
     def test_existing_verdict_date_not_overwritten(self):
         updates, _ = compute_case_updates(
-            "फैसला (मिती: २०८२/०९/२८)", "CONVICTED", "2081-01-17", date(2024, 4, 29), None
+            "फैसला (मिती: २०८२/०९/२८)",
+            "CONVICTED",
+            "2081-01-17",
+            date(2024, 4, 29),
+            None,
         )
         self.assertNotIn("verdict_date_bs", updates)
         self.assertEqual(updates, {})
@@ -107,14 +117,21 @@ class RunBackfillDBTests(TestCase):
             "आदेश /फैसलाको किसिम",
         )
         self.assertIsNone(
-            CourtCase.objects.using("ngm").get(case_number="082-CR-0002").verdict_date_bs
+            CourtCase.objects.using("ngm")
+            .get(case_number="082-CR-0002")
+            .verdict_date_bs
         )
 
     def test_execute_applies_and_is_idempotent(self):
         _mk("082-CR-0001", "आदेश /फैसलाको किसिम")  # DQ-01 header
         _mk(
-            "082-CR-0002", "फैसला (मिती: २०८२/०९/२८)",  # DQ-03 date + DQ-02 hearing fallback
-            extra_data={"enrichment_hearings": [{"case_status": "फैसला", "decision_type": "सफाई"}]},
+            "082-CR-0002",
+            "फैसला (मिती: २०८२/०९/२८)",  # DQ-03 date + DQ-02 hearing fallback
+            extra_data={
+                "enrichment_hearings": [
+                    {"case_status": "फैसला", "decision_type": "सफाई"}
+                ]
+            },
         )
         _mk("082-CR-0003", "फैसला / अन्तिम आदेश >> डिसमिस")  # DQ-02 arrow enum
 
@@ -139,8 +156,10 @@ class RunBackfillDBTests(TestCase):
 
     def test_existing_verdict_date_not_overwritten(self):
         _mk(
-            "082-CR-0004", "फैसला (मिती: २०८२/०९/२८)",
-            verdict_date_bs="2081-01-01", verdict_date_ad=date(2024, 4, 13),
+            "082-CR-0004",
+            "फैसला (मिती: २०८२/०९/२८)",
+            verdict_date_bs="2081-01-01",
+            verdict_date_ad=date(2024, 4, 13),
         )
         run_backfill(execute=True)
         c = CourtCase.objects.using("ngm").get(case_number="082-CR-0004")
@@ -151,14 +170,20 @@ class RunBackfillDBTests(TestCase):
         # finds exactly them; an unchanged row is never saved, so it's untouched.
         _mk("082-CR-0050", "आदेश /फैसलाको किसिम")  # header → changes
         _mk("082-CR-0051", "चालु")  # pending → no change
-        changed_before = CourtCase.objects.using("ngm").get(case_number="082-CR-0050").updated_at
-        same_before = CourtCase.objects.using("ngm").get(case_number="082-CR-0051").updated_at
+        changed_before = (
+            CourtCase.objects.using("ngm").get(case_number="082-CR-0050").updated_at
+        )
+        same_before = (
+            CourtCase.objects.using("ngm").get(case_number="082-CR-0051").updated_at
+        )
         run_backfill(execute=True)
         self.assertGreater(
-            CourtCase.objects.using("ngm").get(case_number="082-CR-0050").updated_at, changed_before
+            CourtCase.objects.using("ngm").get(case_number="082-CR-0050").updated_at,
+            changed_before,
         )
         self.assertEqual(
-            CourtCase.objects.using("ngm").get(case_number="082-CR-0051").updated_at, same_before
+            CourtCase.objects.using("ngm").get(case_number="082-CR-0051").updated_at,
+            same_before,
         )
 
     def test_execute_batches_writes_by_changed_field_group(self):
@@ -178,7 +203,8 @@ class RunBackfillDBTests(TestCase):
             stats = run_backfill(execute=True)
         self.assertEqual(stats["rows_changed"], 6)
         updates = [
-            q["sql"] for q in ctx.captured_queries
+            q["sql"]
+            for q in ctx.captured_queries
             if q["sql"].lstrip().upper().startswith("UPDATE")
         ]
         self.assertEqual(len(updates), 2, updates)
@@ -188,9 +214,11 @@ class RunBackfillDBTests(TestCase):
         # whose ONLY real change is clearing the header artifact. Those columns
         # must be rewritten to their existing (loaded) values, never NULLed.
         _mk(
-            "082-CR-0200", "आदेश /फैसलाको किसिम",
+            "082-CR-0200",
+            "आदेश /फैसलाको किसिम",
             verdict_type="CONVICTED",
-            verdict_date_bs="2081-05-05", verdict_date_ad=date(2024, 8, 20),
+            verdict_date_bs="2081-05-05",
+            verdict_date_ad=date(2024, 8, 20),
         )
         run_backfill(execute=True)
         c = CourtCase.objects.using("ngm").get(case_number="082-CR-0200")

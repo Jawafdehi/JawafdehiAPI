@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """The turn cap on a plain `claude -p` call.
 
 `--max-turns 1` was a hardcoded literal with no test, and it cost two wrong

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Hippocratic-3.0
+# SPDX-License-Identifier: LicenseRef-Hippocratic-3.0
 """Tests for the bus: envelope shape, stream topology, and the no-op guarantee.
 
 No broker is involved. The `nats` client is mocked wherever it would be reached,
