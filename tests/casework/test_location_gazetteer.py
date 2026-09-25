@@ -402,7 +402,6 @@ KV = f"{E}location/district/"
     ("का.जि. वडा नं. ४", f"{KV}kathmandu-np0327", None),
     ("का.म.न.पा. वडा नं. ४", f"{KV}kathmandu-np0327", None),
     ("ल.पु.उ.म.न.पा. वडा नं. ४", f"{KV}lalitpur-np0325", None),
-    ("भ.न.पा. वडा नं. ४", f"{KV}bhaktapur-np0326", f"{E}location/localunit/bhaktapur-municipality-30702"),
 ])
 def test_kathmandu_valley_abbreviations_resolve_on_the_real_snapshot(real_gaz, place, district, localunit):
     d = real_gaz.resolve(place, "")
@@ -412,5 +411,16 @@ def test_kathmandu_valley_abbreviations_resolve_on_the_real_snapshot(real_gaz, p
 def test_valley_abbreviations_expand_before_their_shorter_suffixes():
     assert place_key("का.म.न.पा.") == "काठमाडौं महानगरपालिका"
     assert place_key("ल.पु.उ.म.न.पा.") == "ललितपुर उपमहानगरपालिका"
-    assert place_key("भ.न.पा.") == "भक्तपुर नगरपालिका"
     assert place_key("का.जि. वडा") == "काठमाडौं जिल्ला वडा"
+
+
+def test_bhanaupa_abbreviation_not_expanded_to_bhaktapur(real_gaz):
+    # भ.न.पा. is ambiguous: it can mean भक्तपुर (Kathmandu Valley) or भरतपुर (Chitwan).
+    # The abbreviation has been removed to avoid binding wrong locations.
+    # When resolving "चितवन जिल्ला भ.न.पा.११", it should resolve to Chitwan district,
+    # never Bhaktapur, since the abbreviation is not expanded.
+    chitwan = f"{KV}chitawan-np0335"
+    d = real_gaz.resolve("चितवन जिल्ला भ.न.पा.११", "चितवन")
+    assert d.district == chitwan, "भ.न.पा. should not expand to Bhaktapur"
+    # Also verify that place_key doesn't contain the Bhaktapur expansion
+    assert "भक्तपुर" not in place_key("भ.न.पा."), "place_key should not expand भ.न.पा. to भक्तपुर नगरपालिका"
