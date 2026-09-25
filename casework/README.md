@@ -168,7 +168,7 @@ nothing:
 |------|-------|
 | `.extracted.jsonl` | Every extracted name with its section, notes and evidence quotes, per case |
 | `.accused_notes.jsonl` | The `accused_notes` array |
-| `.dropped.jsonl` | Every answer whose evidence quote failed grounding, with the reason |
+| `.dropped.jsonl` | Every answer whose evidence quote failed grounding, with the reason. A grounded place that does not resolve to a district or municipality goes to `.review.jsonl` instead |
 | `.location_missing.jsonl` | Every case that ended with no district: its source, the windows read, the refused locations |
 | `.binds.jsonl` | Each bind, with the candidates that lost |
 | `.created.jsonl` | Each entity created or refused, with the reason |

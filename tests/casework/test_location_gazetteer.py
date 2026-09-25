@@ -266,3 +266,32 @@ def test_notes_are_capped_at_200_chars(gaz):
     binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, SEIZURE_TEXT, 0)
     assert rejected == []
     assert binds and all(len(b.notes) == 200 for b in binds)
+
+
+def test_a_grounding_failure_is_tagged_grounding(gaz):
+    answers = [{"place_as_written": "बाँके", "district": "बाँके",
+                "evidence": "यो वाक्य पाठमा कतै छैन, बाँके।", "notes": ""}]
+    _binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, SEIZURE_TEXT, 0)
+    assert [(r["stage"], r["reason"]) for r in rejected] == [
+        ("grounding", "evidence not found in the source")]
+
+
+def test_an_unresolved_grounded_place_is_tagged_resolution_with_the_gazetteer_reason(gaz):
+    text = "रकम जिल्ला सुर्खेतमा बरामद भएको थियो ।"
+    answers = [{"place_as_written": "जिल्ला सुर्खेत", "district": "सुर्खेत",
+                "evidence": "रकम जिल्ला सुर्खेतमा बरामद भएको थियो", "notes": ""}]
+    _binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, text, 0)
+    assert [(r["stage"], r["reason"]) for r in rejected] == [
+        ("resolution", "NES match is not a district or municipality")]
+    assert rejected[0]["gazetteer_reason"] == "no single district in the place as written"
+
+
+def test_a_municipality_refused_beside_its_bound_district_is_a_resolution_row(gaz):
+    place = "जिल्ला बाँके, त्रिवेणी गाउँपालिका"
+    text = f"घटना {place} मा भएको हो ।"
+    answers = [{"place_as_written": place, "district": "बाँके",
+                "evidence": f"घटना {place} मा भएको हो", "notes": ""}]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, text, 0)
+    assert [b.nes_id for b in binds] == [BANKE]
+    assert [(r["stage"], r["reason"]) for r in rejected] == [
+        ("resolution", "a named municipality sits in another district; not bound")]

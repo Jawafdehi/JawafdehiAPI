@@ -235,10 +235,18 @@ def _redirect_match(gaz: Gazetteer, candidates, query_key: str) -> str | None:
     return None
 
 
+#: `stage` on a rejected row: the quote failed grounding, or the grounded place did not resolve.
+GROUNDING, RESOLUTION = "grounding", "resolution"
+
+
 def resolve_locations(
     api, gaz: Gazetteer, answers: list[dict], source_text: str, caption_end: int
 ) -> tuple[list[LocationBind], list[dict]]:
-    """Grounded location answers to district/municipality `LocationBind`s, deduped on `nes_id`."""
+    """Grounded location answers to district/municipality `LocationBind`s, deduped on `nes_id`.
+
+    Each rejected row carries `stage`: `GROUNDING` rows are dropped, `RESOLUTION` rows go to
+    review -- including a named municipality refused beside the district that did bind.
+    """
     binds: list[LocationBind] = []
     rejected: list[dict] = []
     seen: set[str] = set()
@@ -255,9 +263,13 @@ def resolve_locations(
         notes = (answer.get("notes") or "")[:NOTES_MAX_CHARS]
         query = place or district_claim
 
+        def reject(reason: str, stage: str = RESOLUTION, **extra: str) -> None:
+            rejected.append({"place": place, "district": district_claim, "evidence": evidence,
+                             "reason": reason, "stage": stage, **extra})
+
         problem = location_quote_problem(evidence, query, source_text, caption_end)
         if problem:
-            rejected.append({"place": place, "district": district_claim, "evidence": evidence, "reason": problem})
+            reject(problem, GROUNDING)
             continue
 
         decision = gaz.resolve(place, district_claim)
@@ -265,20 +277,21 @@ def resolve_locations(
             emit(decision.district, notes, place, evidence, "gazetteer")
             if decision.localunit:
                 emit(decision.localunit, notes, place, evidence, "gazetteer")
+            elif decision.reason:
+                reject(decision.reason)
             continue
 
         resolved = _redirect_match(gaz, api.search_entities(query), place_key(query))
         if resolved is None:
-            rejected.append({"place": place, "district": district_claim, "evidence": evidence,
-                              "reason": "NES match is not a district or municipality"})
+            reject("NES match is not a district or municipality", gazetteer_reason=decision.reason)
             continue
         if "/location/district/" in resolved:
             emit(resolved, notes, place, evidence, "nes-redirect")
         else:
             parent = gaz.parent_district(resolved)
             if parent is None:
-                rejected.append({"place": place, "district": district_claim, "evidence": evidence,
-                                  "reason": "municipality has no known district in the gazetteer"})
+                reject("municipality has no known district in the gazetteer",
+                       gazetteer_reason=decision.reason)
                 continue
             emit(parent, notes, place, evidence, "nes-redirect")
             emit(resolved, notes, place, evidence, "nes-redirect")

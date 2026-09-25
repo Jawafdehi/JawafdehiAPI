@@ -141,7 +141,13 @@ from casework.common.pipeline import (
 )
 from casework.common.review import md_cell
 from casework.common.select import select_for_run
-from casework.location_gazetteer import load_gazetteer, resolve_locations
+from casework.location_gazetteer import (
+    GROUNDING,
+    RESOLUTION,
+    load_gazetteer,
+    place_key,
+    resolve_locations,
+)
 # `defendant_names` is deliberately NOT imported. Reading accused from the case's
 # NGM court record was removed from this enricher: it needs no document and no LLM,
 # so it does not belong behind this module's five document/LLM gates (a case with a
@@ -1166,8 +1172,14 @@ class Extraction:
     location_binds: list
     rejected: list
     windows: list
-    #: Named entities plus locations the model gave, before grounding and the merge.
-    answered: int = 0
+    #: Distinct location answers that passed grounding, bound or not.
+    location_answers: list = field(default_factory=list)
+    #: Grounded location answers that did not resolve: they go to review, not dropped.
+    location_review: list = field(default_factory=list)
+
+
+class PromptTooLarge(ValueError):
+    """One call's content is over `PROMPT_HARD_MAX`; it is refused, never truncated."""
 
 
 def _grounded(items, window_text):
@@ -1192,8 +1204,9 @@ def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, us
                  system_suffix, label=None):
     """One window: the LLM call, evidence grounding, and location resolution."""
     content = f"{label or window.label()}\n\n{window.text}"
-    assert len(content) <= PROMPT_HARD_MAX, (
-        f"{len(content):,} chars is over PROMPT_HARD_MAX ({PROMPT_HARD_MAX:,}); never truncated")
+    if len(content) > PROMPT_HARD_MAX:
+        raise PromptTooLarge(
+            f"{len(content):,} chars is over PROMPT_HARD_MAX ({PROMPT_HARD_MAX:,}); never truncated")
     response = invoke_text(
         system=system_prompt + system_suffix, content=content,
         max_tokens=EXTRACTION_MAX_TOKENS, tier=tier_for("entities"), usage=usage)
@@ -1202,10 +1215,31 @@ def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, us
     accused_notes, notes_rejected = _grounded(answer.accused_notes, window.text)
     rejected.extend(notes_rejected)
     binds, loc_rejected = resolve_locations(api, gaz, answer.locations, text, cap_end)
-    rejected.extend(loc_rejected)
-    answered = len(answer.locations) + sum(
-        1 for item in answer.entities if (item.get("entity_name") or "").strip())
-    return entities, accused_notes, binds, rejected, answered
+    ungrounded = [r for r in loc_rejected if r["stage"] == GROUNDING]
+    rejected.extend(ungrounded)
+    review = [r for r in loc_rejected if r["stage"] == RESOLUTION]
+    refused = {(r["place"], r["district"], r["evidence"]) for r in ungrounded}
+    grounded = [a for a in answer.locations if isinstance(a, dict) and (
+        a.get("place_as_written") or "", a.get("district") or "", a.get("evidence") or "")
+        not in refused]
+    return entities, accused_notes, binds, rejected, grounded, review
+
+
+def _distinct(rows, key, into):
+    """Append each of `rows` to `into` unless `key(row)` is already there."""
+    seen = {key(row) for row in into}
+    for row in rows:
+        if key(row) not in seen:
+            seen.add(key(row))
+            into.append(row)
+
+
+def _answer_key(answer):
+    return place_key(answer.get("place_as_written") or answer.get("district") or "")
+
+
+def _review_key(row):
+    return (place_key(row.get("place") or row.get("district") or ""), row.get("reason"))
 
 
 def _new_accused_notes(case, kept_notes, candidates):
@@ -1270,22 +1304,26 @@ def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffi
 
     if source.kind == "press_release":
         window = Window(0, len(source.text), len(source.text), source.text)
-        entities, accused_notes, binds, rejected, answered = _read_window(
+        entities, accused_notes, binds, rejected, grounded, review = _read_window(
             api, gaz, source.text, 0, window, PRESS_RELEASE_SYSTEM_PROMPT,
             invoke_text, usage, system_suffix, label=_press_release_label(window))
+        answers, reviews = [], []
+        _distinct(grounded, _answer_key, answers)
+        _distinct(review, _review_key, reviews)
         return Extraction(merge_window_entities(entities), accused_notes, binds, rejected,
-                          [(window.start, window.end)], answered)
+                          [(window.start, window.end)], answers, reviews)
 
     text = source.text
     cap_end = caption_end(text)
     entities, accused_notes, location_binds, rejected, windows = [], [], [], [], []
-    seen_nes_ids, answered = set(), 0
+    seen_nes_ids, answers, reviews = set(), [], []
     for window in start_windows(text):
-        w_entities, w_notes, w_binds, w_rejected, w_answered = _read_window(
+        w_entities, w_notes, w_binds, w_rejected, w_grounded, w_review = _read_window(
             api, gaz, text, cap_end, window, COURT_ORDER_SYSTEM_PROMPT,
             invoke_text, usage, system_suffix)
         entities.extend(w_entities)
-        answered += w_answered
+        _distinct(w_grounded, _answer_key, answers)
+        _distinct(w_review, _review_key, reviews)
         accused_notes.extend(_new_accused_notes(case, accused_notes, w_notes))
         rejected.extend(w_rejected)
         for bind in w_binds:
@@ -1297,7 +1335,7 @@ def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffi
         if has_district and not accused_missing_notes(case, accused_notes):
             break
     return Extraction(merge_window_entities(entities), accused_notes, location_binds, rejected,
-                      windows, answered)
+                      windows, answers, reviews)
 
 
 #: What makes a bind a coded district (`location/district/<name>-npNNNN`).
@@ -1920,7 +1958,8 @@ def bind_section(item):
     return rel_type if rel_type in RELATIONSHIP_TYPES else DEFAULT_RELATIONSHIP_TYPE
 
 
-def plan_case_entities(api, case, etag, extracted_items, strict=False, *, locations=()):
+def plan_case_entities(api, case, etag, extracted_items, strict=False, *, locations=(),
+                       location_review=()):
     """Resolve every extracted name for one case and build its write plan.
 
     `locations` is Task 6's pre-resolved `LocationBind`s (from
@@ -1955,7 +1994,9 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False, *, locati
     names, for any of the eight searchable sections the case API accepts.
     `location` is the ninth and is never searched here at all -- an extracted
     item filed under it goes straight to `plan.review`; only a `LocationBind`
-    passed in via `locations` may reach the `location` section. Otherwise, four
+    passed in via `locations` may reach the `location` section; each
+    `location_review` row (a grounded place `resolve_locations` could not
+    resolve) becomes a `location` review row. Otherwise, four
     kinds of name do not bind: an unrecognised section (no place to file it), a
     name no NES entity matched at all (nothing to file), a `location` (see
     above), and an `accused` bind that would escalate an entity the case already
@@ -2063,6 +2104,12 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False, *, locati
     for lb in locations:
         _bind_one(plan, lb.place, Decision(BIND, lb.nes_id, 1.0, lb.place, lb.via, ()),
                   LOCATION_SECTION, lb.notes, have, additions, accused_ids)
+    for row in location_review:
+        why = row.get("reason") or ""
+        if row.get("gazetteer_reason"):
+            why += f"; gazetteer: {row['gazetteer_reason']}"
+        plan.review.append((row.get("place") or row.get("district") or "",
+                            Decision(REVIEW, None, 0.0, "", why, ()), LOCATION_SECTION))
 
     for item in extracted_items:
         name = (item.get("entity_name") or "").strip()
@@ -2859,7 +2906,7 @@ def main(argv=None):
             partially_decided.append(slug)
 
     def extract_entities_for(slug, detail, source):
-        """One case's extraction: `(valid_items, produced, accused_notes, location_binds)`.
+        """One case: `(valid_items, produced, accused_notes, location_binds, location_review)`.
 
         Lifted out of the loop body so that every way extraction can come up
         empty -- a failed call, a reply with nothing in it -- is a `return`
@@ -2894,6 +2941,11 @@ def main(argv=None):
                 api, gazetteer, detail, source, invoke_text, usage,
                 system_suffix=prefix_prompt_section(
                     live_prefixes if args.create_entities else None))
+        except PromptTooLarge as exc:
+            report.record(slug, "entities", "error", f"prompt too large: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="prompt", status="error", detail=str(exc), level=logging.ERROR)
+            return [], False, [], [], []
         except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
             report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
@@ -2903,7 +2955,7 @@ def main(argv=None):
                 import traceback
 
                 traceback.print_exc()
-            return [], False, [], []
+            return [], False, [], [], []
 
         for row in extraction.rejected:
             dropped_rows.append({"slug": slug, **row})
@@ -2914,7 +2966,13 @@ def main(argv=None):
                 or has_district_bind(detail.get("entities") or [])):
             location_missing_rows.append({
                 "slug": slug, "source": source.kind, "windows": extraction.windows,
-                "rejected_locations": [r for r in extraction.rejected if "place" in r]})
+                "rejected_locations": ([r for r in extraction.rejected if "place" in r]
+                                       + extraction.location_review)})
+            # An outcome status, so the ledger reads the case as failed on its district.
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="location", status="location_missing",
+                      detail=f"no district; windows {extraction.windows}",
+                      level=logging.WARNING)
 
         accused_notes = extraction.accused_notes
         # Only two things are dropped here: a non-dict, and an item with no name.
@@ -2930,17 +2988,18 @@ def main(argv=None):
         ]
         windows = f"windows {extraction.windows}"
 
-        # What the model named, grounded or not: grounding refusals are counted
-        # here and listed in `*.dropped.jsonl`, never silently lost.
-        total_entities_extracted += extraction.answered
-        if not valid_items and not accused_notes and not extraction.location_binds:
+        # After grounding and the cross-window merge, so a name or a place repeated
+        # across windows counts once; grounding refusals are the dropped line.
+        total_entities_extracted += len(valid_items) + len(extraction.location_answers)
+        if not (valid_items or accused_notes or extraction.location_binds
+                or extraction.location_review):
             why = ("no answer survived grounding" if extraction.rejected
                    else "LLM returned no entities or accused notes")
             report.record(slug, "entities", "skipped", why)
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="extract", status="skipped", detail=f"{why}; {windows}",
                       level=logging.WARNING)
-            return [], False, [], []
+            return [], False, [], [], []
 
         total_accused_notes_extracted += len(accused_notes)
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
@@ -2962,7 +3021,8 @@ def main(argv=None):
         for note in accused_notes:
             if isinstance(note, dict):
                 accused_notes_rows.append({**note, "slug": slug})
-        return valid_items, True, accused_notes, extraction.location_binds
+        return (valid_items, True, accused_notes, extraction.location_binds,
+                extraction.location_review)
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
@@ -3011,7 +3071,8 @@ def main(argv=None):
             if not verdict_case_refusal(detail):
                 court_text, _court_unmet = source_text(detail, types=COURT_TYPES)
                 court_text = court_text.strip() or None
-            valid_items, produced, case_accused_notes, location_binds = [], False, [], []
+            valid_items, produced, case_accused_notes, location_binds, location_review = (
+                [], False, [], [], [])
         else:
             unmet = unmet_prerequisites(STAGE, detail)
             if unmet:
@@ -3035,8 +3096,8 @@ def main(argv=None):
                       slug=slug, step="source", status="ok",
                       detail=f"{label} {len(source.text)} chars{fallback}")
 
-            valid_items, produced, case_accused_notes, location_binds = extract_entities_for(
-                slug, detail, source)
+            (valid_items, produced, case_accused_notes, location_binds,
+             location_review) = extract_entities_for(slug, detail, source)
 
             # The verdict step still reads the whole order through `source_text`,
             # and only under `--verdicts`.
@@ -3099,7 +3160,8 @@ def main(argv=None):
                       level=logging.WARNING)
 
         plan = plan_case_entities(api, fresh, etag, valid_items,
-                                  strict=args.strict, locations=location_binds)
+                                  strict=args.strict, locations=location_binds,
+                                  location_review=location_review)
 
         # Two refusals reach here and NEITHER looked at a single extracted
         # name: a non-DRAFT state, and a payload with no `entities` key. Both
@@ -3375,6 +3437,9 @@ def main(argv=None):
                           f"{len(changed_ids)} verdict update(s){note_detail}"))
 
     stats = report.summary()
+    # A failure beside the per-case statuses, not a `RunReport` row: see `location_missing_rows`.
+    if location_missing_rows:
+        stats["location_missing"] = len(location_missing_rows)
     print_summary(stats, args.dry_run, "Related-entity extraction")
     unmet_reasons = report.unmet_reasons()
     if unmet_reasons:

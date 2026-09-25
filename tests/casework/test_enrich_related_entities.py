@@ -493,7 +493,10 @@ def test_press_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, ca
     # report status is "already" regardless of what was extracted -- the
     # extraction itself is what this test pins, via the run summary.
     out = capsys.readouterr().out
-    assert "TOTAL entities extracted across all cases: 2" in out
+    # The location item's quote does not name its place, so it fails grounding: counted on the
+    # dropped line, not as extracted (the count is after grounding and the merge).
+    assert "TOTAL entities extracted across all cases: 1" in out
+    assert "TOTAL answers dropped by grounding: 1" in out
 
 
 def test_court_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, capsys):
@@ -502,7 +505,10 @@ def test_court_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, ca
     _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
     assert len(stub.calls) == 1
     out = capsys.readouterr().out
-    assert "TOTAL entities extracted across all cases: 2" in out
+    # The location item's quote does not name its place, so it fails grounding: counted on the
+    # dropped line, not as extracted (the count is after grounding and the merge).
+    assert "TOTAL entities extracted across all cases: 1" in out
+    assert "TOTAL answers dropped by grounding: 1" in out
 
 
 def test_llm_invoked_with_premium_tier_end_to_end(monkeypatch, patched_fetch_markdown):
@@ -581,7 +587,10 @@ def test_summary_reports_the_three_counts_separately(
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
               argv=["--dry-run"])
     out = capsys.readouterr().out
-    assert "TOTAL entities extracted across all cases: 2" in out
+    # The location item's quote does not name its place, so it fails grounding: counted on the
+    # dropped line, not as extracted (the count is after grounding and the merge).
+    assert "TOTAL entities extracted across all cases: 1" in out
+    assert "TOTAL answers dropped by grounding: 1" in out
     assert "TOTAL that WOULD bind to an EXISTING NES entity (dry run, nothing written): 0" in out
     assert "TOTAL reported for human review:" in out
     assert "TOTAL with no NES match:" in out
@@ -675,7 +684,10 @@ def test_invalid_relationship_type_is_excluded_from_extracted_count(
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
               argv=["--dry-run"])
     out = capsys.readouterr().out
-    assert "TOTAL entities extracted across all cases: 3" in out
+    # The location item's quote does not name its place, so it fails grounding: counted on the
+    # dropped line, not as extracted (the count is after grounding and the merge).
+    assert "TOTAL entities extracted across all cases: 2" in out
+    assert "TOTAL answers dropped by grounding: 1" in out
 
 
 def test_accused_notes_only_response_yields_zero_valid_entities_end_to_end(
@@ -3397,6 +3409,21 @@ def test_no_bind_this_module_writes_can_carry_a_charged_outcome(
     assert all(not item.get("outcome") for item in items)
 
 
+@pytest.mark.parametrize("prompt, offered", [
+    (ere.COURT_ORDER_SYSTEM_PROMPT, {"related", "alleged", "witness", "victim"}),
+    (ere.PRESS_RELEASE_SYSTEM_PROMPT, {"related"}),
+])
+def test_every_section_a_prompt_offers_is_one_the_binder_accepts(prompt, offered):
+    # Read from the prompt's own output-format line, so the prompt and the binder
+    # cannot drift apart. `accused` and `location` are never offered.
+    import re
+
+    match = re.search(r'"relationship_type": "([a-z|]+)"', prompt)
+    sections = set(match.group(1).split("|"))
+    assert sections == offered
+    assert sections <= set(ere.RELATIONSHIP_TYPES) - {"accused", "location"}
+
+
 def test_the_prompt_no_longer_offers_accused_as_a_relationship_type():
     for prompt in (ere.COURT_ORDER_SYSTEM_PROMPT, ere.PRESS_RELEASE_SYSTEM_PROMPT):
         assert '"accused"' not in prompt
@@ -5517,6 +5544,76 @@ class TestPickSource:
 #: The last main-branch commit carrying the retired single-call `SYSTEM_PROMPT`.
 RETIRED_PROMPT_COMMIT = "5406f9e"
 
+#: The retired `SYSTEM_PROMPT` from PART 2 through PART 3, frozen from `RETIRED_PROMPT_COMMIT`
+#: so the word-for-word check runs on a shallow clone too.
+RETIRED_PART_2_TO_3 = """PART 2 — PEOPLE AND ORGANIZATIONS (relationship_type="related" unless stated)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Any person or organization connected to the case.
+Extract ALL of these categories that appear in the documents:
+
+  GOVERNMENT BODIES — ministry, department, municipality, office whose funds were
+  misused or where the accused worked.
+  Examples: "जलश्रोत तथा सिँचाइ विभाग"  notes: "आरोपी कार्यरत रहेको सरकारी निकाय"
+            "राष्ट्रिय सूचना प्रविधि केन्द्र"  notes: "खरिद प्रक्रियामा संलग्न सरकारी निकाय"
+
+  COMPANIES/CONTRACTORS — firms, JVs, cooperatives, suppliers, foreign companies.
+  Examples: "कल्पवृक्ष-कोहिनूर जे.भी."  notes: "ठेक्का प्राप्त गर्ने संयुक्त उद्यम"
+            "UOB Singapore बैंक"  notes: "Singapore स्थित बैंक, रकम हस्तान्तरणमा प्रयोग"
+
+  FAMILY MEMBERS — spouse, children, relatives holding assets.
+  Example: "श्रृजना गिरी"  notes: "आरोपितको श्रीमती, सम्पत्ति हस्तान्तरण गरिएको"
+
+  CO-DEFENDANTS/ASSOCIATES — secondary actors, facilitators, middlemen.
+  Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा सहयोग"
+
+  INVESTIGATING/PROSECUTING BODIES — DO NOT extract the inquiry commission
+  (अख्तियार दुरुपयोग अनुसन्धान आयोग) or special attorney office as standalone
+  entities — they are present in every case. DO NOT extract individual prosecutors,
+  attorneys, judges, or court staff — they are performing standard professional
+  duties, not materially connected to the case events.
+  Only extract named CIAA investigation officers if they are specifically named
+  and their investigation is directly relevant.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+
+  MEDIA — DO NOT extract a newspaper, portal or broadcaster whose only role was
+  REPORTING the case. It is a source, not a participant.
+  Example of what to SKIP: "नयाँ पत्रिका" (published the story that prompted the
+  complaint). Extract a media organisation only when it is itself accused, owns
+  assets at issue, or received the funds.
+
+Notes must never be blank for related entities. Always describe the specific connection.
+Only extract entities with CONFIRMED connections — not people who were later acquitted.
+
+DO NOT EXTRACT THE DEFENDANTS. The people the charge sheet (आरोपपत्र) names are
+already held in the court record and are read from there, not from this text.
+Extracting them here would guess at names the court record states exactly.
+Skip them entirely — do not list them under any relationship_type.
+
+USE A MORE SPECIFIC relationship_type INSTEAD OF "related" when the documents make
+the role plain. Only these two; when in doubt use "related".
+
+  "alleged" — named as implicated in the documents, but NOT on the charge sheet.
+  Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा संलग्न भनी उल्लेख, अभियोग लगाइएको छैन"
+
+  "witness" — a named inquiry officer or witness.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+
+PRIORITY ORDER: People and organizations DIRECTLY involved in the case events come first.
+Generic legal infrastructure (courts, attorney offices) should be skipped unless a
+specific named person from those bodies is materially connected.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 3 — ACCUSED NOTES (accused_notes array)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each primary accused person named in the documents, extract a SHORT note
+describing their job title and role. Format: "job title, employer"
+Examples:
+  "तत्कालीन प्रबन्ध निर्देशक, नेपाल टेलिकम"
+  "तत्कालीन नगरप्रमुख, खैरहनी नगरपालिका"
+  "नापी अधिकृत, नापी कार्यालय चाबहिल"
+
+Only include primary accused persons. Keep notes under 80 chars."""
+
 
 def _retired_system_prompt() -> str:
     """`SYSTEM_PROMPT` as it stood at `RETIRED_PROMPT_COMMIT`, read via `git show` + `ast`."""
@@ -5538,11 +5635,13 @@ class TestCourtOrderSystemPrompt:
     """`COURT_ORDER_SYSTEM_PROMPT`: PART 2/3 word for word, new PART 1 and output format."""
 
     def test_keeps_part_2_and_part_3_verbatim_from_the_old_prompt(self):
+        assert RETIRED_PART_2_TO_3 in ere.COURT_ORDER_SYSTEM_PROMPT
+
+    def test_the_frozen_text_matches_the_retired_prompt_in_history(self):
         old = _retired_system_prompt()
         tail_marker = "Only include primary accused persons. Keep notes under 80 chars."
-        old_body = old[old.index("PART 2 — PEOPLE AND ORGANIZATIONS"):
-                       old.index(tail_marker) + len(tail_marker)]
-        assert old_body in ere.COURT_ORDER_SYSTEM_PROMPT
+        assert old[old.index("PART 2 — PEOPLE AND ORGANIZATIONS"):
+                   old.index(tail_marker) + len(tail_marker)] == RETIRED_PART_2_TO_3
 
     def test_has_the_new_part_1_location_rules(self):
         prompt = ere.COURT_ORDER_SYSTEM_PROMPT
@@ -6098,6 +6197,9 @@ class TestMainWiring:
         assert row["windows"] == [[0, len(WIRED_ORDER)]]
         assert [r["reason"] for r in row["rejected_locations"]] == [
             "evidence not found in the source"]
+        assert [(r["place"], r["reason"]) for r in _jsonl("dropped")] == [
+            (BANKE_PLACE, "evidence not found in the source")]
+        assert _jsonl("review") == []
         assert "location_missing: 1" in out
         assert [(b["extracted"], b["role"]) for b in _jsonl("binds")] == [
             ("साझा भण्डार सहकारी", "related")]
@@ -6229,7 +6331,89 @@ class TestMainWiring:
 
         assert stub.calls == []
         assert report.rows[0]["status"] == "error"
+        assert report.rows[0]["reason"].startswith("prompt too large: ")
         assert "PROMPT_HARD_MAX" in report.rows[0]["reason"]
+        assert "LLM extraction failed" not in report.rows[0]["reason"]
+
+    def test_an_oversized_window_raises_prompt_too_large_not_an_assert(self):
+        text = READABLE_PRESS * ((ere.PROMPT_HARD_MAX // len(READABLE_PRESS)) + 1)
+        stub = _sequenced_stub()
+        with pytest.raises(ere.PromptTooLarge, match="PROMPT_HARD_MAX"):
+            extract_from_source(_api(), _gaz(), {"slug": "c", "state": "DRAFT", "entities": []},
+                                Source("press_release", text, ""), stub, usage=None)
+        assert stub.calls == []
+        assert not issubclass(ere.PromptTooLarge, AssertionError)
+
+    def test_a_name_and_district_repeated_across_windows_are_counted_once(
+        self, monkeypatch, capsys
+    ):
+        # The placeholder-noted accused keeps the loop reading into window 2, which
+        # repeats window 1's entity and district and fills the note.
+        order = _order_with_location_at(100_000, len(CAPTION_SHORT) + 500)
+        _patch_links(monkeypatch, {"https://x/wired-court.md": order})
+        accused = {"nes_id": ACCUSED_IRI, "type": "accused", "display_name": "राम बहादुर",
+                   "outcome": "charged", "notes": ere.MACHINE_NOTE_PREFIX + "079-cr-0071"}
+        filler = FILLER_SENTENCE.strip()
+        sajha = {**SAJHA_ITEM, "evidence": filler}
+        stub = _sequenced_stub(
+            _response(locations=[BANKE_LOCATION], entities=[sajha]),
+            _response(locations=[BANKE_LOCATION], entities=[sajha], accused_notes=[
+                {"name": "राम बहादुर", "notes": "तत्कालीन सचिव", "evidence": filler}]),
+        )
+        case = _wired_case(entities=[accused], press=False)
+        _run_main(monkeypatch, _SearchStubApi([case], SAJHA_SEARCH), stub, argv=["--dry-run"])
+        out = capsys.readouterr().out
+
+        assert len(stub.calls) == 2
+        assert "TOTAL entities extracted across all cases: 2" in out
+        assert "TOTAL accused notes extracted: 1" in out
+
+    def test_an_unresolved_grounded_location_goes_to_review_not_dropped(self, monkeypatch):
+        surkhet = "रकम जिल्ला सुर्खेतमा बरामद भएको थियो।"
+        _patch_links(monkeypatch, {"https://x/wired-court.md": WIRED_ORDER + "\n" + surkhet})
+        stub = _call_tracking_stub(_response(locations=[
+            {"place_as_written": "जिल्ला सुर्खेत", "district": "सुर्खेत", "evidence": surkhet,
+             "notes": ""}], entities=[SAJHA_ITEM]))
+        _run_main(monkeypatch, _SearchStubApi([_wired_case(press=False)], SAJHA_SEARCH), stub,
+                  argv=["--dry-run"])
+
+        review = _jsonl("review")
+        assert [(r["extracted"], r["role"]) for r in review] == [("जिल्ला सुर्खेत", "location")]
+        assert review[0]["reason"].startswith("NES match is not a district or municipality")
+        assert "no single district in the place as written" in review[0]["reason"]
+        assert _jsonl("dropped") == []
+        assert [r["reason"] for r in _jsonl("location_missing")[0]["rejected_locations"]] == [
+            "NES match is not a district or municipality"]
+
+    def test_a_municipality_refused_beside_a_bound_district_goes_to_review(self, monkeypatch):
+        place = "जिल्ला बाँके, त्रिवेणी गाउँपालिका"
+        quote = f"घटना {place} मा भएको हो।"
+        _patch_links(monkeypatch, {"https://x/wired-court.md": WIRED_ORDER + "\n" + quote})
+        stub = _call_tracking_stub(_response(locations=[
+            {"place_as_written": place, "district": "बाँके", "evidence": quote, "notes": ""}]))
+        _run_main(monkeypatch, _SearchStubApi([_wired_case(press=False)], SAJHA_SEARCH), stub,
+                  argv=["--dry-run"])
+
+        assert [(b["nes_id"], b["role"]) for b in _jsonl("binds")] == [(BANKE_IRI, "location")]
+        assert [(r["extracted"], r["role"], r["reason"]) for r in _jsonl("review")] == [
+            (place, "location", "a named municipality sits in another district; not bound")]
+        assert _jsonl("dropped") == []
+        assert _jsonl("location_missing") == []
+
+    def test_location_missing_counts_as_a_failure_in_the_run_summary(self, monkeypatch, capsys):
+        _patch_links(monkeypatch)
+        stub = _call_tracking_stub(_response(entities=[SAJHA_ITEM]))
+        report = _run_main(monkeypatch, _SearchStubApi([_wired_case(press=False)], SAJHA_SEARCH),
+                           stub, argv=["--dry-run"])
+        out = capsys.readouterr().out
+
+        assert [r["status"] for r in report.rows] == ["would-bind"]
+        assert "  location_missing: 1\n" in out.split("=== Related-entity extraction")[1]
+        log_text = Path(logging.getLogger("casework.entities")
+                        ._casework_run_paths["log"]).read_text(encoding="utf-8")
+        assert "location_missing=1" in log_text
+        events = [r for r in _read_events(_events_path()) if r["status"] == "location_missing"]
+        assert [(e["slug"], e["step"]) for e in events] == [("case-wired", "location")]
 
 
 def test_prompt_hard_max_fits_a_whole_start_window():
