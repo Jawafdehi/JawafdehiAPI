@@ -90,8 +90,8 @@ IT ALSO UPDATES ACCUSED BINDS IT DID NOT CREATE, under `--verdicts`.
 `enrich_court_record` binds every court-record defendant with
 `outcome = charged` and a placeholder note, because a `ठहर` on a 19-defendant
 judgment does not say who. With `--verdicts`, a case with a bound court order
-and an accused bind not yet settled has the judgment's operative section read
-and those binds rewritten in place -- a real role note and a per-defendant
+and an accused bind not yet settled has the end of the judgment read, backwards
+from the holding, and those binds rewritten in place -- a real role note and a per-defendant
 verdict -- in the SAME `/entities` replace the new binds go out in, never a
 second PATCH. It still proposes no accused bind of its own. OPT-IN, because
 `convicted` on a real person is the worst thing this module can get wrong.
@@ -125,11 +125,10 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
-from casework.common.court_order import court_order_verdict_zone
 from casework.common.grounding import evidence_found, is_readable_devanagari, is_teaser
 from casework.common.llm import bootstrap, tier_for
-from casework.common.materials import materials_of_type, source_chunks, source_text
-from casework.common.order_windows import Window, caption_end, start_windows
+from casework.common.materials import materials_of_type, source_chunks
+from casework.common.order_windows import Window, caption_end, end_windows, start_windows
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.common.parse import balanced_array, balanced_object, parse_extraction_response, strip_fence
 from casework.common.pipeline import (
@@ -602,9 +601,9 @@ VERDICT_OUTCOMES = frozenset({"convicted", "acquitted", "abated", "charged", "un
 VERDICT_SYSTEM_PROMPT = """You are a Nepali legal research assistant reading a Special Court \
 (विशेष अदालत) judgment (फैसला) to record what the court decided about each named defendant.
 
-Decide from the OPERATIVE section only -- the ठहर खण्ड and the तपसिल directions near the \
-end. The earlier sections recite the charge and the defence; they state what was ALLEGED, \
-not what was decided.
+You are reading part of the END of the judgment, labelled with its character range. \
+Decide only from a holding this text itself states. If this text does not state a holding \
+for a person, answer unknown.
 
 The operative verbs are ठहर्छ / ठहरेको (held guilty) and सफाई पाउने ठहर्छ (acquitted). A \
 defendant whose case was discontinued on death is abated (मुद्दा तामेली).
@@ -682,7 +681,7 @@ def _ask_verdict_names(names, zone, invoke_text, usage):
     listing = "\n".join(f"- {name}" for name in names)
     content = (
         f"ACCUSED ON THIS CASE:\n{listing}\n\n"
-        f"COURT ORDER (operative section):\n{zone}"
+        f"COURT ORDER:\n{zone}"
     )
     response_text = invoke_text(
         system=VERDICT_SYSTEM_PROMPT,
@@ -727,18 +726,9 @@ def _retry_verdict_names(missing, zone, invoke_text, usage):
     return answered, errors
 
 
-def accused_verdicts(names, order_text, invoke_text, usage=None):
-    """Ask the model, per chunk of `VERDICT_CHUNK` names, what the order's
-    operative section decided for each -- returns `({name: {"outcome", "role",
-    "evidence"}}, errors)`.
-
-    A short chunk is retried ONCE over the missing names at half the chunk
-    size (`_retry_verdict_names`); one still short after that keeps the rows it
-    did answer and errors naming the rest. A silent partial loss is what the
-    reconciliation this wraps exists to prevent.
-    """
-    zone = court_order_verdict_zone(order_text)
-    results: dict = {}
+def _ask_window(names, zone, invoke_text, usage):
+    """`names` asked of one window in `VERDICT_CHUNK` batches, a short batch retried once: `(answered, errors)`."""
+    answered_all: dict = {}
     errors: list = []
     for start in range(0, len(names), VERDICT_CHUNK):
         chunk = names[start:start + VERDICT_CHUNK]
@@ -747,7 +737,7 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
         except Exception as exc:  # noqa: BLE001 - one bad chunk must not lose the rest
             errors.append(f"chunk of {len(chunk)} defendants failed: {exc}")
             continue
-        results.update(answered)
+        answered_all.update(answered)
         missing = [name for name in chunk if name not in answered]
         if not missing:
             errors.extend(unrequested_errors)
@@ -756,7 +746,7 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
         retry_answered, retry_unrequested = _retry_verdict_names(
             missing, zone, invoke_text, usage)
 
-        results.update(retry_answered)
+        answered_all.update(retry_answered)
         still_missing = [name for name in missing if name not in retry_answered]
         errors.extend(unrequested_errors)
         if still_missing:
@@ -764,6 +754,40 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
                 f"chunk returned {len(answered) + len(retry_answered)} of {len(chunk)} "
                 f"defendants after retry; missing: {', '.join(still_missing)}")
         errors.extend(retry_unrequested)
+    return answered_all, errors
+
+
+def accused_verdicts(names, order_text, invoke_text, usage=None):
+    """Each name's grounded holding from `end_windows`, latest first; undecided names stay `charged`."""
+    pending = list(names)
+    decided: dict = {}
+    roles: dict = {}
+    errors: list = []
+    for window in end_windows(order_text):
+        if not pending:
+            break
+        zone = f"{window.label()}\n\n{window.text}"
+        answered, window_errors = _ask_window(pending, zone, invoke_text, usage)
+        errors.extend(window_errors)
+        for name in pending:
+            row = answered.get(name)
+            if row is None:
+                continue
+            if row["role"] and not roles.get(name):
+                roles[name] = row["role"]
+            if row["outcome"] not in TERMINAL_OUTCOMES:
+                continue
+            if evidence_found(row["evidence"], window.text):
+                decided[name] = row
+            else:
+                errors.append(f"{name}: evidence not found in the order")
+        pending = [name for name in pending if name not in decided]
+    results = {}
+    for name in names:
+        row = decided.get(name)
+        results[name] = {"outcome": row["outcome"] if row else "charged",
+                         "role": roles.get(name, ""),
+                         "evidence": row["evidence"] if row else ""}
     return results, errors
 
 
@@ -1427,6 +1451,11 @@ def verdict_case_refusal(case):
     if all(is_settled(entity) for entity in accused):
         return f"all {len(accused)} accused bind(s) already carry a terminal outcome"
     return ""
+
+
+def verdict_text(source):
+    """The text the verdict step may read: the court order alone, never a press release."""
+    return source.text if source.kind == "court_order" and source.text.strip() else None
 
 
 def verdict_gate(case, court_text):
@@ -3062,15 +3091,12 @@ def main(argv=None):
                       level=logging.WARNING)
 
         if skip_extraction:
-            # Here for the verdicts only, and those read the court order alone --
-            # fetching the press release too would spend a markdown read per
-            # case on a prompt this run will never build. The clauses the case
-            # payload can answer run FIRST, so a case the gate refuses pays for
-            # no document fetch at all.
+            # Here for the verdicts only, and those read the court order alone. The
+            # clauses the case payload can answer run FIRST, so a case the gate
+            # refuses pays for no document fetch at all.
             court_text = None
             if not verdict_case_refusal(detail):
-                court_text, _court_unmet = source_text(detail, types=COURT_TYPES)
-                court_text = court_text.strip() or None
+                court_text = verdict_text(pick_source(detail))
             valid_items, produced, case_accused_notes, location_binds, location_review = (
                 [], False, [], [], [])
         else:
@@ -3099,12 +3125,8 @@ def main(argv=None):
             (valid_items, produced, case_accused_notes, location_binds,
              location_review) = extract_entities_for(slug, detail, source)
 
-            # The verdict step still reads the whole order through `source_text`,
-            # and only under `--verdicts`.
-            court_text = None
-            if args.verdicts:
-                court_text, _court_unmet = source_text(detail, types=COURT_TYPES)
-                court_text = court_text.strip() or None
+            # The order `pick_source` already fetched, never refetched.
+            court_text = verdict_text(source) if args.verdicts else None
 
         # THE VERDICT GATE, EVALUATED INDEPENDENTLY OF THE SKIP ABOVE. The
         # updates it produces are merged into the SAME whole-list replace the
@@ -3261,8 +3283,8 @@ def main(argv=None):
         # filter. Off the gate because `verdict_case_refusal` turns down a
         # fully-settled case, which is exactly where the placeholders pile up.
         #
-        # A verdict's own role note wins: it is read from the judgment's
-        # operative section, where this one is a job title from the extraction.
+        # A verdict's own role note wins: it is read from the end of the
+        # judgment, where this one is a job title from the extraction.
         noted = {}
         for nes_id, note_update in accused_note_updates(
                 fresh, case_accused_notes).items():

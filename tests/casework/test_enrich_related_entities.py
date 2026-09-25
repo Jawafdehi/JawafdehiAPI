@@ -39,7 +39,7 @@ import pytest
 from casework import enrich_related_entities as ere
 from casework.common.api import CandidateList, ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
 from casework.common.api import EntityAlreadyExists
-from casework.common.order_windows import MAX_ENTITY_WINDOWS, start_windows
+from casework.common.order_windows import MAX_ENTITY_WINDOWS, end_windows, start_windows
 from casework.enrich_related_entities import (
     PROMOTED_PREFIX,
     Extraction,
@@ -256,6 +256,8 @@ class _StubApi:
 #: The sentence every `patched_fetch_markdown` text carries, so `with_evidence` can
 #: ground a canned reply against whichever source `pick_source` chooses.
 FIXTURE_EVIDENCE = "गोपाल बहादुर श्रेष्ठविरुद्ध मुद्दा दर्ता भएको छ।"
+#: The holdings the canned verdict replies quote, so their evidence grounds in `court.md`.
+COURT_HOLDINGS = "\nतसर्थ निज प्रतिवादीले कसुर गरेको ठहर्छ। अर्को प्रतिवादीले सफाई पाउने ठहर्छ।"
 #: Pads a press release past `is_teaser`'s 400-char floor.
 PRESS_PADDING = " आयोगले यस विषयमा विस्तृत अनुसन्धान गरेको थियो।" * 10
 
@@ -268,7 +270,8 @@ def patched_fetch_markdown(monkeypatch):
         return {
             "https://x/press.md": "साझा भण्डार सहकारीमा अनियमितता भएको छ। "
                                    + FIXTURE_EVIDENCE + PRESS_PADDING,
-            "https://x/court.md": "अदालतको आदेशमा ठहर खण्ड उल्लेख छ। " + FIXTURE_EVIDENCE,
+            "https://x/court.md": ("अदालतको आदेशमा ठहर खण्ड उल्लेख छ। " + FIXTURE_EVIDENCE
+                                   + COURT_HOLDINGS),
             "https://x/press2.md": "प्रेस विज्ञप्तिको सामग्री। " + FIXTURE_EVIDENCE + PRESS_PADDING,
             "https://x/court2.md": "अदालतको आदेशको सामग्री। " + FIXTURE_EVIDENCE,
             "https://x/empty.md": "",
@@ -3670,11 +3673,20 @@ class TestVerdictPromptBounds:
         assert "VERBATIM" in ere.VERDICT_SYSTEM_PROMPT
 
 
+#: A one-window order whose holding grounds `TestAccusedVerdicts._reply`'s evidence.
+VERDICT_ORDER = "तसर्थ प्रतिवादीले कसुर गरेको ठहर्छ।"
+VERDICT_EVIDENCE = "प्रतिवादीले कसुर गरेको ठहर्छ"
+
+
+def _outcomes(got):
+    return {name: row["outcome"] for name, row in got.items()}
+
+
 class TestAccusedVerdicts:
     def _reply(self, names):
         import json
         return json.dumps({"defendants": [
-            {"name": n, "outcome": "convicted", "role": "सचिव", "evidence": "ठहर्छ"}
+            {"name": n, "outcome": "convicted", "role": "सचिव", "evidence": VERDICT_EVIDENCE}
             for n in names]}, ensure_ascii=False)
 
     def test_one_chunk_for_a_small_case(self):
@@ -3684,7 +3696,7 @@ class TestAccusedVerdicts:
             calls.append(content)
             return self._reply(["क", "ख"])
 
-        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        got, errors = ere.accused_verdicts(["क", "ख"], VERDICT_ORDER, fake)
         assert len(calls) == 1
         assert got["क"]["outcome"] == "convicted"
         assert errors == []
@@ -3700,10 +3712,10 @@ class TestAccusedVerdicts:
             seen.append(len(batch))
             return self._reply(batch)
 
-        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        got, errors = ere.accused_verdicts(names, VERDICT_ORDER, fake)
         assert len(seen) == 3          # 20 + 20 + 5
         assert max(seen) <= ere.VERDICT_CHUNK
-        assert len(got) == 45
+        assert set(_outcomes(got).values()) == {"convicted"} and len(got) == 45
 
     def test_a_short_chunk_is_an_error_not_a_partial(self):
         # The probe's apparent "0 of 9 correct" was really nine rows silently
@@ -3712,7 +3724,7 @@ class TestAccusedVerdicts:
         def fake(system, content, max_tokens, tier, usage=None):
             return self._reply(["नाम0"])
 
-        got, errors = ere.accused_verdicts([f"नाम{i}" for i in range(5)], "आदेश", fake)
+        got, errors = ere.accused_verdicts([f"नाम{i}" for i in range(5)], VERDICT_ORDER, fake)
         assert errors and "1 of 5" in errors[0]
 
     def test_a_failed_chunk_does_not_lose_the_others(self):
@@ -3725,9 +3737,11 @@ class TestAccusedVerdicts:
                 raise RuntimeError("provider 502")
             return self._reply([n for n in names if f"- {n}\n" in content + "\n"])
 
-        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        got, errors = ere.accused_verdicts(names, VERDICT_ORDER, fake)
         assert errors
-        assert len(got) == 5           # the second chunk survived
+        convicted = [n for n, outcome in _outcomes(got).items() if outcome == "convicted"]
+        assert convicted == names[20:]  # the second chunk survived
+        assert all(got[n]["outcome"] == "charged" for n in names[:20])
 
     def test_a_short_chunk_is_retried_and_the_retry_fills_the_gap(self):
         # A chunk of 20 that returns 1 defendant must not lose the other 19:
@@ -3742,9 +3756,9 @@ class TestAccusedVerdicts:
             batch = [n for n in names if f"- {n}\n" in content + "\n"]
             return self._reply(batch)
 
-        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        got, errors = ere.accused_verdicts(names, VERDICT_ORDER, fake)
         assert len(calls) == 2
-        assert len(got) == 5
+        assert set(_outcomes(got).values()) == {"convicted"} and len(got) == 5
         assert errors == []
 
     def test_a_chunk_still_short_after_retry_keeps_partial_results_and_errors(self):
@@ -3757,10 +3771,9 @@ class TestAccusedVerdicts:
             calls["n"] += 1
             return self._reply(["नाम0"])
 
-        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        got, errors = ere.accused_verdicts(names, VERDICT_ORDER, fake)
         assert calls["n"] == 2          # exactly one retry, never a second
-        assert got["नाम0"]["outcome"] == "convicted"
-        assert len(got) == 1
+        assert _outcomes(got) == {"नाम0": "convicted", **{n: "charged" for n in names[1:]}}
         assert errors
 
     def _sizes_stub(self, names, truncate_over):
@@ -3786,9 +3799,10 @@ class TestAccusedVerdicts:
         names = [f"नाम{i}" for i in range(ere.VERDICT_CHUNK)]
         fake, sizes = self._sizes_stub(names, ere.VERDICT_CHUNK // 2)
 
-        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        got, errors = ere.accused_verdicts(names, VERDICT_ORDER, fake)
         assert sizes == [ere.VERDICT_CHUNK,
                          ere.VERDICT_CHUNK // 2, ere.VERDICT_CHUNK // 2]
+        assert set(_outcomes(got).values()) == {"convicted"}
         assert len(got) == ere.VERDICT_CHUNK
         assert errors == []
 
@@ -3798,10 +3812,10 @@ class TestAccusedVerdicts:
         names = [f"नाम{i}" for i in range(ere.VERDICT_CHUNK)]
         fake, sizes = self._sizes_stub(names, 0)
 
-        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        got, errors = ere.accused_verdicts(names, VERDICT_ORDER, fake)
         assert sizes == [ere.VERDICT_CHUNK,
                          ere.VERDICT_CHUNK // 2, ere.VERDICT_CHUNK // 2]
-        assert got == {}
+        assert set(_outcomes(got).values()) == {"charged"}
         assert errors and f"0 of {ere.VERDICT_CHUNK}" in errors[0]
         assert all(name in errors[0] for name in names)
 
@@ -3813,7 +3827,7 @@ class TestAccusedVerdicts:
             calls.append(content)
             return self._reply(names)
 
-        got, errors = ere.accused_verdicts(names, "आदेश", fake)
+        got, errors = ere.accused_verdicts(names, VERDICT_ORDER, fake)
         assert len(calls) == 1
         assert len(got) == 2
         assert errors == []
@@ -3823,7 +3837,7 @@ class TestAccusedVerdicts:
         def fake(system, content, max_tokens, tier, usage=None):
             return self._reply(["क", "ख", "अनाधिकृत नाम"])
 
-        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        got, errors = ere.accused_verdicts(["क", "ख"], VERDICT_ORDER, fake)
         assert "अनाधिकृत नाम" not in got
         assert got["क"]["outcome"] == "convicted"
         assert got["ख"]["outcome"] == "convicted"
@@ -3836,50 +3850,27 @@ class TestAccusedVerdicts:
         def fake(system, content, max_tokens, tier, usage=None):
             return self._reply(["नक्कली नाम"])
 
-        got, errors = ere.accused_verdicts(["क"], "आदेश", fake)
-        assert "क" not in got
+        got, errors = ere.accused_verdicts(["क"], VERDICT_ORDER, fake)
+        assert got == {"क": {"outcome": "charged", "role": "", "evidence": ""}}
         assert errors
 
     def test_a_reply_omitting_one_requested_name_still_returns_the_others(self):
         def fake(system, content, max_tokens, tier, usage=None):
             return self._reply(["क"])  # "ख" was requested but never answered
 
-        got, errors = ere.accused_verdicts(["क", "ख"], "आदेश", fake)
+        got, errors = ere.accused_verdicts(["क", "ख"], VERDICT_ORDER, fake)
         assert got["क"]["outcome"] == "convicted"
-        assert "ख" not in got
+        assert got["ख"]["outcome"] == "charged"
         assert any("ख" in e for e in errors)
 
     def test_an_unusable_reply_errors_for_every_name_in_the_chunk(self):
         def fake(system, content, max_tokens, tier, usage=None):
             return "the model apologised"
 
-        got, errors = ere.accused_verdicts(["क", "ख", "ग"], "आदेश", fake)
-        assert got == {}
+        got, errors = ere.accused_verdicts(["क", "ख", "ग"], VERDICT_ORDER, fake)
+        assert set(_outcomes(got).values()) == {"charged"}
         assert errors
         assert all(name in errors[0] for name in ("क", "ख", "ग"))
-
-    def test_the_model_sees_the_verdict_zone_not_the_plain_tail(self):
-        # Replaces the original brief's plain-tail assertion (Ruling 14): the
-        # verdict call now reads `court_order_verdict_zone`, a union of the
-        # marker-anchored window and the order's last chars, not a single
-        # fixed-distance-from-the-end slice. Build an order whose marker
-        # region carries a distinctive name and whose ending carries the
-        # pronouncement, and require both to reach the prompt.
-        seen = {}
-
-        def fake(system, content, max_tokens, tier, usage=None):
-            seen["content"] = content
-            return self._reply(["क"])
-
-        order = (
-            "सुरुको भाग" + "ख" * 200_000
-            + "ठहर खण्ड" + "राम बहादुर कारागार सजाय" + "ग" * 50_000
-            + "सफाई पाउने ठहर्छ"
-        )
-        ere.accused_verdicts(["क"], order, fake)
-        assert "राम बहादुर कारागार सजाय" in seen["content"]
-        assert "सफाई पाउने ठहर्छ" in seen["content"]
-        assert "सुरुको भाग" not in seen["content"]
 
     def test_the_accused_list_is_put_in_the_prompt(self):
         seen = {}
@@ -3888,8 +3879,157 @@ class TestAccusedVerdicts:
             seen["content"] = content
             return self._reply(["राम बहादुर"])
 
-        ere.accused_verdicts(["राम बहादुर"], "आदेश", fake)
+        ere.accused_verdicts(["राम बहादुर"], VERDICT_ORDER, fake)
         assert "राम बहादुर" in seen["content"]
+
+
+RAM, SITA, HARI = "राम बहादुर", "सीता देवी", "हरि प्रसाद"
+HOLD_A = "पहिलो प्रतिवादीलाई भ्रष्टाचारको कसुर गरेको ठहर्छ"
+HOLD_B = "दोस्रो प्रतिवादीलाई पनि सोही कसुर गरेको ठहर्छ"
+
+
+def _filler(chars):
+    """Paragraphed Devanagari filler naming no defendant."""
+    line = "मिसिलमा रहेका कागजातको विवरण यस प्रकार छ।"
+    return "\n".join([line] * (chars // (len(line) + 1) + 1))[:chars]
+
+
+def _two_holding_order():
+    """B's holding 3k before the last तसर्थ, A's after it: two end windows decide both."""
+    return (_filler(100_000) + "\n" + HOLD_B + "।\n" + _filler(3_000)
+            + "\nतसर्थ " + HOLD_A + "।\n")
+
+
+def _window_stub(answer):
+    """A verdict stub replying per listed name with `answer(name, content)` (a row or None)."""
+    calls = []
+
+    def fake(system, content, max_tokens, tier, usage=None):
+        calls.append(content)
+        listing = content.split("\n\n", 1)[0]
+        rows = []
+        for line in listing.splitlines():
+            if line.startswith("- "):
+                row = answer(line[2:], content)
+                if row is not None:
+                    rows.append({"name": line[2:], **row})
+        return json.dumps({"defendants": rows}, ensure_ascii=False)
+
+    fake.calls = calls
+    return fake
+
+
+def _holding_in_window(holdings):
+    """Convicted on the name's holding when the window carries it, else unknown."""
+    def answer(name, content):
+        sentence = holdings.get(name)
+        if sentence and sentence in content:
+            return {"outcome": "convicted", "role": "", "evidence": sentence}
+        return {"outcome": "unknown", "role": "", "evidence": ""}
+    return answer
+
+
+class TestVerdictsFromTheEndWindow:
+    """`accused_verdicts` walks `end_windows` latest first, asking only the names still pending."""
+
+    def test_a_200k_order_with_its_holding_in_the_last_window_costs_one_call(self):
+        order = _filler(200_000) + "\nतसर्थ " + HOLD_A + "।\n"
+        fake = _window_stub(_holding_in_window({RAM: HOLD_A}))
+        got, errors = ere.accused_verdicts([RAM], order, fake)
+        assert len(fake.calls) == 1
+        assert end_windows(order)[0].label() in fake.calls[0]
+        assert got[RAM] == {"outcome": "convicted", "role": "", "evidence": HOLD_A}
+        assert errors == []
+
+    def test_a_name_the_last_window_leaves_unknown_is_decided_one_window_back(self):
+        order = _two_holding_order()
+        assert RAM not in order and SITA not in order
+        fake = _window_stub(_holding_in_window({RAM: HOLD_A, SITA: HOLD_B}))
+        got, errors = ere.accused_verdicts([RAM, SITA], order, fake)
+        assert len(fake.calls) == 2
+        assert f"- {SITA}" in fake.calls[1]
+        assert got[SITA] == {"outcome": "convicted", "role": "", "evidence": HOLD_B}
+        assert got[RAM]["outcome"] == "convicted"
+        assert errors == []
+
+    def test_a_convicted_whose_evidence_is_not_in_the_window_is_discarded(self):
+        order = "तसर्थ " + HOLD_A + "।"
+
+        def answer(name, content):
+            return {"outcome": "convicted", "role": "",
+                    "evidence": "यो वाक्य आदेशमा कहीँ पनि लेखिएको छैन"}
+
+        got, errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        assert got[RAM] == {"outcome": "charged", "role": "", "evidence": ""}
+        assert f"{RAM}: evidence not found in the order" in errors
+
+    def test_a_decided_name_is_never_in_a_later_calls_content(self):
+        order = _two_holding_order()
+        assert not any(name in order for name in (RAM, SITA, HARI))
+        fake = _window_stub(_holding_in_window({RAM: HOLD_A, SITA: HOLD_B}))
+        got, _errors = ere.accused_verdicts([RAM, SITA, HARI], order, fake)
+        windows = end_windows(order)
+        assert len(fake.calls) == len(windows) > 2   # HARI keeps the walk going to the end
+        assert all(RAM not in content for content in fake.calls[1:])
+        assert all(SITA not in content for content in fake.calls[2:])
+        assert got[HARI] == {"outcome": "charged", "role": "", "evidence": ""}
+
+    def test_an_order_with_no_tasartha_still_finds_a_holding_stated_with_tharharchha(self):
+        order = _filler(50_000) + "\n" + HOLD_A + "।\n" + _filler(2_000)
+        assert "तसर्थ" not in order
+        fake = _window_stub(_holding_in_window({RAM: HOLD_A}))
+        got, errors = ere.accused_verdicts([RAM], order, fake)
+        assert end_windows(order)[0].label() in fake.calls[0]
+        assert got[RAM] == {"outcome": "convicted", "role": "", "evidence": HOLD_A}
+        assert errors == []
+
+    def test_an_ungrounded_holding_stays_pending_and_a_later_grounded_one_decides(self):
+        # HOLD_B sits before the last तसर्थ, so the first window cannot carry it.
+        order = _two_holding_order()
+
+        def answer(name, content):
+            return {"outcome": "convicted", "role": "", "evidence": HOLD_B}
+
+        fake = _window_stub(answer)
+        got, errors = ere.accused_verdicts([SITA], order, fake)
+        assert HOLD_B not in fake.calls[0]
+        assert len(fake.calls) == 2
+        assert f"{SITA}: evidence not found in the order" in errors
+        assert got[SITA] == {"outcome": "convicted", "role": "", "evidence": HOLD_B}
+
+    def test_the_first_non_empty_role_is_kept_across_windows(self):
+        order = _two_holding_order()
+        roles = {}
+
+        def answer(name, content):
+            first = name not in roles
+            roles[name] = True
+            if name == SITA:
+                if first:
+                    return {"outcome": "unknown", "role": "तत्कालीन लेखापाल", "evidence": ""}
+                return {"outcome": "convicted", "role": "अर्को भूमिका", "evidence": HOLD_B}
+            if first:
+                return {"outcome": "unknown", "role": "", "evidence": ""}
+            return {"outcome": "charged", "role": "तत्कालीन सचिव", "evidence": ""}
+
+        got, _errors = ere.accused_verdicts([SITA, HARI], order, _window_stub(answer))
+        assert got[SITA] == {"outcome": "convicted", "role": "तत्कालीन लेखापाल",
+                             "evidence": HOLD_B}
+        assert got[HARI] == {"outcome": "charged", "role": "तत्कालीन सचिव", "evidence": ""}
+
+    def test_the_prompt_reads_part_of_the_end_not_the_operative_section(self):
+        assert ere.VERDICT_SYSTEM_PROMPT.split("\n\n")[1] == (
+            "You are reading part of the END of the judgment, labelled with its character "
+            "range. Decide only from a holding this text itself states. If this text does "
+            "not state a holding for a person, answer unknown.")
+        assert "OPERATIVE section only" not in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_each_call_is_labelled_with_its_character_range(self):
+        order = _two_holding_order()
+        fake = _window_stub(_holding_in_window({RAM: HOLD_A, SITA: HOLD_B}))
+        ere.accused_verdicts([RAM, SITA], order, fake)
+        for content, window in zip(fake.calls, end_windows(order)):
+            assert f"{window.label()}\n\n{window.text}" in content
 
 
 class TestTheServerPreservesOmittedOutcomes:
@@ -4238,6 +4378,55 @@ class TestTheGateSpendsNothingItCannotUse:
         assert "judgment was not read" in row["reason"]
 
 
+class TestTheVerdictReadsTheOrderPickSourceChose:
+    """The verdict text is `pick_source`'s court order, fetched once per case."""
+
+    def _counting(self, monkeypatch):
+        import casework.common.materials as m
+        fetched = []
+        texts = {"https://x/court.md": "अदालतको आदेशको सामग्री। " + FIXTURE_EVIDENCE
+                 + "\nतसर्थ निज प्रतिवादीले कसुर गरेको ठहर्छ।",
+                 "https://x/press.md": "प्रेस विज्ञप्ति। " + FIXTURE_EVIDENCE + PRESS_PADDING}
+
+        def counting(link, timeout=60):
+            fetched.append(link)
+            return texts.get(link, "")
+
+        monkeypatch.setattr(m, "fetch_markdown", counting)
+        return fetched
+
+    def test_an_extracted_case_fetches_its_court_order_once(self, monkeypatch):
+        fetched = self._counting(monkeypatch)
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, _StubApi([_accused_case()]), invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        assert len(stub.entity_calls) == 1 and len(stub.verdict_calls) == 1
+        assert fetched.count("https://x/court.md") == 1
+        assert "https://x/press.md" not in fetched
+
+    def test_an_already_enriched_case_fetches_its_court_order_once(self, monkeypatch):
+        fetched = self._counting(monkeypatch)
+        case = _accused_case(extra_entities=[RELATED_BIND, ALREADY_BOUND_DISTRICT])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, _StubApi([case]), invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        assert stub.entity_calls == [] and len(stub.verdict_calls) == 1
+        assert fetched.count("https://x/court.md") == 1
+        assert "https://x/press.md" not in fetched
+
+    @pytest.mark.parametrize("extra", [(), (RELATED_BIND, ALREADY_BOUND_DISTRICT)])
+    def test_a_press_release_is_never_read_for_verdicts(self, monkeypatch, tmp_path, extra):
+        self._counting(monkeypatch)
+        case = _accused_case(court=False, extra_entities=list(extra))
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, _StubApi([case]), invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        assert stub.verdict_calls == []
+        skipped = [e for e in _read_events(_events_path())
+                   if e.get("step") == "verdicts" and e.get("status") == "skipped"]
+        assert skipped and "no court-order text" in skipped[0]["detail"]
+
+
 class TestAHumanWhoSettlesABindMidRunWins:
     """The gate reads `detail`; the write list is built from the later `fresh`
     read, and `If-Match` cannot catch a human who settled a bind in between --
@@ -4452,14 +4641,15 @@ class TestVerdictWrite:
 class TestVerdictReport:
     def test_verdicts_jsonl_records_a_row_that_was_not_written(
             self, monkeypatch, patched_fetch_markdown, tmp_path):
-        # A run that changes nothing must still say what it saw.
+        # A run that changes nothing must still say what it saw: an `unknown`
+        # reply leaves the name pending, and a name no window decides is `charged`.
         api = _StubApi([_accused_case()])
         stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
             {"name": "राम बहादुर", "outcome": "unknown", "role": "",
              "evidence": ""}]}, ensure_ascii=False))
         _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
         rows = _verdict_rows(tmp_path)
-        assert rows and rows[0]["new_outcome"] == "unknown"
+        assert rows and rows[0]["new_outcome"] == "charged"
         assert rows[0]["written"] is False
 
     def test_a_refused_human_note_is_reported(
