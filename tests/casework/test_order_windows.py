@@ -1,6 +1,8 @@
+from pathlib import Path
+
 from casework.common.order_windows import (
-    ENTITY_WINDOW_CHARS, WINDOW_OVERLAP, Window, analysis_start, caption_end,
-    end_windows, holding_start, start_windows,
+    ENTITY_WINDOW_CHARS, HOLDING_VERB_LEAD, WINDOW_OVERLAP, Window, analysis_start,
+    caption_end, end_windows, holding_start, start_windows,
 )
 
 
@@ -53,28 +55,50 @@ def test_holding_starts_at_the_last_tasartha():
     assert anchor == "तसर्थ" and pos == text.rindex("तसर्थ")
 
 
-def test_holding_falls_back_to_the_last_holding_verbs_sentence():
+def test_holding_falls_back_to_a_fixed_lead_before_the_last_holding_verb():
     text = "क" * 10_000 + "।कसूर गरेको ठहर्छ ।" + "ख" * 2_000
     pos, anchor = holding_start(text)
-    assert anchor == "holding-verb" and pos == text.index("कसूर")
+    assert anchor == "holding-verb" and pos == text.index("ठहर्छ") - HOLDING_VERB_LEAD
 
 
 def test_the_holding_verb_window_keeps_an_acquittals_subject():
     text = "क" * 10_000 + "।\nप्रतिवादी रामले आरोपित कसुरबाट सफाई पाउने ठहर्छ ।" + "ख" * 2_000
     pos, _anchor = holding_start(text)
-    assert text[pos:].startswith("प्रतिवादी रामले आरोपित कसुरबाट सफाई पाउने ठहर्छ")
+    assert pos <= text.index("प्रतिवादी रामले")
 
 
-def test_the_later_of_danda_and_newline_starts_the_sentence():
-    text = "क" * 10_000 + "।पहिलो\nदोस्रो कसूर ठहर्छ" + "ख" * 100
-    assert holding_start(text)[0] == text.index("दोस्रो")
-    text = "क" * 10_000 + "\nपहिलो।दोस्रो कसूर ठहर्छ" + "ख" * 100
-    assert holding_start(text)[0] == text.index("दोस्रो")
+def test_the_lead_snaps_forward_to_its_first_blank_line():
+    text = ("क" * 10_000 + "\n\nपहिलो अनुच्छेद" + "ख" * 500 + "\n\nदोस्रो अनुच्छेद"
+            + "ग" * 500 + "कसूर ठहर्छ" + "घ" * 100)
+    assert holding_start(text)[0] == text.index("पहिलो")
 
 
-def test_the_sentence_start_never_backs_into_the_caption():
-    text = "मुद्दा: भ्रष्टाचार" + "क" * 10_000 + "कसूर ठहर्छ" + "ख" * 100
+def test_a_blank_line_before_the_lead_is_ignored():
+    text = "क" * 10_000 + "\n\n" + "ख" * 4_000 + "कसूर ठहर्छ" + "ग" * 100
+    assert holding_start(text)[0] == text.index("ठहर्छ") - HOLDING_VERB_LEAD
+
+
+def test_a_currency_danda_does_not_start_the_holding():
+    text = "क" * 10_000 + "सफाइ पाउने, रु.१०,०००।- जफत हुने ठहर्छ" + "ख" * 100
+    assert holding_start(text)[0] == text.index("ठहर्छ") - HOLDING_VERB_LEAD
+    text = "क" * 10_000 + "सफाइ पाउने, रु.१०,०००।– जफत हुने ठहर्छ" + "ख" * 100
+    assert holding_start(text)[0] == text.index("ठहर्छ") - HOLDING_VERB_LEAD
+
+
+def test_the_lead_never_backs_into_the_caption():
+    text = "मुद्दा: भ्रष्टाचार" + "क" * 1_000 + "कसूर ठहर्छ" + "ख" * 100
     assert holding_start(text)[0] == caption_end(text)
+
+
+ORDER_END_075_CR_0186 = (Path(__file__).parent / "fixtures" / "075-CR-0186-order-end.txt").read_text(
+    encoding="utf-8")
+
+
+def test_075_cr_0186_acquittal_is_inside_the_first_end_window():
+    text = "मुद्दा: सम्पत्ति शुद्धीकरण\n" + ("क" * 79 + "\n") * 700 + ORDER_END_075_CR_0186
+    first = end_windows(text)[0]
+    assert "तीनै जना  प्रतिवादीहरुले  अभियोगदावीबाट  सफाइ\n   पाउने ठहर्छ" in first.text
+    assert "जफत हुने ठहर्छ" in first.text
 
 
 def test_holding_falls_back_to_the_tail():

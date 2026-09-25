@@ -257,7 +257,8 @@ class _StubApi:
 #: ground a canned reply against whichever source `pick_source` chooses.
 FIXTURE_EVIDENCE = "गोपाल बहादुर श्रेष्ठविरुद्ध मुद्दा दर्ता भएको छ।"
 #: The holdings the canned verdict replies quote, so their evidence grounds in `court.md`.
-COURT_HOLDINGS = "\nतसर्थ निज प्रतिवादीले कसुर गरेको ठहर्छ। अर्को प्रतिवादीले सफाई पाउने ठहर्छ।"
+COURT_HOLDINGS = ("\nतसर्थ प्रतिवादी राम बहादुर समेतको हकमा निज प्रतिवादीले कसुर गरेको ठहर्छ।"
+                  " अर्को प्रतिवादीले सफाई पाउने ठहर्छ।")
 FIXTURE_COURT_TEXT = "अदालतको आदेशमा ठहर खण्ड उल्लेख छ। " + FIXTURE_EVIDENCE + COURT_HOLDINGS
 #: Pads a press release past `is_teaser`'s 400-char floor.
 PRESS_PADDING = " आयोगले यस विषयमा विस्तृत अनुसन्धान गरेको थियो।" * 10
@@ -3673,8 +3674,11 @@ class TestVerdictPromptBounds:
         assert "VERBATIM" in ere.VERDICT_SYSTEM_PROMPT
 
 
-#: A one-window order whose holding grounds `TestAccusedVerdicts._reply`'s evidence.
-VERDICT_ORDER = "तसर्थ प्रतिवादीले कसुर गरेको ठहर्छ।"
+#: A one-window order whose holding grounds `TestAccusedVerdicts._reply`'s evidence
+#: and names every defendant those tests ask about, so a `convicted` can stand.
+VERDICT_ORDER = ("तसर्थ प्रतिवादीहरू "
+                 + ", ".join(["क", "ख", "ग", "राम बहादुर"] + [f"नाम{i}" for i in range(45)])
+                 + " समेतको हकमा प्रतिवादीले कसुर गरेको ठहर्छ।")
 VERDICT_EVIDENCE = "प्रतिवादीले कसुर गरेको ठहर्छ"
 
 
@@ -3884,8 +3888,8 @@ class TestAccusedVerdicts:
 
 
 RAM, SITA, HARI = "राम बहादुर", "सीता देवी", "हरि प्रसाद"
-HOLD_A = "पहिलो प्रतिवादीलाई भ्रष्टाचारको कसुर गरेको ठहर्छ"
-HOLD_B = "दोस्रो प्रतिवादीलाई पनि सोही कसुर गरेको ठहर्छ"
+HOLD_A = f"प्रतिवादी {RAM}लाई भ्रष्टाचारको कसुर गरेको ठहर्छ"
+HOLD_B = f"प्रतिवादी {SITA}लाई पनि सोही कसुर गरेको ठहर्छ"
 
 
 def _filler(chars):
@@ -3958,7 +3962,7 @@ class TestVerdictsFromTheEndWindow:
 
     def test_a_name_the_last_window_leaves_unknown_is_decided_one_window_back(self):
         order = _two_holding_order()
-        assert RAM not in order and SITA not in order
+        assert SITA not in end_windows(order)[0].text
         fake = _window_stub(_holding_in_window({RAM: HOLD_A, SITA: HOLD_B}))
         got, errors = ere.accused_verdicts([RAM, SITA], order, fake)
         assert len(fake.calls) == 2
@@ -3982,13 +3986,13 @@ class TestVerdictsFromTheEndWindow:
 
     def test_a_decided_name_is_never_in_a_later_calls_content(self):
         order = _two_holding_order()
-        assert not any(name in order for name in (RAM, SITA, HARI))
+        assert HARI not in order
         fake = _window_stub(_holding_in_window({RAM: HOLD_A, SITA: HOLD_B}))
         got, _errors = ere.accused_verdicts([RAM, SITA, HARI], order, fake)
         windows = end_windows(order)
         assert len(fake.calls) == len(windows) > 2   # HARI keeps the walk going to the end
-        assert all(RAM not in content for content in fake.calls[1:])
-        assert all(SITA not in content for content in fake.calls[2:])
+        assert all(f"- {RAM}" not in content for content in fake.calls[1:])
+        assert all(f"- {SITA}" not in content for content in fake.calls[2:])
         assert _core(got[HARI]) == {"outcome": "charged", "role": "", "evidence": ""}
 
     def test_an_order_with_no_tasartha_still_finds_a_holding_stated_with_tharharchha(self):
@@ -3996,7 +4000,7 @@ class TestVerdictsFromTheEndWindow:
         assert "तसर्थ" not in order
         fake = _window_stub(_holding_in_window({RAM: HOLD_A}))
         got, errors = ere.accused_verdicts([RAM], order, fake)
-        assert len(fake.calls) == 1   # the window opens at the verb's sentence, not the verb
+        assert len(fake.calls) == 1   # the window opens a fixed lead before the verb, not at it
         assert end_windows(order)[0].label() in fake.calls[0]
         assert _core(got[RAM]) == {"outcome": "convicted", "role": "", "evidence": HOLD_A}
         assert errors == []
@@ -4141,6 +4145,95 @@ class TestVerdictsFromTheEndWindow:
         ere.accused_verdicts([RAM, SITA], order, fake)
         for content, window in zip(fake.calls, end_windows(order)):
             assert f"{window.label()}\n\n{window.text}" in content
+
+
+class TestAConvictionMustNameItsDefendant:
+    """A `convicted` stands only when the defendant's name is in or near its evidence."""
+
+    CO_ACCUSED_HOLDING = "प्रतिवादी सीता देवीलाई भ्रष्टाचारको कसुरमा कैद हुने ठहर्छ"
+
+    def test_a_co_accuseds_holding_never_convicts_someone_else(self):
+        order = "तसर्थ " + self.CO_ACCUSED_HOLDING + "।"
+
+        def answer(name, content):
+            return {"outcome": "convicted", "role": "", "evidence": "कसुरमा कैद हुने ठहर्छ"}
+
+        got, errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        label = end_windows(order)[0].label()
+        assert got[RAM]["outcome"] == "charged"
+        assert got[RAM]["reason"] == "name-not-in-evidence"
+        assert any(e.startswith(f"{label}: {RAM}") for e in errors)
+
+    def test_a_name_one_clause_before_the_verb_still_convicts(self):
+        order = ("तसर्थ प्रतिवादी राम बहादुरले तत्कालीन सचिवको हैसियतमा "
+                 + _filler(1_000) + " भ्रष्टाचारको कसुर गरेकोले निजलाई कैद हुने ठहर्छ।")
+
+        def answer(name, content):
+            return {"outcome": "convicted", "role": "", "evidence": "निजलाई कैद हुने ठहर्छ"}
+
+        got, errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        assert got[RAM]["outcome"] == "convicted" and got[RAM]["reason"] == "decided"
+        assert errors == []
+
+    def test_a_name_far_from_its_evidence_does_not_convict(self):
+        order = ("तसर्थ प्रतिवादी राम बहादुरले तत्कालीन सचिवको हैसियतमा "
+                 + _filler(3_000) + " भ्रष्टाचारको कसुर गरेकोले निजलाई कैद हुने ठहर्छ।")
+
+        def answer(name, content):
+            return {"outcome": "convicted", "role": "", "evidence": "निजलाई कैद हुने ठहर्छ"}
+
+        got, _errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        assert got[RAM]["reason"] == "name-not-in-evidence"
+
+    def test_a_romanized_name_never_convicts(self):
+        order = "तसर्थ प्रतिवादी Ram Bahadur लाई भ्रष्टाचारको कसुरमा कैद हुने ठहर्छ।"
+
+        def answer(name, content):
+            return {"outcome": "convicted", "role": "",
+                    "evidence": "Ram Bahadur लाई भ्रष्टाचारको कसुरमा कैद हुने ठहर्छ"}
+
+        got, _errors = ere.accused_verdicts(["Ram Bahadur"], order, _window_stub(answer))
+        assert got["Ram Bahadur"]["outcome"] == "charged"
+        assert got["Ram Bahadur"]["reason"] == "name-not-in-evidence"
+
+    def test_an_acquittal_needs_no_name(self):
+        order = "तसर्थ " + FINAL_ACQUITTAL + "।"
+
+        def answer(name, content):
+            return {"outcome": "acquitted", "role": "", "evidence": FINAL_ACQUITTAL}
+
+        got, _errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        assert got[RAM]["outcome"] == "acquitted"
+
+
+class TestTheFinalOrdersNamingSomeoneUndecided:
+    """A back window never convicts a name the final orders already named."""
+
+    def test_named_in_the_final_orders_and_answered_unknown_ends_charged(self):
+        final = f"प्रतिवादी {RAM}ले आरोपित कसुरबाट सफाई पाउने ठहर्छ"
+        back = f"प्रतिवादी {RAM}लाई भ्रष्टाचारको कसुरमा कैद हुने ठहर्छ"
+        order = (_filler(60_000) + "\n" + back + "।\n" + _filler(5_000)
+                 + "\nतसर्थ " + _filler(3_000) + "\n" + final + "।\n")
+        windows = end_windows(order)
+        assert RAM in windows[0].text and back not in windows[0].text
+
+        def answer(name, content):
+            if back in content:
+                return {"outcome": "convicted", "role": "", "evidence": back}
+            return {"outcome": "unknown", "role": "", "evidence": ""}
+
+        fake = _window_stub(answer)
+        got, errors = ere.accused_verdicts([RAM], order, fake)
+        assert got[RAM]["outcome"] == "charged"
+        assert got[RAM]["reason"] == "named-in-final-orders-undecided"
+        assert any(RAM in e and "final orders" in e for e in errors)
+
+    def test_a_name_absent_from_the_final_orders_is_still_decided_further_back(self):
+        order = _two_holding_order()
+        fake = _window_stub(_holding_in_window({RAM: HOLD_A, SITA: HOLD_B}))
+        got, _errors = ere.accused_verdicts([RAM, SITA], order, fake)
+        assert SITA not in end_windows(order)[0].text
+        assert got[SITA]["outcome"] == "convicted" and got[SITA]["reason"] == "decided"
 
 
 class TestTheServerPreservesOmittedOutcomes:
@@ -4496,7 +4589,7 @@ class TestTheVerdictReadsTheOrderPickSourceChose:
         import casework.common.materials as m
         fetched = []
         texts = {"https://x/court.md": "अदालतको आदेशको सामग्री। " + FIXTURE_EVIDENCE
-                 + "\nतसर्थ निज प्रतिवादीले कसुर गरेको ठहर्छ।",
+                 + "\nतसर्थ प्रतिवादी राम बहादुरको हकमा निज प्रतिवादीले कसुर गरेको ठहर्छ।",
                  "https://x/press.md": "प्रेस विज्ञप्ति। " + FIXTURE_EVIDENCE + PRESS_PADDING}
 
         def counting(link, timeout=60):
@@ -6806,3 +6899,73 @@ class TestEntitiesMergeAcrossWindows:
 
         assert api.search_calls == ["साझा भण्डार सहकारी"]
         assert [r["extracted"] for r in _jsonl("extracted")] == ["साझा भण्डार सहकारी"]
+
+
+class TestWindowCapFlags:
+    """`--max-entity-windows` and `--max-verdict-chunks` reach the window generators."""
+
+    def test_both_flags_reach_their_window_calls(self, monkeypatch, patched_fetch_markdown):
+        seen = {}
+        real_start, real_end = ere.start_windows, ere.end_windows
+
+        def start(text, *args, **kwargs):
+            seen["limit"] = kwargs.get("limit")
+            return real_start(text, *args, **kwargs)
+
+        def end(text, *args, **kwargs):
+            seen["max_back"] = kwargs.get("max_back")
+            return real_end(text, *args, **kwargs)
+
+        monkeypatch.setattr(ere, "start_windows", start)
+        monkeypatch.setattr(ere, "end_windows", end)
+        api = _SearchStubApi([_accused_case()])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts", "--max-entity-windows", "2",
+                        "--max-verdict-chunks", "1"])
+        assert seen == {"limit": 2, "max_back": 1}
+
+    def test_the_defaults_are_the_spec_constants(self, monkeypatch, patched_fetch_markdown):
+        seen = {}
+        real_start, real_end = ere.start_windows, ere.end_windows
+
+        def start(text, *args, **kwargs):
+            seen["limit"] = kwargs.get("limit")
+            return real_start(text, *args, **kwargs)
+
+        def end(text, *args, **kwargs):
+            seen["max_back"] = kwargs.get("max_back")
+            return real_end(text, *args, **kwargs)
+
+        monkeypatch.setattr(ere, "start_windows", start)
+        monkeypatch.setattr(ere, "end_windows", end)
+        api = _SearchStubApi([_accused_case()])
+        _run_main(monkeypatch, api, invoke_text_stub=_two_call_stub(verdict_response=VERDICT_RESPONSE),
+                  argv=["--dry-run", "--verdicts"])
+        assert seen == {"limit": MAX_ENTITY_WINDOWS, "max_back": ere.MAX_VERDICT_BACK_CHUNKS}
+
+    def test_the_entity_window_cap_limits_the_calls(self):
+        text = _order_with_location_at(200_000, len(CAPTION_SHORT) + 100)
+        case = {"slug": "case-cap", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub()
+        extraction = extract_from_source(_api(), _gaz(), case, Source("court_order", text, ""),
+                                         stub, usage=None, max_windows=2)
+        assert len(stub.calls) == 2 and len(extraction.windows) == 2
+
+
+class TestAnExistingDistrictStopsTheStartWindows:
+    def test_a_case_already_holding_a_district_stops_after_window_one(self):
+        text = _order_with_location_at(100_000, len(CAPTION_SHORT) + 100)
+        case = {"slug": "case-has-district", "state": "DRAFT",
+                "entities": [{"nes_id": BANKE_IRI, "type": "location", "notes": ""}]}
+        stub = _sequenced_stub(_response())
+        extraction = extract_from_source(_api(), _gaz(), case, Source("court_order", text, ""),
+                                         stub, usage=None)
+        assert len(stub.calls) == 1 and len(extraction.windows) == 1
+
+    def test_a_case_with_no_district_still_grows(self):
+        text = _order_with_location_at(100_000, len(CAPTION_SHORT) + 100)
+        case = {"slug": "case-no-district", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response())
+        extract_from_source(_api(), _gaz(), case, Source("court_order", text, ""), stub, usage=None)
+        assert len(stub.calls) > 1

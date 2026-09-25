@@ -12,6 +12,7 @@ MAX_VERDICT_BACK_CHUNKS = 4
 CAPTION_SEARCH_CHARS = 8_000
 CAPTION_FALLBACK_CHARS = 2_000
 PARAGRAPH_SLACK = 2_000
+HOLDING_VERB_LEAD = 3_000
 
 _CAPTION_END = re.compile(r"मुद्[दध]ा\s*[:ः]")
 _TASARTHA = "तसर्थ"
@@ -56,20 +57,27 @@ def start_windows(text: str, size: int = ENTITY_WINDOW_CHARS,
         target = start + size
 
 
-def _sentence_start(text: str, pos: int) -> int:
-    """Just after the last `।` or newline before `pos`, never before the caption end."""
-    boundary = max(text.rfind("।", 0, pos), text.rfind("\n", 0, pos))
-    return max(boundary + 1, min(caption_end(text), pos))
+def _holding_lead_start(text: str, verb_pos: int) -> int:
+    """`HOLDING_VERB_LEAD` chars before the verb, snapped to the lead's first blank line.
+
+    A fixed lead, not a sentence back-off: the last verb is often an ancillary
+    confiscation, and the acquittal it follows must be in the same window. No
+    `।` is a boundary here, so a currency `रु.१०,०००।-` cannot cut the holding.
+    """
+    lead = max(0, verb_pos - HOLDING_VERB_LEAD)
+    blank = text.find("\n\n", lead, verb_pos)
+    start = blank + 2 if blank != -1 else lead
+    return max(start, min(caption_end(text), verb_pos))
 
 
 def holding_start(text: str) -> tuple[int, str]:
-    """Where the court's holding starts: last `तसर्थ`, else the last holding verb's sentence, else the tail."""
+    """Where the court's holding starts: last `तसर्थ`, else a lead before the last holding verb, else the tail."""
     i = text.rfind(_TASARTHA)
     if i != -1:
         return i, "तसर्थ"
     verbs = [m.start() for m in _HOLDING_VERB.finditer(text)]
     if verbs:
-        return _sentence_start(text, verbs[-1]), "holding-verb"
+        return _holding_lead_start(text, verbs[-1]), "holding-verb"
     return max(0, len(text) - VERDICT_CHUNK_CHARS), "tail"
 
 

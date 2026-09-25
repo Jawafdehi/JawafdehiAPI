@@ -109,6 +109,7 @@ Usage:
 import argparse
 import json
 import logging
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -130,7 +131,9 @@ from casework.common.grounding import (
 )
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import materials_of_type, source_chunks
-from casework.common.order_windows import Window, caption_end, end_windows, start_windows
+from casework.common.order_windows import (
+    MAX_ENTITY_WINDOWS, MAX_VERDICT_BACK_CHUNKS, Window, caption_end, end_windows, start_windows,
+)
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.common.parse import balanced_array, balanced_object, parse_extraction_response, strip_fence
 from casework.common.pipeline import (
@@ -780,8 +783,34 @@ def _verdict_end(outcome, reason, window="", role="", evidence=""):
             "reason": reason, "window": window}
 
 
-def _window_ending(name, row, failure, window, errors):
-    """How one window ends `name`'s walk, or None when it answered `unknown`."""
+#: A `convicted` stands only when the defendant's name is this close to its evidence.
+NAME_NEAR_EVIDENCE_CHARS = 1_500
+_DEVANAGARI_LETTER = re.compile(r"[ऀ-ॿ]")
+
+
+def name_near_evidence(name, evidence, window_text):
+    """Whether the Devanagari `name` is in `evidence` or within `NAME_NEAR_EVIDENCE_CHARS` of it."""
+    key = normalise_for_match(name)
+    if not _DEVANAGARI_LETTER.search(key):
+        return False
+    ev, body = normalise_for_match(evidence), normalise_for_match(window_text)
+    if key in ev:
+        return True
+    at = body.find(ev)
+    while at != -1:
+        lo = max(0, at - NAME_NEAR_EVIDENCE_CHARS)
+        if key in body[lo:at + len(ev) + NAME_NEAR_EVIDENCE_CHARS]:
+            return True
+        at = body.find(ev, at + 1)
+    return False
+
+
+def _window_ending(name, row, failure, window, errors, later_texts=()):
+    """How one window ends `name`'s walk, or None when it answered `unknown`.
+
+    `later_texts` are the windows already read (later in the order): a back
+    window cannot convict a name they carry.
+    """
     label = window.label()
     if failure or row is None:
         return _verdict_end("charged", failure or "missing-after-retry", label)
@@ -802,15 +831,25 @@ def _window_ending(name, row, failure, window, errors):
                                       for m in ACQUITTAL_MARKERS):
         errors.append(f"{label}: {name}: convicted vetoed, its evidence says सफाई")
         return _verdict_end("charged", "vetoed", label)
+    if outcome == "convicted" and not name_near_evidence(name, evidence, window.text):
+        errors.append(f"{label}: {name}: convicted refused, the name is not in or near its evidence")
+        return _verdict_end("charged", "name-not-in-evidence", label)
+    key = normalise_for_match(name)
+    if outcome == "convicted" and any(key in normalise_for_match(t) for t in later_texts):
+        errors.append(f"{label}: {name}: convicted refused, the final orders name them "
+                      f"but left them undecided")
+        return _verdict_end("charged", "named-in-final-orders-undecided", label)
     return _verdict_end(outcome, "decided", label, role=row["role"], evidence=evidence)
 
 
-def accused_verdicts(names, order_text, invoke_text, usage=None):
+def accused_verdicts(names, order_text, invoke_text, usage=None,
+                     max_back=MAX_VERDICT_BACK_CHUNKS):
     """Each name's holding from `end_windows`, latest first; only `unknown` moves a name back."""
     ended: dict = {}
     windows_read = dict.fromkeys(names, 0)
     errors: list = []
-    for window in end_windows(order_text):
+    read_texts: list = []
+    for window in end_windows(order_text, max_back=max_back):
         pending = [name for name in names if name not in ended]
         if not pending:
             break
@@ -820,9 +859,11 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
         errors.extend(f"{label}: {error}" for error in window_errors)
         for name in pending:
             windows_read[name] += 1
-            end = _window_ending(name, answered.get(name), failed.get(name), window, errors)
+            end = _window_ending(name, answered.get(name), failed.get(name), window, errors,
+                                 later_texts=read_texts)
             if end is not None:
                 ended[name] = end
+        read_texts.append(window.text)
     results = {}
     for name in names:
         end = ended.get(name) or _verdict_end("charged", "no-window-decided")
@@ -1351,12 +1392,13 @@ def merge_window_entities(items):
     return out
 
 
-def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffix=""):
+def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffix="",
+                        max_windows=MAX_ENTITY_WINDOWS):
     """Read `source`: the court order in growing start-windows, the press release in one call.
 
-    The court-order loop stops once a district has bound and every reachable
-    accused bind on `case` has a note (`accused_missing_notes`), or at
-    `MAX_ENTITY_WINDOWS`. A `LocationBind` already seen (by `nes_id`) in an
+    The court-order loop stops once a district has bound (or `case` already
+    holds one) and every reachable accused bind on `case` has a note
+    (`accused_missing_notes`), or at `max_windows`. A `LocationBind` already seen (by `nes_id`) in an
     earlier window is not repeated; entities are merged across every window
     read (`merge_window_entities`), and accused notes accumulate -- except a
     note whose bind an earlier window already filled (`_new_accused_notes`).
@@ -1380,7 +1422,8 @@ def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffi
     cap_end = caption_end(text)
     entities, accused_notes, location_binds, rejected, windows = [], [], [], [], []
     seen_nes_ids, answers, reviews = set(), [], []
-    for window in start_windows(text):
+    had_district = has_district_bind(case.get("entities") or [])
+    for window in start_windows(text, limit=max_windows):
         w_entities, w_notes, w_binds, w_rejected, w_grounded, w_review = _read_window(
             api, gaz, text, cap_end, window, COURT_ORDER_SYSTEM_PROMPT,
             invoke_text, usage, system_suffix)
@@ -1394,7 +1437,8 @@ def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffi
                 seen_nes_ids.add(bind.nes_id)
                 location_binds.append(bind)
         windows.append((window.start, window.end))
-        has_district = any("/location/district/" in bind.nes_id for bind in location_binds)
+        has_district = had_district or any(DISTRICT_IRI_MARKER in bind.nes_id
+                                           for bind in location_binds)
         if has_district and not accused_missing_notes(case, accused_notes):
             break
     return Extraction(merge_window_entities(entities), accused_notes, location_binds, rejected,
@@ -1525,7 +1569,8 @@ def _verdict_row(slug, name, nes_id, old_outcome, new_outcome, role, evidence,
             "written": written}
 
 
-def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
+def case_verdict_updates(slug, case, court_text, invoke_text, usage=None,
+                         max_back=MAX_VERDICT_BACK_CHUNKS):
     """Read one case's judgment for its accused binds: `(updates, rows, errors)`.
 
     `updates` is `apply_accused_updates`' input, keyed by `nes_id`; `rows` cover
@@ -1551,7 +1596,7 @@ def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
     if not targets:
         return {}, rows, []
     verdicts, errors = accused_verdicts(list(targets), court_text, invoke_text,
-                                        usage=usage)
+                                        usage=usage, max_back=max_back)
     updates = {}
     for name, nes_id in targets.items():
         verdict = verdicts[name]
@@ -2864,6 +2909,12 @@ def main(argv=None):
              "bind costs one extra LLM call per chunk of 20 defendants, and "
              "the outcome and role note it decides ride out in the SAME "
              "/entities write as the binds.")
+    ap.add_argument(
+        "--max-entity-windows", type=int, default=MAX_ENTITY_WINDOWS,
+        help="Most 30k start windows read per court order for entities and a district.")
+    ap.add_argument(
+        "--max-verdict-chunks", type=int, default=MAX_VERDICT_BACK_CHUNKS,
+        help="Most 18k chunks read back from the holding for verdicts.")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -3007,7 +3058,8 @@ def main(argv=None):
             extraction = extract_from_source(
                 api, gazetteer, detail, source, invoke_text, usage,
                 system_suffix=prefix_prompt_section(
-                    live_prefixes if args.create_entities else None))
+                    live_prefixes if args.create_entities else None),
+                max_windows=args.max_entity_windows)
         except PromptTooLarge as exc:
             report.record(slug, "entities", "error", f"prompt too large: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
@@ -3187,7 +3239,8 @@ def main(argv=None):
                     case_verdict_rows = verdict_skip_rows(slug, detail, why_not)
             else:
                 updates, case_verdict_rows, verdict_errors = case_verdict_updates(
-                    slug, detail, court_text, invoke_text, usage=usage)
+                    slug, detail, court_text, invoke_text, usage=usage,
+                    max_back=args.max_verdict_chunks)
 
         # Nothing extracted and no verdict to write: the extraction path already
         # recorded why, and there is no reason to spend the conditional re-read.
