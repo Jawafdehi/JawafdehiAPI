@@ -20,10 +20,9 @@ donor behavior, so it is NOT implemented here (`test_donor_never_defines_
 validate_entity_item`). Same phantom-function shape as `normalise_missing_
 details` (14b) and `validate_timeline_items` (14c).
 
-`TestDonorFidelity` re-derives every slicing constant, the system prompt, and
-the `tier`/`max_tokens` LLM-call arguments directly from the donor at commit
-`0321a85` (via `git show` + `ast`, never by trusting this file's own
-transcription).
+`TestDonorFidelity` re-derives the `tier`/`max_tokens` LLM-call arguments
+directly from the donor at commit `0321a85` (via `git show` + `ast`, never by
+trusting this file's own transcription).
 """
 import ast
 import inspect
@@ -43,13 +42,8 @@ from casework.common.api import EntityAlreadyExists
 from casework.common.order_windows import MAX_ENTITY_WINDOWS, start_windows
 from casework.enrich_related_entities import (
     PROMOTED_PREFIX,
-    RELATIONSHIP_TYPES,
     Extraction,
     Source,
-    _build_content_parts,
-    _enforce_prompt_budget,
-    _parse_extraction_response,
-    _truncate_press_release,
     accused_missing_notes,
     current_entity_binds,
     extract_from_source,
@@ -80,39 +74,6 @@ def _donor_source() -> str:
     return proc.stdout
 
 
-def _literal_from_value_node(value_node):
-    """Return the literal a donor constant assignment resolves to: either the
-    node itself (a plain literal) or, for `env_int("NAME", default)` calls,
-    the literal `default` (second positional arg)."""
-    if isinstance(value_node, ast.Call):
-        return ast.literal_eval(value_node.args[1])
-    return ast.literal_eval(value_node)
-
-
-def _donor_constants() -> dict:
-    """Extract top-level constant assignments from the donor source via AST
-    (never `exec`/`import` it -- the donor's own imports no longer resolve
-    against the refactored `casework.common` package)."""
-    wanted = {
-        "SYSTEM_PROMPT",
-        "COURT_ORDER_FULL_THRESHOLD",
-        "COURT_ORDER_HEAD_CHARS",
-        "COURT_ORDER_TAIL_CHARS",
-        "COURT_ORDER_THAHAR_CHARS",
-        "PRESS_RELEASE_CHARS",
-        "PRESS_RELEASE_CHARS_NO_COURT",
-        "PROMPT_HARD_MAX",
-    }
-    tree = ast.parse(_donor_source())
-    found = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-            if isinstance(target, ast.Name) and target.id in wanted:
-                found[target.id] = _literal_from_value_node(node.value)
-    return found
-
-
 def _donor_invoke_text_kwargs() -> dict:
     """Find the donor's `invoke_text(...)` call and extract its literal
     `tier`/`max_tokens` keyword arguments via AST (donor line ~416-423)."""
@@ -131,87 +92,8 @@ def _donor_invoke_text_kwargs() -> dict:
     raise AssertionError("donor never calls invoke_text(...)")
 
 
-@pytest.fixture(scope="module")
-def donor():
-    return _donor_constants()
-
-
 class TestDonorFidelity:
-    """Byte-for-byte pins against the donor at commit 0321a85 -- NOT this
-    module's own transcription. A drifted prompt or truncation constant is
-    the highest-consequence silent failure available in these files: it
-    changes LLM behavior/prompt budgeting with zero other test failures."""
-
-    # The prompt is the ONE donor constant this port deliberately diverges from,
-    # because the enricher now binds every section the case API accepts and the
-    # donor prompt could only ever emit two of them. Byte-equality is replaced by
-    # two narrower pins: the parts that must not drift, and the exact divergence.
-    # Everything else in this class stays byte-for-byte.
-    def test_system_prompt_keeps_the_donor_parts_that_must_not_drift(self, donor):
-        # The location rules and the accused-notes contract are unchanged from the
-        # donor -- those drive extraction quality and prompt budgeting, and a
-        # silent edit to them is the failure this class exists to catch.
-        for anchor in ("PART 1 — LOCATION ENTITIES",
-                       "DO NOT extract accused home addresses",
-                       "PART 3 — ACCUSED NOTES",
-                       "Only include primary accused persons. Keep notes under 80 chars."):
-            assert anchor in donor["SYSTEM_PROMPT"], "anchor is not donor text"
-            assert anchor in ere.SYSTEM_PROMPT
-
-    def test_the_composite_location_name_is_a_deliberate_divergence(self, donor):
-        # THE ONE DONOR RULE WE REFUSE. The donor tells the model to name a
-        # location "Organisation/Activity - Location", which is why the
-        # 2026-08-05 production run extracted `घरजग्गा सम्पत्ति - काठमाडौं` -- a
-        # description of seized property -- and was about to mint it as an NES
-        # entity. The composite also scores 0.00 against the canonical district
-        # it was meant to name, so it bound nothing either.
-        #
-        # Asserted against the donor as well as against us: if the donor text
-        # ever changes, this stops being a divergence and the test should be
-        # revisited rather than silently passing.
-        composite_rule = ('The entity_name should include context in the format: '
-                          '"Organisation/Activity - Location"')
-        assert composite_rule in donor["SYSTEM_PROMPT"]
-        assert composite_rule not in ere.SYSTEM_PROMPT
-
-    def test_system_prompt_offers_every_section_the_binder_can_write(self):
-        # Without this, widening `plan_case_entities` to all nine sections is dead
-        # code: the LLM never emits anything but the two the donor asked for.
-        # Asserted against the prompt's own output-format line so the two cannot
-        # drift apart.
-        # `accused` is deliberately absent: this module no longer writes it
-        # (2026-08-06). Defendants come from the NGM court record, which states
-        # them instead of guessing -- see `validate_new_bind`.
-        offered = {"location", "related", "alleged", "witness"}
-        format_line = next(
-            line for line in ere.SYSTEM_PROMPT.splitlines()
-            if line.strip().startswith('"relationship_type"'))
-        for section in offered:
-            assert f'"{section}"' in format_line
-            assert section in RELATIONSHIP_TYPES, (
-                f"the prompt offers {section!r} but the binder would refuse it")
-
-    # THE FOUR COURT-ORDER TRUNCATION CONSTANTS ARE DELIBERATELY NO LONGER
-    # PINNED. COURT_ORDER_FULL_THRESHOLD / _HEAD_CHARS / _TAIL_CHARS /
-    # _THAHAR_CHARS described a slice that anchored on the literal `ठहर खण्ड`
-    # and took 12,000 chars forward. Measured over 37 production court orders
-    # (2026-08-31), that reached the operative verdict in 10 of them: the
-    # verdict sits a median 2,852 chars from the END of the file, and the
-    # marker is a section heading roughly two-thirds of the way in. Fidelity to
-    # a donor constant is worth nothing when the constant encodes a defect, and
-    # `PRESS_RELEASE_CHARS`, `PRESS_RELEASE_CHARS_NO_COURT` and
-    # `PROMPT_HARD_MAX` stay pinned because nothing was found wrong with them.
-    # The replacement's own numbers are pinned in
-    # `tests/casework/test_court_order.py::TestZoneSizes`.
-
-    def test_press_release_chars_matches_donor(self, donor):
-        assert ere.PRESS_RELEASE_CHARS == donor["PRESS_RELEASE_CHARS"]
-
-    def test_press_release_chars_no_court_matches_donor(self, donor):
-        assert ere.PRESS_RELEASE_CHARS_NO_COURT == donor["PRESS_RELEASE_CHARS_NO_COURT"]
-
-    def test_prompt_hard_max_matches_donor(self, donor):
-        assert ere.PROMPT_HARD_MAX == donor["PROMPT_HARD_MAX"]
+    """Pins against the donor at commit 0321a85 -- NOT this module's own transcription."""
 
     def test_invoke_text_tier_matches_donor_and_max_tokens_deliberately_does_not(self):
         # Pins donor line ~421 `tier="premium"` and line ~420 `max_tokens=2000`.
@@ -258,316 +140,6 @@ class TestDonorFidelity:
         assert "display_name" not in params
         assert "nes_id" not in params
         assert "payload" in params
-
-
-# --------------------------------------------------------------------------
-# _truncate_press_release
-# --------------------------------------------------------------------------
-
-
-class TestTruncatePressRelease:
-    def test_short_text_is_not_truncated(self):
-        text = "छोटो पाठ।"
-        assert _truncate_press_release(text, limit=100) == text
-
-    def test_none_text_passthrough(self):
-        assert _truncate_press_release(None, limit=100) is None
-
-    def test_empty_text_passthrough(self):
-        assert _truncate_press_release("", limit=100) == ""
-
-    def test_default_limit_is_press_release_chars(self):
-        text = "अ" * (ere.PRESS_RELEASE_CHARS + 500)
-        # No sentence separators at all -- falls through to the raw chunk,
-        # which proves the default limit (no explicit `limit=`) is used.
-        result = _truncate_press_release(text)
-        assert len(result) == ere.PRESS_RELEASE_CHARS
-
-    def test_cuts_at_last_danda_before_limit(self):
-        # Two dandas: one just past the halfway point, one right at the cut.
-        head = "पहिलो वाक्य।" + "भ" * 40 + "।"
-        tail = "अ" * 40
-        text = head + tail
-        limit = len(head) + 5
-        result = _truncate_press_release(text, limit=limit)
-        assert result == head
-
-    def test_falls_back_to_raw_chunk_when_no_separator_in_second_half(self):
-        # A single danda sits in the FIRST half of the chunk (before
-        # limit // 2) -- must not be used as the cut point.
-        text = "क।" + ("अ" * 100)
-        limit = 20
-        result = _truncate_press_release(text, limit=limit)
-        assert result == text[:limit]
-        assert len(result) == limit
-
-    def test_long_text_over_limit_is_shortened(self):
-        text = "स" * 50
-        result = _truncate_press_release(text, limit=10)
-        assert len(result) <= 10
-
-
-# --------------------------------------------------------------------------
-# _enforce_prompt_budget
-# --------------------------------------------------------------------------
-
-
-class TestEnforcePromptBudget:
-    def test_within_budget_returns_joined_parts_unchanged(self):
-        parts = ["--- PRESS RELEASE ---", "छोटो पाठ।"]
-        result = _enforce_prompt_budget(list(parts))
-        assert result == "\n\n".join(parts)
-
-    def test_over_budget_truncates_largest_part(self):
-        small = "--- COURT ORDER ---"
-        large = "अ" * (ere.PROMPT_HARD_MAX + 5000)
-        parts = [small, large]
-        result = _enforce_prompt_budget(list(parts))
-        assert len(result) <= ere.PROMPT_HARD_MAX
-        assert small in result
-
-    def test_over_budget_result_capped_at_hard_max(self):
-        parts = ["अ" * ere.PROMPT_HARD_MAX, "आ" * ere.PROMPT_HARD_MAX]
-        result = _enforce_prompt_budget(list(parts))
-        assert len(result) <= ere.PROMPT_HARD_MAX
-
-    def test_over_budget_still_fills_the_budget_it_is_given(self):
-        # A LOWER bound, deliberately. Every other assertion here is
-        # `len(result) <= PROMPT_HARD_MAX`, which a function returning ""
-        # satisfies perfectly -- over-truncation is invisible to them. That is
-        # this branch's signature failure mode (code silently doing LESS than
-        # asked) wearing a test's clothes: the budget guard exists to fit as
-        # much source text as possible under the cap, so a guard that returns
-        # nothing has failed at its actual job while passing every check.
-        #
-        # Not reachable in today's implementation -- the final
-        # `combined[:PROMPT_HARD_MAX]` hard-slice always preserves content.
-        # This pins that property so a future refactor of the truncation
-        # arithmetic cannot quietly drop it.
-        parts = ["अ" * ere.PROMPT_HARD_MAX, "आ" * ere.PROMPT_HARD_MAX]
-        result = _enforce_prompt_budget(list(parts))
-        assert len(result) == ere.PROMPT_HARD_MAX, (
-            "input is 2x the budget, so the result should fill it exactly; "
-            "a short or empty return means the guard over-truncated")
-
-
-# --------------------------------------------------------------------------
-# _build_content_parts -- press-only / court-only / both / neither matrix
-# --------------------------------------------------------------------------
-
-
-class TestBuildContentPartsMatrix:
-    def test_neither_source_yields_empty_parts(self):
-        assert _build_content_parts(None, None) == []
-
-    def test_press_only_uses_no_court_limit(self):
-        # Longer than PRESS_RELEASE_CHARS but shorter than the NO_COURT
-        # limit -- must survive intact only when treated as press-only.
-        text = "प्रेस विज्ञप्ति। " * 200
-        assert ere.PRESS_RELEASE_CHARS < len(text) < ere.PRESS_RELEASE_CHARS_NO_COURT
-        parts = _build_content_parts(text, None)
-        assert parts[0] == "--- PRESS RELEASE ---"
-        assert parts[1] == text  # untouched: under the NO_COURT limit
-        assert "COURT ORDER" not in "\n".join(parts)
-
-    def test_a_short_order_ships_once_whole(self):
-        # It used to ship TWICE -- once as the head zone, once as the thahar
-        # zone, because each reader returns the text unchanged when it is
-        # already within that zone's limit. The second copy was labelled an
-        # excerpt from the ठहर खण्ड whether or not the order had one.
-        court_text = "अदालतको आदेश।" * 5
-        parts = _build_content_parts(None, court_text)
-        assert parts == ["--- COURT ORDER ---", court_text]
-
-    def test_an_order_under_the_thahar_limit_is_never_sent_twice(self):
-        # The boundary case the head zone hides: over HEAD_CHARS the two
-        # sections are no longer identical, so the duplication is partial and
-        # invisible to an equality check on short text.
-        court_text = "क" * (ere.THAHAR_CHARS - 1)
-        joined = "\n\n".join(_build_content_parts(None, court_text))
-        assert joined.count("क") == len(court_text)
-
-    def test_both_present_press_uses_the_smaller_limit(self):
-        # Same press text as the press-only case, but WITH a court order
-        # present -- must now be capped at the smaller PRESS_RELEASE_CHARS,
-        # not the NO_COURT limit.
-        press_text = "प्रेस विज्ञप्ति। " * 200
-        court_text = "अदालतको आदेश।"
-        parts = _build_content_parts(press_text, court_text)
-        assert parts[0] == "--- PRESS RELEASE ---"
-        assert len(parts[1]) <= ere.PRESS_RELEASE_CHARS
-        assert parts[1] != press_text  # was truncated
-        assert parts[2] == "--- COURT ORDER ---"
-        assert parts[3] == court_text
-
-    def test_press_and_court_order_is_press_section_first(self):
-        parts = _build_content_parts("प्रेस।", "आदेश।")
-        assert parts[0] == "--- PRESS RELEASE ---"
-        assert parts[2] == "--- COURT ORDER ---"
-
-
-# --------------------------------------------------------------------------
-# The extraction call reads the order's HEAD zone, not its middle
-# --------------------------------------------------------------------------
-
-
-class TestExtractionReadsHeadAndThahar:
-    def test_court_order_section_carries_the_start_of_the_order(self):
-        # The extractor wants the caption and party list, which sit in the
-        # first 3% of every order in the 38-order sample. Its narrative comes
-        # from the press release, which it is also given.
-        #
-        # Built to actually DISCRIMINATE from the old `_truncate_court_order`,
-        # not merely pass under both: caption/party list at the top, then
-        # filler long enough to push the `ठहर खण्ड` marker well past
-        # HEAD_CHARS, then the marker and verdict text. Verified against the
-        # pre-change helper (commit 4b30173) in a scratch script: once that
-        # marker is found, the old slice starts AT the marker and drops the
-        # caption entirely. `court_order_head` just takes the first
-        # HEAD_CHARS chars, so the caption survives and the filler does not.
-        press = "प्रेस विज्ञप्ति पाठ"
-        caption = "वादी: नेपाल सरकार। प्रतिवादी: राम बहादुर।"
-        filler = "ख" * 20_000
-        verdict = "ठहर खण्ड\nयो ठहर खण्डको सामग्री हो।"
-        order = caption + filler + verdict
-        parts = ere._build_content_parts(press, order)
-        joined = "\n\n".join(parts)
-        assert caption in joined
-        assert filler not in joined
-
-    def test_truncate_court_order_is_gone(self):
-        # Its replacement is casework.common.court_order. A lingering copy is
-        # how two slicing rules end up in one module.
-        assert not hasattr(ere, "_truncate_court_order")
-
-    def test_prompt_stays_within_the_hard_max(self):
-        # An invariant guard, not a regression test: it passes unchanged
-        # against the old `_truncate_court_order` too, so it proves the hard
-        # cap holds, not that the slice changed.
-        press = "प" * 40_000
-        order = "अ" * 400_000
-        prompt = ere._enforce_prompt_budget(ere._build_content_parts(press, order))
-        assert len(prompt) <= ere.PROMPT_HARD_MAX
-
-    def test_the_operative_section_is_carried_too(self):
-        # The Task 4 A/B: 12 entities live in [marker, marker+12000) and were
-        # lost when the extraction saw only the head. Both zones ship now.
-        press = "प्रेस विज्ञप्ति पाठ"
-        caption = "वादी: नेपाल सरकार। प्रतिवादी: राम बहादुर।"
-        filler = "ख" * 20_000
-        operative = "ठहर खण्ड\nदिनेश लामिछाने उपर कसुर ठहर्छ।"
-        parts = ere._build_content_parts(press, caption + filler + operative)
-        joined = "\n\n".join(parts)
-        assert caption in joined
-        assert "दिनेश लामिछाने" in joined
-        assert filler not in joined
-
-    def test_an_order_with_no_marker_is_never_labelled_a_thahar_excerpt(self):
-        # Long enough to need both zones, but with no `ठहर खण्ड` anywhere --
-        # so neither the section header nor the fragment label may claim one.
-        from casework.common import court_order as co
-
-        order = "क" * 40_000 + "अन्तिम"
-        joined = "\n\n".join(ere._build_content_parts("प्रेस।", order))
-        assert co.THAHAR_MARKER not in joined
-        assert joined.endswith("अन्तिम")
-
-    def test_a_long_order_with_a_marker_still_gets_head_plus_marker_window(self):
-        # THE MEASURED SLICE, PINNED. Everything M5 changed is about orders
-        # that do NOT get this shape; this one must come through untouched.
-        from casework.common import court_order as co
-
-        order = "वादी: नेपाल सरकार।" + "ख" * 20_000 + co.THAHAR_MARKER + "ठ" * 500
-        assert ere._build_content_parts(None, order) == [
-            "--- COURT ORDER ---",
-            co.court_order_head(order),
-            "--- COURT ORDER (ठहर खण्ड) ---",
-            co.court_order_thahar(order),
-        ]
-
-    def test_realistic_budget_is_not_clipped(self):
-        # The true worst case: press sits AT its cap (so it is not shrunk
-        # further and still contributes its full size), and both
-        # court-order zones are long enough to truncate -- which attaches
-        # their fragment labels, the bytes Fix round 1 found missing from
-        # the brief's arithmetic. A sentinel at the very end of the source
-        # region the thahar window should reach pins the failure mode
-        # directly: `_enforce_prompt_budget` truncates its largest part
-        # from the END, so a silent clip drops this sentinel first.
-        from casework.common import court_order as co
-
-        sentinel = "SENTINEL-END-OF-WINDOW"
-        press = "प" * ere.PRESS_RELEASE_CHARS
-        head_source = "क" * (co.HEAD_CHARS + 1)  # forces head to truncate + label
-        filler = "फ" * 200_000  # pushes the marker well past the head zone
-        window_filler_len = co.THAHAR_CHARS - len(co.THAHAR_MARKER) - len(sentinel)
-        court = (
-            head_source
-            + filler
-            + co.THAHAR_MARKER
-            + ("ठ" * window_filler_len)
-            + sentinel
-        )
-        parts = ere._build_content_parts(press, court)
-        prompt = ere._enforce_prompt_budget(parts)
-
-        assert sentinel in prompt, "the thahar window's tail was clipped"
-        assert len(prompt) < ere.PROMPT_HARD_MAX
-
-
-# --------------------------------------------------------------------------
-# _parse_extraction_response
-# --------------------------------------------------------------------------
-
-
-class TestParseExtractionResponse:
-    def test_parses_both_entities_and_accused_notes(self):
-        body = json.dumps({
-            "entities": [{"entity_name": "क", "relationship_type": "related", "notes": "n"}],
-            "accused_notes": [{"name": "ख", "notes": "पद"}],
-        })
-        entities, notes = _parse_extraction_response(body)
-        assert entities == [{"entity_name": "क", "relationship_type": "related", "notes": "n"}]
-        assert notes == [{"name": "ख", "notes": "पद"}]
-
-    def test_entities_only_response_leaks_into_accused_notes_via_shared_fallback(self):
-        # KNOWN QUIRK of the shared `parse_extraction_response` (see
-        # tests/casework/test_parse.py::
-        # test_parse_extraction_response_returns_none_when_key_absent): when
-        # the requested wrapper key is absent, it falls through to a bare
-        # top-level-array scan and returns the FIRST array it finds -- so a
-        # response with ONLY "entities" (no "accused_notes" key) has its
-        # entities list echoed back as accused_notes too. This is the
-        # donor's own two-call pattern against this same parser (donor
-        # lines 233-234), not a defect introduced by this port. Downstream,
-        # `main()`'s `valid_items` filter requires `entity_name` +
-        # `relationship_type`, which accused-note dicts (`name`/`notes`)
-        # never carry, so this leak is harmless in practice.
-        body = json.dumps({
-            "entities": [{"entity_name": "क", "relationship_type": "location", "notes": ""}],
-        })
-        entities, notes = _parse_extraction_response(body)
-        assert len(entities) == 1
-        assert notes == entities
-
-    def test_accused_notes_only_response_leaks_into_entities_via_shared_fallback(self):
-        # Mirror image of the above: requesting "entities" when only
-        # "accused_notes" is present falls through to the same bare-array
-        # scan and returns the accused_notes list as "entities" too.
-        body = json.dumps({"accused_notes": [{"name": "ख", "notes": "पद"}]})
-        entities, notes = _parse_extraction_response(body)
-        assert len(notes) == 1
-        assert entities == notes
-
-    def test_neither_key_yields_two_empty_lists(self):
-        entities, notes = _parse_extraction_response('{"other": "value"}')
-        assert entities == []
-        assert notes == []
-
-    def test_unparseable_text_yields_two_empty_lists(self):
-        entities, notes = _parse_extraction_response("not json at all")
-        assert entities == []
-        assert notes == []
 
 
 # --------------------------------------------------------------------------
@@ -621,6 +193,10 @@ NEITHER_CASE_UNCONVERTED = {
     ],
 }
 
+#: A coded district bind: with a `related` bind it makes a case `already_enriched`.
+ALREADY_BOUND_DISTRICT = {"nes_id": "https://jawafdehi.org/entity/location/district/surkhet-np0605",
+                          "type": "location", "notes": ""}
+
 PRESS_CASE_ALREADY_POPULATED = {
     "slug": "case-populated",
     "title": "पहिल्यै entities भरिएको मुद्दा",
@@ -632,6 +208,7 @@ PRESS_CASE_ALREADY_POPULATED = {
     "entities": [
         {"nes_id": "https://nes.jawafdehi.org/entity/1",
          "type": "related", "notes": "पहिल्यै बाँधिएको"},
+        ALREADY_BOUND_DISTRICT,
     ],
     "evidence": [
         {"material_iri": "https://jawafdehi.org/material/ciaa/press_releases/5",
@@ -676,6 +253,13 @@ class _StubApi:
         return {}
 
 
+#: The sentence every `patched_fetch_markdown` text carries, so `with_evidence` can
+#: ground a canned reply against whichever source `pick_source` chooses.
+FIXTURE_EVIDENCE = "गोपाल बहादुर श्रेष्ठविरुद्ध मुद्दा दर्ता भएको छ।"
+#: Pads a press release past `is_teaser`'s 400-char floor.
+PRESS_PADDING = " आयोगले यस विषयमा विस्तृत अनुसन्धान गरेको थियो।" * 10
+
+
 @pytest.fixture
 def patched_fetch_markdown(monkeypatch):
     import casework.common.materials as m
@@ -683,21 +267,46 @@ def patched_fetch_markdown(monkeypatch):
     def fake_fetch(link, timeout=60):
         return {
             "https://x/press.md": "साझा भण्डार सहकारीमा अनियमितता भएको छ। "
-                                   "गोपाल बहादुर श्रेष्ठविरुद्ध मुद्दा दर्ता भएको छ।",
-            "https://x/court.md": "अदालतको आदेशमा ठहर खण्ड उल्लेख छ।",
-            "https://x/press2.md": "प्रेस विज्ञप्तिको सामग्री।",
-            "https://x/court2.md": "अदालतको आदेशको सामग्री।",
+                                   + FIXTURE_EVIDENCE + PRESS_PADDING,
+            "https://x/court.md": "अदालतको आदेशमा ठहर खण्ड उल्लेख छ। " + FIXTURE_EVIDENCE,
+            "https://x/press2.md": "प्रेस विज्ञप्तिको सामग्री। " + FIXTURE_EVIDENCE + PRESS_PADDING,
+            "https://x/court2.md": "अदालतको आदेशको सामग्री। " + FIXTURE_EVIDENCE,
             "https://x/empty.md": "",
-            "https://x/press5.md": "पहिल्यै भरिएको मुद्दाको प्रेस विज्ञप्ति।",
+            "https://x/press5.md": ("पहिल्यै भरिएको मुद्दाको प्रेस विज्ञप्ति। "
+                                    + FIXTURE_EVIDENCE + PRESS_PADDING),
         }.get(link, "")
 
     monkeypatch.setattr(m, "fetch_markdown", fake_fetch)
 
 
-def _run_main(monkeypatch, api, invoke_text_stub, argv):
+def _stub_gazetteer_loader():
+    """A `load_gazetteer` stand-in over the ten test districts, counting its calls."""
+    calls = []
+
+    def load(api):
+        calls.append(api)
+        return Gazetteer(DISTRICTS, UNITS)
+
+    load.calls = calls
+    return load
+
+
+def with_evidence(reply: str, evidence: str) -> str:
+    """Add `evidence` to every entities/accused_notes item of a canned extraction reply."""
+    data = json.loads(reply)
+    for key in ("entities", "accused_notes"):
+        for item in data.get(key) or []:
+            item.setdefault("evidence", evidence)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _run_main(monkeypatch, api, invoke_text_stub, argv, gazetteer_loader=None,
+              real_gazetteer=False):
     """Drive `main()` end to end with a stubbed API and a stubbed LLM call."""
     monkeypatch.setattr(ere, "build_api", lambda args: api)
     monkeypatch.setattr(ere, "bootstrap", lambda *a, **k: None)
+    if not real_gazetteer:
+        monkeypatch.setattr(ere, "load_gazetteer", gazetteer_loader or _stub_gazetteer_loader())
 
     fake_llm_invoke = types.ModuleType("llm.invoke")
     fake_llm_invoke.invoke_text = invoke_text_stub
@@ -732,7 +341,7 @@ def _call_tracking_stub(response=None):
     return stub
 
 
-ENTITY_RESPONSE = json.dumps({
+ENTITY_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "related",
          "notes": "ठेक्का प्राप्त गर्ने संस्था"},
@@ -741,7 +350,7 @@ ENTITY_RESPONSE = json.dumps({
     "accused_notes": [
         {"name": "गोपाल बहादुर श्रेष्ठ", "notes": "तत्कालीन अध्यक्ष"},
     ],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_unmet_prerequisite_is_recorded_not_silently_skipped(
@@ -792,18 +401,19 @@ def test_force_reruns_an_already_populated_case_and_calls_the_llm(
     # not be a silent no-op. Assert the LLM WAS called (call-count spy), and
     # that the case proceeds all the way to resolution. No search result is
     # configured for the 'related' name, so it is a no-match; the 'location'
-    # one is refused straight to review without ever being searched at all
-    # (Task 5) -- it no longer "gets searched like any other section". Neither
-    # is a new write, hence a NOOP, but a NOOP reached AFTER the LLM ran rather
-    # than by the pre-LLM skip.
+    # one goes through the gazetteer, fails grounding (its quote does not name
+    # the place) and lands in `*.dropped.jsonl` without ever being searched.
+    # Neither is a new write, hence a NOOP, but a NOOP reached AFTER the LLM ran
+    # rather than by the pre-LLM skip.
     api = _SearchStubApi([PRESS_CASE_ALREADY_POPULATED])
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     report = _run_main(
         monkeypatch, api, invoke_text_stub=stub, argv=["--force", "--dry-run"])
     assert len(stub.calls) == 1
     assert report.rows[0]["status"] == "already"
-    assert report.rows[0]["reason"] == "1 for review, 1 no match"
+    assert report.rows[0]["reason"] == "0 for review, 1 no match"
     assert api.search_calls == ["साझा भण्डार सहकारी"]
+    assert [r["place"] for r in _jsonl("dropped")] == ["सुर्खेत जिल्ला"]
 
 
 def test_pre_llm_skip_keys_on_a_related_bind_not_any_bind(
@@ -835,7 +445,8 @@ def test_pre_llm_skip_keys_on_a_related_bind_not_any_bind(
     related_bound["entities"] = [
         {"nes_id": "https://jawafdehi.org/entity/organization/"
                    "sajha-bhandara-sahakari-9f9f9f",
-         "type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+         "type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"},
+        ALREADY_BOUND_DISTRICT]
 
     api = _SearchStubApi([location_only, related_bound])  # nothing resolves
     stub = _call_tracking_stub(ENTITY_RESPONSE)
@@ -864,7 +475,8 @@ def test_pre_llm_skip_also_tolerates_the_write_shape_key(
     related_bound["entities"] = [
         {"nes_id": "https://jawafdehi.org/entity/organization/"
                    "sajha-bhandara-sahakari-9f9f9f",
-         "relationship_type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+         "relationship_type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"},
+        ALREADY_BOUND_DISTRICT]
     api = _SearchStubApi([related_bound])
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
@@ -891,21 +503,6 @@ def test_court_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, ca
     assert len(stub.calls) == 1
     out = capsys.readouterr().out
     assert "TOTAL entities extracted across all cases: 2" in out
-
-
-def test_both_present_case_reaches_the_llm_with_both_sections(
-    monkeypatch, patched_fetch_markdown
-):
-    seen = {}
-
-    def stub(**kw):
-        seen.update(kw)
-        return ENTITY_RESPONSE
-
-    api = _StubApi([BOTH_CASE])
-    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
-    assert "--- PRESS RELEASE ---" in seen["content"]
-    assert "--- COURT ORDER ---" in seen["content"]
 
 
 def test_llm_invoked_with_premium_tier_end_to_end(monkeypatch, patched_fetch_markdown):
@@ -1025,7 +622,7 @@ def test_summary_uses_plan_summary_so_already_bound_names_do_not_vanish(
     case["entities"] = [
         {"nes_id": sajha_iri, "relationship_type": "related",
          "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
-    response = json.dumps({
+    response = with_evidence(json.dumps({
         "entities": [
             {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "related",
              "notes": "ठेक्का प्राप्त गर्ने संस्था"},
@@ -1033,7 +630,7 @@ def test_summary_uses_plan_summary_so_already_bound_names_do_not_vanish(
              "notes": "घुस लेनदेनमा सहयोग"},
         ],
         "accused_notes": [],
-    })
+    }), FIXTURE_EVIDENCE)
     api = _SearchStubApi(
         [case],
         {"साझा भण्डार सहकारी": [{"id": sajha_iri,
@@ -1064,7 +661,7 @@ def test_invalid_relationship_type_is_excluded_from_extracted_count(
     # be dropped is an item with no name -- the planner skips those without
     # recording them anywhere, so counting one would corrupt `plan_summary`'s
     # already-bound subtraction.
-    response = json.dumps({
+    response = with_evidence(json.dumps({
         "entities": [
             {"entity_name": "गोपाल बहादुर", "relationship_type": "accused", "notes": "x"},
             {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": ""},
@@ -1073,7 +670,7 @@ def test_invalid_relationship_type_is_excluded_from_extracted_count(
             {"entity_name": "   ", "relationship_type": "related", "notes": "no name"},
         ],
         "accused_notes": [],
-    })
+    }), FIXTURE_EVIDENCE)
     api = _SearchStubApi([PRESS_ONLY_CASE])
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
               argv=["--dry-run"])
@@ -1089,7 +686,8 @@ def test_accused_notes_only_response_yields_zero_valid_entities_end_to_end(
     # the same array, but main()'s valid_items filter (entity_name +
     # relationship_type required) rejects the leaked accused-note dicts, so
     # extraction still correctly reports 0 entities.
-    response = json.dumps({"accused_notes": [{"name": "गोपाल", "notes": "अध्यक्ष"}]})
+    response = with_evidence(json.dumps({"accused_notes": [{"name": "गोपाल", "notes": "अध्यक्ष"}]}),
+                             FIXTURE_EVIDENCE)
     api = _StubApi([PRESS_ONLY_CASE])
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
               argv=["--dry-run"])
@@ -2408,14 +2006,14 @@ def _report_files():
     return ere.report_paths(logger._casework_run_paths)
 
 
-THREE_WAY_RESPONSE = json.dumps({
+THREE_WAY_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"},
         {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "ख"},
         {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ग"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 # One name binds outright, one is ambiguous between two same-name people (so it
 # goes to review), one matches nothing in NES. Mirrors the real production
@@ -2549,13 +2147,9 @@ def test_dry_run_bind_rows_are_marked_unwritten(
         False, True, True]
 
 
-# `test_binds_jsonl_labels_each_section_when_one_entity_binds_twice` DELETED
-# here (Task 5): it drove the two-section shape end to end through `main()`
-# via a `location`-typed EXTRACTED item that name-search bound -- `main()`
-# does not wire `locations=` until Task 7, so that shape is unreachable through
-# `main()` until then. The planner-level equivalent
-# (`test_one_entity_binds_into_two_sections_in_a_single_plan`, using
-# `locations=`) still covers the bug this test was written to catch.
+# The end-to-end two-section check (one entity bound as a location and as
+# `related`, each labelled in `*.binds.jsonl` and on the console) is
+# `TestMainWiring.test_one_entity_bound_in_two_sections_is_labelled_per_section`.
 
 
 # --------------------------------------------------------------------------
@@ -2623,6 +2217,7 @@ def test_an_all_skipped_run_does_not_claim_names_went_to_review(
     # empty.
     already = dict(PRESS_ONLY_CASE, slug="case-all-skipped", entities=[
         {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिल्यै"},
+        ALREADY_BOUND_DISTRICT,
     ])
     api = _SearchStubApi([already], THREE_WAY_SEARCH)
     stub = _call_tracking_stub(THREE_WAY_RESPONSE)
@@ -2750,7 +2345,7 @@ def test_report_paths_includes_the_new_sidecars():
     assert out["created"].endswith(f"{stem}.created.jsonl")
 
 
-NOTHING_RESOLVES_RESPONSE = json.dumps({
+NOTHING_RESOLVES_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "notes": "तत्कालीन प्रमुख"},
@@ -2760,7 +2355,7 @@ NOTHING_RESOLVES_RESPONSE = json.dumps({
     "accused_notes": [
         {"name": "हेम राज बिष्ट", "notes": "वन अधिकृत, वन निर्देशनालय धनगढी"},
     ],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_extraction_sidecar_records_every_name_when_nothing_resolves(
@@ -2802,7 +2397,8 @@ def test_extraction_sidecar_records_accused_notes(
              .read_text(encoding="utf-8").splitlines()]
     assert notes == [{"slug": "case-accused-notes",
                       "name": "हेम राज बिष्ट",
-                      "notes": "वन अधिकृत, वन निर्देशनालय धनगढी"}]
+                      "notes": "वन अधिकृत, वन निर्देशनालय धनगढी",
+                      "evidence": FIXTURE_EVIDENCE}]
 
 
 # --------------------------------------------------------------------------
@@ -2974,7 +2570,7 @@ def test_an_accused_name_never_reaches_the_case_at_all():
 # --------------------------------------------------------------------------
 
 
-CREATE_RESPONSE = json.dumps({
+CREATE_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "entity_prefix": "person", "entity_type": "Person",
@@ -2987,7 +2583,7 @@ CREATE_RESPONSE = json.dumps({
          "notes": "आरोपी कार्यरत रहेको निकाय"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def _created_rows():
@@ -3068,7 +2664,7 @@ def test_the_created_entity_cites_the_material_it_came_from(
     assert citations == {"https://jawafdehi.org/material/ciaa/press_releases/1"}
 
 
-TWO_SPELLINGS_RESPONSE = json.dumps({
+TWO_SPELLINGS_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "वन निदेशनालय, धनगढी",
          "relationship_type": "related",
@@ -3082,7 +2678,7 @@ TWO_SPELLINGS_RESPONSE = json.dumps({
          "is_named_entity": True, "name_en": "", "notes": "ख"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_one_office_named_twice_creates_one_entity(
@@ -3110,23 +2706,23 @@ def test_one_office_named_twice_creates_one_entity(
 # different IRIs (`person/...` and `organization/...`) and the server would
 # never 409 one against the other. Keyed on the name alone, the second case
 # binds a PERSON entity as the organisation in a corruption case.
-HOMONYM_PERSON_RESPONSE = json.dumps({
+HOMONYM_PERSON_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "श्रीकृष्ण श्रेष्ठ", "relationship_type": "related",
          "entity_prefix": "person", "entity_type": "Person",
          "is_named_entity": True, "name_en": "", "notes": "क"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
-HOMONYM_ORG_RESPONSE = json.dumps({
+HOMONYM_ORG_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "श्रीकृष्ण श्रेष्ठ", "relationship_type": "related",
          "entity_prefix": "organization", "entity_type": "Organization",
          "is_named_entity": True, "name_en": "", "notes": "ख"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_the_same_name_under_a_different_prefix_is_not_reused(
@@ -3155,7 +2751,7 @@ def test_the_same_name_under_a_different_prefix_is_not_reused(
 # the name alone, so BOTH `plan.nomatch` entries read whichever item the model
 # happened to emit last -- here the `person`/`is_named_entity: False` one, which
 # fails the creation gate and takes the legitimate contractor down with it.
-CROSSED_SECTIONS_RESPONSE = json.dumps({
+CROSSED_SECTIONS_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "गोरखा निर्माण सेवा", "relationship_type": "related",
          "entity_prefix": "organization/contractor",
@@ -3166,7 +2762,7 @@ CROSSED_SECTIONS_RESPONSE = json.dumps({
          "is_named_entity": False, "name_en": "", "notes": "साक्षी"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_each_section_reads_its_own_extracted_item(
@@ -3189,7 +2785,7 @@ def test_each_section_reads_its_own_extracted_item(
     assert "is_named_entity" in by_role["witness"]["reason"]
 
 
-COERCED_SECTION_RESPONSE = json.dumps({
+COERCED_SECTION_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "employer",
          "entity_prefix": "organization", "entity_type": "Organization",
@@ -3197,7 +2793,7 @@ COERCED_SECTION_RESPONSE = json.dumps({
          "notes": "क"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_a_coerced_section_still_finds_its_own_item(
@@ -3219,14 +2815,14 @@ def test_a_coerced_section_still_finds_its_own_item(
     assert (row["role"], row["outcome"]) == ("related", "created")
 
 
-BAD_PREFIX_RESPONSE = json.dumps({
+BAD_PREFIX_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "entity_prefix": "persen", "entity_type": "Person",
          "is_named_entity": True, "name_en": "", "notes": "क"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_a_prefix_with_no_existing_parent_is_skipped_not_posted(
@@ -3313,15 +2909,12 @@ def test_a_case_with_a_related_bind_never_reaches_the_create_step(
     monkeypatch, patched_fetch_markdown
 ):
     # A LIMITATION, PINNED RATHER THAN FIXED. The idempotency gate skips a case
-    # that already holds any `related` bind, and it runs before anything else --
-    # so on an already-enriched case, --create-entities creates nothing, however
-    # many unmatched names that case has. `--force` is the way past it.
-    #
-    # Left alone deliberately: widening the gate changes which cases every run of
-    # this enricher touches, which deserves its own measurement rather than
-    # riding along with entity creation.
+    # that already holds a `related` bind and a district, and it runs before
+    # anything else -- so on an already-enriched case, --create-entities creates
+    # nothing, however many unmatched names that case has. `--force` is the way
+    # past it.
     existing = {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिलेको"}
-    case = dict(PRESS_ONLY_CASE, slug="case-gated", entities=[existing])
+    case = dict(PRESS_ONLY_CASE, slug="case-gated", entities=[existing, ALREADY_BOUND_DISTRICT])
     api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
                                   "वन निर्देशनालय, धनगढी": []})
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
@@ -3335,7 +2928,7 @@ def test_force_gets_past_the_gate_and_creates(
     monkeypatch, patched_fetch_markdown
 ):
     existing = {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिलेको"}
-    case = dict(PRESS_ONLY_CASE, slug="case-forced", entities=[existing])
+    case = dict(PRESS_ONLY_CASE, slug="case-forced", entities=[existing, ALREADY_BOUND_DISTRICT])
     api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
                                   "वन निर्देशनालय, धनगढी": []})
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
@@ -3365,8 +2958,9 @@ def test_the_prefix_section_is_empty_without_prefixes():
 
 
 def test_the_system_prompt_asks_for_the_two_new_fields():
-    assert "entity_prefix" in ere.SYSTEM_PROMPT
-    assert "entity_type" in ere.SYSTEM_PROMPT
+    for prompt in (ere.COURT_ORDER_SYSTEM_PROMPT, ere.PRESS_RELEASE_SYSTEM_PROMPT):
+        assert "entity_prefix" in prompt
+        assert "entity_type" in prompt
 
 
 def test_the_category_list_is_absent_from_the_prompt_without_the_flag(
@@ -3524,7 +3118,7 @@ def test_a_500_propagates_untouched():
 # `plan_case_entities` only.
 
 
-COMPOSITE_RELATED_RESPONSE = json.dumps({
+COMPOSITE_RELATED_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "घरजग्गा सम्पत्ति - काठमाडौं", "relationship_type": "related",
          "entity_prefix": "organization", "entity_type": "Organization",
@@ -3532,7 +3126,7 @@ COMPOSITE_RELATED_RESPONSE = json.dumps({
          "notes": "जफत गरिएको सम्पत्ति"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_a_composite_name_in_the_related_section_is_never_created(
@@ -3566,7 +3160,8 @@ def _named_entity_response(flag):
               "notes": "रुख कटान गरिएको भनिएको समूह"}
     if flag is not None:
         entity["is_named_entity"] = flag
-    return json.dumps({"entities": [entity], "accused_notes": []})
+    return with_evidence(json.dumps({"entities": [entity], "accused_notes": []}),
+                         FIXTURE_EVIDENCE)
 
 
 def test_is_named_entity_false_blocks_creation(monkeypatch, patched_fetch_markdown):
@@ -3658,7 +3253,7 @@ def test_the_payload_carries_both_names_when_english_is_supplied(
                                "en": "Community Forest User Group"}
 
 
-NO_ENGLISH_RESPONSE = json.dumps({
+NO_ENGLISH_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "entity_prefix": "person", "entity_type": "Person",
@@ -3666,7 +3261,7 @@ NO_ENGLISH_RESPONSE = json.dumps({
          "notes": "तत्कालीन प्रमुख"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_the_payload_omits_the_english_name_rather_than_sending_it_blank(
@@ -3688,34 +3283,15 @@ def test_the_payload_omits_the_english_name_rather_than_sending_it_blank(
 
 
 def test_the_prompt_asks_for_both_new_fields():
-    assert "is_named_entity" in ere.SYSTEM_PROMPT
-    assert "name_en" in ere.SYSTEM_PROMPT
-
-
-def test_the_prompt_no_longer_teaches_the_composite_location_name():
-    # Line 204 used to mandate "Organisation/Activity - Location", which is why
-    # `घरजग्गा सम्पत्ति - काठमाडौं` was extracted at all. Both dry-run cases
-    # produced one, and the composite also scores 0.00 against the canonical
-    # district it was supposed to name.
-    assert "Activity - Location" not in ere.SYSTEM_PROMPT
-    # The composite survives only as a labelled counter-example. Showing the
-    # model the exact string it used to emit, marked WRONG, beats deleting it.
-    correct, _sep, wrong = ere.SYSTEM_PROMPT.partition(
-        "Examples of WRONG location names:")
-    assert "स्वास्थ्य उपकरण खरिद - जनकपुरधाम" not in correct
-    assert "स्वास्थ्य उपकरण खरिद - जनकपुरधाम" in wrong
-
-
-def test_the_prompt_no_longer_demands_blank_location_notes():
-    # The activity context moves out of the name and into notes, so the old
-    # "leave notes BLANK" rule would now throw it away.
-    assert 'Leave notes BLANK ("") for all location entities' not in ere.SYSTEM_PROMPT
+    for prompt in (ere.COURT_ORDER_SYSTEM_PROMPT, ere.PRESS_RELEASE_SYSTEM_PROMPT):
+        assert "is_named_entity" in prompt
+        assert "name_en" in prompt
 
 
 def test_the_prompt_rules_out_media_that_only_reported_the_case():
     # `नयाँ पत्रिका` was extracted as `related` for publishing the story. A
     # newspaper that reported a case is a source, not a participant.
-    assert "नयाँ पत्रिका" in ere.SYSTEM_PROMPT
+    assert "नयाँ पत्रिका" in ere.COURT_ORDER_SYSTEM_PROMPT
 
 
 def test_the_creation_block_explains_both_new_fields():
@@ -3741,7 +3317,7 @@ def test_the_creation_block_explains_both_new_fields():
 # --------------------------------------------------------------------------
 
 
-ACCUSED_RESPONSE = json.dumps({
+ACCUSED_RESPONSE = with_evidence(json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
          "entity_prefix": "person", "entity_type": "Person",
@@ -3753,7 +3329,7 @@ ACCUSED_RESPONSE = json.dumps({
          "notes": "घुस लेनदेनमा संलग्न भनी उल्लेख"},
     ],
     "accused_notes": [],
-})
+}), FIXTURE_EVIDENCE)
 
 
 def test_an_extracted_accused_is_never_bound(monkeypatch, patched_fetch_markdown):
@@ -3822,14 +3398,15 @@ def test_no_bind_this_module_writes_can_carry_a_charged_outcome(
 
 
 def test_the_prompt_no_longer_offers_accused_as_a_relationship_type():
-    assert '"accused"' not in ere.SYSTEM_PROMPT
-    assert "relationship_type" in ere.SYSTEM_PROMPT      # the others survive
-    assert '"alleged"' in ere.SYSTEM_PROMPT
-    assert '"witness"' in ere.SYSTEM_PROMPT
+    for prompt in (ere.COURT_ORDER_SYSTEM_PROMPT, ere.PRESS_RELEASE_SYSTEM_PROMPT):
+        assert '"accused"' not in prompt
+        assert "relationship_type" in prompt      # the others survive
+    assert '"alleged"' in ere.COURT_ORDER_SYSTEM_PROMPT
+    assert '"witness"' in ere.COURT_ORDER_SYSTEM_PROMPT
 
 
 def test_the_prompt_says_where_defendants_actually_come_from():
-    assert "court record" in ere.SYSTEM_PROMPT
+    assert "court record" in ere.COURT_ORDER_SYSTEM_PROMPT
 
 
 def test_the_carry_through_validator_still_accepts_an_existing_accused_bind():
@@ -4484,12 +4061,13 @@ class TestVerdictGate:
     def test_a_case_already_carrying_related_binds_still_gets_its_verdicts(
             self, monkeypatch, patched_fetch_markdown):
         # THE POINT OF A SEPARATE GATE. main() skips extraction for a case that
-        # already has a `related` bind, and nearly every case this feature
-        # targets is in exactly that state. Sharing that gate would skip all of
-        # them.
+        # already has a `related` bind and a district, and nearly every case
+        # this feature targets is in exactly that state. Sharing that gate would
+        # skip all of them.
         case = _accused_case(extra_entities=[
             {"nes_id": "https://jawafdehi.org/entity/organization/o-1",
-             "type": "related", "display_name": "संस्था", "notes": ""}])
+             "type": "related", "display_name": "संस्था", "notes": ""},
+            ALREADY_BOUND_DISTRICT])
         api = _StubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
         _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
@@ -4502,7 +4080,8 @@ class TestVerdictGate:
         # case must still cost nothing at all, not merely no LLM call.
         case = _accused_case(extra_entities=[
             {"nes_id": "https://jawafdehi.org/entity/organization/o-1",
-             "type": "related", "display_name": "संस्था", "notes": ""}])
+             "type": "related", "display_name": "संस्था", "notes": ""},
+            ALREADY_BOUND_DISTRICT])
         api = _StubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
         _run_main(monkeypatch, api, invoke_text_stub=stub,
@@ -4600,7 +4179,7 @@ class TestTheGateSpendsNothingItCannotUse:
 
         monkeypatch.setattr(m, "fetch_markdown", counting)
         api = _StubApi([_accused_case(outcome="acquitted",
-                                      extra_entities=[RELATED_BIND])])
+                                      extra_entities=[RELATED_BIND, ALREADY_BOUND_DISTRICT])])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
         _run_main(monkeypatch, api, invoke_text_stub=stub,
                   argv=["--dry-run", "--verdicts"])
@@ -4621,7 +4200,8 @@ class TestTheGateSpendsNothingItCannotUse:
 
         monkeypatch.setattr(m, "fetch_markdown", counting)
         case = dict(_accused_case(slug="case-in-review-skipped",
-                                  extra_entities=[RELATED_BIND]), state="IN_REVIEW")
+                                  extra_entities=[RELATED_BIND, ALREADY_BOUND_DISTRICT]),
+                    state="IN_REVIEW")
         api = _StubApi([case])
         stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
         _run_main(monkeypatch, api, invoke_text_stub=stub,
@@ -4999,9 +4579,9 @@ ROLE_NOTE = "तत्कालीन प्रबन्ध निर्दे�
 
 
 def _notes_response(name="राम बहादुर", role=ROLE_NOTE, entities=()):
-    return json.dumps({"entities": list(entities),
-                       "accused_notes": [{"name": name, "notes": role}]},
-                      ensure_ascii=False)
+    return with_evidence(json.dumps({"entities": list(entities),
+                                     "accused_notes": [{"name": name, "notes": role}]},
+                                    ensure_ascii=False), FIXTURE_EVIDENCE)
 
 
 class TestAccusedNoteUpdates:
@@ -5200,11 +4780,11 @@ class TestAnAccusedIsNotReboundUnderAnotherSection:
 
     @staticmethod
     def _extracted(section):
-        return json.dumps({"entities": [
+        return with_evidence(json.dumps({"entities": [
             {"entity_name": "राम बहादुर", "relationship_type": section,
              "entity_prefix": "person", "entity_type": "Person",
              "is_named_entity": True, "name_en": "Ram Bahadur",
-             "notes": "सम्बद्ध"}], "accused_notes": []}, ensure_ascii=False)
+             "notes": "सम्बद्ध"}], "accused_notes": []}, ensure_ascii=False), FIXTURE_EVIDENCE)
 
     def _api(self, case):
         return _SearchStubApi([case], {
@@ -5782,9 +5362,8 @@ class TestTheVerdictPromptCarriesItsGuardrails:
 
 
 # --------------------------------------------------------------------------
-# Task 6: source selection, the two window prompts, and the start-window loop.
-# `main()` is not wired to any of this yet (Task 7) -- these tests call
-# `pick_source` / `extract_from_source` directly.
+# Task 6: source selection, the two window prompts, and the start-window loop,
+# called directly. `TestMainWiring` drives the same path through `main()`.
 # --------------------------------------------------------------------------
 
 CAPTION_SHORT = "विशेष अदालत काठमाडौं। मुद्दा:"
@@ -5935,11 +5514,31 @@ class TestPickSource:
         assert source.reason
 
 
+#: The last main-branch commit carrying the retired single-call `SYSTEM_PROMPT`.
+RETIRED_PROMPT_COMMIT = "5406f9e"
+
+
+def _retired_system_prompt() -> str:
+    """`SYSTEM_PROMPT` as it stood at `RETIRED_PROMPT_COMMIT`, read via `git show` + `ast`."""
+    proc = subprocess.run(
+        ["git", "show", f"{RETIRED_PROMPT_COMMIT}:casework/enrich_related_entities.py"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"commit {RETIRED_PROMPT_COMMIT} not in local history (shallow clone?)")
+    for node in ast.parse(proc.stdout).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "SYSTEM_PROMPT"):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"no SYSTEM_PROMPT at {RETIRED_PROMPT_COMMIT}")
+
+
 class TestCourtOrderSystemPrompt:
     """`COURT_ORDER_SYSTEM_PROMPT`: PART 2/3 word for word, new PART 1 and output format."""
 
     def test_keeps_part_2_and_part_3_verbatim_from_the_old_prompt(self):
-        old = ere.SYSTEM_PROMPT
+        old = _retired_system_prompt()
         tail_marker = "Only include primary accused persons. Keep notes under 80 chars."
         old_body = old[old.index("PART 2 — PEOPLE AND ORGANIZATIONS"):
                        old.index(tail_marker) + len(tail_marker)]
@@ -6378,3 +5977,314 @@ class TestPressReleaseLabelAndPromptDuplicate:
         marker = "You are reading part of a Special Court judgment, labelled with its character range."
         assert prompt.count(marker) == 1
         assert marker in prompt[prompt.index("PART 1"):]
+
+
+# --------------------------------------------------------------------------
+# Task 7 -- `main()` reads through `pick_source` / `extract_from_source`, skips
+# only a case with a `related` bind AND a district, and reports every case that
+# ends without a district.
+# --------------------------------------------------------------------------
+
+BANKE_IRI = "https://jawafdehi.org/entity/location/district/banke-np0557"
+KHAJURA_IRI = "https://jawafdehi.org/entity/location/localunit/khajura-gaunpalika-50001"
+SAJHA_EVIDENCE = "साझा भण्डार सहकारीले ठेक्का प्राप्त गरेको थियो।"
+KHAJURA_EVIDENCE = "खजुरा गाउँपालिकाको बजेटबाट भुक्तानी गरिएको थियो।"
+WIRED_ORDER = "\n".join([CAPTION_SHORT, SAJHA_EVIDENCE, BANKE_EVIDENCE, KHAJURA_EVIDENCE,
+                         FILLER_SENTENCE * 20])
+WIRED_LINKS = {"https://x/wired-court.md": WIRED_ORDER,
+               "https://x/wired-press.md": READABLE_PRESS}
+SAJHA_ITEM = {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "related",
+              "evidence": SAJHA_EVIDENCE, "notes": "ठेक्का प्राप्त गर्ने संस्था"}
+BANKE_LOCATION = {"place_as_written": BANKE_PLACE, "district": "बाँके",
+                  "evidence": BANKE_EVIDENCE, "notes": "रकम लगानी भएको स्थान"}
+SAJHA_SEARCH = {"साझा भण्डार सहकारी": [{"id": SAJHA_IRI, "title": {"ne": "साझा भण्डार सहकारी"},
+                                       "score": 200.0}]}
+DISTRICT_BIND = {"nes_id": BANKE_IRI, "type": "location", "notes": ""}
+SAJHA_RELATED_BIND = {"nes_id": SAJHA_IRI, "type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}
+
+
+def _patch_links(monkeypatch, links=None):
+    """Serve `links` from `fetch_markdown` and record every link fetched."""
+    import casework.common.materials as m
+
+    fetched = []
+    links = WIRED_LINKS if links is None else links
+
+    def fake_fetch(link, timeout=60):
+        fetched.append(link)
+        return links.get(link, "")
+
+    monkeypatch.setattr(m, "fetch_markdown", fake_fetch)
+    return fetched
+
+
+def _wired_case(slug="case-wired", entities=(), court=True, press=True):
+    evidence = []
+    if court:
+        evidence.append(_material("https://jawafdehi.org/material/ngm/court_orders/7",
+                                  "court_order", "https://x/wired-court.md"))
+    if press:
+        evidence.append(_material("https://jawafdehi.org/material/ciaa/press_releases/7",
+                                  "press_release", "https://x/wired-press.md"))
+    return {"slug": slug, "title": "जोडिएको मुद्दा", "state": "DRAFT",
+            "evidence": evidence, "entities": list(entities)}
+
+
+def _jsonl(key):
+    return [json.loads(line) for line in
+            Path(_report_files()[key]).read_text(encoding="utf-8").splitlines()]
+
+
+class TestAlreadyEnriched:
+    """The skip rule: a `related` bind AND a coded-district bind, nothing less."""
+
+    def test_a_related_bind_alone_is_not_enough(self):
+        assert not ere.already_enriched({"entities": [SAJHA_RELATED_BIND]})
+
+    def test_a_district_bind_alone_is_not_enough(self):
+        assert not ere.already_enriched({"entities": [DISTRICT_BIND]})
+
+    def test_a_municipality_is_not_a_district(self):
+        municipality = {"nes_id": KHAJURA_IRI, "type": "location", "notes": ""}
+        assert not ere.already_enriched({"entities": [SAJHA_RELATED_BIND, municipality]})
+
+    def test_both_is_already_enriched_in_either_key_shape(self):
+        write_shape = {"nes_id": SAJHA_IRI, "relationship_type": "related", "notes": ""}
+        assert ere.already_enriched({"entities": [SAJHA_RELATED_BIND, DISTRICT_BIND]})
+        assert ere.already_enriched({"entities": [write_shape, DISTRICT_BIND]})
+
+
+class TestMainWiring:
+    def test_a_case_with_a_related_bind_but_no_district_is_not_skipped(self, monkeypatch):
+        _patch_links(monkeypatch)
+        case = _wired_case(entities=[SAJHA_RELATED_BIND])
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION]))
+        report = _run_main(monkeypatch, _SearchStubApi([case], SAJHA_SEARCH), stub,
+                           argv=["--dry-run"])
+
+        assert len(stub.calls) == 1
+        assert "already present" not in report.rows[0]["reason"]
+
+    def test_a_case_with_a_related_bind_and_a_district_is_skipped(self, monkeypatch):
+        fetched = _patch_links(monkeypatch)
+        case = _wired_case(entities=[SAJHA_RELATED_BIND, DISTRICT_BIND])
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION]))
+        loader = _stub_gazetteer_loader()
+        report = _run_main(monkeypatch, _SearchStubApi([case], SAJHA_SEARCH), stub,
+                           argv=["--dry-run"], gazetteer_loader=loader)
+
+        assert stub.calls == []
+        assert fetched == []
+        assert loader.calls == []
+        assert report.rows[0]["status"] == "already"
+        assert "already present" in report.rows[0]["reason"]
+
+    def test_a_court_order_case_with_no_district_writes_location_missing_and_still_binds(
+        self, monkeypatch, capsys
+    ):
+        _patch_links(monkeypatch)
+        case = _wired_case(slug="case-no-district", press=False)
+        stub = _call_tracking_stub(_response(
+            locations=[{**BANKE_LOCATION, "evidence": "यो वाक्य आदेशमा कतै छैन, कतै पनि।"}],
+            entities=[SAJHA_ITEM]))
+        report = _run_main(monkeypatch, _SearchStubApi([case], SAJHA_SEARCH), stub,
+                           argv=["--dry-run"])
+        out = capsys.readouterr().out
+
+        missing = _jsonl("location_missing")
+        assert len(missing) == 1
+        row = missing[0]
+        assert (row["slug"], row["source"]) == ("case-no-district", "court_order")
+        assert row["windows"] == [[0, len(WIRED_ORDER)]]
+        assert [r["reason"] for r in row["rejected_locations"]] == [
+            "evidence not found in the source"]
+        assert "location_missing: 1" in out
+        assert [(b["extracted"], b["role"]) for b in _jsonl("binds")] == [
+            ("साझा भण्डार सहकारी", "related")]
+        assert [r["slug"] for r in report.rows] == ["case-no-district"]
+
+    def test_a_case_already_holding_a_district_is_not_location_missing(
+        self, monkeypatch, capsys
+    ):
+        _patch_links(monkeypatch)
+        case = _wired_case(slug="case-has-district", entities=[DISTRICT_BIND], press=False)
+        stub = _call_tracking_stub(_response(entities=[SAJHA_ITEM]))
+        _run_main(monkeypatch, _SearchStubApi([case], SAJHA_SEARCH), stub, argv=["--dry-run"])
+
+        assert _jsonl("location_missing") == []
+        assert "location_missing: 0" in capsys.readouterr().out
+
+    def test_a_readable_court_order_means_the_press_release_is_never_fetched(
+        self, monkeypatch
+    ):
+        fetched = _patch_links(monkeypatch)
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION]))
+        _run_main(monkeypatch, _SearchStubApi([_wired_case()], SAJHA_SEARCH), stub,
+                  argv=["--dry-run"])
+
+        assert len(stub.calls) == 1
+        assert "https://x/wired-press.md" not in fetched
+        assert "https://x/wired-court.md" in fetched
+
+    def test_a_dry_run_never_calls_replace_list(self, monkeypatch, capsys):
+        _patch_links(monkeypatch)
+        api = _SearchStubApi([_wired_case()], SAJHA_SEARCH)
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION], entities=[SAJHA_ITEM]))
+        _run_main(monkeypatch, api, stub, argv=["--dry-run"])
+        out = capsys.readouterr().out
+
+        assert api.replace_list_calls == []
+        assert api.patch_calls == []
+        assert f"WOULD BIND (location) {BANKE_PLACE}  ->  {BANKE_IRI}" in out
+        assert "WOULD BIND (related) साझा भण्डार सहकारी" in out
+
+    def test_apply_writes_the_district_and_the_related_bind_in_one_replace(self, monkeypatch):
+        _patch_links(monkeypatch)
+        api = _SearchStubApi([_wired_case()], SAJHA_SEARCH)
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION], entities=[SAJHA_ITEM]))
+        _run_main(monkeypatch, api, stub, argv=["--apply"])
+
+        assert len(api.replace_list_calls) == 1
+        items = api.replace_list_calls[0][2]
+        assert [(i["nes_id"], i["relationship_type"]) for i in items] == [
+            (BANKE_IRI, "location"), (KHAJURA_IRI, "location"), (SAJHA_IRI, "related")]
+
+    def test_one_entity_bound_in_two_sections_is_labelled_per_section(
+        self, monkeypatch, capsys
+    ):
+        # The municipality binds as a location through the gazetteer, and the
+        # model also names it as the related body whose budget paid out.
+        _patch_links(monkeypatch)
+        khajura_related = {"entity_name": "खजुरा गाउँपालिका", "relationship_type": "related",
+                           "evidence": KHAJURA_EVIDENCE, "notes": "भुक्तानी गर्ने निकाय"}
+        search = {"खजुरा गाउँपालिका": [{"id": KHAJURA_IRI, "title": {"ne": "खजुरा गाउँपालिका"},
+                                      "score": 200.0}]}
+        api = _SearchStubApi([_wired_case()], search)
+        stub = _call_tracking_stub(
+            _response(locations=[BANKE_LOCATION], entities=[khajura_related]))
+        _run_main(monkeypatch, api, stub, argv=["--apply"])
+        out = capsys.readouterr().out
+
+        rows = [(b["nes_id"], b["role"]) for b in _jsonl("binds")]
+        assert (KHAJURA_IRI, "location") in rows
+        assert (KHAJURA_IRI, "related") in rows
+        assert f"BOUND (location) {BANKE_PLACE}  ->  {KHAJURA_IRI}" in out
+        assert f"BOUND (related) खजुरा गाउँपालिका  ->  {KHAJURA_IRI}" in out
+
+    def test_the_gazetteer_is_loaded_once_for_the_run(self, monkeypatch):
+        _patch_links(monkeypatch)
+        cases = [_wired_case(slug="case-a"), _wired_case(slug="case-b")]
+        loader = _stub_gazetteer_loader()
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION]))
+        _run_main(monkeypatch, _SearchStubApi(cases, SAJHA_SEARCH), stub,
+                  argv=["--dry-run"], gazetteer_loader=loader)
+
+        assert len(stub.calls) == 2
+        assert len(loader.calls) == 1
+
+    def test_a_gazetteer_load_failure_stops_the_run(self, monkeypatch):
+        _patch_links(monkeypatch)
+
+        class _PagedSearchApi(_SearchStubApi):
+            def get(self, path, params=None, timeout=60):
+                rows = {"location/district": DISTRICTS,
+                        "location/localunit": UNITS}[params["entity_prefix"]]
+                o, n = params["offset"], params["limit"]
+                return {"entities": rows[o:o + n], "total": len(rows)}
+
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION]))
+        api = _PagedSearchApi([_wired_case(slug="case-a"), _wired_case(slug="case-b")])
+        with pytest.raises(RuntimeError, match="expected 77 NES districts"):
+            _run_main(monkeypatch, api, stub, argv=["--dry-run"], real_gazetteer=True)
+        assert stub.calls == []
+
+    def test_the_extract_event_records_the_windows_read(self, monkeypatch):
+        _patch_links(monkeypatch)
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION]))
+        _run_main(monkeypatch, _SearchStubApi([_wired_case()], SAJHA_SEARCH), stub,
+                  argv=["--dry-run"])
+
+        extract = [r for r in _read_events(_events_path()) if r["step"] == "extract"]
+        assert len(extract) == 1
+        assert f"windows [(0, {len(WIRED_ORDER)})]" in extract[0]["detail"]
+
+    def test_an_answer_that_fails_grounding_lands_in_dropped_jsonl(self, monkeypatch):
+        _patch_links(monkeypatch)
+        unfounded = {**SAJHA_ITEM, "evidence": "यो वाक्य आदेशमा कतै पनि लेखिएको छैन।"}
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION], entities=[unfounded]))
+        _run_main(monkeypatch, _SearchStubApi([_wired_case()], SAJHA_SEARCH), stub,
+                  argv=["--dry-run"])
+
+        dropped = _jsonl("dropped")
+        assert [(r["slug"], r["entity_name"], r["reason"]) for r in dropped] == [
+            ("case-wired", "साझा भण्डार सहकारी", "evidence not found in the source")]
+        assert _jsonl("extracted") == []
+
+    def test_a_window_over_the_hard_max_is_refused_before_the_call(self, monkeypatch):
+        long_press = READABLE_PRESS * ((ere.PROMPT_HARD_MAX // len(READABLE_PRESS)) + 1)
+        _patch_links(monkeypatch, {"https://x/wired-press.md": long_press})
+        stub = _call_tracking_stub(_response())
+        report = _run_main(monkeypatch, _SearchStubApi([_wired_case(court=False)]), stub,
+                           argv=["--dry-run"])
+
+        assert stub.calls == []
+        assert report.rows[0]["status"] == "error"
+        assert "PROMPT_HARD_MAX" in report.rows[0]["reason"]
+
+
+def test_prompt_hard_max_fits_a_whole_start_window():
+    assert ere.PROMPT_HARD_MAX == 40_000
+
+
+def test_report_paths_carries_dropped_and_location_missing():
+    out = ere.report_paths({"log": "/tmp/20260925T000000Z-entities-abc.log"})
+    assert out["dropped"] == "/tmp/20260925T000000Z-entities-abc.dropped.jsonl"
+    assert out["location_missing"] == "/tmp/20260925T000000Z-entities-abc.location_missing.jsonl"
+
+
+class TestEntitiesMergeAcrossWindows:
+    """Spec §3: one `(normalised name, section)` per case, first non-empty note wins."""
+
+    def test_a_name_repeated_in_a_later_window_is_one_item_with_the_first_real_note(self):
+        text = _order_with_location_at(100_000, 45_000)
+        first = "यो अदालतको आदेशको विवरण हो।"
+        source = Source("court_order", text, "")
+        case = {"slug": "case-merge", "state": "DRAFT", "entities": []}
+        bare = {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "related",
+                "evidence": first, "notes": ""}
+        stub = _sequenced_stub(
+            _response(entities=[bare]),
+            _response(entities=[{**bare, "entity_name": "साझा  भण्डार सहकारी",
+                                 "evidence": BANKE_EVIDENCE, "notes": "ठेक्का पाउने"}],
+                      locations=[BANKE_LOCATION]),
+        )
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == 2
+        assert len(extraction.entities) == 1
+        merged = extraction.entities[0]
+        assert merged["entity_name"] == "साझा भण्डार सहकारी"
+        assert merged["notes"] == "ठेक्का पाउने"
+        assert merged["evidence_quotes"] == [first, BANKE_EVIDENCE]
+
+    def test_the_same_name_in_two_sections_stays_two_items(self):
+        text = WIRED_ORDER
+        case = {"slug": "case-two-sections", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response(entities=[
+            SAJHA_ITEM, {**SAJHA_ITEM, "relationship_type": "alleged"}]))
+
+        extraction = extract_from_source(_api(), _gaz(), case, Source("court_order", text, ""),
+                                         stub, usage=None)
+
+        assert [e["relationship_type"] for e in extraction.entities] == ["related", "alleged"]
+
+    def test_main_searches_a_repeated_name_once(self, monkeypatch):
+        _patch_links(monkeypatch)
+        api = _SearchStubApi([_wired_case()], SAJHA_SEARCH)
+        stub = _call_tracking_stub(_response(locations=[BANKE_LOCATION],
+                                             entities=[SAJHA_ITEM, SAJHA_ITEM]))
+        _run_main(monkeypatch, api, stub, argv=["--dry-run"])
+
+        assert api.search_calls == ["साझा भण्डार सहकारी"]
+        assert [r["extracted"] for r in _jsonl("extracted")] == ["साझा भण्डार सहकारी"]
