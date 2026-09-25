@@ -53,6 +53,7 @@ from casework.enrich_related_entities import (
     plan_case_entities,
     validate_bind_item,
 )
+from casework.location_gazetteer import LocationBind
 from tests.casework.fakes import FakeUsage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -782,17 +783,19 @@ def test_force_reruns_an_already_populated_case_and_calls_the_llm(
     # The other half of Finding 2: --force must actually override the skip,
     # not be a silent no-op. Assert the LLM WAS called (call-count spy), and
     # that the case proceeds all the way to resolution. No search result is
-    # configured for either extracted name, so BOTH are no-matches -- including
-    # the 'location' one, which now gets searched like any other section instead
-    # of being refused before the request. Neither is a new write, hence a NOOP,
-    # but a NOOP reached AFTER the LLM ran rather than by the pre-LLM skip.
+    # configured for the 'related' name, so it is a no-match; the 'location'
+    # one is refused straight to review without ever being searched at all
+    # (Task 5) -- it no longer "gets searched like any other section". Neither
+    # is a new write, hence a NOOP, but a NOOP reached AFTER the LLM ran rather
+    # than by the pre-LLM skip.
     api = _SearchStubApi([PRESS_CASE_ALREADY_POPULATED])
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     report = _run_main(
         monkeypatch, api, invoke_text_stub=stub, argv=["--force", "--dry-run"])
     assert len(stub.calls) == 1
     assert report.rows[0]["status"] == "already"
-    assert report.rows[0]["reason"] == "0 for review, 2 no match"
+    assert report.rows[0]["reason"] == "1 for review, 1 no match"
+    assert api.search_calls == ["साझा भण्डार सहकारी"]
 
 
 def test_pre_llm_skip_keys_on_a_related_bind_not_any_bind(
@@ -1526,14 +1529,16 @@ def test_strict_mode_also_refuses_a_cross_script_only_match():
 
 
 def test_one_entity_binds_into_two_sections_in_a_single_plan():
-    # The planner's `have` set is keyed on the pair too, so an extraction that
-    # names one entity in two sections plans both writes. Keyed on `nes_id` alone
-    # the second was dropped without appearing in any report.
+    # The planner's `have` set is keyed on the pair too, so a pre-resolved
+    # location and an extraction naming the SAME entity under a different
+    # section plan both writes. Keyed on `nes_id` alone the second was dropped
+    # without appearing in any report.
     case = {"slug": "case-two-sections", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
+    lb = LocationBind(SURKHET_IRI, "क", "सुर्खेत जिल्ला", "एभिडेन्स", "gazetteer")
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
-        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "related", "notes": "ख"}])
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "related", "notes": "ख"}],
+        locations=[lb])
 
     assert plan.action == "WOULD_PATCH"
     assert [(i["nes_id"], i["relationship_type"]) for i in plan.patch_items] == [
@@ -1545,15 +1550,16 @@ def test_one_entity_binds_into_two_sections_in_a_single_plan():
     assert [section for _n, _d, _notes, section in plan.bound] == ["location", "related"]
 
 
-def test_the_same_entity_and_section_twice_is_planned_once():
-    # Two extracted spellings resolving to one entity in one section is still a
-    # single bind -- the pair key must not let a duplicate through.
+def test_the_same_location_bind_twice_is_planned_once():
+    # A `LocationBind` can in principle repeat across the same run --
+    # `resolve_locations` already dedups on `nes_id`, but the planner's own
+    # `have`/`bind_key` idempotency must hold regardless, the same as it does
+    # for a duplicate resolved from two extracted spellings in any other
+    # section.
     case = {"slug": "case-dupe", "state": "DRAFT", "entities": []}
-    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE],
-                                  "सुर्खेत": [SURKHET_CANDIDATE]})
-    plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
-        {"entity_name": "सुर्खेत", "relationship_type": "location", "notes": "ख"}])
+    api = _SearchStubApi([case], {})
+    lb = LocationBind(SURKHET_IRI, "क", "सुर्खेत जिल्ला", "एभिडेन्स", "gazetteer")
+    plan = plan_case_entities(api, case, 'W/"e"', [], locations=[lb, lb])
 
     assert [i["nes_id"] for i in plan.patch_items] == [SURKHET_IRI]
     assert len(plan.bound) == 1
@@ -1580,13 +1586,14 @@ def test_an_accused_extraction_never_touches_an_existing_bind():
 
 
 def test_a_non_accused_section_does_join_an_already_characterised_entity():
-    # The other side of that guard: only `accused` is held back. A `location`
-    # bind alongside an existing `related` one is additive, not an accusation.
+    # The other side of that guard: only `accused` is held back. A pre-resolved
+    # `location` bind alongside an existing `related` one is additive, not an
+    # accusation.
     case = {"slug": "case-additive", "state": "DRAFT", "entities": [
         {"nes_id": SURKHET_IRI, "type": "related", "notes": "क"}]}
-    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
-    plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "ख"}])
+    api = _SearchStubApi([case], {})
+    lb = LocationBind(SURKHET_IRI, "ख", "सुर्खेत जिल्ला", "एभिडेन्स", "gazetteer")
+    plan = plan_case_entities(api, case, 'W/"e"', [], locations=[lb])
 
     assert plan.action == "WOULD_PATCH"
     assert [(i["nes_id"], i["relationship_type"]) for i in plan.patch_items] == [
@@ -1759,7 +1766,13 @@ def test_plan_still_binds_when_the_document_has_a_null_identifier():
     assert plan.review == []
 
 
-# --- Correction 2: a location-typed item binds into the location section ---
+# --- Correction 2, superseded by Task 5: a location-typed EXTRACTED item is
+# refused, never searched. `test_a_location_item_binds_into_the_location_
+# section` and the location half of `test_a_location_and_a_related_item_each_
+# bind_into_their_own_section` pinned the search-based bind this reverses;
+# see `TestExtractedLocationItemsAreRefused` below for the replacement and
+# `test_one_entity_binds_into_two_sections_in_a_single_plan` above for the
+# `locations=` replacement of the two-section shape.
 
 
 SURKHET_IRI = "https://jawafdehi.org/entity/location/district/surkhet"
@@ -1767,31 +1780,10 @@ SURKHET_CANDIDATE = {"id": SURKHET_IRI, "title": {"ne": "सुर्खेत �
                      "score": 190.0}
 
 
-def test_a_location_item_binds_into_the_location_section():
-    # 7 of 33 extracted names in a live smoke run came back
-    # relationship_type="location", and every one of them used to be refused
-    # before searching. They now bind, into `location` -- NOT into `related`:
-    # the section comes from the extraction's own relationship_type, so a
-    # district does not get filed as a related party.
-    case = {"slug": "case-loc", "state": "DRAFT", "entities": []}
-    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]},
-                         documents={SURKHET_IRI: {"identifier": None}})
-    plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": ""}])
-
-    assert plan.action == "WOULD_PATCH"
-    assert plan.patch_items == [{"nes_id": SURKHET_IRI,
-                                 "relationship_type": "location", "notes": ""}]
-    assert len(plan.bound) == 1
-    assert plan.review == []
-    # `outcome` is legal only on an accused bind -- a location must not carry one.
-    assert "outcome" not in plan.patch_items[0]
-
-
-def test_a_location_and_a_related_item_each_bind_into_their_own_section():
-    # A mixed extraction lands in two different sections from one pass. This is
-    # the behaviour the whole change exists for: bind everything that matched,
-    # each into the section it was extracted under.
+def test_a_location_item_is_refused_while_a_related_item_in_the_same_extraction_still_binds():
+    # A mixed extraction lands in two different sections from one pass. The
+    # `location` item is refused to review without ever being searched; the
+    # `related` item resolves and binds exactly as any other section would.
     case = {"slug": "case-mixed", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE],
                                   "सुर्खेत जिल्ला": [SURKHET_CANDIDATE]},
@@ -1803,9 +1795,58 @@ def test_a_location_and_a_related_item_each_bind_into_their_own_section():
 
     assert plan.action == "WOULD_PATCH"
     assert {i["nes_id"]: i["relationship_type"] for i in plan.patch_items} == {
-        SURKHET_IRI: "location", ANKUR_IRI: "related"}
-    assert plan.review == []
-    assert len(plan.bound) == 2
+        ANKUR_IRI: "related"}
+    assert len(plan.bound) == 1
+    assert [(name, section) for name, _decision, section in plan.review] == [
+        ("सुर्खेत जिल्ला", "location")]
+    assert "सुर्खेत जिल्ला" not in api.search_calls
+
+
+KTM_IRI = "https://jawafdehi.org/entity/location/district/kathmandu-np0327"
+
+
+class TestLocationsBindOnlyThroughTheGazetteer:
+    """Task 5: `plan_case_entities` binds a `LocationBind` straight through
+    `_bind_one`, and refuses an extracted `location` item outright rather than
+    name-searching it."""
+
+    @staticmethod
+    def _ktm_bind():
+        return LocationBind(KTM_IRI, "घटना भएको जिल्ला", "काठमाडौं",
+                            "काठमाडौं जिल्लाभित्र भएको", "gazetteer")
+
+    def test_a_location_bind_puts_a_patch_item_into_the_plan(self):
+        case = {"slug": "case-ktm", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {})
+        plan = plan_case_entities(api, case, 'W/"e"', [], locations=[self._ktm_bind()])
+
+        assert plan.action == "WOULD_PATCH"
+        assert {"nes_id": KTM_IRI, "relationship_type": "location",
+                "notes": "घटना भएको जिल्ला"} in plan.patch_items
+        assert api.search_calls == []
+
+    def test_a_rerun_with_the_location_already_bound_is_a_noop(self):
+        case = {"slug": "case-ktm-rerun", "state": "DRAFT", "entities": [
+            {"nes_id": KTM_IRI, "type": "location", "notes": "घटना भएको जिल्ला"}]}
+        api = _SearchStubApi([case], {})
+        plan = plan_case_entities(api, case, 'W/"e"', [], locations=[self._ktm_bind()])
+
+        assert plan.action == "NOOP"
+        assert plan.patch_items == []
+
+    def test_an_extracted_location_item_lands_in_review_without_a_search(self):
+        case = {"slug": "case-ktm-extracted", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {})
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "काठमाडौं", "relationship_type": "location", "notes": ""}])
+
+        assert plan.patch_items == []
+        name, decision, section = plan.review[0]
+        assert name == "काठमाडौं"
+        assert section == "location"
+        assert decision.reason == (
+            "a location must come through the gazetteer (resolve_locations)")
+        assert api.search_calls == []
 
 
 def test_an_accused_extraction_writes_nothing():
@@ -1837,8 +1878,6 @@ def test_an_accused_extraction_writes_nothing():
 
 
 @pytest.mark.parametrize("relationship_type,expected", [
-    ("Location", "location"),      # casing is normalised, not refused
-    (" location ", "location"),    # so is padding
     ("ALLEGED", "alleged"),
     ("witness", "witness"),
 ])
@@ -1857,6 +1896,24 @@ def test_a_valid_section_binds_however_the_llm_cased_it(relationship_type, expec
 
     assert plan.action == "WOULD_PATCH"
     assert plan.patch_items[0]["relationship_type"] == expected
+
+
+@pytest.mark.parametrize("relationship_type", ["Location", " location ", "LOCATION"])
+def test_a_location_section_is_refused_however_the_llm_cased_it(relationship_type):
+    # The refusal keys on the SAME normalised value the bind path does -- a
+    # casing or padding mismatch here would let a location slip through and be
+    # name-searched, exactly the hole the casing test above exists to close on
+    # the bind side.
+    case = {"slug": "case-scope-loc", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": relationship_type,
+         "notes": "क"}])
+
+    assert plan.patch_items == []
+    assert [(name, section) for name, _decision, section in plan.review] == [
+        ("अंकुर खत्री", "location")]
+    assert api.search_calls == []
 
 
 @pytest.mark.parametrize("relationship_type", ["", "organization", "Related party", None])
@@ -2484,36 +2541,13 @@ def test_dry_run_bind_rows_are_marked_unwritten(
         False, True, True]
 
 
-TWO_SECTION_RESPONSE = json.dumps({
-    "entities": [
-        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
-        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "related", "notes": "ख"},
-    ],
-    "accused_notes": [],
-})
-
-
-def test_binds_jsonl_labels_each_section_when_one_entity_binds_twice(
-    monkeypatch, patched_fetch_markdown, capsys
-):
-    # End to end through `main()`, because the plan-level assertion is not enough:
-    # the report row's section used to come from an `nes_id`-keyed lookup over
-    # `patch_items`, which collapses two sections for one entity and labels BOTH
-    # rows with whichever was written last. A caseworker reading `.binds.jsonl`
-    # would see two `related` binds and no `location` one.
-    case = dict(PRESS_ONLY_CASE, slug="case-two-sections-e2e", entities=[])
-    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
-    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: TWO_SECTION_RESPONSE,
-              argv=["--dry-run"])
-
-    binds = [json.loads(line) for line
-             in Path(_report_files()["binds"]).read_text(encoding="utf-8").splitlines()]
-    assert [b["role"] for b in binds] == ["location", "related"]
-    assert {b["nes_id"] for b in binds} == {SURKHET_IRI}
-    # And the console says the same thing, since that is what an operator reads.
-    out = capsys.readouterr().out
-    assert "WOULD BIND (location)" in out
-    assert "WOULD BIND (related)" in out
+# `test_binds_jsonl_labels_each_section_when_one_entity_binds_twice` DELETED
+# here (Task 5): it drove the two-section shape end to end through `main()`
+# via a `location`-typed EXTRACTED item that name-search bound -- `main()`
+# does not wire `locations=` until Task 7, so that shape is unreachable through
+# `main()` until then. The planner-level equivalent
+# (`test_one_entity_binds_into_two_sections_in_a_single_plan`, using
+# `locations=`) still covers the bug this test was written to catch.
 
 
 # --------------------------------------------------------------------------
@@ -2652,18 +2686,22 @@ def test_nomatch_rows_carry_the_section_they_were_extracted_under():
     # `bound` and `review` carry it for a documented reason -- two extracted
     # items can name the same person under different sections, so it cannot be
     # recovered from the name afterwards. That reasoning applies here unchanged.
+    #
+    # `location` is deliberately NOT one of the two sections here any more: it
+    # never reaches `nomatch` at all now (`plan.review` catches it before any
+    # search), so `witness` stands in as the second non-`related` section.
     case = {"slug": "case-nomatch-sections", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
                                   "वन निर्देशनालय, धनगढी": []})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "notes": "क"},
-        {"entity_name": "वन निर्देशनालय, धनगढी", "relationship_type": "location",
+        {"entity_name": "वन निर्देशनालय, धनगढी", "relationship_type": "witness",
          "notes": "ख"}], strict=True)
 
     assert [(name, section) for name, _decision, section in plan.nomatch] == [
         ("हेम राज बिष्ट", "related"),
-        ("वन निर्देशनालय, धनगढी", "location"),
+        ("वन निर्देशनालय, धनगढी", "witness"),
     ]
 
 
@@ -3467,33 +3505,15 @@ def test_a_500_propagates_untouched():
 # --------------------------------------------------------------------------
 
 
-LOCATION_RESPONSE = json.dumps({
-    "entities": [
-        {"entity_name": "काठमाडौं", "relationship_type": "location",
-         "entity_prefix": "location/district", "entity_type": "Place",
-         "is_named_entity": True, "name_en": "Kathmandu",
-         "notes": "जग्गा तथा शेयर लगानी रहेको जिल्ला"},
-    ],
-    "accused_notes": [],
-})
-
-
-def test_a_location_is_never_created_even_when_everything_else_is_valid(
-    monkeypatch, patched_fetch_markdown
-):
-    # NES already holds all 77 districts under official codes
-    # (location/district/kailali-np0771). A location this pipeline creates is
-    # therefore always a duplicate of a canonical district or junk -- there is
-    # no third case.
-    case = dict(PRESS_ONLY_CASE, slug="case-location-nocreate", entities=[])
-    api = _SearchStubApi([case], {"काठमाडौं": []})
-    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: LOCATION_RESPONSE,
-              argv=["--apply", "--create-entities"])
-
-    assert api.create_entity_calls == []
-    row, = _created_rows()
-    assert row["outcome"] == "skipped"
-    assert "location" in row["reason"]
+# `test_a_location_is_never_created_even_when_everything_else_is_valid`
+# DELETED here (Task 5). It drove a `location`-typed extracted item all the
+# way through `main()` to the create step's `_cannot_create` location gate --
+# that item now never reaches `nomatch` (and so never reaches the create
+# step) at all, since `plan_case_entities` refuses it straight to
+# `plan.review` before any search. `_cannot_create`'s `section ==
+# LOCATION_SECTION` branch is consequently unreachable via `main()` today;
+# left in place rather than removed here, since this task's scope is
+# `plan_case_entities` only.
 
 
 COMPOSITE_RELATED_RESPONSE = json.dumps({
@@ -3589,20 +3609,23 @@ def test_is_named_entity_true_still_creates(monkeypatch, patched_fetch_markdown)
 def test_a_gated_name_still_binds_when_the_resolver_matched_it(
     monkeypatch, patched_fetch_markdown
 ):
-    # The gates stop CREATION, never binding. A location that matches its
-    # canonical district must still reach the case.
+    # The create gates stop CREATION, never binding: a composite name
+    # `_name_vetoes` would refuse to mint still reaches the case if the
+    # resolver found it in NES. `location` used to be this test's example
+    # gate, but a location item is refused outright before it can ever
+    # resolve now (Task 5) -- the composite-name gate takes over as the
+    # example of the same principle, a gate the create step still owns.
+    org_iri = "https://jawafdehi.org/entity/organization/gharjagga-sampatti-kathmandu"
     case = dict(PRESS_ONLY_CASE, slug="case-gate-still-binds", entities=[])
-    api = _SearchStubApi([case], {"काठमाडौं": [
-        {"id": "https://jawafdehi.org/entity/location/district/kathmandu-np0261",
-         "title": {"ne": "काठमाडौं", "en": "Kathmandu"}, "score": 112.6},
-    ]})
-    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: LOCATION_RESPONSE,
+    api = _SearchStubApi([case], {"घरजग्गा सम्पत्ति - काठमाडौं": [
+        {"id": org_iri, "title": {"ne": "घरजग्गा सम्पत्ति - काठमाडौं"}, "score": 200.0},
+    ]}, documents={org_iri: {"identifier": None}})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: COMPOSITE_RELATED_RESPONSE,
               argv=["--apply", "--create-entities"])
 
     assert api.create_entity_calls == []
     _slug, _path, items, _etag = api.replace_list_calls[0]
-    assert [i["nes_id"] for i in items] == [
-        "https://jawafdehi.org/entity/location/district/kathmandu-np0261"]
+    assert [i["nes_id"] for i in items] == [org_iri]
 
 
 # --------------------------------------------------------------------------
@@ -5448,7 +5471,17 @@ KANCHANPUR_BARE = "https://jawafdehi.org/entity/location/kanchanpur"
 
 class TestAGazetteerTwinIsNotBoundAlongsideItsCodedRecord:
     """NES holds कञ्चनपुर twice. `resolve` drops the bare twin; this pins that
-    `qualifying_binds` does not put it back."""
+    `qualifying_binds` does not put it back.
+
+    Filed under `related`, not `location` -- a `location`-typed item is refused
+    before it can ever reach `resolve`/`qualifying_binds` now (Task 5). The
+    narrowing itself is not a location-section feature: `qualifying_binds`
+    fires on the shape of the QUALIFYING CANDIDATES (all `/entity/location/`
+    IRIs, at least one gazetteer-coded), regardless of which section the
+    extraction filed the name under -- see `TestTheGazetteerNarrowingSurvives
+    APromotedReview.test_a_place_filed_under_another_section_still_drops_the_
+    bare_twin` for the same point made explicitly.
+    """
 
     @staticmethod
     def _api(case):
@@ -5458,7 +5491,7 @@ class TestAGazetteerTwinIsNotBoundAlongsideItsCodedRecord:
 
     @staticmethod
     def _items():
-        return [{"entity_name": "कञ्चनपुर", "relationship_type": "location",
+        return [{"entity_name": "कञ्चनपुर", "relationship_type": "related",
                  "entity_prefix": "location/district", "entity_type": "Place",
                  "is_named_entity": True, "name_en": "Kanchanpur",
                  "notes": "कसुर भएको जिल्ला"}]
@@ -5519,7 +5552,7 @@ class TestTheGazetteerNarrowingSurvivesAPromotedReview:
         return [{"id": ACHHAM_BARE, "title": {"ne": "अछाम"}, "score": 180.0},
                 {"id": ACHHAM_CODED, "title": {"ne": "अछाम"}, "score": 180.0}]
 
-    def _bind(self, slug, rel_type="location", complete=True):
+    def _bind(self, slug, rel_type="related", complete=True):
         case = {"slug": slug, "state": "DRAFT", "entities": []}
         found = (list(self._candidates()) if complete
                  else _TruncatedCandidates(self._candidates()))
@@ -5534,21 +5567,28 @@ class TestTheGazetteerNarrowingSurvivesAPromotedReview:
     def test_a_truncated_candidate_window_still_drops_the_bare_twin(self):
         # Routine for a common district name: the search stopped early, so
         # `resolve` REVIEWs on the truncation veto and the promotion re-derives
-        # the winner from the un-narrowed tuple -- the bare twin, here.
+        # the winner from the un-narrowed tuple -- the bare twin, here. Filed
+        # under `related`: a `location`-typed item is refused before any search
+        # now (Task 5), so this can no longer be reached through that section
+        # -- `prefer_gazetteer` (which would have narrowed at `resolve()` time
+        # instead) is moot for the same reason.
         assert self._bind("case-achham-truncated", complete=False) == {
             ACHHAM_CODED}
 
     def test_a_place_filed_under_another_section_still_drops_the_bare_twin(self):
-        # `prefer_gazetteer` is only on for the location section, so this one
+        # `prefer_gazetteer` was only ever on for the location section (and a
+        # location item can no longer reach `resolve` at all, Task 5), so this
         # REVIEWs as an ambiguity and is then promoted. `bind_section`'s
         # coercion to `related` makes this easy for the extraction to produce.
         assert self._bind("case-achham-related", rel_type="related") == {
             ACHHAM_CODED}
 
-    def test_the_clean_location_path_is_unchanged(self):
-        # The one path the previous tests exercised, and the one that already
-        # worked. It must keep working.
-        assert self._bind("case-achham-clean") == {ACHHAM_CODED}
+    # `test_the_clean_location_path_is_unchanged` DELETED here (Task 5). It
+    # pinned a `location`-typed item binding cleanly via `prefer_gazetteer`
+    # narrowing at `resolve()` time -- a `location` item is refused outright
+    # now, before any search, so that path is gone rather than "unchanged".
+    # `test_a_place_filed_under_another_section_still_drops_the_bare_twin`
+    # above covers the same narrowing via the (still-live) promoted-review path.
 
     def test_the_dropped_twin_still_reaches_the_report_on_a_promotion(self):
         case = {"slug": "case-achham-report", "state": "DRAFT", "entities": []}

@@ -432,6 +432,14 @@ ACCUSED_SECTION = "accused"
 #: so anything this stage would mint here is a duplicate or junk.
 LOCATION_SECTION = "location"
 
+#: Why an extracted `location` item is refused rather than name-searched.
+#: `casework.location_gazetteer.resolve_locations` is the only path onto a
+#: `location` bind now -- it grounds the model's quote against the source text
+#: before ever reaching NES, which fuzzy name search cannot do (a district
+#: search can't tell "the event happened here" from "this place was merely
+#: mentioned").
+LOCATION_MUST_COME_FROM_GAZETTEER = "a location must come through the gazetteer (resolve_locations)"
+
 #: Where a section the API rejects lands. `related` and not a guess at the
 #: intended meaning: it is what the extraction prompt already defaults to
 #: ("PART 2 -- PEOPLE AND ORGANIZATIONS (relationship_type=\"related\" unless
@@ -1590,8 +1598,15 @@ def bind_section(item):
     return rel_type if rel_type in RELATIONSHIP_TYPES else DEFAULT_RELATIONSHIP_TYPE
 
 
-def plan_case_entities(api, case, etag, extracted_items, strict=False):
+def plan_case_entities(api, case, etag, extracted_items, strict=False, *, locations=()):
     """Resolve every extracted name for one case and build its write plan.
+
+    `locations` is Task 6's pre-resolved `LocationBind`s (from
+    `casework.location_gazetteer.resolve_locations`), each written straight into
+    the `location` section via `_bind_one` -- same `have` idempotency, same
+    `validate_new_bind`, no search. An extracted item whose own section is
+    `location` is refused instead of searched: see `LOCATION_MUST_COME_FROM_
+    GAZETTEER`.
 
     Guarantees: never plans a write for a non-DRAFT case, or for a case whose
     payload does not carry an `entities` key at all (see below); only BIND
@@ -1615,11 +1630,15 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     destructive whole-list replace with every existing bind missing.
 
     Every extracted name binds into the section its own `relationship_type`
-    names, for any of the nine the case API accepts. Three kinds of name do not
-    bind: an unrecognised section (no place to file it), a name no NES entity
-    matched at all (nothing to file), and an `accused` bind that would escalate an
-    entity the case already characterises another way (a human's call, not this
-    module's -- see the guard below).
+    names, for any of the eight searchable sections the case API accepts.
+    `location` is the ninth and is never searched here at all -- an extracted
+    item filed under it goes straight to `plan.review`; only a `LocationBind`
+    passed in via `locations` may reach the `location` section. Otherwise, four
+    kinds of name do not bind: an unrecognised section (no place to file it), a
+    name no NES entity matched at all (nothing to file), a `location` (see
+    above), and an `accused` bind that would escalate an entity the case already
+    characterises another way (a human's call, not this module's -- see the
+    guard below).
 
     Bind identity is `(nes_id, relationship_type)`, matching the DB's
     `unique_case_entity_relationship_type` constraint, so one entity may hold two
@@ -1714,13 +1733,22 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     # leave a future reader hunting for the guard it used to serve.
 
     additions = []
+    # PRE-RESOLVED LOCATIONS, BOUND FIRST. Each `LocationBind` already carries a
+    # confirmed `nes_id` -- grounded against the source text and looked up in the
+    # NES gazetteer, never searched by name -- so it goes straight to `_bind_one`
+    # as a synthetic BIND at score 1.0, sharing `have`/`validate_new_bind` with
+    # every other section.
+    for lb in locations:
+        _bind_one(plan, lb.place, Decision(BIND, lb.nes_id, 1.0, lb.place, lb.via, ()),
+                  LOCATION_SECTION, lb.notes, have, additions, accused_ids)
+
     for item in extracted_items:
         name = (item.get("entity_name") or "").strip()
         if not name:
             continue
 
-        # Bind into whatever section the extraction names. `alleged`, `location`,
-        # `witness`, `victim` and the rest all bind.
+        # Bind into whatever section the extraction names. `alleged`, `witness`,
+        # `victim` and the rest all bind; `location` does not -- see below.
         #
         # A section the API does not accept is COERCED to `related` rather than
         # held: `related` is what the prompt itself defaults to, and the coercion
@@ -1732,6 +1760,17 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
         rel_type = bind_section(item)
         if rel_type != raw_type:
             plan.coerced.append((name, raw_type, rel_type))
+
+        # A LOCATION NAME IS NEVER SEARCHED. Only `resolve_locations` (Task 6)
+        # may bind this section -- it grounds the model's quote against the
+        # source text before the gazetteer lookup, which name search cannot do.
+        # Refused before spending a search, unlike the ACCUSED refusal below,
+        # which still records what the section claimed.
+        if rel_type == LOCATION_SECTION:
+            plan.review.append(
+                (name, Decision(REVIEW, None, 0.0, "", LOCATION_MUST_COME_FROM_GAZETTEER, ()),
+                 rel_type))
+            continue
 
         # THE LLM DOES NOT SUPPLY DEFENDANTS. `GET /courtcases/<court>/<number>/
         # entities` states them exactly -- for 078-CR-0038, हेम राज विष्ट and
