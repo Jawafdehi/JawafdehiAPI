@@ -40,21 +40,28 @@ import pytest
 from casework import enrich_related_entities as ere
 from casework.common.api import CandidateList, ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
 from casework.common.api import EntityAlreadyExists
+from casework.common.order_windows import MAX_ENTITY_WINDOWS, start_windows
 from casework.enrich_related_entities import (
     PROMOTED_PREFIX,
     RELATIONSHIP_TYPES,
+    Source,
     _build_content_parts,
     _enforce_prompt_budget,
     _parse_extraction_response,
     _truncate_press_release,
+    accused_missing_notes,
     current_entity_binds,
+    extract_from_source,
     is_promoted,
     merge_entity_binds,
+    parse_window_response,
+    pick_source,
     plan_case_entities,
     validate_bind_item,
 )
-from casework.location_gazetteer import LocationBind
+from casework.location_gazetteer import Gazetteer, LocationBind
 from tests.casework.fakes import FakeUsage
+from tests.casework.test_location_gazetteer import DISTRICTS, UNITS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DONOR_COMMIT = "0321a85"
@@ -5771,3 +5778,415 @@ class TestTheVerdictPromptCarriesItsGuardrails:
         # The guardrails must not have introduced a fifth answer.
         assert ere.VERDICT_OUTCOMES == frozenset(
             {"convicted", "acquitted", "abated", "charged", "unknown"})
+
+
+# --------------------------------------------------------------------------
+# Task 6: source selection, the two window prompts, and the start-window loop.
+# `main()` is not wired to any of this yet (Task 7) -- these tests call
+# `pick_source` / `extract_from_source` directly.
+# --------------------------------------------------------------------------
+
+CAPTION_SHORT = "विशेष अदालत काठमाडौं। मुद्दा:"
+FILLER_SENTENCE = "यो अदालतको आदेशको विवरण हो। "
+BANKE_EVIDENCE = ("जिल्ला बाँके, खजुरा गाउँपालिका वडा नं.४ स्थित घरजग्गामा "
+                  "भ्रष्ट रकम लगानी भएको पाइयो।")
+BANKE_PLACE = "जिल्ला बाँके, खजुरा गाउँपालिका वडा नं.४"
+READABLE_PRESS = "साझा भण्डार सहकारीको बिरुद्ध भ्रष्टाचार मुद्दा दायर गरिएको छ। " * 15
+PREETI_ASCII_ORDER = "abc def ghijk lmnop qrstuv wxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 " * 20
+
+
+def _filler(n):
+    """`n` chars of neutral Devanagari filler, no newline and no caption/holding markers --
+    so `order_windows` cuts every window at exactly `size` chars, never earlier."""
+    body = (FILLER_SENTENCE * (n // len(FILLER_SENTENCE) + 1))[:n]
+    return body.replace("\n", " ")
+
+
+def _order_with_location_at(n, position):
+    """An `n`-char order: `CAPTION_SHORT` then filler, with `BANKE_EVIDENCE` spliced in at `position`."""
+    body = CAPTION_SHORT + _filler(n - len(CAPTION_SHORT))
+    return _splice(body, position, BANKE_EVIDENCE)
+
+
+def _splice(text, position, snippet):
+    """Same-length replace: put `snippet` at `position`, keeping `len(text)` unchanged."""
+    return text[:position] + snippet + text[position + len(snippet):]
+
+
+def _gaz():
+    return Gazetteer(DISTRICTS, UNITS)
+
+
+def _api():
+    return _SearchStubApi([], {})
+
+
+def _response(locations=(), entities=(), accused_notes=()):
+    return json.dumps({"locations": list(locations), "entities": list(entities),
+                        "accused_notes": list(accused_notes)}, ensure_ascii=False)
+
+
+def _sequenced_stub(*responses):
+    """An `invoke_text` stub answering each call from `responses` in turn, then repeating
+    a nothing-found reply -- so a test only scripts the calls it cares about."""
+    calls = []
+    remaining = list(responses)
+    nothing = _response()
+
+    def stub(**kw):
+        calls.append(kw)
+        return remaining.pop(0) if remaining else nothing
+
+    stub.calls = calls
+    return stub
+
+
+def _material(iri, mtype, link):
+    return {"material_iri": iri, "material": {"material_type": mtype,
+                                              "urls": [{"link": link, "role": "MARKDOWN"}]}}
+
+
+class TestPickSource:
+    """`pick_source`: court order first, the press release only on a real fallback."""
+
+    def test_falls_back_to_the_press_release_when_the_order_is_preeti(self, monkeypatch):
+        import casework.common.materials as m
+
+        links = {"https://x/order.md": PREETI_ASCII_ORDER, "https://x/press.md": READABLE_PRESS}
+        monkeypatch.setattr(m, "fetch_markdown", lambda link, timeout=60: links[link])
+        detail = {"slug": "case-preeti", "state": "DRAFT", "evidence": [
+            _material("https://jawafdehi.org/material/ngm/court_orders/1", "court_order",
+                      "https://x/order.md"),
+            _material("https://jawafdehi.org/material/ciaa/press_releases/1", "press_release",
+                      "https://x/press.md"),
+        ]}
+
+        source = pick_source(detail)
+
+        assert source.kind == "press_release"
+        assert source.text == READABLE_PRESS
+        assert "court order" in source.reason
+
+    def test_joins_bound_parts_by_material_iri_not_evidence_order(self, monkeypatch):
+        import casework.common.materials as m
+
+        links = {"https://x/part1.md": "पहिलो अंश।", "https://x/part2.md": "दोस्रो अंश।"}
+        monkeypatch.setattr(m, "fetch_markdown", lambda link, timeout=60: links[link])
+        detail = {"slug": "case-parts", "state": "DRAFT", "evidence": [
+            _material("https://jawafdehi.org/material/ngm/court_orders/x.2", "court_order",
+                      "https://x/part2.md"),
+            _material("https://jawafdehi.org/material/ngm/court_orders/x.1", "court_order",
+                      "https://x/part1.md"),
+        ]}
+
+        source = pick_source(detail)
+
+        assert source.kind == "court_order"
+        assert source.text == "पहिलो अंश।\n\nदोस्रो अंश।"
+
+    def test_prefers_a_readable_court_order_outright(self, monkeypatch):
+        import casework.common.materials as m
+
+        text = "यो अदालतको आदेशको पूर्ण पाठ हो। " * 20
+        monkeypatch.setattr(m, "fetch_markdown", lambda link, timeout=60: text)
+        detail = {"slug": "case-order-only", "state": "DRAFT", "evidence": [
+            _material("https://jawafdehi.org/material/ngm/court_orders/1", "court_order",
+                      "https://x/order.md"),
+        ]}
+
+        source = pick_source(detail)
+
+        assert source == Source("court_order", text, "")
+
+    def test_never_fetches_the_press_release_when_the_order_is_readable(self, monkeypatch):
+        import casework.common.materials as m
+
+        fetched = []
+
+        def fake_fetch(link, timeout=60):
+            fetched.append(link)
+            return {"https://x/order.md": "यो अदालतको आदेशको पूर्ण पाठ हो। " * 20,
+                    "https://x/press.md": READABLE_PRESS}[link]
+
+        monkeypatch.setattr(m, "fetch_markdown", fake_fetch)
+        detail = {"slug": "case-both-readable", "state": "DRAFT", "evidence": [
+            _material("https://jawafdehi.org/material/ngm/court_orders/1", "court_order",
+                      "https://x/order.md"),
+            _material("https://jawafdehi.org/material/ciaa/press_releases/1", "press_release",
+                      "https://x/press.md"),
+        ]}
+
+        source = pick_source(detail)
+
+        assert source.kind == "court_order"
+        assert fetched == ["https://x/order.md"]
+
+    def test_returns_none_when_neither_source_is_usable(self, monkeypatch):
+        import casework.common.materials as m
+
+        monkeypatch.setattr(m, "fetch_markdown", lambda link, timeout=60: "")
+        detail = {"slug": "case-none", "state": "DRAFT", "evidence": []}
+
+        source = pick_source(detail)
+
+        assert source.kind is None
+        assert source.text == ""
+        assert source.reason
+
+
+class TestCourtOrderSystemPrompt:
+    """`COURT_ORDER_SYSTEM_PROMPT`: PART 2/3 word for word, new PART 1 and output format."""
+
+    def test_keeps_part_2_and_part_3_verbatim_from_the_old_prompt(self):
+        old = ere.SYSTEM_PROMPT
+        tail_marker = "Only include primary accused persons. Keep notes under 80 chars."
+        old_body = old[old.index("PART 2 — PEOPLE AND ORGANIZATIONS"):
+                       old.index(tail_marker) + len(tail_marker)]
+        assert old_body in ere.COURT_ORDER_SYSTEM_PROMPT
+
+    def test_has_the_new_part_1_location_rules(self):
+        prompt = ere.COURT_ORDER_SYSTEM_PROMPT
+        assert "PART 1 — WHERE THE EVENTS HAPPENED" in prompt
+        assert "place_as_written" in prompt
+        for marker in ("स्थायी", "जन्मस्थान", "बस्ने", '"locations": []'):
+            assert marker in prompt
+
+    def test_output_format_matches_the_brief_shape(self):
+        prompt = ere.COURT_ORDER_SYSTEM_PROMPT
+        assert '"locations": [{"place_as_written"' in prompt
+        assert '"accused_notes": [{"name"' in prompt
+        assert "Every entities and accused_notes item also carries evidence" in prompt
+
+
+class TestPressReleaseSystemPrompt:
+    def test_names_the_boilerplate_and_refuses_witnesses_and_verdicts(self):
+        prompt = ere.PRESS_RELEASE_SYSTEM_PROMPT
+        for marker in ("टंगाल काठमाडौं", "विशेष अदालत काठमाडौं", "आयोगको कार्यालय"):
+            assert marker in prompt
+        assert "witnesses" in prompt
+        assert "verdict" in prompt
+        assert "जफत गर्ने प्रयोजन" in prompt
+
+    def test_the_output_json_shape_matches_the_court_order_prompt(self):
+        # Same three top-level keys, same per-item field names -- so
+        # `parse_window_response` reads either reply identically.
+        output = '{"locations": [{"place_as_written"'
+        assert output in ere.PRESS_RELEASE_SYSTEM_PROMPT
+        assert output in ere.COURT_ORDER_SYSTEM_PROMPT
+        for field in ('"district"', '"evidence"', '"entity_name"', '"relationship_type"',
+                     '"accused_notes"', '"name"', '"notes"'):
+            assert field in ere.PRESS_RELEASE_SYSTEM_PROMPT
+            assert field in ere.COURT_ORDER_SYSTEM_PROMPT
+
+
+class TestParseWindowResponse:
+    def test_reads_all_three_keys(self):
+        text = json.dumps({
+            "locations": [{"place_as_written": "बाँके", "district": "बाँके",
+                          "evidence": "बाँके जिल्लामा घटना भएको हो।", "notes": ""}],
+            "entities": [{"entity_name": "संस्था", "relationship_type": "related",
+                        "evidence": "संस्था संलग्न रहेको पाइयो।", "notes": "क"}],
+            "accused_notes": [{"name": "राम", "notes": "अधिकृत",
+                              "evidence": "राम अधिकृत रहेका थिए।"}],
+        }, ensure_ascii=False)
+
+        answer = parse_window_response(text)
+
+        assert answer.locations[0]["place_as_written"] == "बाँके"
+        assert answer.entities[0]["entity_name"] == "संस्था"
+        assert answer.accused_notes[0]["name"] == "राम"
+
+    def test_moves_a_location_typed_entity_into_locations(self):
+        text = json.dumps({
+            "locations": [],
+            "entities": [{"entity_name": "सुर्खेत", "relationship_type": "location",
+                        "evidence": "सुर्खेत जिल्लामा घटना भएको हो।", "notes": "घटनास्थल"}],
+            "accused_notes": [],
+        }, ensure_ascii=False)
+
+        answer = parse_window_response(text)
+
+        assert answer.entities == []
+        assert answer.locations == [{"place_as_written": "सुर्खेत", "district": "",
+                                    "evidence": "सुर्खेत जिल्लामा घटना भएको हो।",
+                                    "notes": "घटनास्थल"}]
+
+
+class TestAccusedMissingNotes:
+    """`accused_missing_notes` -- the same "needs a note" test `apply_accused_updates` uses."""
+
+    def test_reports_a_placeholder_note_the_notes_do_not_fill(self):
+        case = _accused_case()
+        assert accused_missing_notes(case, []) == {ACCUSED_IRI}
+
+    def test_is_empty_once_the_notes_fill_it(self):
+        case = _accused_case()
+        assert accused_missing_notes(
+            case, [{"name": "राम बहादुर", "notes": ROLE_NOTE}]) == set()
+
+    def test_ignores_a_bind_that_already_has_a_real_note(self):
+        case = _accused_case(notes="वास्तविक व्यक्तिगत विवरण भएको नोट")
+        assert accused_missing_notes(case, []) == set()
+
+
+class TestExtractFromSourceCourtOrder:
+    """`extract_from_source`'s start-window loop over a court order."""
+
+    def test_stops_after_one_window_when_the_first_grounds_a_district(self):
+        text = _order_with_location_at(100_000, len(CAPTION_SHORT) + 500)
+        source = Source("court_order", text, "")
+        case = {"slug": "case-banke", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response(locations=[
+            {"place_as_written": BANKE_PLACE, "district": "बाँके",
+             "evidence": BANKE_EVIDENCE, "notes": "रकम लगानी भएको जिल्ला"}]))
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == 1
+        assert any("/location/district/" in b.nes_id for b in extraction.location_binds)
+        assert len(extraction.windows) == 1 and extraction.windows[0][0] == 0
+
+    def test_grows_to_a_second_window_when_the_first_finds_no_location(self):
+        text = _order_with_location_at(100_000, len(CAPTION_SHORT) + 100)
+        assert ere.caption_end(text) < 1_000
+        source = Source("court_order", text, "")
+        case = {"slug": "case-grows", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(
+            _response(),  # window 1: nothing found
+            _response(locations=[{"place_as_written": BANKE_PLACE, "district": "बाँके",
+                                  "evidence": BANKE_EVIDENCE, "notes": ""}]),
+        )
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == 2
+        expected_label = list(start_windows(text))[1].label()
+        assert stub.calls[1]["content"].startswith(expected_label)
+        assert any("/location/district/" in b.nes_id for b in extraction.location_binds)
+
+    def test_rejects_an_entity_and_an_accused_note_whose_evidence_is_not_in_the_window(self):
+        text = _order_with_location_at(100_000, len(CAPTION_SHORT) + 100)
+        source = Source("court_order", text, "")
+        case = {"slug": "case-reject", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response(
+            locations=[{"place_as_written": BANKE_PLACE, "district": "बाँके",
+                       "evidence": BANKE_EVIDENCE, "notes": ""}],
+            entities=[{"entity_name": "काल्पनिक संस्था", "relationship_type": "related",
+                     "evidence": "यो वाक्य स्रोत पाठमा कहीं पनि छैन।", "notes": "क"}],
+            accused_notes=[{"name": "काल्पनिक व्यक्ति", "notes": "क",
+                           "evidence": "यो पनि स्रोत पाठमा छैन।"}]))
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert extraction.entities == []
+        assert extraction.accused_notes == []
+        rejected_names = {r.get("entity_name") or r.get("name") for r in extraction.rejected}
+        assert rejected_names == {"काल्पनिक संस्था", "काल्पनिक व्यक्ति"}
+        assert all(r["reason"] == "evidence not found in the source" for r in extraction.rejected)
+
+    def test_the_invoke_text_call_carries_the_brief_shape(self):
+        text = "यो अदालतको आदेशको पूर्ण पाठ हो। " * 5
+        source = Source("court_order", text, "")
+        case = {"slug": "case-call-shape", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response())
+        sentinel_usage = object()
+
+        extract_from_source(_api(), _gaz(), case, source, stub, usage=sentinel_usage)
+
+        call = stub.calls[0]
+        window = list(start_windows(text))[0]
+        assert call["system"] == ere.COURT_ORDER_SYSTEM_PROMPT
+        assert call["content"] == f"{window.label()}\n\n{window.text}"
+        assert call["max_tokens"] == ere.EXTRACTION_MAX_TOKENS
+        assert call["tier"] == ere.tier_for("entities")
+        assert call["usage"] is sentinel_usage
+
+    def test_keeps_growing_until_every_accused_note_is_filled_and_dedupes_the_district(self):
+        text = _order_with_location_at(100_000, len(CAPTION_SHORT) + 100)
+        w2 = list(start_windows(text))[1]
+        note_evidence = "राम बहादुर तत्कालीन सचिव थिए भनी उल्लेख छ।"
+        text = _splice(text, w2.start + 50, note_evidence)
+        source = Source("court_order", text, "")
+        case = {"slug": "case-needs-note", "state": "DRAFT", "entities": [
+            {"nes_id": "https://jawafdehi.org/entity/person/x", "type": "accused",
+             "display_name": "राम बहादुर", "notes": ere.MACHINE_NOTE_PREFIX + "079-cr-0001"},
+        ]}
+        banke_answer = {"place_as_written": BANKE_PLACE, "district": "बाँके",
+                        "evidence": BANKE_EVIDENCE, "notes": ""}
+        stub = _sequenced_stub(
+            _response(locations=[banke_answer]),
+            _response(locations=[banke_answer],
+                      accused_notes=[{"name": "राम बहादुर", "notes": "तत्कालीन सचिव",
+                                    "evidence": note_evidence}]),
+        )
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == 2
+        district_binds = [b for b in extraction.location_binds if "/location/district/" in b.nes_id]
+        assert len(district_binds) == 1, "the same district must not be bound twice across windows"
+        assert extraction.accused_notes == [
+            {"name": "राम बहादुर", "notes": "तत्कालीन सचिव", "evidence": note_evidence}]
+
+    def test_stops_at_the_window_cap_without_a_district(self):
+        text = CAPTION_SHORT + _filler(150_000 - len(CAPTION_SHORT))
+        source = Source("court_order", text, "")
+        case = {"slug": "case-no-district-ever", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub()  # every call answers "nothing found"
+
+        extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == MAX_ENTITY_WINDOWS
+
+    def test_sends_a_short_order_whole_in_one_call(self):
+        text = "यो सानो अदालतको आदेश हो। " * 5
+        source = Source("court_order", text, "")
+        case = {"slug": "case-short", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response())
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == 1
+        assert extraction.windows == [(0, len(text))]
+
+    def test_appends_the_system_suffix(self):
+        text = "यो अदालतको आदेशको पूर्ण पाठ हो। " * 5
+        source = Source("court_order", text, "")
+        case = {"slug": "case-suffix", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response())
+
+        extract_from_source(_api(), _gaz(), case, source, stub, usage=None,
+                           system_suffix="\nEXTRA")
+
+        assert stub.calls[0]["system"] == ere.COURT_ORDER_SYSTEM_PROMPT + "\nEXTRA"
+
+    def test_propagates_an_invoke_text_failure(self):
+        text = "यो अदालतको आदेशको पूर्ण पाठ हो। " * 5
+        source = Source("court_order", text, "")
+        case = {"slug": "case-raise", "state": "DRAFT", "entities": []}
+
+        def boom(**kw):
+            raise RuntimeError("claude_cli failed")
+
+        with pytest.raises(RuntimeError, match="claude_cli failed"):
+            extract_from_source(_api(), _gaz(), case, source, boom, usage=None)
+
+
+class TestExtractFromSourcePressRelease:
+    def test_is_one_call_with_caption_end_zero(self):
+        # Evidence at the very start of the text would be refused for a court
+        # order as "only in the caption" -- it must NOT be here, since the
+        # press-release path passes `caption_end=0`.
+        text = BANKE_EVIDENCE + " " + FILLER_SENTENCE * 20
+        source = Source("press_release", text, "")
+        case = {"slug": "case-press-window", "state": "DRAFT", "entities": []}
+        stub = _sequenced_stub(_response(locations=[
+            {"place_as_written": BANKE_PLACE, "district": "बाँके",
+             "evidence": BANKE_EVIDENCE, "notes": ""}]))
+
+        extraction = extract_from_source(_api(), _gaz(), case, source, stub, usage=None)
+
+        assert len(stub.calls) == 1
+        assert stub.calls[0]["system"] == ere.PRESS_RELEASE_SYSTEM_PROMPT
+        assert any("/location/district/" in b.nes_id for b in extraction.location_binds)
+        assert extraction.windows == [(0, len(text))]

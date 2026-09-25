@@ -134,10 +134,12 @@ from casework.common.court_order import (
     court_order_thahar,
     court_order_verdict_zone,
 )
+from casework.common.grounding import evidence_found, is_readable_devanagari, is_teaser
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import materials_of_type, source_chunks, source_text
+from casework.common.order_windows import Window, caption_end, start_windows
 from casework.entity_identity import entity_slug, prefix_is_creatable
-from casework.common.parse import parse_extraction_response
+from casework.common.parse import balanced_object, parse_extraction_response, strip_fence
 from casework.common.pipeline import (
     COURT_TYPES,
     PRESS_TYPES,
@@ -147,6 +149,7 @@ from casework.common.pipeline import (
 )
 from casework.common.review import md_cell
 from casework.common.select import select_for_run
+from casework.location_gazetteer import resolve_locations
 # `defendant_names` is deliberately NOT imported. Reading accused from the case's
 # NGM court record was removed from this enricher: it needs no document and no LLM,
 # so it does not belong behind this module's five document/LLM gates (a case with a
@@ -332,6 +335,153 @@ Output ONLY this JSON object, no other text:
     }
   ]
 }
+"""
+
+# Task 6: the court-order-first prompt. PART 2 and PART 3 below are copied
+# word for word from `SYSTEM_PROMPT` above; PART 1 and the output format are
+# new -- a court order names WHERE the events happened (the charge-sheet
+# facts, PART 1 here) in a way a press release rarely does, and every answer
+# now carries `evidence` so `evidence_found` can ground it against the window
+# it was read from before anything is bound. Not yet wired into `main()` --
+# `SYSTEM_PROMPT` and `_build_content_parts` stay live until Task 7.
+COURT_ORDER_SYSTEM_PROMPT = """You are a Nepali legal research assistant helping to build a public transparency database of court cases.
+You are reading part of a Special Court judgment, labelled with its character range.
+
+You must extract THREE things in a single response:
+
+━━ PART 1 — WHERE THE EVENTS HAPPENED (locations array) ━━
+You are reading part of a Special Court judgment, labelled with its character range.
+Give every place where the case events happened or the assets at issue are.
+- place_as_written: the place exactly as the text writes it, e.g. "जिल्ला बाँके, खजुरा गाउँपालिका वडा नं.४".
+- district: the district alone, e.g. "बाँके".
+- evidence: ONE sentence copied VERBATIM from this text that names the place.
+NEVER a defendant's home or permanent address (स्थायी, जन्मस्थान, बस्ने), the caption,
+the CIAA or any of its offices, or the Special Court. If this text names no event
+place, return "locations": []. Do not guess.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 2 — PEOPLE AND ORGANIZATIONS (relationship_type="related" unless stated)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Any person or organization connected to the case.
+Extract ALL of these categories that appear in the documents:
+
+  GOVERNMENT BODIES — ministry, department, municipality, office whose funds were
+  misused or where the accused worked.
+  Examples: "जलश्रोत तथा सिँचाइ विभाग"  notes: "आरोपी कार्यरत रहेको सरकारी निकाय"
+            "राष्ट्रिय सूचना प्रविधि केन्द्र"  notes: "खरिद प्रक्रियामा संलग्न सरकारी निकाय"
+
+  COMPANIES/CONTRACTORS — firms, JVs, cooperatives, suppliers, foreign companies.
+  Examples: "कल्पवृक्ष-कोहिनूर जे.भी."  notes: "ठेक्का प्राप्त गर्ने संयुक्त उद्यम"
+            "UOB Singapore बैंक"  notes: "Singapore स्थित बैंक, रकम हस्तान्तरणमा प्रयोग"
+
+  FAMILY MEMBERS — spouse, children, relatives holding assets.
+  Example: "श्रृजना गिरी"  notes: "आरोपितको श्रीमती, सम्पत्ति हस्तान्तरण गरिएको"
+
+  CO-DEFENDANTS/ASSOCIATES — secondary actors, facilitators, middlemen.
+  Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा सहयोग"
+
+  INVESTIGATING/PROSECUTING BODIES — DO NOT extract the inquiry commission
+  (अख्तियार दुरुपयोग अनुसन्धान आयोग) or special attorney office as standalone
+  entities — they are present in every case. DO NOT extract individual prosecutors,
+  attorneys, judges, or court staff — they are performing standard professional
+  duties, not materially connected to the case events.
+  Only extract named CIAA investigation officers if they are specifically named
+  and their investigation is directly relevant.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+
+  MEDIA — DO NOT extract a newspaper, portal or broadcaster whose only role was
+  REPORTING the case. It is a source, not a participant.
+  Example of what to SKIP: "नयाँ पत्रिका" (published the story that prompted the
+  complaint). Extract a media organisation only when it is itself accused, owns
+  assets at issue, or received the funds.
+
+Notes must never be blank for related entities. Always describe the specific connection.
+Only extract entities with CONFIRMED connections — not people who were later acquitted.
+
+DO NOT EXTRACT THE DEFENDANTS. The people the charge sheet (आरोपपत्र) names are
+already held in the court record and are read from there, not from this text.
+Extracting them here would guess at names the court record states exactly.
+Skip them entirely — do not list them under any relationship_type.
+
+USE A MORE SPECIFIC relationship_type INSTEAD OF "related" when the documents make
+the role plain. Only these two; when in doubt use "related".
+
+  "alleged" — named as implicated in the documents, but NOT on the charge sheet.
+  Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा संलग्न भनी उल्लेख, अभियोग लगाइएको छैन"
+
+  "witness" — a named inquiry officer or witness.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+
+PRIORITY ORDER: People and organizations DIRECTLY involved in the case events come first.
+Generic legal infrastructure (courts, attorney offices) should be skipped unless a
+specific named person from those bodies is materially connected.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 3 — ACCUSED NOTES (accused_notes array)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each primary accused person named in the documents, extract a SHORT note
+describing their job title and role. Format: "job title, employer"
+Examples:
+  "तत्कालीन प्रबन्ध निर्देशक, नेपाल टेलिकम"
+  "तत्कालीन नगरप्रमुख, खैरहनी नगरपालिका"
+  "नापी अधिकृत, नापी कार्यालय चाबहिल"
+
+Only include primary accused persons. Keep notes under 80 chars.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Output ONLY this JSON object, no other text:
+{"locations": [{"place_as_written": "...", "district": "...", "evidence": "...", "notes": "..."}],
+ "entities": [{"entity_name": "...", "relationship_type": "related|alleged|witness|victim",
+               "entity_prefix": "...", "entity_type": "...", "is_named_entity": true,
+               "name_en": "...", "evidence": "...", "notes": "..."}],
+ "accused_notes": [{"name": "...", "notes": "job title, employer", "evidence": "..."}]}
+Every entities and accused_notes item also carries evidence: one sentence copied verbatim.
+"""
+
+# Task 6: the press-release fallback prompt, used only when a case has no
+# readable court order (`pick_source`). A press release is a filing notice,
+# not a judgment -- it names no witnesses and decides no verdict, so this
+# prompt asks for neither. Same output shape as `COURT_ORDER_SYSTEM_PROMPT`
+# so `parse_window_response` reads either reply the same way.
+PRESS_RELEASE_SYSTEM_PROMPT = """You are a Nepali legal research assistant helping to build a public transparency database of court cases.
+You are reading a CIAA (अख्तियार दुरुपयोग अनुसन्धान आयोग) press release announcing a case
+filing -- not the court order itself. Extract only what a filing notice can actually state.
+
+Ignore boilerplate that names the CIAA's own offices, never the case events:
+टंगाल काठमाडौं, विशेष अदालत काठमाडौं, आयोगको कार्यालय X (any numbered CIAA regional office).
+
+Extract FOUR things in a single response:
+
+1. LOCATIONS (locations array) -- the district(s) where the case events happened or the
+   assets at issue are, never a CIAA office. Every item needs:
+   - place_as_written: the place exactly as the text writes it.
+   - district: the district alone.
+   - evidence: ONE sentence copied VERBATIM from this text that names the place.
+   Return "locations": [] if the release names no event place. Do not guess.
+
+2. ACCUSED ROLE NOTES (accused_notes array) -- for each accused person named, their job
+   title and employer. Format: "job title, employer". Keep notes under 80 chars.
+
+3. NAMED COMPANIES OR COMMITTEES (entities array, relationship_type="related") -- a
+   company, cooperative, or committee connected to the case.
+
+4. FAMILY MEMBERS NAMED FOR CONFISCATION (जफत गर्ने प्रयोजन) (entities array,
+   relationship_type="related") -- a spouse, child or relative named so their property
+   can be attached.
+
+Every entities and accused_notes item also carries evidence: one sentence copied verbatim.
+
+Do NOT extract witnesses -- a filing notice names none.
+Do NOT extract a verdict or outcome -- a filing notice is written before the case is decided.
+
+OUTPUT: only this JSON object, no other text --
+{"locations": [{"place_as_written": "...", "district": "...", "evidence": "...", "notes": "..."}],
+ "entities": [{"entity_name": "...", "relationship_type": "related",
+               "entity_prefix": "...", "entity_type": "...", "is_named_entity": true,
+               "name_en": "...", "evidence": "...", "notes": "..."}],
+ "accused_notes": [{"name": "...", "notes": "job title, employer", "evidence": "..."}]}
 """
 
 #: Appended to `SYSTEM_PROMPT` when `--create-entities` is on, carrying the live
@@ -992,6 +1142,203 @@ def _settle_note_claims(slug, claims, how):
                     "%s with different roles: %s", slug, nes_id, len(roles), how,
                     "; ".join(sorted(roles)))
     return settled
+
+
+def accused_missing_notes(case, notes):
+    """`nes_id`s of accused binds with an empty or placeholder note that `notes` does not fill.
+
+    "Empty or placeholder" is the SAME test `apply_accused_updates` runs before
+    it will overwrite a note (`not notes or notes.startswith(MACHINE_NOTE_PREFIX)`),
+    so the two never disagree about which binds still need one.
+    """
+    needing = {
+        (entity.get("nes_id") or "").strip()
+        for entity in (case.get("entities") or [])
+        if bind_relationship_type(entity) == ACCUSED_SECTION
+        and (lambda note: not note or note.startswith(MACHINE_NOTE_PREFIX))(entity.get("notes") or "")
+    }
+    needing.discard("")
+    return needing - set(accused_note_updates(case, notes))
+
+
+@dataclass(frozen=True)
+class Source:
+    """One case's chosen extraction text: a court order, a press release, or neither."""
+    kind: str | None
+    text: str
+    reason: str
+
+
+def _joined_source_chunks(detail, types):
+    """`source_chunks` for `types`, sorted by material IRI (`.1` before `.2`) and joined."""
+    chunks, _unmet = source_chunks(detail, types=types)
+    return "\n\n".join(text for _mtype, _iri, text in sorted(chunks, key=lambda c: c[1]))
+
+
+def pick_source(detail):
+    """Court order first; the press release only when no readable court order exists.
+
+    The press release is never fetched at all while a readable court order is
+    in hand -- `source_chunks` for `PRESS_TYPES` only runs on the fallback path.
+    """
+    court_text = _joined_source_chunks(detail, COURT_TYPES)
+    if court_text and is_readable_devanagari(court_text):
+        return Source("court_order", court_text, "")
+    why = ("the case has no court order material with extracted text" if not court_text
+           else "the court order text is not readable Devanagari (likely Preeti-encoded)")
+    press_text = _joined_source_chunks(detail, PRESS_TYPES)
+    if press_text and not is_teaser(press_text):
+        return Source("press_release", press_text, why)
+    why += ("; no press release material with text either" if not press_text
+            else "; the press release is a teaser stub")
+    return Source(None, "", why)
+
+
+@dataclass
+class WindowAnswer:
+    """One window's parsed reply, before evidence grounding or NES resolution."""
+    locations: list
+    entities: list
+    accused_notes: list
+
+
+def _parsed_extraction_object(text):
+    """`(obj, True)` when `text` (fence-stripped) parses as one JSON object; `({}, False)`
+    otherwise -- the same brace-balanced primitives `parse_extraction_response` itself
+    uses, exposed here so a well-formed reply can be read key by key. See
+    `_extraction_list` for why."""
+    stripped = strip_fence((text or "").strip())
+    start = stripped.find("{")
+    if start == -1:
+        return {}, False
+    frag = balanced_object(stripped, start)
+    if frag is None:
+        return {}, False
+    try:
+        obj = json.loads(frag)
+    except json.JSONDecodeError:
+        return {}, False
+    return (obj, True) if isinstance(obj, dict) else ({}, False)
+
+
+def _extraction_list(obj, parsed_ok, key, text):
+    """`obj[key]` from an already-parsed reply; `parse_extraction_response` only recovers
+    `key` from raw `text` when that parse failed outright.
+
+    `parse_window_response` asks for THREE sibling keys (`locations`, `entities`,
+    `accused_notes`) on one reply, and `parse_extraction_response`'s own fallback --
+    reached whenever the requested key's list is empty -- searches the WHOLE text for
+    the first `[`, with no idea which key it was asked for. On a real reply where
+    `locations` is populated and `entities` is genuinely `[]`, that fallback returns
+    the `locations` array AS `entities`. Measured via
+    `TestExtractFromSourceCourtOrder.test_keeps_growing_until_every_accused_note_is_
+    filled_and_dedupes_the_district`, which failed with a location answer landing in
+    `accused_notes` before this existed. Reading a well-formed reply straight off the
+    parsed object sidesteps the ambiguity entirely; `parse_extraction_response` still
+    does its real job -- recovering a fenced or otherwise malformed reply.
+    """
+    if parsed_ok:
+        value = obj.get(key)
+        return list(value) if isinstance(value, list) else []
+    return list(parse_extraction_response(text, {key}) or [])
+
+
+def parse_window_response(text):
+    """Parse one window's JSON reply; an `entities` item typed `location` moves into `locations`."""
+    obj, parsed_ok = _parsed_extraction_object(text)
+    locations = _extraction_list(obj, parsed_ok, "locations", text)
+    entities_raw = _extraction_list(obj, parsed_ok, "entities", text)
+    accused_notes = _extraction_list(obj, parsed_ok, "accused_notes", text)
+    entities = []
+    for item in entities_raw:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("relationship_type") or "").strip().lower() == LOCATION_SECTION:
+            locations.append({
+                "place_as_written": item.get("entity_name") or "",
+                "district": "",
+                "evidence": item.get("evidence") or "",
+                "notes": item.get("notes") or "",
+            })
+            continue
+        entities.append(item)
+    return WindowAnswer(locations=locations, entities=entities, accused_notes=accused_notes)
+
+
+@dataclass
+class Extraction:
+    """One source's extraction across every window it took: what to bind, what was refused,
+    and which windows were read."""
+    entities: list
+    accused_notes: list
+    location_binds: list
+    rejected: list
+    windows: list
+
+
+def _grounded(items, window_text):
+    """Split `items` on `evidence_found` against `window_text`: `(kept, rejected)`."""
+    kept, rejected = [], []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if evidence_found(item.get("evidence") or "", window_text):
+            kept.append(item)
+        else:
+            rejected.append({**item, "reason": "evidence not found in the source"})
+    return kept, rejected
+
+
+def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, usage, system_suffix):
+    """One window: the LLM call, evidence grounding, and location resolution."""
+    content = f"{window.label()}\n\n{window.text}"
+    response = invoke_text(
+        system=system_prompt + system_suffix, content=content,
+        max_tokens=EXTRACTION_MAX_TOKENS, tier=tier_for("entities"), usage=usage)
+    answer = parse_window_response(response)
+    entities, rejected = _grounded(answer.entities, window.text)
+    accused_notes, notes_rejected = _grounded(answer.accused_notes, window.text)
+    rejected.extend(notes_rejected)
+    binds, loc_rejected = resolve_locations(api, gaz, answer.locations, text, cap_end)
+    rejected.extend(loc_rejected)
+    return entities, accused_notes, binds, rejected
+
+
+def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffix=""):
+    """Read `source`: the court order in growing start-windows, the press release in one call.
+
+    The court-order loop stops once a district has bound and every accused bind
+    on `case` has a note (`accused_missing_notes`), or at `MAX_ENTITY_WINDOWS`.
+    A `LocationBind` already seen (by `nes_id`) in an earlier window is not
+    repeated; entities and accused notes accumulate across every window read.
+    """
+    if source.kind == "press_release":
+        window = Window(0, len(source.text), len(source.text), source.text)
+        entities, accused_notes, binds, rejected = _read_window(
+            api, gaz, source.text, 0, window, PRESS_RELEASE_SYSTEM_PROMPT,
+            invoke_text, usage, system_suffix)
+        return Extraction(entities, accused_notes, binds, rejected, [(window.start, window.end)])
+
+    text = source.text
+    cap_end = caption_end(text)
+    entities, accused_notes, location_binds, rejected, windows = [], [], [], [], []
+    seen_nes_ids = set()
+    for window in start_windows(text):
+        w_entities, w_notes, w_binds, w_rejected = _read_window(
+            api, gaz, text, cap_end, window, COURT_ORDER_SYSTEM_PROMPT,
+            invoke_text, usage, system_suffix)
+        entities.extend(w_entities)
+        accused_notes.extend(w_notes)
+        rejected.extend(w_rejected)
+        for bind in w_binds:
+            if bind.nes_id not in seen_nes_ids:
+                seen_nes_ids.add(bind.nes_id)
+                location_binds.append(bind)
+        windows.append((window.start, window.end))
+        has_district = any("/location/district/" in bind.nes_id for bind in location_binds)
+        if has_district and not accused_missing_notes(case, accused_notes):
+            break
+    return Extraction(entities, accused_notes, location_binds, rejected, windows)
 
 
 def case_state(case):
