@@ -1186,6 +1186,23 @@ OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "http://localhost:9200")
 OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "")
 OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "")
 
+# Entity public-visibility gate (search.service._visibility_clauses): hide NES
+# entities no PUBLISHED case cites. OFF BY DEFAULT, and it must stay that way
+# through the merge that ships it.
+#
+# The gate filters on ``case_count``, a field this release ADDS to the entity
+# mapping. No document in the live generation carries it yet, and an OpenSearch
+# ``range`` clause does not match a document missing the field — so enabling the
+# gate before the entities index has been rebuilt does not shrink public entity
+# search to the cited set, it empties it. Code auto-deploys on merge; the
+# reindex is a separate manual off-peak job. Those two facts together are why
+# this is a setting and not a constant.
+#
+# Rollout is therefore: merge (nothing changes for any caller) -> reindex ->
+# verify the counts -> reconcile -> set this to true. Unsetting it is the whole
+# rollback, with no image change and no reindex.
+ENTITY_VISIBILITY_GATE_ENABLED = env_flag("ENTITY_VISIBILITY_GATE_ENABLED", False)
+
 # ============================================================================
 # Case-enrichment event bus — NATS + JetStream
 # ============================================================================
