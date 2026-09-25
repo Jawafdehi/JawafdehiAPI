@@ -125,7 +125,9 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
-from casework.common.grounding import evidence_found, is_readable_devanagari, is_teaser
+from casework.common.grounding import (
+    evidence_found, is_readable_devanagari, is_teaser, normalise_for_match,
+)
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import materials_of_type, source_chunks
 from casework.common.order_windows import Window, caption_end, end_windows, start_windows
@@ -630,7 +632,7 @@ be convicted or acquitted on what the order says.
 
 For EACH name in the accused list, answer:
   outcome   exactly one of: convicted | acquitted | abated | charged | unknown.
-            Answer unknown -- never a guess -- when the operative section does
+            Answer unknown -- never a guess -- when this text does
             not decide that person's case.
   role      a short Nepali note: the person's post and employer at the time,
             plus what the court found they did, under 90 characters. "" if the
@@ -669,13 +671,20 @@ def parse_verdict_response(text: str) -> list:
     return out
 
 
+#: The outcome `_ask_verdict_names` gives a name one reply answered two different ways.
+CONFLICT = "conflict"
+#: A `convicted` whose own evidence carries either spelling quotes an acquittal.
+ACQUITTAL_MARKERS = ("सफाई", "सफाइ")
+
+
 def _ask_verdict_names(names, zone, invoke_text, usage):
     """One verdict call for exactly `names`, reconciled by EXACT name match.
 
     Returns `(answered, unrequested_errors)`. A row naming anyone but one of
     `names` is dropped and reported, never fuzzily matched: the prompt tells
     the model to copy `name` verbatim, and a near-match here binds a verdict to
-    the wrong person. Propagates an `invoke_text` failure to the caller.
+    the wrong person. A name answered twice with different outcomes comes back
+    as outcome `CONFLICT`, never last-wins. Propagates an `invoke_text` failure.
     """
     requested = set(names)
     listing = "\n".join(f"- {name}" for name in names)
@@ -697,9 +706,15 @@ def _ask_verdict_names(names, zone, invoke_text, usage):
         if name not in requested:
             unrequested_errors.append(f"chunk returned an unrequested name: {name!r}")
             continue
-        answered[name] = {
-            "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
-        }
+        prior = answered.get(name)
+        if prior is None:
+            answered[name] = {
+                "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
+                "outcomes": [row["outcome"]],
+            }
+        elif row["outcome"] not in prior["outcomes"]:
+            prior["outcomes"].append(row["outcome"])
+            prior.update(outcome=CONFLICT, role="", evidence="")
     return answered, unrequested_errors
 
 
@@ -727,8 +742,9 @@ def _retry_verdict_names(missing, zone, invoke_text, usage):
 
 
 def _ask_window(names, zone, invoke_text, usage):
-    """`names` asked of one window in `VERDICT_CHUNK` batches, a short batch retried once: `(answered, errors)`."""
+    """`names` asked of one window in batches, a short batch retried once: `(answered, failed, errors)`."""
     answered_all: dict = {}
+    failed: dict = {}
     errors: list = []
     for start in range(0, len(names), VERDICT_CHUNK):
         chunk = names[start:start + VERDICT_CHUNK]
@@ -736,6 +752,7 @@ def _ask_window(names, zone, invoke_text, usage):
             answered, unrequested_errors = _ask_verdict_names(chunk, zone, invoke_text, usage)
         except Exception as exc:  # noqa: BLE001 - one bad chunk must not lose the rest
             errors.append(f"chunk of {len(chunk)} defendants failed: {exc}")
+            failed.update(dict.fromkeys(chunk, "call-failed"))
             continue
         answered_all.update(answered)
         missing = [name for name in chunk if name not in answered]
@@ -750,44 +767,66 @@ def _ask_window(names, zone, invoke_text, usage):
         still_missing = [name for name in missing if name not in retry_answered]
         errors.extend(unrequested_errors)
         if still_missing:
+            failed.update(dict.fromkeys(still_missing, "missing-after-retry"))
             errors.append(
                 f"chunk returned {len(answered) + len(retry_answered)} of {len(chunk)} "
                 f"defendants after retry; missing: {', '.join(still_missing)}")
         errors.extend(retry_unrequested)
-    return answered_all, errors
+    return answered_all, failed, errors
+
+
+def _verdict_end(outcome, reason, window="", role="", evidence=""):
+    return {"outcome": outcome, "role": role, "evidence": evidence,
+            "reason": reason, "window": window}
+
+
+def _window_ending(name, row, failure, window, errors):
+    """How one window ends `name`'s walk, or None when it answered `unknown`."""
+    label = window.label()
+    if failure or row is None:
+        return _verdict_end("charged", failure or "missing-after-retry", label)
+    outcome = row["outcome"]
+    if outcome == "unknown":
+        return None
+    if outcome == CONFLICT:
+        errors.append(f"{label}: {name}: conflicting outcomes in one reply "
+                      f"({', '.join(row['outcomes'])})")
+        return _verdict_end("charged", "conflict", label)
+    if outcome not in TERMINAL_OUTCOMES:
+        return _verdict_end("charged", "charged-answer", label, role=row["role"])
+    evidence = row["evidence"]
+    if not evidence_found(evidence, window.text):
+        errors.append(f"{label}: {name}: evidence not found in the order")
+        return _verdict_end("charged", "evidence-not-found", label)
+    if outcome == "convicted" and any(m in normalise_for_match(evidence)
+                                      for m in ACQUITTAL_MARKERS):
+        errors.append(f"{label}: {name}: convicted vetoed, its evidence says सफाई")
+        return _verdict_end("charged", "vetoed", label)
+    return _verdict_end(outcome, "decided", label, role=row["role"], evidence=evidence)
 
 
 def accused_verdicts(names, order_text, invoke_text, usage=None):
-    """Each name's grounded holding from `end_windows`, latest first; undecided names stay `charged`."""
-    pending = list(names)
-    decided: dict = {}
-    roles: dict = {}
+    """Each name's holding from `end_windows`, latest first; only `unknown` moves a name back."""
+    ended: dict = {}
+    windows_read = dict.fromkeys(names, 0)
     errors: list = []
     for window in end_windows(order_text):
+        pending = [name for name in names if name not in ended]
         if not pending:
             break
-        zone = f"{window.label()}\n\n{window.text}"
-        answered, window_errors = _ask_window(pending, zone, invoke_text, usage)
-        errors.extend(window_errors)
+        label = window.label()
+        answered, failed, window_errors = _ask_window(
+            pending, f"{label}\n\n{window.text}", invoke_text, usage)
+        errors.extend(f"{label}: {error}" for error in window_errors)
         for name in pending:
-            row = answered.get(name)
-            if row is None:
-                continue
-            if row["role"] and not roles.get(name):
-                roles[name] = row["role"]
-            if row["outcome"] not in TERMINAL_OUTCOMES:
-                continue
-            if evidence_found(row["evidence"], window.text):
-                decided[name] = row
-            else:
-                errors.append(f"{name}: evidence not found in the order")
-        pending = [name for name in pending if name not in decided]
+            windows_read[name] += 1
+            end = _window_ending(name, answered.get(name), failed.get(name), window, errors)
+            if end is not None:
+                ended[name] = end
     results = {}
     for name in names:
-        row = decided.get(name)
-        results[name] = {"outcome": row["outcome"] if row else "charged",
-                         "role": roles.get(name, ""),
-                         "evidence": row["evidence"] if row else ""}
+        end = ended.get(name) or _verdict_end("charged", "no-window-decided")
+        results[name] = {**end, "windows_read": windows_read[name]}
     return results, errors
 
 
@@ -1474,11 +1513,15 @@ def verdict_gate(case, court_text):
 
 
 def _verdict_row(slug, name, nes_id, old_outcome, new_outcome, role, evidence,
-                 reason, written=False):
+                 reason, written=False, verdict=None):
     """One `*.verdicts.jsonl` row -- every accused bind considered, decided or not."""
+    verdict = verdict or {}
     return {"slug": slug, "name": name, "nes_id": nes_id,
             "old_outcome": old_outcome, "new_outcome": new_outcome,
             "role": role, "evidence": evidence, "reason": reason,
+            "verdict_reason": verdict.get("reason", ""),
+            "window": verdict.get("window", ""),
+            "windows_read": verdict.get("windows_read", 0),
             "written": written}
 
 
@@ -1511,16 +1554,11 @@ def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
                                         usage=usage)
     updates = {}
     for name, nes_id in targets.items():
-        verdict = verdicts.get(name)
-        if verdict is None:
-            rows.append(_verdict_row(
-                slug, name, nes_id, old_outcome(nes_id), "", "", "",
-                "the judgment reply did not answer for this name"))
-            continue
+        verdict = verdicts[name]
         updates[nes_id] = {"outcome": verdict["outcome"], "notes": verdict["role"]}
         rows.append(_verdict_row(
             slug, name, nes_id, old_outcome(nes_id), verdict["outcome"],
-            verdict["role"], verdict["evidence"], ""))
+            verdict["role"], verdict["evidence"], "", verdict=verdict))
     return updates, rows, errors
 
 

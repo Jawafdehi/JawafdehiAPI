@@ -258,6 +258,7 @@ class _StubApi:
 FIXTURE_EVIDENCE = "गोपाल बहादुर श्रेष्ठविरुद्ध मुद्दा दर्ता भएको छ।"
 #: The holdings the canned verdict replies quote, so their evidence grounds in `court.md`.
 COURT_HOLDINGS = "\nतसर्थ निज प्रतिवादीले कसुर गरेको ठहर्छ। अर्को प्रतिवादीले सफाई पाउने ठहर्छ।"
+FIXTURE_COURT_TEXT = "अदालतको आदेशमा ठहर खण्ड उल्लेख छ। " + FIXTURE_EVIDENCE + COURT_HOLDINGS
 #: Pads a press release past `is_teaser`'s 400-char floor.
 PRESS_PADDING = " आयोगले यस विषयमा विस्तृत अनुसन्धान गरेको थियो।" * 10
 
@@ -270,8 +271,7 @@ def patched_fetch_markdown(monkeypatch):
         return {
             "https://x/press.md": "साझा भण्डार सहकारीमा अनियमितता भएको छ। "
                                    + FIXTURE_EVIDENCE + PRESS_PADDING,
-            "https://x/court.md": ("अदालतको आदेशमा ठहर खण्ड उल्लेख छ। " + FIXTURE_EVIDENCE
-                                   + COURT_HOLDINGS),
+            "https://x/court.md": FIXTURE_COURT_TEXT,
             "https://x/press2.md": "प्रेस विज्ञप्तिको सामग्री। " + FIXTURE_EVIDENCE + PRESS_PADDING,
             "https://x/court2.md": "अदालतको आदेशको सामग्री। " + FIXTURE_EVIDENCE,
             "https://x/empty.md": "",
@@ -3851,7 +3851,7 @@ class TestAccusedVerdicts:
             return self._reply(["नक्कली नाम"])
 
         got, errors = ere.accused_verdicts(["क"], VERDICT_ORDER, fake)
-        assert got == {"क": {"outcome": "charged", "role": "", "evidence": ""}}
+        assert _core(got["क"]) == {"outcome": "charged", "role": "", "evidence": ""}
         assert errors
 
     def test_a_reply_omitting_one_requested_name_still_returns_the_others(self):
@@ -3929,8 +3929,23 @@ def _holding_in_window(holdings):
     return answer
 
 
+def _core(row):
+    """The three fields a verdict writes, without the trace keys."""
+    return {key: row[key] for key in ("outcome", "role", "evidence")}
+
+
+CONVICTION_LOOKING = "प्रतिवादीलाई भ्रष्टाचारको कसुरमा कैद हुने ठहर्छ"
+FINAL_ACQUITTAL = "प्रतिवादीले आरोपित कसुरबाट सफाई पाउने ठहर्छ"
+
+
+def _probe_order():
+    """The reviewer's probe: a conviction-looking sentence 5k before the last तसर्थ, the acquittal 3k after it."""
+    return (_filler(60_000) + "\n" + CONVICTION_LOOKING + "।\n" + _filler(5_000)
+            + "\nतसर्थ " + _filler(3_000) + "\n" + FINAL_ACQUITTAL + "।\n")
+
+
 class TestVerdictsFromTheEndWindow:
-    """`accused_verdicts` walks `end_windows` latest first, asking only the names still pending."""
+    """`accused_verdicts` walks `end_windows` latest first; only `unknown` moves a name back."""
 
     def test_a_200k_order_with_its_holding_in_the_last_window_costs_one_call(self):
         order = _filler(200_000) + "\nतसर्थ " + HOLD_A + "।\n"
@@ -3938,7 +3953,7 @@ class TestVerdictsFromTheEndWindow:
         got, errors = ere.accused_verdicts([RAM], order, fake)
         assert len(fake.calls) == 1
         assert end_windows(order)[0].label() in fake.calls[0]
-        assert got[RAM] == {"outcome": "convicted", "role": "", "evidence": HOLD_A}
+        assert _core(got[RAM]) == {"outcome": "convicted", "role": "", "evidence": HOLD_A}
         assert errors == []
 
     def test_a_name_the_last_window_leaves_unknown_is_decided_one_window_back(self):
@@ -3948,7 +3963,7 @@ class TestVerdictsFromTheEndWindow:
         got, errors = ere.accused_verdicts([RAM, SITA], order, fake)
         assert len(fake.calls) == 2
         assert f"- {SITA}" in fake.calls[1]
-        assert got[SITA] == {"outcome": "convicted", "role": "", "evidence": HOLD_B}
+        assert _core(got[SITA]) == {"outcome": "convicted", "role": "", "evidence": HOLD_B}
         assert got[RAM]["outcome"] == "convicted"
         assert errors == []
 
@@ -3956,12 +3971,14 @@ class TestVerdictsFromTheEndWindow:
         order = "तसर्थ " + HOLD_A + "।"
 
         def answer(name, content):
-            return {"outcome": "convicted", "role": "",
+            return {"outcome": "convicted", "role": "सचिव",
                     "evidence": "यो वाक्य आदेशमा कहीँ पनि लेखिएको छैन"}
 
         got, errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
-        assert got[RAM] == {"outcome": "charged", "role": "", "evidence": ""}
-        assert f"{RAM}: evidence not found in the order" in errors
+        label = end_windows(order)[0].label()
+        assert _core(got[RAM]) == {"outcome": "charged", "role": "", "evidence": ""}
+        assert got[RAM]["reason"] == "evidence-not-found"
+        assert f"{label}: {RAM}: evidence not found in the order" in errors
 
     def test_a_decided_name_is_never_in_a_later_calls_content(self):
         order = _two_holding_order()
@@ -3972,18 +3989,19 @@ class TestVerdictsFromTheEndWindow:
         assert len(fake.calls) == len(windows) > 2   # HARI keeps the walk going to the end
         assert all(RAM not in content for content in fake.calls[1:])
         assert all(SITA not in content for content in fake.calls[2:])
-        assert got[HARI] == {"outcome": "charged", "role": "", "evidence": ""}
+        assert _core(got[HARI]) == {"outcome": "charged", "role": "", "evidence": ""}
 
     def test_an_order_with_no_tasartha_still_finds_a_holding_stated_with_tharharchha(self):
         order = _filler(50_000) + "\n" + HOLD_A + "।\n" + _filler(2_000)
         assert "तसर्थ" not in order
         fake = _window_stub(_holding_in_window({RAM: HOLD_A}))
         got, errors = ere.accused_verdicts([RAM], order, fake)
+        assert len(fake.calls) == 1   # the window opens at the verb's sentence, not the verb
         assert end_windows(order)[0].label() in fake.calls[0]
-        assert got[RAM] == {"outcome": "convicted", "role": "", "evidence": HOLD_A}
+        assert _core(got[RAM]) == {"outcome": "convicted", "role": "", "evidence": HOLD_A}
         assert errors == []
 
-    def test_an_ungrounded_holding_stays_pending_and_a_later_grounded_one_decides(self):
+    def test_an_ungrounded_holding_ends_the_walk_at_charged(self):
         # HOLD_B sits before the last तसर्थ, so the first window cannot carry it.
         order = _two_holding_order()
 
@@ -3993,29 +4011,117 @@ class TestVerdictsFromTheEndWindow:
         fake = _window_stub(answer)
         got, errors = ere.accused_verdicts([SITA], order, fake)
         assert HOLD_B not in fake.calls[0]
-        assert len(fake.calls) == 2
-        assert f"{SITA}: evidence not found in the order" in errors
-        assert got[SITA] == {"outcome": "convicted", "role": "", "evidence": HOLD_B}
+        assert len(fake.calls) == 1
+        assert f"{end_windows(order)[0].label()}: {SITA}: evidence not found in the order" in errors
+        assert got[SITA]["outcome"] == "charged"
 
-    def test_the_first_non_empty_role_is_kept_across_windows(self):
+    def test_a_failed_latest_call_never_hands_the_name_to_earlier_text(self):
+        # The reviewer's probe: a 502 on the final holding used to let the
+        # conviction-looking sentence further back decide the name.
+        order = _probe_order()
+        calls = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls.append(content)
+            if len(calls) == 1:
+                raise RuntimeError("provider 502")
+            return json.dumps({"defendants": [{"name": RAM, "outcome": "convicted", "role": "",
+                                               "evidence": CONVICTION_LOOKING}]},
+                              ensure_ascii=False)
+
+        got, errors = ere.accused_verdicts([RAM], order, fake)
+        assert len(calls) == 1
+        assert got[RAM]["outcome"] == "charged" and got[RAM]["reason"] == "call-failed"
+        assert errors and errors[0].startswith(end_windows(order)[0].label())
+
+    def test_a_name_missing_after_the_retry_is_not_asked_again_further_back(self):
+        order = _probe_order()
+        calls = []
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            calls.append(content)
+            if len(calls) <= 2:
+                return json.dumps({"defendants": []})
+            return json.dumps({"defendants": [{"name": RAM, "outcome": "convicted", "role": "",
+                                               "evidence": CONVICTION_LOOKING}]},
+                              ensure_ascii=False)
+
+        got, errors = ere.accused_verdicts([RAM], order, fake)
+        assert len(calls) == 2   # the call and its one retry, both on the latest window
+        assert got[RAM]["outcome"] == "charged"
+        assert got[RAM]["reason"] == "missing-after-retry"
+        assert errors and all(e.startswith(end_windows(order)[0].label()) for e in errors)
+
+    def test_a_charged_answer_ends_the_walk(self):
+        # A confiscation-only defendant is `charged` by the prompt's own rule;
+        # an earlier window must not get the chance to convict them.
         order = _two_holding_order()
-        roles = {}
 
         def answer(name, content):
-            first = name not in roles
-            roles[name] = True
+            return {"outcome": "charged", "role": "जफत प्रयोजनका लागि प्रतिवादी", "evidence": ""}
+
+        fake = _window_stub(answer)
+        got, _errors = ere.accused_verdicts([SITA], order, fake)
+        assert len(fake.calls) == 1
+        assert _core(got[SITA]) == {"outcome": "charged",
+                                    "role": "जफत प्रयोजनका लागि प्रतिवादी", "evidence": ""}
+        assert got[SITA]["reason"] == "charged-answer"
+
+    def test_two_different_outcomes_for_one_name_in_one_reply_end_charged(self):
+        order = "तसर्थ " + HOLD_A + "। " + FINAL_ACQUITTAL + "।"
+
+        def fake(system, content, max_tokens, tier, usage=None):
+            return json.dumps({"defendants": [
+                {"name": RAM, "outcome": "acquitted", "role": "", "evidence": FINAL_ACQUITTAL},
+                {"name": RAM, "outcome": "convicted", "role": "", "evidence": HOLD_A},
+            ]}, ensure_ascii=False)
+
+        got, errors = ere.accused_verdicts([RAM], order, fake)
+        assert got[RAM]["outcome"] == "charged" and got[RAM]["reason"] == "conflict"
+        assert any(RAM in e and "conflict" in e for e in errors)
+
+    def test_a_convicted_quoting_an_acquittal_is_vetoed(self):
+        order = "तसर्थ " + FINAL_ACQUITTAL + "।"
+
+        def answer(name, content):
+            return {"outcome": "convicted", "role": "सचिव", "evidence": FINAL_ACQUITTAL}
+
+        got, errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        assert _core(got[RAM]) == {"outcome": "charged", "role": "", "evidence": ""}
+        assert got[RAM]["reason"] == "vetoed"
+        assert any(RAM in e and "सफाई" in e for e in errors)
+
+    def test_the_role_comes_only_from_the_row_that_ended_the_walk(self):
+        order = _two_holding_order()
+        seen = {}
+
+        def answer(name, content):
+            first = name not in seen
+            seen[name] = True
             if name == SITA:
                 if first:
                     return {"outcome": "unknown", "role": "तत्कालीन लेखापाल", "evidence": ""}
-                return {"outcome": "convicted", "role": "अर्को भूमिका", "evidence": HOLD_B}
-            if first:
-                return {"outcome": "unknown", "role": "", "evidence": ""}
-            return {"outcome": "charged", "role": "तत्कालीन सचिव", "evidence": ""}
+                return {"outcome": "convicted", "role": "तत्कालीन सचिव", "evidence": HOLD_B}
+            if name == HARI:
+                return {"outcome": "unknown", "role": "तत्कालीन प्रमुख", "evidence": ""}
+            return {"outcome": "convicted", "role": "तत्कालीन अधिकृत",
+                    "evidence": "यो वाक्य आदेशमा कहीँ पनि लेखिएको छैन"}
 
-        got, _errors = ere.accused_verdicts([SITA, HARI], order, _window_stub(answer))
-        assert got[SITA] == {"outcome": "convicted", "role": "तत्कालीन लेखापाल",
-                             "evidence": HOLD_B}
-        assert got[HARI] == {"outcome": "charged", "role": "तत्कालीन सचिव", "evidence": ""}
+        got, _errors = ere.accused_verdicts([SITA, HARI, RAM], order, _window_stub(answer))
+        assert got[SITA]["role"] == "तत्कालीन सचिव"
+        assert got[HARI]["role"] == ""   # ran out of windows
+        assert got[RAM]["role"] == ""    # ended on an ungrounded answer
+
+    def test_each_name_records_its_reason_window_and_windows_read(self):
+        order = _two_holding_order()
+        windows = end_windows(order)
+        fake = _window_stub(_holding_in_window({RAM: HOLD_A, SITA: HOLD_B}))
+        got, _errors = ere.accused_verdicts([RAM, SITA, HARI], order, fake)
+        trace = {name: (row["reason"], row["window"], row["windows_read"])
+                 for name, row in got.items()}
+        assert trace == {RAM: ("decided", windows[0].label(), 1),
+                         SITA: ("decided", windows[1].label(), 2),
+                         HARI: ("no-window-decided", "", len(windows))}
 
     def test_the_prompt_reads_part_of_the_end_not_the_operative_section(self):
         assert ere.VERDICT_SYSTEM_PROMPT.split("\n\n")[1] == (
@@ -4023,6 +4129,11 @@ class TestVerdictsFromTheEndWindow:
             "range. Decide only from a holding this text itself states. If this text does "
             "not state a holding for a person, answer unknown.")
         assert "OPERATIVE section only" not in ere.VERDICT_SYSTEM_PROMPT
+
+    def test_the_outcome_guidance_says_this_text_not_the_operative_section(self):
+        prompt = " ".join(ere.VERDICT_SYSTEM_PROMPT.split())
+        assert "when this text does not decide that person's case" in prompt
+        assert "when the operative section does not decide" not in prompt
 
     def test_each_call_is_labelled_with_its_character_range(self):
         order = _two_holding_order()
@@ -4425,6 +4536,39 @@ class TestTheVerdictReadsTheOrderPickSourceChose:
         skipped = [e for e in _read_events(_events_path())
                    if e.get("step") == "verdicts" and e.get("status") == "skipped"]
         assert skipped and "no court-order text" in skipped[0]["detail"]
+
+
+class TestTheVerdictTraceReachesTheReport:
+    """Every `*.verdicts.jsonl` row says why its name ended where it did, and which window."""
+
+    def test_a_decided_row_carries_its_reason_window_and_windows_read(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, _StubApi([_accused_case()]), invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert row["verdict_reason"] == "decided"
+        assert row["window"] == end_windows(FIXTURE_COURT_TEXT)[0].label()
+        assert row["windows_read"] == 1
+
+    def test_an_undecided_row_says_so(self, monkeypatch, patched_fetch_markdown, tmp_path):
+        stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
+            {"name": "राम बहादुर", "outcome": "unknown", "role": "", "evidence": ""}]},
+            ensure_ascii=False))
+        _run_main(monkeypatch, _StubApi([_accused_case()]), invoke_text_stub=stub,
+                  argv=["--dry-run", "--verdicts"])
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert (row["new_outcome"], row["verdict_reason"], row["window"],
+                row["windows_read"]) == ("charged", "no-window-decided", "",
+                                         len(end_windows(FIXTURE_COURT_TEXT)))
+
+    def test_a_row_the_judgment_never_reached_reads_zero_windows(
+            self, monkeypatch, patched_fetch_markdown, tmp_path):
+        case = dict(_accused_case(slug="case-in-review-trace"), state="IN_REVIEW")
+        _run_main(monkeypatch, _StubApi([case]), invoke_text_stub=_two_call_stub(),
+                  argv=["--dry-run", "--verdicts"])
+        row = next(r for r in _verdict_rows(tmp_path) if r["nes_id"] == ACCUSED_IRI)
+        assert (row["verdict_reason"], row["window"], row["windows_read"]) == ("", "", 0)
 
 
 class TestAHumanWhoSettlesABindMidRunWins:

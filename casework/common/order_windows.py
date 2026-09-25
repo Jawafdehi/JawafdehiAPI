@@ -56,14 +56,20 @@ def start_windows(text: str, size: int = ENTITY_WINDOW_CHARS,
         target = start + size
 
 
+def _sentence_start(text: str, pos: int) -> int:
+    """Just after the last `।` or newline before `pos`, never before the caption end."""
+    boundary = max(text.rfind("।", 0, pos), text.rfind("\n", 0, pos))
+    return max(boundary + 1, min(caption_end(text), pos))
+
+
 def holding_start(text: str) -> tuple[int, str]:
-    """Where the court's holding starts: last `तसर्थ`, else last holding verb, else the tail."""
+    """Where the court's holding starts: last `तसर्थ`, else the last holding verb's sentence, else the tail."""
     i = text.rfind(_TASARTHA)
     if i != -1:
         return i, "तसर्थ"
     verbs = [m.start() for m in _HOLDING_VERB.finditer(text)]
     if verbs:
-        return verbs[-1], "holding-verb"
+        return _sentence_start(text, verbs[-1]), "holding-verb"
     return max(0, len(text) - VERDICT_CHUNK_CHARS), "tail"
 
 

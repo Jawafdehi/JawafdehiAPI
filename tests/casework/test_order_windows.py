@@ -53,10 +53,28 @@ def test_holding_starts_at_the_last_tasartha():
     assert anchor == "तसर्थ" and pos == text.rindex("तसर्थ")
 
 
-def test_holding_falls_back_to_the_last_holding_verb():
-    text = "क" * 10_000 + "कसूर गरेको ठहर्छ ।" + "ख" * 2_000
+def test_holding_falls_back_to_the_last_holding_verbs_sentence():
+    text = "क" * 10_000 + "।कसूर गरेको ठहर्छ ।" + "ख" * 2_000
     pos, anchor = holding_start(text)
-    assert anchor == "holding-verb" and pos == text.index("ठहर्छ")
+    assert anchor == "holding-verb" and pos == text.index("कसूर")
+
+
+def test_the_holding_verb_window_keeps_an_acquittals_subject():
+    text = "क" * 10_000 + "।\nप्रतिवादी रामले आरोपित कसुरबाट सफाई पाउने ठहर्छ ।" + "ख" * 2_000
+    pos, _anchor = holding_start(text)
+    assert text[pos:].startswith("प्रतिवादी रामले आरोपित कसुरबाट सफाई पाउने ठहर्छ")
+
+
+def test_the_later_of_danda_and_newline_starts_the_sentence():
+    text = "क" * 10_000 + "।पहिलो\nदोस्रो कसूर ठहर्छ" + "ख" * 100
+    assert holding_start(text)[0] == text.index("दोस्रो")
+    text = "क" * 10_000 + "\nपहिलो।दोस्रो कसूर ठहर्छ" + "ख" * 100
+    assert holding_start(text)[0] == text.index("दोस्रो")
+
+
+def test_the_sentence_start_never_backs_into_the_caption():
+    text = "मुद्दा: भ्रष्टाचार" + "क" * 10_000 + "कसूर ठहर्छ" + "ख" * 100
+    assert holding_start(text)[0] == caption_end(text)
 
 
 def test_holding_falls_back_to_the_tail():
