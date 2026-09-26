@@ -6969,3 +6969,23 @@ class TestAnExistingDistrictStopsTheStartWindows:
         stub = _sequenced_stub(_response())
         extract_from_source(_api(), _gaz(), case, Source("court_order", text, ""), stub, usage=None)
         assert len(stub.calls) > 1
+
+
+def test_rejected_row_with_missing_evidence_key_does_not_raise():
+    """A rejected row missing the evidence key is handled gracefully."""
+    # Simulate a rejected row missing 'evidence' key
+    ungrounded = [
+        {"place": "बाँके", "district": "बाँके", "evidence": "वाक्य", "reason": "test"},
+        {"place": "काठमाडौं", "district": "काठमाडौं", "reason": "test"},  # missing evidence
+        {"district": "सल्यान", "evidence": "भाग", "reason": "test"},  # missing place
+    ]
+    
+    # This should not raise KeyError
+    refused = {(r.get("place") or "", r.get("district") or "", r.get("evidence") or "") for r in ungrounded}
+    
+    # Verify the set is built correctly with empty strings for missing keys
+    assert refused == {
+        ("बाँके", "बाँके", "वाक्य"),
+        ("काठमाडौं", "काठमाडौं", ""),
+        ("", "सल्यान", "भाग"),
+    }

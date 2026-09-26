@@ -424,3 +424,28 @@ def test_bhanaupa_abbreviation_not_expanded_to_bhaktapur(real_gaz):
     assert d.district == chitwan, "भ.न.पा. should not expand to Bhaktapur"
     # Also verify that place_key doesn't contain the Bhaktapur expansion
     assert "भक्तपुर" not in place_key("भ.न.पा."), "place_key should not expand भ.न.पा. to भक्तपुर नगरपालिका"
+
+
+def test_orphan_localunit_with_no_containedInPlace_resolves_cleanly():
+    """A localunit lacking containedInPlace does not bind through None."""
+    orphan = {"@id": f"{E}location/localunit/orphan-1", "name": {"ne": "अनाथ गाउँपालिका", "en": "Orphan"}}
+    gaz = Gazetteer(DISTRICTS, UNITS + [orphan])
+    d = gaz.resolve("अनाथ गाउँपालिका", "")
+    assert d.district is None
+    assert d.localunit is None
+
+
+def test_plain_string_alternateName_yields_one_form():
+    """A plain-string alternateName is treated as one form, not per-character."""
+    d = district("test", "9999", "परीक्षा", "Test", alt="Kathmandu Valley District")
+    gaz = Gazetteer([d], [])
+    # Should find the form as a whole, not individual letters
+    assert gaz.district_for("Kathmandu Valley District") == d["@id"]
+
+
+def test_dict_alternateName_with_string_values_are_treated_as_single_forms():
+    """A dict-valued alternateName with string values is treated as forms per value."""
+    d = district("test", "9999", "परीक्षा", "Test", alt={"en": "X District"})
+    gaz = Gazetteer([d], [])
+    # Should find the form as a whole, not per-character
+    assert gaz.district_for("X District") == d["@id"]

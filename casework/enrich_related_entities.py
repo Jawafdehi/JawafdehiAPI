@@ -1322,7 +1322,7 @@ def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, us
     ungrounded = [r for r in loc_rejected if r["stage"] == GROUNDING]
     rejected.extend(ungrounded)
     review = [r for r in loc_rejected if r["stage"] == RESOLUTION]
-    refused = {(r["place"], r["district"], r["evidence"]) for r in ungrounded}
+    refused = {(r.get("place") or "", r.get("district") or "", r.get("evidence") or "") for r in ungrounded}
     grounded = [a for a in answer.locations if isinstance(a, dict) and (
         a.get("place_as_written") or "", a.get("district") or "", a.get("evidence") or "")
         not in refused]

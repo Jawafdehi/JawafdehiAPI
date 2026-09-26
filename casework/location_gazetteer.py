@@ -89,9 +89,17 @@ def _alt_names(alt) -> set[str]:
     """`alternateName` as a flat set of strings, whether it is a list or a `{lang: [..]}` dict."""
     if not alt:
         return set()
+    if isinstance(alt, str):
+        return {alt}
     if isinstance(alt, dict):
-        return {v for vals in alt.values() for v in vals}
-    return set(alt)
+        result: set[str] = set()
+        for vals in alt.values():
+            if isinstance(vals, str):
+                result.add(vals)
+            elif isinstance(vals, list):
+                result.update(v for v in vals if isinstance(v, str))
+        return result
+    return set(alt) if alt else set()
 
 
 def _district_stem(iri: str) -> str:
@@ -174,7 +182,7 @@ class Gazetteer:
         claim_iri = self.district_for(district_claim)
         named = self.districts_in(place)
         units = self.localunits_in(place)
-        parents = {p for _, p in units}
+        parents = {p for _, p in units if p is not None}
         if claim_iri is None:
             pool = (named & parents) or parents or named
             if len(pool) != 1:
