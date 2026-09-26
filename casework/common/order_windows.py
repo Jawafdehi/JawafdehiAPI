@@ -9,6 +9,7 @@ WINDOW_OVERLAP = 1_500
 MAX_ENTITY_WINDOWS = 4
 VERDICT_CHUNK_CHARS = 18_000
 MAX_VERDICT_BACK_CHUNKS = 4
+MAX_VERDICT_FORWARD_CHUNKS = 4
 CAPTION_SEARCH_CHARS = 8_000
 CAPTION_FALLBACK_CHARS = 2_000
 PARAGRAPH_SLACK = 2_000
@@ -70,12 +71,20 @@ def _holding_lead_start(text: str, verb_pos: int) -> int:
     return max(start, min(caption_end(text), verb_pos))
 
 
-def holding_start(text: str) -> tuple[int, str]:
-    """Where the court's holding starts: last `तसर्थ`, else a lead before the last holding verb, else the tail."""
+def _forward_reach(size: int, chunks: int) -> int:
+    return chunks * (size - WINDOW_OVERLAP) + WINDOW_OVERLAP
+
+
+def holding_start(text: str, reach: int = _forward_reach(VERDICT_CHUNK_CHARS, MAX_VERDICT_FORWARD_CHUNKS)
+                  ) -> tuple[int, str]:
+    """Where the court's holding starts: last `तसर्थ`, else a lead before the last holding verb, else the tail.
+
+    A `तसर्थ` with a holding verb beyond `reach` after it is not the holding (the court held with `अतः`).
+    """
     i = text.rfind(_TASARTHA)
-    if i != -1:
-        return i, "तसर्थ"
     verbs = [m.start() for m in _HOLDING_VERB.finditer(text)]
+    if i != -1 and not (verbs and verbs[-1] >= i + reach):
+        return i, "तसर्थ"
     if verbs:
         return _holding_lead_start(text, verbs[-1]), "holding-verb"
     return max(0, len(text) - VERDICT_CHUNK_CHARS), "tail"
@@ -99,13 +108,15 @@ def _backward(text: str, lo: int, hi: int, size: int) -> list[Window]:
 
 
 def end_windows(text: str, size: int = VERDICT_CHUNK_CHARS,
-                max_back: int = MAX_VERDICT_BACK_CHUNKS) -> list[Window]:
-    """Holding-to-end chunks, then up to `max_back` chunks before it, latest first."""
-    hold, _ = holding_start(text)
+                max_back: int = MAX_VERDICT_BACK_CHUNKS,
+                max_forward: int = MAX_VERDICT_FORWARD_CHUNKS) -> list[Window]:
+    """Up to `max_forward` chunks from the holding on, then up to `max_back` before it, latest first."""
+    reach = _forward_reach(size, max_forward)
+    hold, _ = holding_start(text, reach)
     analysis = analysis_start(text)
     floor = analysis if analysis is not None and analysis < hold else 0
     back_floor = max(floor, hold - max_back * (size - WINDOW_OVERLAP))
-    out = _backward(text, hold, len(text), size)
+    out = _backward(text, hold, min(len(text), hold + reach), size)
     if max_back and back_floor < hold:
         out += _backward(text, back_floor, hold + WINDOW_OVERLAP, size)[:max_back]
     return out

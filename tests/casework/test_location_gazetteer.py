@@ -112,6 +112,48 @@ def test_a_municipality_in_another_district_is_not_bound(gaz):
 
 def test_a_district_name_inside_a_longer_word_is_not_a_match(gaz):
     assert gaz.districts_in("अबाँके") == set()
+    assert gaz.districts_in("बाँकेपुर") == set()
+    assert gaz.districts_in("दाङवाङ") == set()
+
+
+def test_a_district_name_with_a_joined_case_ending_still_matches(gaz):
+    for text in ("बाँकेमा", "बाँकेस्थित", "जिल्ला दाङको", "काठमाडौं।", "।काठमाडौं", "काठमाडौंैं"):
+        assert gaz.districts_in(text), text
+
+
+def test_varanasi_is_not_bara_on_the_real_snapshot(real_gaz):
+    assert real_gaz.districts_in("बाराणसी") == set()
+    assert real_gaz.districts_in("बारास्थित") == {f"{KV}bara-np0233"}
+
+
+def test_a_named_district_that_does_not_hold_the_municipality_is_not_overridden(gaz):
+    d = gaz.resolve("दाङ जिल्ला, खजुरा गाउँपालिका", "")
+    assert d.district is None and "does not contain" in d.reason
+
+
+def test_a_claim_cannot_side_with_the_municipality_against_the_named_district(gaz):
+    d = gaz.resolve("दाङ जिल्ला, खजुरा गाउँपालिका", "बाँके")
+    assert d.district is None and "does not contain" in d.reason
+
+
+def test_a_claim_alone_cannot_pick_between_same_named_municipalities(gaz):
+    d = gaz.resolve("गोदावरी नगरपालिका", "ललितपुर", "रकम गोदावरी नगरपालिका मा बरामद")
+    assert d.district is None and "not in the quote" in d.reason
+
+
+def test_a_quote_that_names_the_district_lets_the_claim_pick_the_municipality(gaz):
+    d = gaz.resolve("गोदावरी नगरपालिका", "ललितपुर", "ललितपुर जिल्ला गोदावरी नगरपालिका मा बरामद")
+    assert (d.district, d.localunit) == (LALIT, f"{E}location/localunit/godawari-lalitpur-30803")
+
+
+def test_an_ungrounded_claim_goes_to_review(gaz):
+    text = "रकम गोदावरी नगरपालिका मा बरामद भएको थियो ।"
+    answers = [{"place_as_written": "गोदावरी नगरपालिका", "district": "ललितपुर",
+                "evidence": "रकम गोदावरी नगरपालिका मा बरामद भएको थियो", "notes": ""}]
+    binds, rejected = resolve_locations(_StubSearchApi([]), gaz, answers, text, 0)
+    assert binds == []
+    assert [(r["stage"], r["reason"]) for r in rejected] == [
+        ("resolution", "the district that picks the municipality is not in the quote")]
 
 
 def test_twin_redirect(gaz):
@@ -396,12 +438,14 @@ def test_twins_that_agree_on_one_district_still_bind(gaz):
 
 
 KV = f"{E}location/district/"
+LU = f"{E}location/localunit/"
 
 
 @pytest.mark.parametrize("place,district,localunit", [
     ("का.जि. वडा नं. ४", f"{KV}kathmandu-np0327", None),
-    ("का.म.न.पा. वडा नं. ४", f"{KV}kathmandu-np0327", None),
-    ("ल.पु.उ.म.न.पा. वडा नं. ४", f"{KV}lalitpur-np0325", None),
+    ("का.म.न.पा. वडा नं. ४", f"{KV}kathmandu-np0327", f"{LU}kathmandu-metropolitian-city-30608"),
+    ("ल.पु.उ.म.न.पा. वडा नं. ४", f"{KV}lalitpur-np0325", f"{LU}lalitpur-metropolitian-city-30802"),
+    ("ललितपुर उपमहानगरपालिका वडा नं. ४", f"{KV}lalitpur-np0325", f"{LU}lalitpur-metropolitian-city-30802"),
 ])
 def test_kathmandu_valley_abbreviations_resolve_on_the_real_snapshot(real_gaz, place, district, localunit):
     d = real_gaz.resolve(place, "")
@@ -410,7 +454,7 @@ def test_kathmandu_valley_abbreviations_resolve_on_the_real_snapshot(real_gaz, p
 
 def test_valley_abbreviations_expand_before_their_shorter_suffixes():
     assert place_key("का.म.न.पा.") == "काठमाडौं महानगरपालिका"
-    assert place_key("ल.पु.उ.म.न.पा.") == "ललितपुर उपमहानगरपालिका"
+    assert place_key("ल.पु.उ.म.न.पा.") == "ललितपुर महानगरपालिका"
     assert place_key("का.जि. वडा") == "काठमाडौं जिल्ला वडा"
 
 

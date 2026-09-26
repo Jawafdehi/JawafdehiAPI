@@ -7,6 +7,16 @@ from casework.common.grounding import location_quote_problem, normalise_for_matc
 
 #: Devanagari block, used to require a form match starts at a word boundary.
 _DEVANAGARI = "ऀ-ॿ"
+#: Devanagari letters and signs, i.e. the block minus danda, digits and the abbreviation sign.
+_WORD = "ऀ-ॣॱ-ॿ"
+#: Signs a mis-decoded transcript leaves after a form (`काठमाडौंैं`); a sign never starts a new word.
+_SIGNS = "ऀ-ःऺ-ौॎ-ॏॕ-ॗॢॣ"
+#: Case endings written joined to a place name (`काठमाडौंमा`, `बाँकेस्थित`).
+_SUFFIXES = ("अन्तर्गत", "द्वारा", "स्थित", "भित्र", "सम्म", "तर्फ", "बाट", "वाट", "लाई", "संग",
+             "मा", "का", "को", "की", "ले", "कै")
+_MATCH_END = rf"(?=[{_SIGNS}]|(?:{'|'.join(_SUFFIXES)})?(?![{_WORD}]))"
+#: काठमाडौं as NES and the orders spell it: काठमाण्डौ, काठमान्डौ, काठमाडौ, काठमाण्डाै.
+_KATHMANDU = re.compile(r"काठमा(?:ण्ड|न्ड|ड)(?:ौ|ाै)ं?")
 
 #: Abbreviation expansions, longest key first so a shorter one never fires inside a longer one.
 _ABBREVIATIONS = (
@@ -39,7 +49,7 @@ DISTRICT_VARIANTS = {
     "solukhumbu": ("सोलुखुम्बू",),
     "dadeldhura": ("डडेलधुरा",),
     "siraha": ("सिराहा",),
-    "dang": ("दाङ्ग",),
+    "dang": ("दाङ्ग", "दाङदेउखुरी"),
     "nawalparasi-east": ("नवलपुर", "नवलपरासी पूर्व"),
     "nawalparasi-west": ("परासी", "नवलपरासी पश्चिम"),
     "rukum-east": ("रुकुम (पूर्व)", "रुकुम पूर्व", "पूर्वी रुकुम"),
@@ -74,6 +84,9 @@ def place_key(text: str) -> str:
     t = normalise_for_match(text).lower()
     for abbr, full in _ABBREVIATIONS:
         t = t.replace(abbr, full)
+    t = _KATHMANDU.sub("काठमाडौं", t)
+    # Lalitpur became a metropolitan city in 2017; older orders still say उपमहानगरपालिका.
+    t = t.replace("ललितपुर उपमहानगरपालिका", "ललितपुर महानगरपालिका")
     t = t.replace("गांउ", "गाउं")
     t = re.sub(r"^जिल्ला ", "", t)
     t = re.sub(r"( जिल्ला| district| जि\.)$", "", t)
@@ -81,8 +94,8 @@ def place_key(text: str) -> str:
 
 
 def _matches(key: str, text: str) -> bool:
-    """Whether `key` occurs in `text` at a position not preceded by a Devanagari letter."""
-    return bool(key) and re.search(rf"(?<![{_DEVANAGARI}])" + re.escape(key), text) is not None
+    """Whether `key` occurs in `text` as a whole word, allowing a joined case ending (`बाँकेमा`, not `बाँकेपुर`)."""
+    return bool(key) and re.search(rf"(?<![{_WORD}])" + re.escape(key) + _MATCH_END, text) is not None
 
 
 def _alt_names(alt) -> set[str]:
@@ -178,18 +191,25 @@ class Gazetteer:
         units = self._unit_forms.get(place_key(name), [])
         return units[0][0] if len(units) == 1 else None
 
-    def resolve(self, place: str, district_claim: str) -> PlaceDecision:
+    def resolve(self, place: str, district_claim: str, evidence: str = "") -> PlaceDecision:
+        """Only the place and the quote ground a district: the claim may pick among them, never add one."""
         claim_iri = self.district_for(district_claim)
         named = self.districts_in(place)
         units = self.localunits_in(place)
         parents = {p for _, p in units if p is not None}
         if claim_iri is None:
+            if named and parents and not named & parents:
+                return PlaceDecision(None, None, "the named district does not contain the named municipality")
             pool = (named & parents) or parents or named
             if len(pool) != 1:
                 return PlaceDecision(None, None, "no single district in the place as written")
             claim_iri = next(iter(pool))
-        if claim_iri not in named | parents:
+        elif claim_iri not in named | parents:
             return PlaceDecision(None, None, "the place as written does not name the claimed district")
+        elif named and claim_iri not in named:
+            return PlaceDecision(None, None, "the named district does not contain the named municipality")
+        elif claim_iri not in named and len(parents) > 1 and claim_iri not in self.districts_in(evidence):
+            return PlaceDecision(None, None, "the district that picks the municipality is not in the quote")
         matching = [u for u, p in units if p == claim_iri]
         if len(matching) == 1:
             return PlaceDecision(claim_iri, matching[0], "")
@@ -306,7 +326,7 @@ def resolve_locations(
             reject(problem, GROUNDING)
             continue
 
-        decision = gaz.resolve(place, district_claim)
+        decision = gaz.resolve(place, district_claim, evidence)
         if decision.district:
             emit(decision.district, notes, place, evidence, "gazetteer")
             if decision.localunit:

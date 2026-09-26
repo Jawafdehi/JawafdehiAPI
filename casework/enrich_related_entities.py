@@ -2914,7 +2914,7 @@ def main(argv=None):
         help="Most 30k start windows read per court order for entities and a district.")
     ap.add_argument(
         "--max-verdict-chunks", type=int, default=MAX_VERDICT_BACK_CHUNKS,
-        help="Most 18k chunks read back from the holding for verdicts.")
+        help="Most 18k chunks read back from the holding for verdicts (at most 4 more are read from it forward).")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)

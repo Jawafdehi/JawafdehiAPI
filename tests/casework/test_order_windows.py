@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from casework.common.order_windows import (
-    ENTITY_WINDOW_CHARS, HOLDING_VERB_LEAD, WINDOW_OVERLAP, Window, analysis_start,
+    ENTITY_WINDOW_CHARS, HOLDING_VERB_LEAD, MAX_VERDICT_FORWARD_CHUNKS, WINDOW_OVERLAP, Window,
+    analysis_start,
     caption_end, end_windows, holding_start, start_windows,
 )
 
@@ -123,6 +124,28 @@ def test_end_windows_never_read_back_past_the_analysis_start():
     floor = analysis_start(text)
     assert floor is not None
     assert all(w.start >= floor for w in end_windows(text))
+
+
+def test_an_early_tasartha_loses_to_a_holding_verb_near_the_end():
+    # 073-CR-0118 shape: the court holds with अतः; the last तसर्थ is in the prosecution summary.
+    text = "क" * 20_000 + "तसर्थ" + "ख" * 80_000 + "\n\nअतः कसूर गरेको ठहर्छ ।" + "ग" * 1_500
+    pos, anchor = holding_start(text)
+    assert anchor == "holding-verb" and pos > text.index("तसर्थ") + 60_000
+
+
+def test_a_tasartha_with_its_holding_verb_nearby_is_kept():
+    text = "क" * 20_000 + "तसर्थ कसूर ठहर्छ ।" + "ख" * 80_000
+    assert holding_start(text) == (20_000, "तसर्थ")
+
+
+def test_forward_windows_are_capped_from_the_holding_not_the_end():
+    # Lalita Niwas shape: a long bibliography after the holding is never read.
+    text = "क" * 10_000 + "तसर्थ" + "ख" * 300_000
+    hold, _ = holding_start(text)
+    forward = [w for w in end_windows(text, max_back=0) if w.end > hold]
+    assert len(forward) == MAX_VERDICT_FORWARD_CHUNKS
+    assert min(w.start for w in forward) == hold
+    assert max(w.end for w in forward) < len(text)
 
 
 def test_end_windows_read_back_at_most_max_back_chunks():
