@@ -44,7 +44,7 @@ class ProxyProvider(Provider):
             _proxy = OpenAI(**kwargs)
         return _proxy
 
-    def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None):
+    def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None, effort=None):
         """Invoke llm-proxy via OpenAI chat-completions API.
 
         Translates Anthropic-shaped content (string or text blocks) into OpenAI

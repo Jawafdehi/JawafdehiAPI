@@ -21,7 +21,7 @@ class Provider:
     supports_tools: bool = False
 
     def invoke_text(
-        self, system, content, max_tokens, model_id, tier, usage=None
+        self, system, content, max_tokens, model_id, tier, usage=None, effort=None
     ) -> str:
         """Invoke the LLM and return raw text response.
 
@@ -32,6 +32,7 @@ class Provider:
             model_id: Model identifier
             tier: "premium" or "cheap"
             usage: Optional UsageAccumulator to record token counts
+            effort: Per-call reasoning budget; a provider without one ignores it
 
         Returns:
             Raw text response (code fences stripped)

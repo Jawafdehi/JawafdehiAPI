@@ -106,10 +106,9 @@ class TestDonorFidelity:
         # sonnet. 2000 stopped being a budget and became a failure, once the
         # extraction asked for five sections of Devanagari names and notes instead
         # of two. Pinned here, in the class that exists to catch silent drift, so
-        # the divergence stays a decision with a reason attached. 8000 in turn was
-        # too small for a 30k window: the CLI split the answer across two turns and
-        # returned only the tail (077-CR-0001, 2026-09-27).
-        assert ere.EXTRACTION_MAX_TOKENS == 32_000
+        # the divergence stays a decision with a reason attached. 8000 holds a 30k
+        # window only at EXTRACTION_EFFORT with the trimmed output (077-CR-0001).
+        assert ere.EXTRACTION_MAX_TOKENS == 8000
         assert ere.EXTRACTION_MAX_TOKENS > donor_kwargs["max_tokens"]
         # And that this port's tier_for("entities") resolves to the same
         # value (casework/common/llm.py's own pin, cross-checked here).
@@ -2994,10 +2993,14 @@ def test_the_prefix_section_is_empty_without_prefixes():
     assert ere.prefix_prompt_section(None) == ""
 
 
-def test_the_system_prompt_asks_for_the_two_new_fields():
-    for prompt in (ere.COURT_ORDER_SYSTEM_PROMPT, ere.PRESS_RELEASE_SYSTEM_PROMPT):
-        assert "entity_prefix" in prompt
-        assert "entity_type" in prompt
+def test_the_create_fields_are_asked_for_only_with_the_create_section():
+    # Four fields only `--create-entities` reads: asking for them on every call
+    # was a quarter of a window's output.
+    section = ere.prefix_prompt_section(["person", "organization"])
+    for field in ("entity_prefix", "entity_type", "is_named_entity", "name_en"):
+        assert field in section
+        for prompt in (ere.COURT_ORDER_SYSTEM_PROMPT, ere.PRESS_RELEASE_SYSTEM_PROMPT):
+            assert field not in prompt
 
 
 def test_the_category_list_is_absent_from_the_prompt_without_the_flag(
@@ -3317,12 +3320,6 @@ def test_the_payload_omits_the_english_name_rather_than_sending_it_blank(
 # --------------------------------------------------------------------------
 # The prompt itself.
 # --------------------------------------------------------------------------
-
-
-def test_the_prompt_asks_for_both_new_fields():
-    for prompt in (ere.COURT_ORDER_SYSTEM_PROMPT, ere.PRESS_RELEASE_SYSTEM_PROMPT):
-        assert "is_named_entity" in prompt
-        assert "name_en" in prompt
 
 
 def test_the_prompt_rules_out_media_that_only_reported_the_case():
@@ -6124,11 +6121,36 @@ def _retired_system_prompt() -> str:
     raise AssertionError(f"no SYSTEM_PROMPT at {RETIRED_PROMPT_COMMIT}")
 
 
+#: The two passages of the retired PART 2 the procedural-witness rule replaced.
+RETIRED_WITNESS_RULES = (
+    """  Only extract named CIAA investigation officers if they are specifically named
+  and their investigation is directly relevant.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+""",
+    """  "witness" — a named inquiry officer or witness.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+""",
+)
+
+
 class TestCourtOrderSystemPrompt:
     """`COURT_ORDER_SYSTEM_PROMPT`: PART 2/3 word for word, new PART 1 and output format."""
 
-    def test_keeps_part_2_and_part_3_verbatim_from_the_old_prompt(self):
-        assert RETIRED_PART_2_TO_3 in ere.COURT_ORDER_SYSTEM_PROMPT
+    def test_keeps_part_2_and_part_3_verbatim_but_for_the_witness_rules(self):
+        # 2026-09-27: procedural witnesses (raid team, police, lab, मुचुल्का
+        # signatories, CIAA investigators) are no longer extracted.
+        prompt = ere.COURT_ORDER_SYSTEM_PROMPT
+        rest = RETIRED_PART_2_TO_3
+        for old in RETIRED_WITNESS_RULES:
+            assert old in rest and old not in prompt
+            rest = rest.replace(old, "\0")
+        for segment in rest.split("\0"):
+            assert segment in prompt
+
+    def test_skips_procedural_witnesses(self):
+        prompt = ere.COURT_ORDER_SYSTEM_PROMPT
+        assert "SKIP people who only carried out the procedure" in prompt
+        assert "DO NOT extract CIAA investigation officers" in prompt
 
     def test_the_frozen_text_matches_the_retired_prompt_in_history(self):
         old = _retired_system_prompt()
@@ -6147,7 +6169,8 @@ class TestCourtOrderSystemPrompt:
         prompt = ere.COURT_ORDER_SYSTEM_PROMPT
         assert '"locations": [{"place_as_written"' in prompt
         assert '"accused_notes": [{"name"' in prompt
-        assert "Every entities and accused_notes item also carries evidence" in prompt
+        assert "SHORTEST phrase copied verbatim" in prompt
+        assert "A location's evidence is ONE sentence" in prompt
 
 
 class TestPressReleaseSystemPrompt:
@@ -7156,3 +7179,21 @@ class TestSecondReviewFixes:
 
         got, _errors = ere.accused_verdicts(["राम"], order, _window_stub(answer))
         assert got["राम"]["outcome"] == "convicted"
+
+
+def test_extraction_asks_for_low_effort_and_verdicts_keep_the_default(
+        monkeypatch, patched_fetch_markdown):
+    stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+    seen = []
+
+    def recording(**kw):
+        seen.append(kw)
+        return stub(**kw)
+
+    _run_main(monkeypatch, _SearchStubApi([_accused_case()]), invoke_text_stub=recording,
+              argv=["--dry-run", "--verdicts"])
+    extraction = [kw for kw in seen if kw["system"] != ere.VERDICT_SYSTEM_PROMPT]
+    verdicts = [kw for kw in seen if kw["system"] == ere.VERDICT_SYSTEM_PROMPT]
+    assert extraction and verdicts
+    assert all(kw["effort"] == "low" and kw["max_tokens"] == 8000 for kw in extraction)
+    assert all("effort" not in kw for kw in verdicts)

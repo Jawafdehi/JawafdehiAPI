@@ -100,3 +100,34 @@ def test_a_marker_as_its_own_word_still_rejects(quote, marker):
 def test_has_word_allows_a_joined_case_ending_but_not_a_longer_word():
     assert has_word("बाँके", "बाँकेमा") and has_word("बाँके", "जिल्ला बाँके।")
     assert not has_word("बाँके", "बाँकेपुर") and not has_word("बाँके", "अबाँके")
+
+
+#: 077-CR-0004's shape: the event place first, other people's addresses 200 chars on.
+FAR_ADDRESS = ("दाङ जिल्ला, घोराही उप-महानगरपालिका वडा नं. १४ मा रहेको वडा प्रहरी कार्यालय घोराहीको "
+               "कार्यालय प्रमुख प्रहरी निरीक्षक दिनेश रिमाललाई निजको कार्यकक्षभित्र आई मिति "
+               "२०७७।०३।२७ गते १७:०० बजेको समयमा जिल्ला दाङ घोराही उप-महानगरपालिका वडा नं. "
+               "१८ बस्ने गोविन्द शाहले घुस दिएको अवस्थामा नियन्त्रणमा लिइयो")
+
+
+def test_an_address_far_from_the_place_does_not_reject_it():
+    place = "दाङ जिल्ला, घोराही उप-महानगरपालिका वडा नं. १४"
+    assert location_quote_problem(FAR_ADDRESS, place, FAR_ADDRESS) == ""
+
+
+def test_an_address_right_after_the_place_still_rejects_it():
+    quote = "जिल्ला कालिकोट, पचालझरना गाउँपालिका वडा नं. ५ बस्ने वर्ष ४५ को प्रतिवादी"
+    assert "'बस्ने'" in location_quote_problem(quote, "जिल्ला कालिकोट", quote)
+
+
+def test_a_home_address_lead_in_rejects_the_place():
+    quote = "जिल्ला गोरखा, आरुघाट गाउँपालिका वडा नं.९ आरुघाट बजार घर भई खोटाङमा कार्यरत"
+    assert "'घर भई'" in location_quote_problem(quote, "जिल्ला गोरखा", quote)
+
+
+def test_a_place_differing_from_its_quote_only_by_punctuation_is_in_it():
+    quote = "खानतलासी मुचुल्का:-जिल्ला खोटाङ, दिक्तेल रुपाकोट मझुवागढी नगरपालिका वडा नं.१ स्थितमा रहेको निवास"
+    assert location_quote_problem(quote, "जिल्ला खोटाङ दिक्तेल रुपाकोट मझुवागढी नगरपालिका", quote) == ""
+
+
+def test_a_district_joined_to_jilla_is_its_word():
+    assert has_word("दाङ", "दाङजिल्ला, घोराही")

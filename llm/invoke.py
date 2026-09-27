@@ -5,7 +5,7 @@ import json
 from llm import routing
 
 
-def invoke_text(system, content, max_tokens, tier="premium", usage=None) -> str:
+def invoke_text(system, content, max_tokens, tier="premium", usage=None, effort=None) -> str:
     """Invoke the LLM and return raw text response.
 
     Routes through the active provider for the given tier.
@@ -16,13 +16,17 @@ def invoke_text(system, content, max_tokens, tier="premium", usage=None) -> str:
         max_tokens: Max tokens in response
         tier: "premium" or "cheap" (default "premium")
         usage: Optional UsageAccumulator to record token counts
+        effort: Reasoning budget for this one call (low/medium/high/xhigh/max),
+            over the provider's default. Only claude_cli uses it; others ignore it.
 
     Returns:
         Raw text response (code fences stripped)
     """
     provider = routing.provider_for_tier(tier)
     model = provider.model_for_tier(tier)
-    return provider.invoke_text(system, content, max_tokens, model, tier, usage)
+    if effort is None:
+        return provider.invoke_text(system, content, max_tokens, model, tier, usage)
+    return provider.invoke_text(system, content, max_tokens, model, tier, usage, effort=effort)
 
 
 def invoke_with_tools(

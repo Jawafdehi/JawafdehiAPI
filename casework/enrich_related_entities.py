@@ -198,11 +198,14 @@ STAGE = STAGES["entities"]
 # actually reaches it: billing is on tokens produced, not on the ceiling. There is
 # no env knob because no other constant in `casework.common` has one.
 #
-# 32,000 since 2026-09-27: one 30k court-order window yields ~9,000 output tokens
-# (077-CR-0001: 17 entities, 2 locations). At 8,000 the CLI continued the answer
-# in a second turn and returned only that turn's tail, so 3 of the first 5 FY077
-# cases came back as "no entities" with the district quoted in plain sight.
-EXTRACTION_MAX_TOKENS = 32_000
+# The CLI counts reasoning against this cap too, and continues a reply that runs
+# past it in a second turn whose tail is all it returns (`MalformedReply`). On
+# 077-CR-0001 a 30k window took ~9,000 tokens at default effort, listing every raid
+# officer as a witness; skipping procedural witnesses, short quotes and
+# `EXTRACTION_EFFORT` brought it to ~3,000 with the same locations and entities.
+EXTRACTION_MAX_TOKENS = 8000
+#: Reasoning budget for the extraction call alone (`llm.invoke.invoke_text(effort=)`).
+EXTRACTION_EFFORT = "low"
 
 #: One call's user content: one start window (caption <= 8k + 30k) and its label.
 PROMPT_HARD_MAX = 40_000
@@ -250,9 +253,8 @@ Extract ALL of these categories that appear in the documents:
   entities — they are present in every case. DO NOT extract individual prosecutors,
   attorneys, judges, or court staff — they are performing standard professional
   duties, not materially connected to the case events.
-  Only extract named CIAA investigation officers if they are specifically named
-  and their investigation is directly relevant.
-  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+  DO NOT extract CIAA investigation officers either -- running the inquiry is their
+  standard duty, the same as a prosecutor's.
 
   MEDIA — DO NOT extract a newspaper, portal or broadcaster whose only role was
   REPORTING the case. It is a source, not a participant.
@@ -274,8 +276,12 @@ the role plain. Only these two; when in doubt use "related".
   "alleged" — named as implicated in the documents, but NOT on the charge sheet.
   Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा संलग्न भनी उल्लेख, अभियोग लगाइएको छैन"
 
-  "witness" — a named inquiry officer or witness.
-  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+  "witness" — a named person whose statement is about the case events themselves:
+  the complainant, a colleague or supplier who saw the transaction.
+  Example: "प्रभात राई"  notes: "उजुरीकर्ता, ठेकेदार कम्पनीका प्रतिनिधि"
+  SKIP people who only carried out the procedure: the raid, search or seizure team,
+  police who assisted, lab analysts, ward officials who signed a मुचुल्का as local
+  representatives, and CIAA investigation officers.
 
 PRIORITY ORDER: People and organizations DIRECTLY involved in the case events come first.
 Generic legal infrastructure (courts, attorney offices) should be skipped unless a
@@ -299,10 +305,11 @@ OUTPUT FORMAT
 Output ONLY this JSON object, no other text:
 {"locations": [{"place_as_written": "...", "district": "...", "evidence": "...", "notes": "..."}],
  "entities": [{"entity_name": "...", "relationship_type": "related|alleged|witness|victim",
-               "entity_prefix": "...", "entity_type": "...", "is_named_entity": true,
-               "name_en": "...", "evidence": "...", "notes": "..."}],
+               "evidence": "...", "notes": "..."}],
  "accused_notes": [{"name": "...", "notes": "job title, employer", "evidence": "..."}]}
-Every entities and accused_notes item also carries evidence: one sentence copied verbatim.
+A location's evidence is ONE sentence copied verbatim. An entities or accused_notes
+item's evidence is the SHORTEST phrase copied verbatim that names it, under 100
+characters. Keep every note under 80 characters.
 """
 
 # Task 6: the press-release fallback prompt, used only when a case has no
@@ -336,17 +343,17 @@ Extract FOUR things in a single response:
    relationship_type="related") -- a spouse, child or relative named so their property
    can be attached.
 
-Every entities and accused_notes item also carries evidence: one sentence copied verbatim.
-
 Do NOT extract witnesses -- a filing notice names none.
 Do NOT extract a verdict or outcome -- a filing notice is written before the case is decided.
 
 OUTPUT: only this JSON object, no other text --
 {"locations": [{"place_as_written": "...", "district": "...", "evidence": "...", "notes": "..."}],
  "entities": [{"entity_name": "...", "relationship_type": "related",
-               "entity_prefix": "...", "entity_type": "...", "is_named_entity": true,
-               "name_en": "...", "evidence": "...", "notes": "..."}],
+               "evidence": "...", "notes": "..."}],
  "accused_notes": [{"name": "...", "notes": "job title, employer", "evidence": "..."}]}
+A location's evidence is ONE sentence copied verbatim. An entities or accused_notes
+item's evidence is the SHORTEST phrase copied verbatim that names it, under 100
+characters. Keep every note under 80 characters.
 """
 
 #: Appended to the extraction system prompt when `--create-entities` is on, carrying
@@ -357,6 +364,12 @@ OUTPUT: only this JSON object, no other text --
 #: because it is `SELECT DISTINCT prefix` over live entities and grows. A
 #: hardcoded copy would silently refuse categories that exist.
 PREFIX_PROMPT_TEMPLATE = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FOUR MORE FIELDS ON EVERY entities ITEM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Add `entity_prefix`, `entity_type`, `is_named_entity` and `name_en` to every
+entities item, as described below.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ENTITY CATEGORY (entity_prefix)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1364,7 +1377,8 @@ def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, us
             f"{len(content):,} chars is over PROMPT_HARD_MAX ({PROMPT_HARD_MAX:,}); never truncated")
     response = invoke_text(
         system=system_prompt + system_suffix, content=content,
-        max_tokens=EXTRACTION_MAX_TOKENS, tier=tier_for("entities"), usage=usage)
+        max_tokens=EXTRACTION_MAX_TOKENS, tier=tier_for("entities"), usage=usage,
+        effort=EXTRACTION_EFFORT)
     answer = parse_window_response(response)
     entities, rejected = _grounded(answer.entities, window.text)
     accused_notes, notes_rejected = _grounded(answer.accused_notes, window.text)

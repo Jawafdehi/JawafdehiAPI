@@ -10,20 +10,26 @@ _STRIP = dict.fromkeys(map(ord, "​‌‍﻿*_"), None)
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 _LETTER = re.compile(r"[A-Za-zऀ-ॿ]")
 
-#: Quotes carrying any of these words are addresses, CIAA, or the court, never the event place.
+#: Any of these words beside the place makes it an address, CIAA, or the court, never the event place.
 LOCATION_REJECT_MARKERS = (
-    "स्थायी", "जन्मस्थान", "बस्ने", "वतन", "टंगाल", "टङ्गाल",
+    "स्थायी", "जन्मस्थान", "बस्ने", "वतन", "घर भई", "टंगाल", "टङ्गाल",
     "विशेष अदालत", "बिशेष अदालत", "सर्वोच्च अदालत", "आयोगको कार्यालय", "क्षेत्रीय कार्यालय",
 )
 #: Phrases that carry a marker word without being an address (a standing committee).
 LOCATION_MARKER_EXCEPTIONS = ("स्थायी समिति",)
+#: How far from the place a marker counts. A court "sentence" is often a whole paragraph,
+#: and one naming the event place can also give other people's addresses 200 chars on
+#: (077-CR-0004); an address phrase sits right against its place (`X वडा नं. ५ बस्ने`).
+MARKER_BEFORE_CHARS = 40
+MARKER_AFTER_CHARS = 120
+_PUNCTUATION = re.compile(r"[,;:।॥\-–—()\"'/]+")
 
 #: Devanagari letters and signs, i.e. the block minus danda, digits and the abbreviation sign.
 _WORD = "ऀ-ॣॱ-ॿ"
 #: Signs a mis-decoded transcript leaves after a word (`काठमाडौंैं`); a sign never starts a new word.
 _SIGNS = "ऀ-ःऺ-ौॎ-ॏॕ-ॗॢॣ"
 #: Case endings written joined to a name (`काठमाडौंमा`, `बाँकेस्थित`, `रामलाई`).
-_SUFFIXES = ("अन्तर्गत", "द्वारा", "स्थित", "भित्र", "सम्म", "तर्फ", "बाट", "वाट", "लाई", "संग",
+_SUFFIXES = ("अन्तर्गत", "द्वारा", "जिल्ला", "स्थित", "भित्र", "सम्म", "तर्फ", "बाट", "वाट", "लाई", "संग",
              "मा", "का", "को", "की", "ले", "कै")
 _WORD_END = rf"(?=[{_SIGNS}]|(?:{'|'.join(_SUFFIXES)})?(?![{_WORD}]))"
 
@@ -55,15 +61,23 @@ def location_quote_problem(evidence: str, place: str, text: str, caption_end: in
         return "evidence not found in the source"
     if body.find(ev, len(normalise_for_match(text[:caption_end]))) == -1:
         return "evidence is only in the caption"
-    if normalise_for_match(place) not in ev:
+    loose_ev, loose_place = _loosen(ev), _loosen(place)
+    spans = [m.start() for m in re.finditer(re.escape(loose_place), loose_ev)] if loose_place else []
+    if not spans:
         return "the place is not in its own evidence"
-    screened = ev
-    for phrase in LOCATION_MARKER_EXCEPTIONS:
-        screened = screened.replace(phrase, " ")
-    for marker in LOCATION_REJECT_MARKERS:
-        if has_word(marker, screened):
-            return f"evidence carries {marker!r}: an address, CIAA or the court"
+    for at in spans:
+        near = loose_ev[max(0, at - MARKER_BEFORE_CHARS):at + len(loose_place) + MARKER_AFTER_CHARS]
+        for phrase in LOCATION_MARKER_EXCEPTIONS:
+            near = near.replace(phrase, " ")
+        for marker in LOCATION_REJECT_MARKERS:
+            if has_word(marker, near):
+                return f"evidence carries {marker!r} beside the place: an address, CIAA or the court"
     return ""
+
+
+def _loosen(text: str) -> str:
+    """`normalise_for_match` with punctuation dropped: `जिल्ला खोटाङ, दिक्तेल` is `जिल्ला खोटाङ दिक्तेल`."""
+    return re.sub(r"\s+", " ", _PUNCTUATION.sub(" ", normalise_for_match(text))).strip()
 
 
 def is_readable_devanagari(text: str) -> bool:
