@@ -1,6 +1,6 @@
 import pytest
 from casework.common.grounding import (
-    evidence_found, is_readable_devanagari, is_teaser, location_quote_problem,
+    evidence_found, has_word, is_readable_devanagari, is_teaser, location_quote_problem,
     normalise_for_match,
 )
 
@@ -75,3 +75,28 @@ def test_a_permanent_home_vatan_is_refused():
     ev = "निजहरुको वतन बाँके जिल्लाको खजुरा गाउँपालिका वडा नं. २ मा"
     text = f"मुद्दा: भ्रष्टाचार\n{ev} देखिन्छ ।\n"
     assert "वतन" in location_quote_problem(ev, "बाँके", text, 0)
+
+
+@pytest.mark.parametrize("quote", [
+    "बाँके जिल्लाको स्वतन्त्र उपभोक्ता समितिले खजुरामा ठेक्का लियो",
+    "प्रतिवादी हरि बस्नेतले बाँके जिल्ला खजुरामा रकम बुझे",
+    "बाँके जिल्ला खजुरामा अस्थायी शिविर राखी रकम बुझियो",
+    "संसदको स्थायी समितिले बाँके जिल्ला खजुराको ठेक्का छानबिन गर्‍यो",
+])
+def test_a_marker_inside_another_word_does_not_reject_the_quote(quote):
+    assert location_quote_problem(quote, "बाँके", quote) == ""
+
+
+@pytest.mark.parametrize("quote,marker", [
+    ("जिल्ला कालिकोट स्थायी घर भई बाँके जिल्ला खजुरामा", "स्थायी"),
+    ("हाल बाँके जिल्ला खजुरामा बस्ने प्रतिवादी", "बस्ने"),
+    ("बाँके जिल्ला खजुरा वतन भएका प्रतिवादी", "वतन"),
+    ("आयोगको कार्यालय, बाँकेमा उजुरी पर्‍यो", "आयोगको कार्यालय"),
+])
+def test_a_marker_as_its_own_word_still_rejects(quote, marker):
+    assert repr(marker) in location_quote_problem(quote, "बाँके", quote)
+
+
+def test_has_word_allows_a_joined_case_ending_but_not_a_longer_word():
+    assert has_word("बाँके", "बाँकेमा") and has_word("बाँके", "जिल्ला बाँके।")
+    assert not has_word("बाँके", "बाँकेपुर") and not has_word("बाँके", "अबाँके")

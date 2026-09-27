@@ -127,12 +127,12 @@ from casework.common.cli import (
     setup_logging,
 )
 from casework.common.grounding import (
-    evidence_found, is_readable_devanagari, is_teaser, normalise_for_match,
+    evidence_found, has_word, is_readable_devanagari, is_teaser, normalise_for_match,
 )
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import materials_of_type, source_chunks
 from casework.common.order_windows import (
-    MAX_ENTITY_WINDOWS, MAX_VERDICT_BACK_CHUNKS, Window, caption_end, end_windows, start_windows,
+    MAX_ENTITY_WINDOWS, MAX_VERDICT_BACK_CHUNKS, caption_end, end_windows, start_windows,
 )
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.common.parse import balanced_array, balanced_object, parse_extraction_response, strip_fence
@@ -783,23 +783,23 @@ def _verdict_end(outcome, reason, window="", role="", evidence=""):
             "reason": reason, "window": window}
 
 
-#: A `convicted` stands only when the defendant's name is this close to its evidence.
+#: A decided outcome stands only when the defendant's name is this close to its evidence.
 NAME_NEAR_EVIDENCE_CHARS = 1_500
 _DEVANAGARI_LETTER = re.compile(r"[ऀ-ॿ]")
 
 
 def name_near_evidence(name, evidence, window_text):
-    """Whether the Devanagari `name` is in `evidence` or within `NAME_NEAR_EVIDENCE_CHARS` of it."""
+    """Whether the Devanagari `name`, as whole words, is in `evidence` or within `NAME_NEAR_EVIDENCE_CHARS` of it."""
     key = normalise_for_match(name)
     if not _DEVANAGARI_LETTER.search(key):
         return False
     ev, body = normalise_for_match(evidence), normalise_for_match(window_text)
-    if key in ev:
+    if has_word(key, ev):
         return True
     at = body.find(ev)
     while at != -1:
         lo = max(0, at - NAME_NEAR_EVIDENCE_CHARS)
-        if key in body[lo:at + len(ev) + NAME_NEAR_EVIDENCE_CHARS]:
+        if has_word(key, body[lo:at + len(ev) + NAME_NEAR_EVIDENCE_CHARS]):
             return True
         at = body.find(ev, at + 1)
     return False
@@ -808,8 +808,10 @@ def name_near_evidence(name, evidence, window_text):
 def _window_ending(name, row, failure, window, errors, later_texts=()):
     """How one window ends `name`'s walk, or None when it answered `unknown`.
 
-    `later_texts` are the windows already read (later in the order): a back
-    window cannot convict a name they carry.
+    `later_texts` are the parts of the windows already read (later in the
+    order) that this window does not share: a back window cannot convict a
+    name they carry. Every decided outcome needs its Devanagari name in or near
+    its evidence, so an undecided name stays `charged` whichever way it went.
     """
     label = window.label()
     if failure or row is None:
@@ -831,11 +833,14 @@ def _window_ending(name, row, failure, window, errors, later_texts=()):
                                       for m in ACQUITTAL_MARKERS):
         errors.append(f"{label}: {name}: convicted vetoed, its evidence says सफाई")
         return _verdict_end("charged", "vetoed", label)
-    if outcome == "convicted" and not name_near_evidence(name, evidence, window.text):
-        errors.append(f"{label}: {name}: convicted refused, the name is not in or near its evidence")
-        return _verdict_end("charged", "name-not-in-evidence", label)
     key = normalise_for_match(name)
-    if outcome == "convicted" and any(key in normalise_for_match(t) for t in later_texts):
+    if not _DEVANAGARI_LETTER.search(key):
+        errors.append(f"{label}: {name}: {outcome} refused, a romanized name cannot be found in the order")
+        return _verdict_end("charged", "name-not-devanagari", label)
+    if not name_near_evidence(name, evidence, window.text):
+        errors.append(f"{label}: {name}: {outcome} refused, the name is not in or near its evidence")
+        return _verdict_end("charged", "name-not-in-evidence", label)
+    if outcome == "convicted" and any(has_word(key, normalise_for_match(t)) for t in later_texts):
         errors.append(f"{label}: {name}: convicted refused, the final orders name them "
                       f"but left them undecided")
         return _verdict_end("charged", "named-in-final-orders-undecided", label)
@@ -848,22 +853,24 @@ def accused_verdicts(names, order_text, invoke_text, usage=None,
     ended: dict = {}
     windows_read = dict.fromkeys(names, 0)
     errors: list = []
-    read_texts: list = []
+    read: list = []
     for window in end_windows(order_text, max_back=max_back):
         pending = [name for name in names if name not in ended]
         if not pending:
             break
         label = window.label()
+        # Only what this window does not share: a name in the overlap is not "left undecided".
+        later_texts = [order_text[max(w.start, window.end):w.end] for w in read]
         answered, failed, window_errors = _ask_window(
             pending, f"{label}\n\n{window.text}", invoke_text, usage)
         errors.extend(f"{label}: {error}" for error in window_errors)
         for name in pending:
             windows_read[name] += 1
             end = _window_ending(name, answered.get(name), failed.get(name), window, errors,
-                                 later_texts=read_texts)
+                                 later_texts=later_texts)
             if end is not None:
                 ended[name] = end
-        read_texts.append(window.text)
+        read.append(window)
     results = {}
     for name in names:
         end = ended.get(name) or _verdict_end("charged", "no-window-decided")
@@ -1135,11 +1142,16 @@ class Source:
     reason: str
 
 
+def _part_order(iri):
+    """Sort key for a material IRI that reads its numbers as numbers (`.2` before `.10`)."""
+    return [(0, int(p), "") if p.isdigit() else (1, 0, p) for p in re.split(r"(\d+)", iri or "")]
+
+
 def _joined_source_chunks(detail, types):
-    """`source_chunks` for `types`, sorted by material IRI (`.1` before `.2`) and joined:
+    """`source_chunks` for `types`, in part order (`.1`, `.2`, `.10`) and joined:
     `(joined_text, unmet_reasons)`."""
     chunks, unmet = source_chunks(detail, types=types)
-    text = "\n\n".join(text for _mtype, _iri, text in sorted(chunks, key=lambda c: c[1]))
+    text = "\n\n".join(text for _mtype, _iri, text in sorted(chunks, key=lambda c: _part_order(c[1])))
     return text, unmet
 
 
@@ -1149,25 +1161,37 @@ def _joined_source_chunks(detail, types):
 _FETCH_FAILED_MARKER = "MARKDOWN fetch failed"
 
 
-def pick_source(detail):
-    """Court order first; the press release only when no readable court order exists.
+def court_source(detail):
+    """`(source, refused)`: the court order alone, or a `None`-kind `Source` saying why not.
 
-    A court-order material that FAILED TO FETCH (a transport error, as opposed to
-    the case simply having no court-order material) refuses outright rather than
-    falling back -- a 503 must not silently swap in the press release under a
-    misleading reason, and a multi-part order must not be read with one part
-    silently missing. The press release is never fetched at all while a readable
-    court order is in hand -- `source_chunks` for `PRESS_TYPES` only runs on the
-    fallback path.
+    `refused` means no fallback: a part that FAILED TO FETCH, or an order with text
+    in some parts and none in others -- a multi-part order is never read with a
+    part silently missing.
     """
     court_text, court_unmet = _joined_source_chunks(detail, COURT_TYPES)
     fetch_failures = [reason for reason in court_unmet if _FETCH_FAILED_MARKER in reason]
     if fetch_failures:
-        return Source(None, "", "; ".join(fetch_failures))
+        return Source(None, "", "; ".join(fetch_failures)), True
+    if court_text and court_unmet:
+        return Source(None, "", "the court order has parts with no text: " + "; ".join(court_unmet)), True
     if court_text and is_readable_devanagari(court_text):
-        return Source("court_order", court_text, "")
-    why = ("the case has no court order material with extracted text" if not court_text
-           else "the court order text is not readable Devanagari (likely Preeti-encoded)")
+        return Source("court_order", court_text, ""), False
+    return Source(None, "", "the case has no court order material with extracted text" if not court_text
+                  else "the court order text is not readable Devanagari (likely Preeti-encoded)"), False
+
+
+def pick_source(detail):
+    """Court order first; the press release only when no readable court order exists.
+
+    A refused court order (`court_source`) never falls back: a 503 or a missing
+    part must not silently swap in the press release under a misleading reason.
+    The press release is never fetched at all while a readable court order is in
+    hand -- `source_chunks` for `PRESS_TYPES` only runs on the fallback path.
+    """
+    court, refused = court_source(detail)
+    if court.kind or refused:
+        return court
+    why = court.reason
     press_text, _press_unmet = _joined_source_chunks(detail, PRESS_TYPES)
     if press_text and not is_teaser(press_text):
         return Source("press_release", press_text, why)
@@ -1248,7 +1272,8 @@ def _extraction_list(obj, parsed_ok, key, text):
 def parse_window_response(text):
     """Parse one window's JSON reply; an `entities` item typed `location` moves into `locations`."""
     obj, parsed_ok = _parsed_extraction_object(text)
-    locations = _extraction_list(obj, parsed_ok, "locations", text)
+    locations = [item for item in _extraction_list(obj, parsed_ok, "locations", text)
+                 if isinstance(item, dict)]
     entities_raw = _extraction_list(obj, parsed_ok, "entities", text)
     accused_notes = _extraction_list(obj, parsed_ok, "accused_notes", text)
     entities = []
@@ -1394,11 +1419,12 @@ def merge_window_entities(items):
 
 def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffix="",
                         max_windows=MAX_ENTITY_WINDOWS):
-    """Read `source`: the court order in growing start-windows, the press release in one call.
+    """Read `source` in growing start-windows, the court order and the press release alike.
 
-    The court-order loop stops once a district has bound (or `case` already
+    The loop stops once a district has bound (or `case` already
     holds one) and every reachable accused bind on `case` has a note
-    (`accused_missing_notes`), or at `max_windows`. A `LocationBind` already seen (by `nes_id`) in an
+    (`accused_missing_notes`), or at `max_windows`. A press release has no
+    caption, so its whole text counts for location grounding. A `LocationBind` already seen (by `nes_id`) in an
     earlier window is not repeated; entities are merged across every window
     read (`merge_window_entities`), and accused notes accumulate -- except a
     note whose bind an earlier window already filled (`_new_accused_notes`).
@@ -1407,26 +1433,17 @@ def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffi
     if source.kind is None:
         return Extraction([], [], [], [], [])
 
-    if source.kind == "press_release":
-        window = Window(0, len(source.text), len(source.text), source.text)
-        entities, accused_notes, binds, rejected, grounded, review = _read_window(
-            api, gaz, source.text, 0, window, PRESS_RELEASE_SYSTEM_PROMPT,
-            invoke_text, usage, system_suffix, label=_press_release_label(window))
-        answers, reviews = [], []
-        _distinct(grounded, _answer_key, answers)
-        _distinct(review, _review_key, reviews)
-        return Extraction(merge_window_entities(entities), accused_notes, binds, rejected,
-                          [(window.start, window.end)], answers, reviews)
-
+    press = source.kind == "press_release"
+    prompt = PRESS_RELEASE_SYSTEM_PROMPT if press else COURT_ORDER_SYSTEM_PROMPT
     text = source.text
-    cap_end = caption_end(text)
+    cap_end = 0 if press else caption_end(text)
     entities, accused_notes, location_binds, rejected, windows = [], [], [], [], []
     seen_nes_ids, answers, reviews = set(), [], []
     had_district = has_district_bind(case.get("entities") or [])
     for window in start_windows(text, limit=max_windows):
         w_entities, w_notes, w_binds, w_rejected, w_grounded, w_review = _read_window(
-            api, gaz, text, cap_end, window, COURT_ORDER_SYSTEM_PROMPT,
-            invoke_text, usage, system_suffix)
+            api, gaz, text, cap_end, window, prompt, invoke_text, usage, system_suffix,
+            label=_press_release_label(window) if press else None)
         entities.extend(w_entities)
         _distinct(w_grounded, _answer_key, answers)
         _distinct(w_review, _review_key, reviews)
@@ -3010,9 +3027,17 @@ def main(argv=None):
     run_entities = {}
     # Fetched on first use, not at startup -- see the call site.
     live_prefixes = None
-    # Loaded once, on the first case that reaches extraction. A failure stops the
-    # run: there is no fallback that binds a location without it.
+    # Loaded once, before the first case, so a failure stops the run before any
+    # write (a verdict-only case can PATCH before extraction ever runs): there is
+    # no fallback that binds a location without it.
     gazetteer = None
+    if cases:
+        try:
+            gazetteer = load_gazetteer(api)
+        except Exception as exc:  # noqa: BLE001 - logged, then re-raised: it stops the run
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug="",
+                      step="gazetteer", status="error", detail=str(exc), level=logging.ERROR)
+            raise
 
     def record_decidedness(slug, binds):
         """Count one case's verdict coverage. Called at exactly one exit per case."""
@@ -3034,19 +3059,9 @@ def main(argv=None):
         can keep the old reporting exactly.
         """
         nonlocal total_entities_extracted, total_accused_notes_extracted, live_prefixes
-        nonlocal gazetteer
 
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="prompt", status="ok", detail=f"{len(source.text)} chars")
-
-        if gazetteer is None:
-            try:
-                gazetteer = load_gazetteer(api)
-            except Exception as exc:  # noqa: BLE001 - logged, then re-raised: it stops the run
-                log_event(logger, paths["events"], run_id=run_id, stage="entities",
-                          slug=slug, step="gazetteer", status="error", detail=str(exc),
-                          level=logging.ERROR)
-                raise
 
         # The category list rides on the system prompt only when we might create
         # something. Fetched once per run, here as well as at the create step,
@@ -3186,7 +3201,7 @@ def main(argv=None):
             # refuses pays for no document fetch at all.
             court_text = None
             if not verdict_case_refusal(detail):
-                court_text = verdict_text(pick_source(detail))
+                court_text = verdict_text(court_source(detail)[0])
             valid_items, produced, case_accused_notes, location_binds, location_review = (
                 [], False, [], [], [])
         else:

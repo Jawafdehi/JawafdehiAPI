@@ -39,7 +39,7 @@ import pytest
 from casework import enrich_related_entities as ere
 from casework.common.api import CandidateList, ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
 from casework.common.api import EntityAlreadyExists
-from casework.common.order_windows import MAX_ENTITY_WINDOWS, end_windows, start_windows
+from casework.common.order_windows import MAX_ENTITY_WINDOWS, Window, end_windows, start_windows
 from casework.enrich_related_entities import (
     PROMOTED_PREFIX,
     Extraction,
@@ -4194,16 +4194,58 @@ class TestAConvictionMustNameItsDefendant:
 
         got, _errors = ere.accused_verdicts(["Ram Bahadur"], order, _window_stub(answer))
         assert got["Ram Bahadur"]["outcome"] == "charged"
-        assert got["Ram Bahadur"]["reason"] == "name-not-in-evidence"
+        assert got["Ram Bahadur"]["reason"] == "name-not-devanagari"
 
-    def test_an_acquittal_needs_no_name(self):
+    def test_an_acquittal_needs_its_name_too(self):
         order = "तसर्थ " + FINAL_ACQUITTAL + "।"
 
         def answer(name, content):
             return {"outcome": "acquitted", "role": "", "evidence": FINAL_ACQUITTAL}
 
+        got, errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        assert (got[RAM]["outcome"], got[RAM]["reason"]) == ("charged", "name-not-in-evidence")
+        assert any("acquitted refused" in e for e in errors)
+
+    def test_an_acquittal_that_names_its_defendant_stands(self):
+        held = f"प्रतिवादी {RAM}ले आरोपित कसुरबाट सफाई पाउने ठहर्छ"
+        order = "तसर्थ " + held + "।"
+
+        def answer(name, content):
+            return {"outcome": "acquitted", "role": "", "evidence": held}
+
         got, _errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
         assert got[RAM]["outcome"] == "acquitted"
+
+    def test_abated_needs_its_name_too(self):
+        order = "तसर्थ प्रतिवादीको मृत्यु भएकोले मुद्दा तामेलीमा राख्ने ठहर्छ।"
+
+        def answer(name, content):
+            return {"outcome": "abated", "role": "",
+                    "evidence": "प्रतिवादीको मृत्यु भएकोले मुद्दा तामेलीमा राख्ने ठहर्छ"}
+
+        got, _errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        assert (got[RAM]["outcome"], got[RAM]["reason"]) == ("charged", "name-not-in-evidence")
+
+    def test_a_romanized_name_is_never_acquitted_either(self):
+        order = "तसर्थ प्रतिवादी Ram Bahadur ले आरोपित कसुरबाट सफाई पाउने ठहर्छ।"
+
+        def answer(name, content):
+            return {"outcome": "acquitted", "role": "",
+                    "evidence": "Ram Bahadur ले आरोपित कसुरबाट सफाई पाउने ठहर्छ"}
+
+        got, _errors = ere.accused_verdicts(["Ram Bahadur"], order, _window_stub(answer))
+        assert (got["Ram Bahadur"]["outcome"], got["Ram Bahadur"]["reason"]) == (
+            "charged", "name-not-devanagari")
+
+    def test_a_short_name_inside_a_longer_one_is_not_its_name(self):
+        held = "प्रतिवादी रामप्रसादलाई भ्रष्टाचारको कसुरमा कैद हुने ठहर्छ"
+        order = "तसर्थ " + held + "।"
+
+        def answer(name, content):
+            return {"outcome": "convicted", "role": "", "evidence": held}
+
+        got, _errors = ere.accused_verdicts(["राम"], order, _window_stub(answer))
+        assert (got["राम"]["outcome"], got["राम"]["reason"]) == ("charged", "name-not-in-evidence")
 
 
 class TestTheFinalOrdersNamingSomeoneUndecided:
@@ -4520,11 +4562,14 @@ class TestSettledOutcomesAreSkippedPerBind:
         # THE GUARANTEE B1 RESTORES. This is the case exactly as a first run
         # that answered for राम बहादुर only would have left it; the second run
         # must be able to decide सीता देवी rather than find the case locked.
+        # An acquittal must name its defendant, so this order does.
+        _patch_links(monkeypatch, {"https://x/court.md": FIXTURE_COURT_TEXT
+                                   + " प्रतिवादी सीता देवीले सफाई पाउने ठहर्छ।"})
         api = _SearchStubApi([_accused_case(outcome="convicted",
                                             extra_entities=[_sita("charged")])])
         stub = _two_call_stub(verdict_response=json.dumps({"defendants": [
             {"name": "सीता देवी", "outcome": "acquitted", "role": "तत्कालीन लेखापाल",
-             "evidence": "सफाई पाउने ठहर्छ"}]}, ensure_ascii=False))
+             "evidence": "सीता देवीले सफाई पाउने ठहर्छ"}]}, ensure_ascii=False))
         _run_main(monkeypatch, api, invoke_text_stub=stub,
                   argv=["--apply", "--verdicts"])
         assert api.replace_list_calls, "the re-run wrote nothing"
@@ -6601,7 +6646,8 @@ class TestMainWiring:
 
         assert stub.calls == []
         assert fetched == []
-        assert loader.calls == []
+        # Loaded before the first case, so a load failure can never follow a write.
+        assert len(loader.calls) == 1
         assert report.rows[0]["status"] == "already"
         assert "already present" in report.rows[0]["reason"]
 
@@ -6749,25 +6795,26 @@ class TestMainWiring:
             ("case-wired", "साझा भण्डार सहकारी", "evidence not found in the source")]
         assert _jsonl("extracted") == []
 
-    def test_a_window_over_the_hard_max_is_refused_before_the_call(self, monkeypatch):
-        long_press = READABLE_PRESS * ((ere.PROMPT_HARD_MAX // len(READABLE_PRESS)) + 1)
+    def test_a_press_release_over_the_hard_max_is_read_in_windows(self, monkeypatch):
+        # Release 1561's PDF is 64,344 chars: the fallback reads it, never refuses it.
+        long_press = READABLE_PRESS * ((64_344 // len(READABLE_PRESS)) + 1)
         _patch_links(monkeypatch, {"https://x/wired-press.md": long_press})
         stub = _call_tracking_stub(_response())
         report = _run_main(monkeypatch, _SearchStubApi([_wired_case(court=False)]), stub,
                            argv=["--dry-run"])
 
-        assert stub.calls == []
-        assert report.rows[0]["status"] == "error"
-        assert report.rows[0]["reason"].startswith("prompt too large: ")
-        assert "PROMPT_HARD_MAX" in report.rows[0]["reason"]
-        assert "LLM extraction failed" not in report.rows[0]["reason"]
+        assert len(stub.calls) >= 2
+        assert all(len(call["content"]) <= ere.PROMPT_HARD_MAX for call in stub.calls)
+        assert all(call["content"].startswith("प्रेस विज्ञप्ति") for call in stub.calls)
+        assert not any((row.get("reason") or "").startswith("prompt too large")
+                       for row in report.rows)
 
     def test_an_oversized_window_raises_prompt_too_large_not_an_assert(self):
         text = READABLE_PRESS * ((ere.PROMPT_HARD_MAX // len(READABLE_PRESS)) + 1)
         stub = _sequenced_stub()
         with pytest.raises(ere.PromptTooLarge, match="PROMPT_HARD_MAX"):
-            extract_from_source(_api(), _gaz(), {"slug": "c", "state": "DRAFT", "entities": []},
-                                Source("press_release", text, ""), stub, usage=None)
+            ere._read_window(_api(), _gaz(), text, 0, Window(0, len(text), len(text), text),
+                             ere.PRESS_RELEASE_SYSTEM_PROMPT, stub, None, "")
         assert stub.calls == []
         assert not issubclass(ere.PromptTooLarge, AssertionError)
 
@@ -6989,3 +7036,106 @@ def test_rejected_row_with_missing_evidence_key_does_not_raise():
         ("काठमाडौं", "काठमाडौं", ""),
         ("", "सल्यान", "भाग"),
     }
+
+
+class TestSecondReviewFixes:
+    """The whole-branch review's findings: each one's failure, pinned."""
+
+    def test_a_location_that_is_not_an_object_is_dropped_not_a_crash(self):
+        reply = json.dumps({"locations": ["बाँके", BANKE_LOCATION], "entities": [],
+                            "accused_notes": []}, ensure_ascii=False)
+        assert ere.parse_window_response(reply).locations == [BANKE_LOCATION]
+
+    def test_an_order_with_a_part_that_has_no_text_is_refused(self, monkeypatch):
+        import casework.common.materials as m
+
+        monkeypatch.setattr(m, "fetch_markdown", lambda link, timeout=60: READABLE_PRESS)
+        raw_only = {"material_iri": "https://jawafdehi.org/material/ngm/court_orders/x.2",
+                    "material": {"material_type": "court_order",
+                                 "urls": [{"link": "https://x/part2.pdf", "role": "RAW"}]}}
+        detail = {"slug": "case-part-missing", "state": "DRAFT", "evidence": [
+            _material("https://jawafdehi.org/material/ngm/court_orders/x.1", "court_order",
+                      "https://x/part1.md"),
+            raw_only,
+            _material("https://jawafdehi.org/material/ciaa/press_releases/1", "press_release",
+                      "https://x/press.md"),
+        ]}
+
+        source = pick_source(detail)
+
+        assert source.kind is None
+        assert "parts with no text" in source.reason and "no MARKDOWN role" in source.reason
+
+    def test_parts_join_in_number_order_not_string_order(self, monkeypatch):
+        import casework.common.materials as m
+
+        links = {f"https://x/p{i}.md": f"अंश {i}।" for i in (1, 2, 10)}
+        monkeypatch.setattr(m, "fetch_markdown", lambda link, timeout=60: links[link])
+        detail = {"slug": "case-ten-parts", "state": "DRAFT", "evidence": [
+            _material(f"https://jawafdehi.org/material/ngm/court_orders/x.{i}", "court_order",
+                      f"https://x/p{i}.md") for i in (10, 2, 1)]}
+
+        assert pick_source(detail).text == "अंश 1।\n\nअंश 2।\n\nअंश 10।"
+
+    def test_a_verdict_only_case_never_fetches_the_press_release(self, monkeypatch):
+        import casework.common.materials as m
+        fetched = []
+
+        def counting(link, timeout=60):
+            fetched.append(link)
+            return READABLE_PRESS
+
+        monkeypatch.setattr(m, "fetch_markdown", counting)
+        api = _StubApi([_accused_case(court=False,
+                                      extra_entities=[RELATED_BIND, ALREADY_BOUND_DISTRICT])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run", "--verdicts"])
+        assert stub.verdict_calls == []
+        assert "https://x/press.md" not in fetched
+
+    def test_a_gazetteer_failure_stops_a_verdict_run_before_any_write(
+            self, monkeypatch, patched_fetch_markdown):
+        def failing(api):
+            raise RuntimeError("expected 77 NES districts, got 76")
+
+        api = _SearchStubApi([_accused_case(extra_entities=[RELATED_BIND, ALREADY_BOUND_DISTRICT])])
+        stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
+        with pytest.raises(RuntimeError, match="77 NES districts"):
+            _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply", "--verdicts"],
+                      gazetteer_loader=failing)
+        assert api.replace_list_calls == []
+        assert stub.verdict_calls == []
+
+    def test_a_name_in_the_shared_overlap_does_not_veto_a_conviction(self):
+        order = _filler(5_000) + "\nतसर्थ " + _filler(40_000)
+        windows = end_windows(order)
+        overlap_at = windows[0].start + 100
+        assert overlap_at < windows[1].end
+        held = f"प्रतिवादी {RAM}लाई भ्रष्टाचारको कसुरमा कैद हुने ठहर्छ"
+        order = _splice(order, overlap_at, held)
+        assert [(w.start, w.end) for w in end_windows(order)] == [(w.start, w.end) for w in windows]
+        asked = []
+
+        def answer(name, content):
+            asked.append(content)
+            if len(asked) == 1:
+                return {"outcome": "unknown", "role": "", "evidence": ""}
+            return {"outcome": "convicted", "role": "", "evidence": held}
+
+        got, _errors = ere.accused_verdicts([RAM], order, _window_stub(answer))
+        assert (got[RAM]["outcome"], got[RAM]["reason"]) == ("convicted", "decided")
+
+    def test_a_longer_name_in_the_final_orders_does_not_veto_a_shorter_one(self):
+        back = "प्रतिवादी रामलाई भ्रष्टाचारको कसुरमा कैद हुने ठहर्छ"
+        final = "प्रतिवादी रामप्रसादले आरोपित कसुरबाट सफाई पाउने ठहर्छ"
+        order = (_filler(60_000) + "\n" + back + "।\n" + _filler(5_000)
+                 + "\nतसर्थ " + _filler(3_000) + "\n" + final + "।\n")
+        assert back not in end_windows(order)[0].text
+
+        def answer(name, content):
+            if back in content:
+                return {"outcome": "convicted", "role": "", "evidence": back}
+            return {"outcome": "unknown", "role": "", "evidence": ""}
+
+        got, _errors = ere.accused_verdicts(["राम"], order, _window_stub(answer))
+        assert got["राम"]["outcome"] == "convicted"

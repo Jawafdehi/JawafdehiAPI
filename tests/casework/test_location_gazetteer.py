@@ -383,9 +383,9 @@ GAZETTEER_REFUSALS = [
      ("sunkoshi-gaunpalika-10407", "sunkoshi-gaunpalika-30212", "sunkoshi-gaunpalika-31106"),
      "no single district in the place as written"),
     ("खजुरा गाउँपालिका", "बर्दिया", ("khajura-gaunpalika-51104",),
-     "the place as written does not name the claimed district"),
+     "neither the place nor its quote names the claimed district"),
     ("बर्दिया", "बाँके", ("bardiya-np0558",),
-     "the place as written does not name the claimed district"),
+     "neither the place nor its quote names the claimed district"),
 ]
 
 
@@ -493,3 +493,17 @@ def test_dict_alternateName_with_string_values_are_treated_as_single_forms():
     gaz = Gazetteer([d], [])
     # Should find the form as a whole, not per-character
     assert gaz.district_for("X District") == d["@id"]
+
+
+def test_two_spellings_of_one_municipality_are_one_municipality():
+    khajura = unit("khajura-gaunpalika-50001", "खजुरा गाउँपालिका", "Khajura", BANKE)
+    khajura["alternateName"] = ["खजुरा गाउंपालिका", "खजुरा"]
+    g = Gazetteer(DISTRICTS, [khajura])
+    d = g.resolve("जिल्ला बाँके, खजुरा गाउँपालिका वडा नं.४", "बाँके")
+    assert d.localunit == khajura["@id"]
+    assert g.redirect(f"{E}location/khajura-twin", "खजुरा गाउँपालिका") == khajura["@id"]
+
+
+def test_a_district_the_quote_names_grounds_the_claim(gaz):
+    d = gaz.resolve("खजुरा गा.वि.स.", "बाँके", "बाँके जिल्ला खजुरा गा.वि.स. मा ठेक्का लगाइयो")
+    assert (d.district, d.reason) == (BANKE, "")

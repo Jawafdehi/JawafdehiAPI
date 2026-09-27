@@ -3,18 +3,8 @@
 import re
 from dataclasses import dataclass
 
-from casework.common.grounding import location_quote_problem, normalise_for_match
+from casework.common.grounding import has_word, location_quote_problem, normalise_for_match
 
-#: Devanagari block, used to require a form match starts at a word boundary.
-_DEVANAGARI = "ऀ-ॿ"
-#: Devanagari letters and signs, i.e. the block minus danda, digits and the abbreviation sign.
-_WORD = "ऀ-ॣॱ-ॿ"
-#: Signs a mis-decoded transcript leaves after a form (`काठमाडौंैं`); a sign never starts a new word.
-_SIGNS = "ऀ-ःऺ-ौॎ-ॏॕ-ॗॢॣ"
-#: Case endings written joined to a place name (`काठमाडौंमा`, `बाँकेस्थित`).
-_SUFFIXES = ("अन्तर्गत", "द्वारा", "स्थित", "भित्र", "सम्म", "तर्फ", "बाट", "वाट", "लाई", "संग",
-             "मा", "का", "को", "की", "ले", "कै")
-_MATCH_END = rf"(?=[{_SIGNS}]|(?:{'|'.join(_SUFFIXES)})?(?![{_WORD}]))"
 #: काठमाडौं as NES and the orders spell it: काठमाण्डौ, काठमान्डौ, काठमाडौ, काठमाण्डाै.
 _KATHMANDU = re.compile(r"काठमा(?:ण्ड|न्ड|ड)(?:ौ|ाै)ं?")
 
@@ -93,11 +83,6 @@ def place_key(text: str) -> str:
     return t
 
 
-def _matches(key: str, text: str) -> bool:
-    """Whether `key` occurs in `text` as a whole word, allowing a joined case ending (`बाँकेमा`, not `बाँकेपुर`)."""
-    return bool(key) and re.search(rf"(?<![{_WORD}])" + re.escape(key) + _MATCH_END, text) is not None
-
-
 def _alt_names(alt) -> set[str]:
     """`alternateName` as a flat set of strings, whether it is a list or a `{lang: [..]}` dict."""
     if not alt:
@@ -147,10 +132,9 @@ class Gazetteer:
             self._unit_parent[u["@id"]] = parent
             name = u.get("name") or {}
             forms = _alt_names(u.get("alternateName")) | {name[lang] for lang in ("ne", "en") if name.get(lang)}
-            for form in forms:
-                key = place_key(form)
-                if key:
-                    self._unit_forms.setdefault(key, []).append((u["@id"], parent))
+            # Keys, not forms: `खजुरा गाउँपालिका` and `खजुरा गाउंपालिका` are one entry, not two namesakes.
+            for key in {place_key(form) for form in forms} - {""}:
+                self._unit_forms.setdefault(key, []).append((u["@id"], parent))
 
     def district_for(self, name: str) -> str | None:
         key = place_key(name)
@@ -160,13 +144,13 @@ class Gazetteer:
 
     def districts_in(self, text: str) -> set:
         normalized = place_key(text)
-        found = {iri for key, iri in self._district_forms.items() if _matches(key, normalized)}
+        found = {iri for key, iri in self._district_forms.items() if has_word(key, normalized)}
         for key, iris in self._ambiguous.items():
             # A disambiguated compound (e.g. "रुकुम पश्चिम") also contains the bare
             # ambiguous word as a word-start substring. Only add the ambiguous pair
             # when neither half was already found through that more specific form --
             # otherwise a self-disambiguating text would still yield both halves.
-            if _matches(key, normalized) and not (set(iris) & found):
+            if has_word(key, normalized) and not (set(iris) & found):
                 found.update(iris)
         return found
 
@@ -174,8 +158,8 @@ class Gazetteer:
         normalized = place_key(text)
         found = []
         for key, entries in self._unit_forms.items():
-            if _matches(key, normalized):
-                found.extend(entries)
+            if has_word(key, normalized):
+                found.extend(e for e in entries if e not in found)
         return found
 
     def parent_district(self, localunit_iri: str) -> str | None:
@@ -204,11 +188,11 @@ class Gazetteer:
             if len(pool) != 1:
                 return PlaceDecision(None, None, "no single district in the place as written")
             claim_iri = next(iter(pool))
-        elif claim_iri not in named | parents:
-            return PlaceDecision(None, None, "the place as written does not name the claimed district")
+        elif claim_iri not in named | parents | (quoted := self.districts_in(evidence)):
+            return PlaceDecision(None, None, "neither the place nor its quote names the claimed district")
         elif named and claim_iri not in named:
             return PlaceDecision(None, None, "the named district does not contain the named municipality")
-        elif claim_iri not in named and len(parents) > 1 and claim_iri not in self.districts_in(evidence):
+        elif claim_iri not in named and len(parents) > 1 and claim_iri not in quoted:
             return PlaceDecision(None, None, "the district that picks the municipality is not in the quote")
         matching = [u for u, p in units if p == claim_iri]
         if len(matching) == 1:
