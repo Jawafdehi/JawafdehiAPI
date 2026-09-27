@@ -197,7 +197,12 @@ STAGE = STAGES["entities"]
 # fixed-constant treatment for the same reason. A cap costs nothing unless the model
 # actually reaches it: billing is on tokens produced, not on the ceiling. There is
 # no env knob because no other constant in `casework.common` has one.
-EXTRACTION_MAX_TOKENS = 8000
+#
+# 32,000 since 2026-09-27: one 30k court-order window yields ~9,000 output tokens
+# (077-CR-0001: 17 entities, 2 locations). At 8,000 the CLI continued the answer
+# in a second turn and returned only that turn's tail, so 3 of the first 5 FY077
+# cases came back as "no entities" with the district quoted in plain sight.
+EXTRACTION_MAX_TOKENS = 32_000
 
 #: One call's user content: one start window (caption <= 8k + 30k) and its label.
 PROMPT_HARD_MAX = 40_000
@@ -1269,9 +1274,30 @@ def _extraction_list(obj, parsed_ok, key, text):
     return _recover_key_array(text, key)
 
 
+_WINDOW_KEYS = ("locations", "entities", "accused_notes")
+
+
+class MalformedReply(ValueError):
+    """A window reply missing one of `_WINDOW_KEYS`: cut off or not JSON, never "found nothing"."""
+
+
 def parse_window_response(text):
-    """Parse one window's JSON reply; an `entities` item typed `location` moves into `locations`."""
+    """Parse one window's JSON reply; an `entities` item typed `location` moves into `locations`.
+
+    Raises `MalformedReply` when the reply is not one object and a key never
+    appears: the claude CLI returns only the last turn of a long answer, and that
+    tail used to parse as an empty window.
+    """
     obj, parsed_ok = _parsed_extraction_object(text)
+    if parsed_ok and not any(key in obj for key in _WINDOW_KEYS):
+        parsed_ok = False  # the first balanced object was one item, not the reply
+    if not parsed_ok:
+        stripped = strip_fence((text or "").strip())
+        missing = [key for key in _WINDOW_KEYS if f'"{key}"' not in stripped]
+        if missing:
+            raise MalformedReply(
+                f"reply is cut off or not JSON: no {', '.join(missing)} "
+                f"({len(stripped):,} chars, starts {stripped[:60]!r})")
     locations = [item for item in _extraction_list(obj, parsed_ok, "locations", text)
                  if isinstance(item, dict)]
     entities_raw = _extraction_list(obj, parsed_ok, "entities", text)

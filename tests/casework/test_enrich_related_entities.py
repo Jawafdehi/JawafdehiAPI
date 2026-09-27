@@ -106,8 +106,10 @@ class TestDonorFidelity:
         # sonnet. 2000 stopped being a budget and became a failure, once the
         # extraction asked for five sections of Devanagari names and notes instead
         # of two. Pinned here, in the class that exists to catch silent drift, so
-        # the divergence stays a decision with a reason attached.
-        assert ere.EXTRACTION_MAX_TOKENS == 8000
+        # the divergence stays a decision with a reason attached. 8000 in turn was
+        # too small for a 30k window: the CLI split the answer across two turns and
+        # returned only the tail (077-CR-0001, 2026-09-27).
+        assert ere.EXTRACTION_MAX_TOKENS == 32_000
         assert ere.EXTRACTION_MAX_TOKENS > donor_kwargs["max_tokens"]
         # And that this port's tier_for("entities") resolves to the same
         # value (casework/common/llm.py's own pin, cross-checked here).
@@ -538,11 +540,30 @@ def test_llm_extraction_failure_is_recorded_as_error(monkeypatch, patched_fetch_
 
 
 def test_llm_returning_nothing_is_recorded_as_skipped(monkeypatch, patched_fetch_markdown):
-    response = json.dumps({"other": "no entities or accused_notes key"})
+    response = json.dumps({"locations": [], "entities": [], "accused_notes": []})
     api = _StubApi([PRESS_ONLY_CASE])
     report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
                         argv=["--apply"])
     assert report.rows[0]["status"] == "skipped"
+
+
+def test_a_reply_with_none_of_the_keys_is_an_error_not_nothing(monkeypatch, patched_fetch_markdown):
+    response = json.dumps({"other": "no entities or accused_notes key"})
+    api = _StubApi([PRESS_ONLY_CASE])
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+                        argv=["--apply"])
+    assert report.rows[0]["status"] == "error"
+    assert "cut off or not JSON" in report.rows[0]["reason"]
+
+
+def test_the_tail_of_a_two_turn_answer_is_an_error_not_nothing(monkeypatch, patched_fetch_markdown):
+    # 077-CR-0001: the CLI returned only the second turn, which starts mid-array.
+    tail = ('मा बरामद भएको", "notes": ""}\n ],\n "accused_notes": [\n  {"name": "राम बहादुर", '
+            '"notes": "सचिव", "evidence": "राम बहादुर सचिव"}\n ]}\n```')
+    api = _StubApi([PRESS_ONLY_CASE])
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: tail, argv=["--apply"])
+    assert report.rows[0]["status"] == "error"
+    assert "no locations, entities" in report.rows[0]["reason"]
 
 
 def test_dry_run_writes_nothing_but_prints_what_it_would_bind(
@@ -6436,17 +6457,13 @@ class TestParseWindowResponseMalformed:
                                    "evidence": "संस्था संलग्न रहेको पाइयो।", "notes": "क"}]
         assert answer.accused_notes == []
 
-    def test_a_key_truncated_before_its_own_array_opens_is_reported_empty(self, caplog):
+    def test_a_key_truncated_before_its_own_array_opens_is_an_error(self):
         full = _response(locations=[{"place_as_written": BANKE_PLACE, "district": "बाँके",
                                      "evidence": BANKE_EVIDENCE, "notes": ""}])
         truncated = full[:full.index('"accused_notes"')]
 
-        with caplog.at_level(logging.WARNING, logger="casework.enrich_related_entities"):
-            answer = parse_window_response(truncated)
-
-        assert answer.accused_notes == []
-        assert answer.locations  # the intact key is still recovered
-        assert any("accused_notes" in r.message for r in caplog.records)
+        with pytest.raises(ere.MalformedReply, match="no accused_notes"):
+            parse_window_response(truncated)
 
 
 class TestExtractFromSourceNoteAccumulation:
