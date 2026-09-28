@@ -1,6 +1,6 @@
 import pytest
 from casework.common.grounding import (
-    evidence_found, has_word, is_readable_devanagari, is_teaser, location_quote_problem,
+    entity_quote, evidence_found, has_word, is_readable_devanagari, is_teaser, location_quote_problem,
     normalise_for_match, verbatim_quote,
 )
 
@@ -187,3 +187,35 @@ def test_one_mention_with_no_address_beside_it_is_enough():
 def test_a_permanent_appointment_is_not_a_permanent_address():
     ev = "तत्कालीन भगवानपुर गा.वि.स., रुपन्देहीमा मिति 2065/04/01 देखि कार्यालय सहायक पदमा स्थायी नियुक्ति लिएको"
     assert location_quote_problem(ev, "रुपन्देही", ev + " ।", 0) == ""
+
+
+# --- An entity's quote: the model gives the shortest phrase, elides, or rewords around the name. ---
+
+ROSTER = ("उजूरीकर्ता रमेश ढकालले मिति २०७७।०४।०५ मा दिएको निवेदन ।\n"
+          "|१. |प्रभु बैंक |0460100028755000001 |\n"
+          "उजूरी निवेदक श्री नेत्र प्रसाद रेग्मीको निवेदन अनुसार अनुसन्धान गरियो ।")
+
+
+def test_a_quote_that_is_just_the_name_grounds_it():
+    assert entity_quote("रमेश ढकाल", ROSTER, "रमेश ढकाल") == "रमेश ढकाल"
+
+
+def test_a_short_quote_that_is_not_the_name_grounds_nothing():
+    assert entity_quote("मिति २०७७", ROSTER, "रमेश ढकाल") == ""
+
+
+def test_every_piece_of_an_elided_quote_must_be_in_the_order():
+    assert entity_quote("उजूरी निवेदक... नेत्र प्रसाद रेग्मी", ROSTER, "नेत्र प्रसाद रेग्मी") != ""
+    assert entity_quote("उजूरी निवेदक... नेत्र बहादुर रेग्मी", ROSTER, "नेत्र बहादुर रेग्मी") == ""
+
+
+def test_a_reworded_word_beside_the_name_still_grounds_it():
+    assert entity_quote("उजुरीकर्ता रमेश ढकालले", ROSTER, "रमेश ढकाल") == "रमेश ढकाल"
+
+
+def test_a_name_in_a_table_row_grounds_it():
+    assert entity_quote("प्रभु बैंक 0460100028755000001", ROSTER, "प्रभु बैंक") == "प्रभु बैंक"
+
+
+def test_a_name_the_order_never_mentions_is_not_grounded_by_its_quote():
+    assert entity_quote("उजुरीकर्ता सीता देवी", ROSTER, "सीता देवी") == ""

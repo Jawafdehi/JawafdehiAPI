@@ -54,18 +54,8 @@ def evidence_found(evidence: str, text: str) -> bool:
     return len(ev) >= MIN_EVIDENCE_CHARS and ev in normalise_for_match(text)
 
 
-def verbatim_quote(evidence: str, text: str, min_share: float = 0.0) -> str:
-    """The part of `evidence` that is word for word in `text`, as the quote wrote it; "" when too little is.
-
-    All of it when it is all there. Otherwise its longest run of whole words, which must be at
-    least `MIN_VERBATIM_CHARS` and `min_share` of the quote: the model copies a sentence and
-    rewords its last few words (077-CR-0004), and the stretch it did copy still grounds it.
-    """
-    ev, body = normalise_for_match(evidence), normalise_for_match(text)
-    if len(ev) < MIN_EVIDENCE_CHARS:
-        return ""
-    if ev in body:
-        return (evidence or "").strip()
+def _longest_run(evidence: str, body: str) -> str:
+    """The longest run of `evidence`'s whole words that is in `body` (already normalised), as written."""
     words, best = (evidence or "").split(), ""
     for i in range(len(words)):
         lo, hi = i, len(words)
@@ -78,7 +68,56 @@ def verbatim_quote(evidence: str, text: str, min_share: float = 0.0) -> str:
         run = " ".join(words[i:lo])
         if len(normalise_for_match(run)) > len(normalise_for_match(best)):
             best = run
+    return best
+
+
+def verbatim_quote(evidence: str, text: str, min_share: float = 0.0) -> str:
+    """The part of `evidence` that is word for word in `text`, as the quote wrote it; "" when too little is.
+
+    All of it when it is all there. Otherwise its longest run of whole words, which must be at
+    least `MIN_VERBATIM_CHARS` and `min_share` of the quote: the model copies a sentence and
+    rewords its last few words (077-CR-0004), and the stretch it did copy still grounds it.
+    """
+    ev, body = normalise_for_match(evidence), normalise_for_match(text)
+    if len(ev) < MIN_EVIDENCE_CHARS:
+        return ""
+    if ev in body:
+        return (evidence or "").strip()
+    best = _longest_run(evidence, body)
     return best if len(normalise_for_match(best)) >= max(MIN_VERBATIM_CHARS, min_share * len(ev)) else ""
+
+
+#: Where the model skipped part of a sentence ("उजूरी निवेदक... नेत्र प्रसाद रेग्मी").
+_ELLIPSIS = re.compile(r"\.{2,}|…")
+#: The shortest piece of an elided quote that counts: a scrap like "र" is in every order.
+MIN_PIECE_CHARS = 4
+
+
+def entity_quote(evidence: str, text: str, name: str = "") -> str:
+    """The part of an entity's or accused note's quote that `text` backs, or "" when none does.
+
+    The whole quote when it is word for word: under `MIN_EVIDENCE_CHARS` only if it holds `name`
+    (the prompt asks for the shortest phrase, often the name alone). Every piece of a quote the
+    model elided with "...", each at least `MIN_PIECE_CHARS`. Otherwise its longest word-for-word
+    run, if that is `MIN_VERBATIM_CHARS` long. Failing all of those, the name alone when both the
+    quote and the order hold it ("उजुरीकर्ता X" where the order spells उजूरीकर्ता; a bank named in
+    a table between `|`s).
+    """
+    ev, body, key = normalise_for_match(evidence), normalise_for_match(text), normalise_for_match(name)
+    if not ev:
+        return ""
+    if ev in body and (len(ev) >= MIN_EVIDENCE_CHARS or has_word(key, ev)):
+        return evidence.strip()
+    pieces = [normalise_for_match(p) for p in _ELLIPSIS.split(evidence) if p.strip()]
+    if (len(pieces) > 1 and all(len(p) >= MIN_PIECE_CHARS and p in body for p in pieces)
+            and sum(map(len, pieces)) >= MIN_EVIDENCE_CHARS):
+        return evidence.strip()
+    run = _longest_run(evidence, body)
+    if len(normalise_for_match(run)) >= MIN_VERBATIM_CHARS:
+        return run
+    if has_word(key, ev) and has_word(key, body):
+        return name.strip()
+    return ""
 
 
 def location_quote_problem(evidence: str, place: str, text: str, caption_end: int = 0,

@@ -7227,3 +7227,23 @@ class TestPartlyCopiedVerdictQuotes:
         got, errors = self._decide(self.COPIED + " भए पनि सफाई")
         assert (got[RAM]["outcome"], got[RAM]["reason"]) == ("charged", "vetoed")
         assert any("सफाई" in e for e in errors)
+
+
+def test_a_short_name_quote_is_kept_and_an_invented_one_dropped():
+    window = "उजूरीकर्ता रमेश ढकालले मिति २०७७।०४।०५ मा दिएको निवेदन ।"
+    kept, rejected = ere._grounded([
+        {"entity_name": "रमेश ढकाल", "evidence": "रमेश ढकाल"},
+        {"entity_name": "सीता देवी", "evidence": "उजुरीकर्ता सीता देवी"},
+    ], window)
+    assert [k["entity_name"] for k in kept] == ["रमेश ढकाल"]
+    assert [(r["entity_name"], r["reason"]) for r in rejected] == [
+        ("सीता देवी", "evidence not found in the source")]
+
+
+def test_an_accused_note_with_a_reworded_tail_keeps_only_the_copied_part():
+    copied = "सब इन्जिनियर पदमा कार्यरत वर्ष ३२ को रञ्जित कुमार श्रेष्ठ"
+    window = f"खानेपानी कार्यालय दैलेखमा {copied}ले घुस माग गरेको ।"
+    kept, rejected = ere._grounded(
+        [{"name": "रञ्जित कुमार श्रेष्ठ", "evidence": copied + " भनी उल्लेख छ", "notes": "सब इन्जिनियर"}],
+        window)
+    assert rejected == [] and kept[0]["evidence"] == copied

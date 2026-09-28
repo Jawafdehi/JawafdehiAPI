@@ -127,7 +127,7 @@ from casework.common.cli import (
     setup_logging,
 )
 from casework.common.grounding import (
-    evidence_found, has_word, is_readable_devanagari, is_teaser, normalise_for_match,
+    entity_quote, has_word, is_readable_devanagari, is_teaser, normalise_for_match,
     verbatim_quote,
 )
 from casework.common.llm import bootstrap, tier_for
@@ -1352,13 +1352,18 @@ class PromptTooLarge(ValueError):
 
 
 def _grounded(items, window_text):
-    """Split `items` on `evidence_found` against `window_text`: `(kept, rejected)`."""
+    """Split `items` on `entity_quote` against `window_text`: `(kept, rejected)`.
+
+    A kept item carries only the part of its quote the window backs.
+    """
     kept, rejected = [], []
     for item in items:
         if not isinstance(item, dict):
             continue
-        if evidence_found(item.get("evidence") or "", window_text):
-            kept.append(item)
+        quote = entity_quote(item.get("evidence") or "", window_text,
+                             item.get("entity_name") or item.get("name") or "")
+        if quote:
+            kept.append({**item, "evidence": quote})
         else:
             rejected.append({**item, "reason": "evidence not found in the source"})
     return kept, rejected
