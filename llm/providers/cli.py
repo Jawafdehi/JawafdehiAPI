@@ -17,9 +17,6 @@ from django.conf import settings
 
 from llm.providers.base import Provider, strip_code_fence
 
-#: The `claude --effort` levels.
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-
 
 def _flatten(content):
     """Flatten content to plain text for CLI input.
@@ -195,15 +192,10 @@ class ClaudeCliProvider(_CliProvider):
     name = "claude_cli"
     supports_tools = True
 
-    def _effort_args(self, effort=None):
-        """`--effort <level>`: the per-call `effort`, else `CLAUDE_CLI_EFFORT`; empty -> CLI default.
-
-        The CLI caps reasoning and answer together (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`),
-        so a call with a tight output budget can ask to reason less.
-        """
-        eff = effort or getattr(settings, "CLAUDE_CLI_EFFORT", "")
-        if eff and eff not in EFFORT_LEVELS:
-            raise ValueError(f"effort must be one of {', '.join(EFFORT_LEVELS)}, got {eff!r}")
+    def _effort_args(self):
+        """`--effort <level>` (low/medium/high/xhigh/max) when configured; the CLI
+        reasoning budget. Empty -> CLI default."""
+        eff = getattr(settings, "CLAUDE_CLI_EFFORT", "")
         return ["--effort", eff] if eff else []
 
     def _claude_env(self, max_tokens=None):
@@ -278,7 +270,7 @@ class ClaudeCliProvider(_CliProvider):
             )
         return text
 
-    def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None, effort=None):
+    def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None):
         """Invoke claude -p --output-format json.
 
         Args:
@@ -339,7 +331,7 @@ class ClaudeCliProvider(_CliProvider):
         effective_model = model_id
         if effective_model:
             argv.extend(["--model", effective_model])
-        argv.extend(self._effort_args(effort))
+        argv.extend(self._effort_args())
 
         out = self._run(argv, _flatten(content), self._claude_env(max_tokens))
         return self._finalize(out, model_id, effective_model, tier, usage)
@@ -450,7 +442,7 @@ class CodexCliProvider(_CliProvider):
 
     name = "codex_cli"
 
-    def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None, effort=None):
+    def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None):
         """Invoke codex exec --json.
 
         Args:

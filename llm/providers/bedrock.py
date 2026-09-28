@@ -37,7 +37,7 @@ class BedrockProvider(Provider):
             )
         return _client
 
-    def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None, effort=None):
+    def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None):
         """Invoke Bedrock with Anthropic API format."""
         body = {
             "anthropic_version": "bedrock-2023-05-31",

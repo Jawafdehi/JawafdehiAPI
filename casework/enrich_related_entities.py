@@ -201,12 +201,9 @@ STAGE = STAGES["entities"]
 #
 # The CLI counts reasoning against this cap too, and continues a reply that runs
 # past it in a second turn whose tail is all it returns (`MalformedReply`). On
-# 077-CR-0001 a 30k window took ~9,000 tokens at default effort, listing every raid
-# officer as a witness; skipping procedural witnesses, short quotes and
-# `EXTRACTION_EFFORT` brought it to ~3,000 with the same locations and entities.
+# 077-CR-0001 a 30k window took ~7,900 tokens at default effort and ~3,100 at low,
+# so the run sets `CLAUDE_CLI_EFFORT=low` (work/enricher-runs/enrichers/entities.env).
 EXTRACTION_MAX_TOKENS = 8000
-#: Reasoning budget for the extraction call alone (`llm.invoke.invoke_text(effort=)`).
-EXTRACTION_EFFORT = "low"
 
 #: One call's user content: one start window (caption <= 8k + 30k) and its label.
 PROMPT_HARD_MAX = 40_000
@@ -1381,8 +1378,7 @@ def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, us
             f"{len(content):,} chars is over PROMPT_HARD_MAX ({PROMPT_HARD_MAX:,}); never truncated")
     response = invoke_text(
         system=system_prompt + system_suffix, content=content,
-        max_tokens=EXTRACTION_MAX_TOKENS, tier=tier_for("entities"), usage=usage,
-        effort=EXTRACTION_EFFORT)
+        max_tokens=EXTRACTION_MAX_TOKENS, tier=tier_for("entities"), usage=usage)
     answer = parse_window_response(response)
     entities, rejected = _grounded(answer.entities, window.text)
     accused_notes, notes_rejected = _grounded(answer.accused_notes, window.text)

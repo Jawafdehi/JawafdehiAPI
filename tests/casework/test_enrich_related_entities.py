@@ -7181,7 +7181,7 @@ class TestSecondReviewFixes:
         assert got["राम"]["outcome"] == "convicted"
 
 
-def test_extraction_asks_for_low_effort_and_verdicts_keep_the_default(
+def test_extraction_asks_for_8000_tokens_and_no_call_passes_an_effort(
         monkeypatch, patched_fetch_markdown):
     stub = _two_call_stub(verdict_response=VERDICT_RESPONSE)
     seen = []
@@ -7193,10 +7193,8 @@ def test_extraction_asks_for_low_effort_and_verdicts_keep_the_default(
     _run_main(monkeypatch, _SearchStubApi([_accused_case()]), invoke_text_stub=recording,
               argv=["--dry-run", "--verdicts"])
     extraction = [kw for kw in seen if kw["system"] != ere.VERDICT_SYSTEM_PROMPT]
-    verdicts = [kw for kw in seen if kw["system"] == ere.VERDICT_SYSTEM_PROMPT]
-    assert extraction and verdicts
-    assert all(kw["effort"] == "low" and kw["max_tokens"] == 8000 for kw in extraction)
-    assert all("effort" not in kw for kw in verdicts)
+    assert extraction and all(kw["max_tokens"] == 8000 for kw in extraction)
+    assert all("effort" not in kw for kw in seen)
 
 
 class TestPartlyCopiedVerdictQuotes:
