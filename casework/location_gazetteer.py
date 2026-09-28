@@ -80,11 +80,11 @@ def place_key(text: str) -> str:
     t = _KATHMANDU.sub("काठमाडौं", t)
     # Orders split the local-level word (`उप-महानगरपालिका`, `नगर पालिका`); NES never does.
     t = t.replace("महाननगर", "महानगर")
+    t = t.replace("गांउ", "गाउं")  # before the split join, which only knows गाउं
     t = _SPLIT_SUB_METRO.sub("उपमहानगर", t)
     t = _SPLIT_PALIKA.sub(r"\1पालिका", t)
     # Lalitpur became a metropolitan city in 2017; older orders still say उपमहानगरपालिका.
     t = t.replace("ललितपुर उपमहानगरपालिका", "ललितपुर महानगरपालिका")
-    t = t.replace("गांउ", "गाउं")
     t = re.sub(r"^जिल्ला ", "", t)
     t = re.sub(r"( जिल्ला| district| जि\.)$", "", t)
     return t

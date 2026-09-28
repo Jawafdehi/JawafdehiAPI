@@ -580,3 +580,7 @@ def test_a_district_named_only_in_the_reworded_tail_is_refused(gaz):
 def test_a_claim_only_the_quote_backs_cannot_contradict_the_named_municipality(gaz):
     d = gaz.resolve("खजुरा गाउँपालिका", "दाङ", "घटना दाङ जिल्लामा खजुरा गाउँपालिकाका व्यक्तिले गरेको")
     assert d.district is None and "another district than the claim" in d.reason
+
+
+def test_a_split_misspelled_rural_municipality_still_matches(gaz):
+    assert gaz.localunits_in("खजुरा गांउ पालिका") == [(KHAJURA, BANKE)]

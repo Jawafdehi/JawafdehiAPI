@@ -219,3 +219,13 @@ def test_a_name_in_a_table_row_grounds_it():
 
 def test_a_name_the_order_never_mentions_is_not_grounded_by_its_quote():
     assert entity_quote("उजुरीकर्ता सीता देवी", ROSTER, "सीता देवी") == ""
+
+
+def test_a_vowel_sign_after_a_consonant_makes_another_word():
+    assert not has_word("हरि कुमार", "हरि कुमारी श्रेष्ठलाई")
+    assert not has_word("राम", "रामा")
+    assert has_word("हरि कुमार", "हरि कुमारलाई")
+
+
+def test_a_stray_sign_after_a_final_sign_is_still_the_word():
+    assert has_word("काठमाडौं", "काठमाडौंैं")

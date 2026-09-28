@@ -33,7 +33,10 @@ _SIGNS = "ऀ-ःऺ-ौॎ-ॏॕ-ॗॢॣ"
 #: Case endings written joined to a name (`काठमाडौंमा`, `बाँकेस्थित`, `रामलाई`).
 _SUFFIXES = ("अन्तर्गत", "द्वारा", "जिल्ला", "स्थित", "भित्र", "सम्म", "तर्फ", "बाट", "वाट", "लाई", "संग",
              "मा", "का", "को", "की", "ले", "कै")
-_WORD_END = rf"(?=[{_SIGNS}]|(?:{'|'.join(_SUFFIXES)})?(?![{_WORD}]))"
+_WORD_END = rf"(?=(?:{'|'.join(_SUFFIXES)})?(?![{_WORD}]))"
+#: After a key that already ends in a sign, a further sign is transcript debris (`काठमाडौंैं`);
+#: after a consonant it is a vowel making another word (`कुमार` -> `कुमारी`, `राम` -> `रामा`).
+_WORD_END_AFTER_SIGN = rf"(?=[{_SIGNS}]|(?:{'|'.join(_SUFFIXES)})?(?![{_WORD}]))"
 
 
 def normalise_for_match(text: str) -> str:
@@ -149,7 +152,10 @@ def location_quote_problem(evidence: str, place: str, text: str, caption_end: in
 
 
 def _word_matches(key: str, text: str):
-    return re.finditer(rf"(?<![{_WORD}])" + re.escape(key) + _WORD_END, text) if key else ()
+    if not key:
+        return ()
+    end = _WORD_END_AFTER_SIGN if re.match(rf"[{_SIGNS}]", key[-1]) else _WORD_END
+    return re.finditer(rf"(?<![{_WORD}])" + re.escape(key) + end, text)
 
 
 def _marker_beside(text: str, start: int, end: int) -> str:
