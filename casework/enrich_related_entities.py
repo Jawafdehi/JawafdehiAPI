@@ -3,11 +3,9 @@
 name to an existing NES entity and bind it into the section it was extracted under
 (accused, alleged, related, witness, location, ...).
 
-Ported from the deleted `casework/enrich_related_entities.py` (recovered at
-donor commit `0321a85`, 553 lines). Reads a case's press-release AND/OR
-court-order source text entirely over the Jawafdehi HTTP API and asks the
-premium LLM tier to extract related/location entities plus short accused-person
-notes, in one response.
+Ported from donor commit `0321a85`. How it reads a case -- the court order first, in
+windows, every answer grounded and a district on every case -- is specified in the
+jawafdehi-meta spec `docs/2026-09-25-related-entities-court-order-first/design.md`.
 
 THE DONOR'S WRITE SHAPE (0321a85, no longer valid against this branch):
     entity_id = api.create_entity(display_name=name, nes_id="")        # donor line 510
@@ -92,12 +90,12 @@ IT ALSO UPDATES ACCUSED BINDS IT DID NOT CREATE, under `--verdicts`.
 `enrich_court_record` binds every court-record defendant with
 `outcome = charged` and a placeholder note, because a `ठहर` on a 19-defendant
 judgment does not say who. With `--verdicts`, a case with a bound court order
-and an accused bind not yet settled has the judgment's operative section read
-and those binds rewritten in place -- a real role note and a per-defendant
+and an accused bind not yet settled has the end of the judgment read, backwards
+from the holding, and those binds rewritten in place -- a real role note and a per-defendant
 verdict -- in the SAME `/entities` replace the new binds go out in, never a
 second PATCH. It still proposes no accused bind of its own. OPT-IN, because
 `convicted` on a real person is the worst thing this module can get wrong.
-Gated INDEPENDENTLY of the `related`-bind idempotency skip: nearly every case
+Gated INDEPENDENTLY of the already-enriched skip: nearly every case
 this targets has already been through an extraction run.
 
 Usage:
@@ -111,6 +109,7 @@ Usage:
 import argparse
 import json
 import logging
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -127,17 +126,17 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
-from casework.common.court_order import (
-    THAHAR_CHARS,
-    THAHAR_MARKER,
-    court_order_head,
-    court_order_thahar,
-    court_order_verdict_zone,
+from casework.common.grounding import (
+    entity_quote, has_word, is_readable_devanagari, is_teaser, normalise_for_match,
+    verbatim_quote,
 )
 from casework.common.llm import bootstrap, tier_for
-from casework.common.materials import materials_of_type, source_chunks, source_text
+from casework.common.materials import materials_of_type, source_chunks
+from casework.common.order_windows import (
+    MAX_ENTITY_WINDOWS, MAX_VERDICT_BACK_CHUNKS, caption_end, end_windows, start_windows,
+)
 from casework.entity_identity import entity_slug, prefix_is_creatable
-from casework.common.parse import parse_extraction_response
+from casework.common.parse import balanced_array, balanced_object, parse_extraction_response, strip_fence
 from casework.common.pipeline import (
     COURT_TYPES,
     PRESS_TYPES,
@@ -147,6 +146,13 @@ from casework.common.pipeline import (
 )
 from casework.common.review import md_cell
 from casework.common.select import select_for_run
+from casework.location_gazetteer import (
+    GROUNDING,
+    RESOLUTION,
+    load_gazetteer,
+    place_key,
+    resolve_locations,
+)
 # `defendant_names` is deliberately NOT imported. Reading accused from the case's
 # NGM court record was removed from this enricher: it needs no document and no LLM,
 # so it does not belong behind this module's five document/LLM gates (a case with a
@@ -161,6 +167,7 @@ from casework.entity_resolver import (
     Decision,
     _name_vetoes,
     apply_document_veto,
+    has_devanagari,
     is_election_candidate_record,
     names_a_gazetteer_place,
     normalise_name,
@@ -191,54 +198,32 @@ STAGE = STAGES["entities"]
 # fixed-constant treatment for the same reason. A cap costs nothing unless the model
 # actually reaches it: billing is on tokens produced, not on the ceiling. There is
 # no env knob because no other constant in `casework.common` has one.
+#
+# The CLI counts reasoning against this cap too, and continues a reply that runs
+# past it in a second turn whose tail is all it returns (`MalformedReply`). On
+# 077-CR-0001 a 30k window took ~7,900 tokens at default effort and ~3,100 at low,
+# so the run sets `CLAUDE_CLI_EFFORT=low` (work/enricher-runs/enrichers/entities.env).
 EXTRACTION_MAX_TOKENS = 8000
 
-# ── Slicing constants (verbatim from the donor's `env_int(NAME, default)`
-# defaults). The donor read these via an `env_int()` helper that lived in the
-# deleted `casework/common.py` and was never re-created in the Task 5-11
-# common package (see `enrich_missing_bigo.py`'s identical note) -- fixed at
-# the donor's own defaults. The court-order side of this budget is no longer
-# here: it comes from `casework.common.court_order.court_order_head` and
-# `court_order_thahar`.
-PRESS_RELEASE_CHARS = 3_000
-PRESS_RELEASE_CHARS_NO_COURT = 18_000
+#: One call's user content: one start window (caption <= 8k + 30k) and its label.
+PROMPT_HARD_MAX = 40_000
 
-PROMPT_HARD_MAX = 25_000
-
-SYSTEM_PROMPT = """You are a Nepali legal research assistant helping to build a public transparency database of court cases.
-Analyze the provided Nepali legal documents (press release and/or court order excerpts) and extract structured data.
+# The court-order prompt. PART 2 and PART 3 are word for word from the retired
+# single-call prompt; PART 1 and the output format are new, and every answer
+# carries `evidence` so it can be grounded against its window.
+COURT_ORDER_SYSTEM_PROMPT = """You are a Nepali legal research assistant helping to build a public transparency database of court cases.
 
 You must extract THREE things in a single response:
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 1 — LOCATION ENTITIES (relationship_type="location")
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Extract the district(s), municipality, or province WHERE THE CASE EVENTS occurred
-or where the key assets/funds at issue are located.
-
-STRICT RULES:
-- Extract ONLY where the case events happened or where the assets are.
-- DO NOT extract accused home addresses, birthplaces, or permanent addresses.
-- DO NOT extract the location of courts or government inquiry offices.
-- Extract 1 location for simple cases. Extract 2-3 only if the case genuinely spans
-  multiple districts.
-- The entity_name must be the PLACE NAME ALONE. Never combine it with an activity,
-  an organisation, or anything else. The place is the entity; what happened there
-  belongs in notes.
-- Put the activity context in notes instead, in Nepali.
-
-Examples of CORRECT location entities:
-- "सुर्खेत"      notes: "साझा भण्डार सहकारीको कारोबार भएको जिल्ला"
-- "जनकपुरधाम"    notes: "स्वास्थ्य उपकरण खरिद भएको स्थान"
-- "सर्लाही"      notes: "भरत ताल निर्माण परियोजना रहेको जिल्ला"
-- "खैरहनी नगरपालिका"  notes: "नापी कार्यालयको कारोबार भएको नगरपालिका"
-- "काठमाडौं"     notes: "जग्गा तथा शेयर लगानी रहेको जिल्ला"
-
-Examples of WRONG location names:
-- "स्वास्थ्य उपकरण खरिद - जनकपुरधाम" ← an activity glued to a place, NEVER do this
-- "घरजग्गा सम्पत्ति - काठमाडौं" ← a description of property, not a place
-- "तनहुँ जिल्ला" ← accused home address, SKIP
-- "काठमाडौं" ← if only reason is court/CIAA office, SKIP
+━━ PART 1 — WHERE THE EVENTS HAPPENED (locations array) ━━
+You are reading part of a Special Court judgment, labelled with its character range.
+Give every place where the case events happened or the assets at issue are.
+- place_as_written: the place exactly as the text writes it, e.g. "जिल्ला बाँके, खजुरा गाउँपालिका वडा नं.४".
+- district: the district alone, e.g. "बाँके".
+- evidence: ONE sentence copied VERBATIM from this text that names the place.
+NEVER a defendant's home or permanent address (स्थायी, जन्मस्थान, बस्ने), the caption,
+the CIAA or any of its offices, or the Special Court. If this text names no event
+place, return "locations": []. Do not guess.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PART 2 — PEOPLE AND ORGANIZATIONS (relationship_type="related" unless stated)
@@ -266,9 +251,8 @@ Extract ALL of these categories that appear in the documents:
   entities — they are present in every case. DO NOT extract individual prosecutors,
   attorneys, judges, or court staff — they are performing standard professional
   duties, not materially connected to the case events.
-  Only extract named CIAA investigation officers if they are specifically named
-  and their investigation is directly relevant.
-  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+  DO NOT extract CIAA investigation officers either -- running the inquiry is their
+  standard duty, the same as a prosecutor's.
 
   MEDIA — DO NOT extract a newspaper, portal or broadcaster whose only role was
   REPORTING the case. It is a source, not a participant.
@@ -290,8 +274,12 @@ the role plain. Only these two; when in doubt use "related".
   "alleged" — named as implicated in the documents, but NOT on the charge sheet.
   Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा संलग्न भनी उल्लेख, अभियोग लगाइएको छैन"
 
-  "witness" — a named inquiry officer or witness.
-  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+  "witness" — a named person whose statement is about the case events themselves:
+  the complainant, a colleague or supplier who saw the transaction.
+  Example: "प्रभात राई"  notes: "उजुरीकर्ता, ठेकेदार कम्पनीका प्रतिनिधि"
+  SKIP people who only carried out the procedure: the raid, search or seizure team,
+  police who assisted, lab analysts, ward officials who signed a मुचुल्का as local
+  representatives, and CIAA investigation officers.
 
 PRIORITY ORDER: People and organizations DIRECTLY involved in the case events come first.
 Generic legal infrastructure (courts, attorney offices) should be skipped unless a
@@ -313,36 +301,73 @@ Only include primary accused persons. Keep notes under 80 chars.
 OUTPUT FORMAT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Output ONLY this JSON object, no other text:
-{
-  "entities": [
-    {
-      "entity_name": "Name exactly as in document",
-      "relationship_type": "location", "related", "alleged" or "witness",
-      "entity_prefix": "the category from the list below",
-      "entity_type": "Person", "Organization", "GovernmentOrganization" or "Place",
-      "is_named_entity": true or false,
-      "name_en": "the name in English, or \"\" if you cannot give one",
-      "notes": "specific description"
-    }
-  ],
-  "accused_notes": [
-    {
-      "name": "Accused person name exactly as in document",
-      "notes": "job title, employer"
-    }
-  ]
-}
+{"locations": [{"place_as_written": "...", "district": "...", "evidence": "...", "notes": "..."}],
+ "entities": [{"entity_name": "...", "relationship_type": "related|alleged|witness|victim",
+               "evidence": "...", "notes": "..."}],
+ "accused_notes": [{"name": "...", "notes": "job title, employer", "evidence": "..."}]}
+A location's evidence is ONE sentence copied verbatim. An entities or accused_notes
+item's evidence is the SHORTEST phrase copied verbatim that names it, under 100
+characters. Keep every note under 80 characters.
 """
 
-#: Appended to `SYSTEM_PROMPT` when `--create-entities` is on, carrying the live
-#: category list. Only then: without the flag nothing is created, and asking for
-#: two fields nobody reads would spend prompt budget on a case where the budget
-#: is already the binding constraint (`PROMPT_HARD_MAX`).
+# Task 6: the press-release fallback prompt, used only when a case has no
+# readable court order (`pick_source`). A press release is a filing notice,
+# not a judgment -- it names no witnesses and decides no verdict, so this
+# prompt asks for neither. Same output shape as `COURT_ORDER_SYSTEM_PROMPT`
+# so `parse_window_response` reads either reply the same way.
+PRESS_RELEASE_SYSTEM_PROMPT = """You are a Nepali legal research assistant helping to build a public transparency database of court cases.
+You are reading a CIAA (अख्तियार दुरुपयोग अनुसन्धान आयोग) press release announcing a case
+filing -- not the court order itself. Extract only what a filing notice can actually state.
+
+Ignore boilerplate that names the CIAA's own offices, never the case events:
+टंगाल काठमाडौं, विशेष अदालत काठमाडौं, आयोगको कार्यालय X (any numbered CIAA regional office).
+
+Extract FOUR things in a single response:
+
+1. LOCATIONS (locations array) -- the district(s) where the case events happened or the
+   assets at issue are, never a CIAA office. Every item needs:
+   - place_as_written: the place exactly as the text writes it.
+   - district: the district alone.
+   - evidence: ONE sentence copied VERBATIM from this text that names the place.
+   Return "locations": [] if the release names no event place. Do not guess.
+
+2. ACCUSED ROLE NOTES (accused_notes array) -- for each accused person named, their job
+   title and employer. Format: "job title, employer". Keep notes under 80 chars.
+
+3. NAMED COMPANIES OR COMMITTEES (entities array, relationship_type="related") -- a
+   company, cooperative, or committee connected to the case.
+
+4. FAMILY MEMBERS NAMED FOR CONFISCATION (जफत गर्ने प्रयोजन) (entities array,
+   relationship_type="related") -- a spouse, child or relative named so their property
+   can be attached.
+
+Do NOT extract witnesses -- a filing notice names none.
+Do NOT extract a verdict or outcome -- a filing notice is written before the case is decided.
+
+OUTPUT: only this JSON object, no other text --
+{"locations": [{"place_as_written": "...", "district": "...", "evidence": "...", "notes": "..."}],
+ "entities": [{"entity_name": "...", "relationship_type": "related",
+               "evidence": "...", "notes": "..."}],
+ "accused_notes": [{"name": "...", "notes": "job title, employer", "evidence": "..."}]}
+A location's evidence is ONE sentence copied verbatim. An entities or accused_notes
+item's evidence is the SHORTEST phrase copied verbatim that names it, under 100
+characters. Keep every note under 80 characters.
+"""
+
+#: Appended to the extraction system prompt when `--create-entities` is on, carrying
+#: the live category list. Only then: without the flag nothing is created, and asking
+#: for two fields nobody reads would spend prompt budget for nothing.
 #:
 #: The list arrives from `GET /api/entity_prefixes` rather than being hardcoded,
 #: because it is `SELECT DISTINCT prefix` over live entities and grows. A
 #: hardcoded copy would silently refuse categories that exist.
 PREFIX_PROMPT_TEMPLATE = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FOUR MORE FIELDS ON EVERY entities ITEM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Add `entity_prefix`, `entity_type`, `is_named_entity` and `name_en` to every
+entities item, as described below.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ENTITY CATEGORY (entity_prefix)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -393,7 +418,7 @@ English name when the document does not support it.
 
 
 def prefix_prompt_section(live_prefixes):
-    """The category instructions for `SYSTEM_PROMPT`, or "" with no prefixes.
+    """The category instructions for the extraction system prompt, or "" with no prefixes.
 
     Returns "" rather than a template with an empty list: an instruction to
     choose from nothing would make the model invent values, and every invented
@@ -431,6 +456,14 @@ ACCUSED_SECTION = "accused"
 #: gazetteer ingest, keyed by official code (`location/district/jhapa-np0104`),
 #: so anything this stage would mint here is a duplicate or junk.
 LOCATION_SECTION = "location"
+
+#: Why an extracted `location` item is refused rather than name-searched.
+#: `casework.location_gazetteer.resolve_locations` is the only path onto a
+#: `location` bind now -- it grounds the model's quote against the source text
+#: before ever reaching NES, which fuzzy name search cannot do (a district
+#: search can't tell "the event happened here" from "this place was merely
+#: mentioned").
+LOCATION_MUST_COME_FROM_GAZETTEER = "a location must come through the gazetteer (resolve_locations)"
 
 #: Where a section the API rejects lands. `related` and not a guess at the
 #: intended meaning: it is what the extraction prompt already defaults to
@@ -589,9 +622,9 @@ VERDICT_OUTCOMES = frozenset({"convicted", "acquitted", "abated", "charged", "un
 VERDICT_SYSTEM_PROMPT = """You are a Nepali legal research assistant reading a Special Court \
 (विशेष अदालत) judgment (फैसला) to record what the court decided about each named defendant.
 
-Decide from the OPERATIVE section only -- the ठहर खण्ड and the तपसिल directions near the \
-end. The earlier sections recite the charge and the defence; they state what was ALLEGED, \
-not what was decided.
+You are reading part of the END of the judgment, labelled with its character range. \
+Decide only from a holding this text itself states. If this text does not state a holding \
+for a person, answer unknown.
 
 The operative verbs are ठहर्छ / ठहरेको (held guilty) and सफाई पाउने ठहर्छ (acquitted). A \
 defendant whose case was discontinued on death is abated (मुद्दा तामेली).
@@ -618,7 +651,7 @@ be convicted or acquitted on what the order says.
 
 For EACH name in the accused list, answer:
   outcome   exactly one of: convicted | acquitted | abated | charged | unknown.
-            Answer unknown -- never a guess -- when the operative section does
+            Answer unknown -- never a guess -- when this text does
             not decide that person's case.
   role      a short Nepali note: the person's post and employer at the time,
             plus what the court found they did, under 90 characters. "" if the
@@ -657,19 +690,26 @@ def parse_verdict_response(text: str) -> list:
     return out
 
 
+#: The outcome `_ask_verdict_names` gives a name one reply answered two different ways.
+CONFLICT = "conflict"
+#: A `convicted` whose own evidence carries either spelling quotes an acquittal.
+ACQUITTAL_MARKERS = ("सफाई", "सफाइ")
+
+
 def _ask_verdict_names(names, zone, invoke_text, usage):
     """One verdict call for exactly `names`, reconciled by EXACT name match.
 
     Returns `(answered, unrequested_errors)`. A row naming anyone but one of
     `names` is dropped and reported, never fuzzily matched: the prompt tells
     the model to copy `name` verbatim, and a near-match here binds a verdict to
-    the wrong person. Propagates an `invoke_text` failure to the caller.
+    the wrong person. A name answered twice with different outcomes comes back
+    as outcome `CONFLICT`, never last-wins. Propagates an `invoke_text` failure.
     """
     requested = set(names)
     listing = "\n".join(f"- {name}" for name in names)
     content = (
         f"ACCUSED ON THIS CASE:\n{listing}\n\n"
-        f"COURT ORDER (operative section):\n{zone}"
+        f"COURT ORDER:\n{zone}"
     )
     response_text = invoke_text(
         system=VERDICT_SYSTEM_PROMPT,
@@ -685,9 +725,15 @@ def _ask_verdict_names(names, zone, invoke_text, usage):
         if name not in requested:
             unrequested_errors.append(f"chunk returned an unrequested name: {name!r}")
             continue
-        answered[name] = {
-            "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
-        }
+        prior = answered.get(name)
+        if prior is None:
+            answered[name] = {
+                "outcome": row["outcome"], "role": row["role"], "evidence": row["evidence"],
+                "outcomes": [row["outcome"]],
+            }
+        elif row["outcome"] not in prior["outcomes"]:
+            prior["outcomes"].append(row["outcome"])
+            prior.update(outcome=CONFLICT, role="", evidence="")
     return answered, unrequested_errors
 
 
@@ -714,18 +760,10 @@ def _retry_verdict_names(missing, zone, invoke_text, usage):
     return answered, errors
 
 
-def accused_verdicts(names, order_text, invoke_text, usage=None):
-    """Ask the model, per chunk of `VERDICT_CHUNK` names, what the order's
-    operative section decided for each -- returns `({name: {"outcome", "role",
-    "evidence"}}, errors)`.
-
-    A short chunk is retried ONCE over the missing names at half the chunk
-    size (`_retry_verdict_names`); one still short after that keeps the rows it
-    did answer and errors naming the rest. A silent partial loss is what the
-    reconciliation this wraps exists to prevent.
-    """
-    zone = court_order_verdict_zone(order_text)
-    results: dict = {}
+def _ask_window(names, zone, invoke_text, usage):
+    """`names` asked of one window in batches, a short batch retried once: `(answered, failed, errors)`."""
+    answered_all: dict = {}
+    failed: dict = {}
     errors: list = []
     for start in range(0, len(names), VERDICT_CHUNK):
         chunk = names[start:start + VERDICT_CHUNK]
@@ -733,8 +771,9 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
             answered, unrequested_errors = _ask_verdict_names(chunk, zone, invoke_text, usage)
         except Exception as exc:  # noqa: BLE001 - one bad chunk must not lose the rest
             errors.append(f"chunk of {len(chunk)} defendants failed: {exc}")
+            failed.update(dict.fromkeys(chunk, "call-failed"))
             continue
-        results.update(answered)
+        answered_all.update(answered)
         missing = [name for name in chunk if name not in answered]
         if not missing:
             errors.extend(unrequested_errors)
@@ -743,14 +782,118 @@ def accused_verdicts(names, order_text, invoke_text, usage=None):
         retry_answered, retry_unrequested = _retry_verdict_names(
             missing, zone, invoke_text, usage)
 
-        results.update(retry_answered)
+        answered_all.update(retry_answered)
         still_missing = [name for name in missing if name not in retry_answered]
         errors.extend(unrequested_errors)
         if still_missing:
+            failed.update(dict.fromkeys(still_missing, "missing-after-retry"))
             errors.append(
                 f"chunk returned {len(answered) + len(retry_answered)} of {len(chunk)} "
                 f"defendants after retry; missing: {', '.join(still_missing)}")
         errors.extend(retry_unrequested)
+    return answered_all, failed, errors
+
+
+def _verdict_end(outcome, reason, window="", role="", evidence=""):
+    return {"outcome": outcome, "role": role, "evidence": evidence,
+            "reason": reason, "window": window}
+
+
+#: A decided outcome stands only when the defendant's name is this close to its evidence.
+NAME_NEAR_EVIDENCE_CHARS = 1_500
+#: How much of a verdict quote must be word for word: a stretch this share of it, not a scrap.
+VERDICT_MIN_VERBATIM_SHARE = 0.5
+_DEVANAGARI_LETTER = re.compile(r"[ऀ-ॿ]")
+
+
+def name_near_evidence(name, evidence, window_text):
+    """Whether the Devanagari `name`, as whole words, is in `evidence` or within `NAME_NEAR_EVIDENCE_CHARS` of it."""
+    key = normalise_for_match(name)
+    if not _DEVANAGARI_LETTER.search(key):
+        return False
+    ev, body = normalise_for_match(evidence), normalise_for_match(window_text)
+    if has_word(key, ev):
+        return True
+    at = body.find(ev)
+    while at != -1:
+        lo = max(0, at - NAME_NEAR_EVIDENCE_CHARS)
+        if has_word(key, body[lo:at + len(ev) + NAME_NEAR_EVIDENCE_CHARS]):
+            return True
+        at = body.find(ev, at + 1)
+    return False
+
+
+def _window_ending(name, row, failure, window, errors, later_texts=()):
+    """How one window ends `name`'s walk, or None when it answered `unknown`.
+
+    `later_texts` are the parts of the windows already read (later in the
+    order) that this window does not share: a back window cannot convict a
+    name they carry. Every decided outcome needs its Devanagari name in or near
+    its evidence, so an undecided name stays `charged` whichever way it went.
+    """
+    label = window.label()
+    if failure or row is None:
+        return _verdict_end("charged", failure or "missing-after-retry", label)
+    outcome = row["outcome"]
+    if outcome == "unknown":
+        return None
+    if outcome == CONFLICT:
+        errors.append(f"{label}: {name}: conflicting outcomes in one reply "
+                      f"({', '.join(row['outcomes'])})")
+        return _verdict_end("charged", "conflict", label)
+    if outcome not in TERMINAL_OUTCOMES:
+        return _verdict_end("charged", "charged-answer", label, role=row["role"])
+    # The name check runs on the verbatim part only; the सफाई veto reads the whole quote.
+    evidence = verbatim_quote(row["evidence"], window.text, min_share=VERDICT_MIN_VERBATIM_SHARE)
+    if not evidence:
+        errors.append(f"{label}: {name}: evidence not found in the order")
+        return _verdict_end("charged", "evidence-not-found", label)
+    if outcome == "convicted" and any(m in normalise_for_match(row["evidence"])
+                                      for m in ACQUITTAL_MARKERS):
+        errors.append(f"{label}: {name}: convicted vetoed, its evidence says सफाई")
+        return _verdict_end("charged", "vetoed", label)
+    key = normalise_for_match(name)
+    if not _DEVANAGARI_LETTER.search(key):
+        errors.append(f"{label}: {name}: {outcome} refused, a romanized name cannot be found in the order")
+        return _verdict_end("charged", "name-not-devanagari", label)
+    if not name_near_evidence(name, evidence, window.text):
+        errors.append(f"{label}: {name}: {outcome} refused, the name is not in or near its evidence")
+        return _verdict_end("charged", "name-not-in-evidence", label)
+    if outcome == "convicted" and any(has_word(key, normalise_for_match(t)) for t in later_texts):
+        errors.append(f"{label}: {name}: convicted refused, the final orders name them "
+                      f"but left them undecided")
+        return _verdict_end("charged", "named-in-final-orders-undecided", label)
+    return _verdict_end(outcome, "decided", label, role=row["role"], evidence=evidence)
+
+
+def accused_verdicts(names, order_text, invoke_text, usage=None,
+                     max_back=MAX_VERDICT_BACK_CHUNKS):
+    """Each name's holding from `end_windows`, latest first; only `unknown` moves a name back."""
+    ended: dict = {}
+    windows_read = dict.fromkeys(names, 0)
+    errors: list = []
+    read: list = []
+    for window in end_windows(order_text, max_back=max_back):
+        pending = [name for name in names if name not in ended]
+        if not pending:
+            break
+        label = window.label()
+        # Only what this window does not share: a name in the overlap is not "left undecided".
+        later_texts = [order_text[max(w.start, window.end):w.end] for w in read]
+        answered, failed, window_errors = _ask_window(
+            pending, f"{label}\n\n{window.text}", invoke_text, usage)
+        errors.extend(f"{label}: {error}" for error in window_errors)
+        for name in pending:
+            windows_read[name] += 1
+            end = _window_ending(name, answered.get(name), failed.get(name), window, errors,
+                                 later_texts=later_texts)
+            if end is not None:
+                ended[name] = end
+        read.append(window)
+    results = {}
+    for name in names:
+        end = ended.get(name) or _verdict_end("charged", "no-window-decided")
+        results[name] = {**end, "windows_read": windows_read[name]}
     return results, errors
 
 
@@ -986,6 +1129,400 @@ def _settle_note_claims(slug, claims, how):
     return settled
 
 
+def accused_missing_notes(case, notes):
+    """`nes_id`s of accused binds `notes` cannot yet fill, restricted to binds
+    `accused_note_updates` could EVER fill from this pipeline.
+
+    "Empty or placeholder" is the SAME test `apply_accused_updates` runs before
+    it will overwrite a note (`not notes or notes.startswith(MACHINE_NOTE_PREFIX)`).
+    "Could ever fill" narrows that to a bind `accused_binds_by_name` keeps under a
+    UNIQUE display name (a namesake is dropped there already) whose name is
+    Devanagari -- `note_match_key` folds an extracted name against the court
+    ORDER's own script, so a romanized display name (~40% of accused binds in
+    production) can never be matched and must not hold the start-window loop
+    open waiting for a note this pipeline can never supply.
+    """
+    grouped, _skipped = accused_binds_by_name(case)
+    reachable = {nes_id for name, (nes_id, _entity) in grouped.items() if has_devanagari(name)}
+    needing = {
+        (entity.get("nes_id") or "").strip()
+        for entity in (case.get("entities") or [])
+        if bind_relationship_type(entity) == ACCUSED_SECTION
+        and (lambda note: not note or note.startswith(MACHINE_NOTE_PREFIX))(entity.get("notes") or "")
+    }
+    return (needing & reachable) - set(accused_note_updates(case, notes))
+
+
+@dataclass(frozen=True)
+class Source:
+    """One case's chosen extraction text: a court order, a press release, or neither."""
+    kind: str | None
+    text: str
+    reason: str
+
+
+def _part_order(iri):
+    """Sort key for a material IRI that reads its numbers as numbers (`.2` before `.10`)."""
+    return [(0, int(p), "") if p.isdigit() else (1, 0, p) for p in re.split(r"(\d+)", iri or "")]
+
+
+def _joined_source_chunks(detail, types):
+    """`source_chunks` for `types`, in part order (`.1`, `.2`, `.10`) and joined:
+    `(joined_text, unmet_reasons)`."""
+    chunks, unmet = source_chunks(detail, types=types)
+    text = "\n\n".join(text for _mtype, _iri, text in sorted(chunks, key=lambda c: _part_order(c[1])))
+    return text, unmet
+
+
+#: The exact wording `casework.common.materials.source_chunks` uses for a fetch that
+#: raised, as opposed to a material simply not existing (`"no MARKDOWN role"`) or
+#: fetching empty (`"MARKDOWN empty"`) -- see `pick_source`.
+_FETCH_FAILED_MARKER = "MARKDOWN fetch failed"
+
+
+def court_source(detail):
+    """`(source, refused)`: the court order alone, or a `None`-kind `Source` saying why not.
+
+    `refused` means no fallback: a part that FAILED TO FETCH, or an order with text
+    in some parts and none in others -- a multi-part order is never read with a
+    part silently missing.
+    """
+    court_text, court_unmet = _joined_source_chunks(detail, COURT_TYPES)
+    fetch_failures = [reason for reason in court_unmet if _FETCH_FAILED_MARKER in reason]
+    if fetch_failures:
+        return Source(None, "", "; ".join(fetch_failures)), True
+    if court_text and court_unmet:
+        return Source(None, "", "the court order has parts with no text: " + "; ".join(court_unmet)), True
+    if court_text and is_readable_devanagari(court_text):
+        return Source("court_order", court_text, ""), False
+    return Source(None, "", "the case has no court order material with extracted text" if not court_text
+                  else "the court order text is not readable Devanagari (likely Preeti-encoded)"), False
+
+
+def pick_source(detail):
+    """Court order first; the press release only when no readable court order exists.
+
+    A refused court order (`court_source`) never falls back: a 503 or a missing
+    part must not silently swap in the press release under a misleading reason.
+    The press release is never fetched at all while a readable court order is in
+    hand -- `source_chunks` for `PRESS_TYPES` only runs on the fallback path.
+    """
+    court, refused = court_source(detail)
+    if court.kind or refused:
+        return court
+    why = court.reason
+    press_text, _press_unmet = _joined_source_chunks(detail, PRESS_TYPES)
+    if press_text and not is_teaser(press_text):
+        return Source("press_release", press_text, why)
+    why += ("; no press release material with text either" if not press_text
+            else "; the press release is a teaser stub")
+    return Source(None, "", why)
+
+
+@dataclass
+class WindowAnswer:
+    """One window's parsed reply, before evidence grounding or NES resolution."""
+    locations: list
+    entities: list
+    accused_notes: list
+
+
+def _parsed_extraction_object(text):
+    """`(obj, True)` when `text` (fence-stripped) parses as one JSON object; `({}, False)`
+    otherwise -- the same brace-balanced primitives `parse_extraction_response` itself
+    uses, exposed here so a well-formed reply can be read key by key. See
+    `_extraction_list` for why."""
+    stripped = strip_fence((text or "").strip())
+    start = stripped.find("{")
+    if start == -1:
+        return {}, False
+    frag = balanced_object(stripped, start)
+    if frag is None:
+        return {}, False
+    try:
+        obj = json.loads(frag)
+    except json.JSONDecodeError:
+        return {}, False
+    return (obj, True) if isinstance(obj, dict) else ({}, False)
+
+
+def _recover_key_array(text, key):
+    """Recover `key`'s own array from a reply whose object-level parse failed outright.
+
+    NEVER `parse_extraction_response`'s whole-text first-`[` fallback: with three
+    sibling keys (`locations`, `entities`, `accused_notes`) on one reply, that
+    fallback cannot tell one key's array from another's, so a reply truncated
+    mid-`accused_notes` returned `locations` for every key that came up empty
+    (measured via `TestParseWindowResponse.test_a_truncated_reply_recovers_each_
+    key_from_its_own_array_not_a_neighbours`). Instead: locate the literal
+    `"<key>"` field name, then the `[` that follows IT, and read from there with
+    the same brace-balanced, string-aware primitive. A key whose array cannot be
+    recovered this way is logged and left empty, never borrowed from a neighbour.
+    """
+    stripped = strip_fence((text or "").strip())
+    marker = stripped.find(f'"{key}"')
+    if marker == -1:
+        log.warning("malformed extraction reply: %r never appears", key)
+        return []
+    bracket = stripped.find("[", marker)
+    if bracket == -1:
+        log.warning("malformed extraction reply: %r has no following '['", key)
+        return []
+    frag = balanced_array(stripped, bracket)
+    if frag is None:
+        log.warning("malformed extraction reply: %r's array never closes", key)
+        return []
+    try:
+        entries = json.loads(frag)
+    except json.JSONDecodeError:
+        log.warning("malformed extraction reply: %r's recovered array is not valid JSON", key)
+        return []
+    return entries if isinstance(entries, list) else []
+
+
+def _extraction_list(obj, parsed_ok, key, text):
+    """`obj[key]` from an already-parsed reply, else `_recover_key_array`'s per-key recovery."""
+    if parsed_ok:
+        value = obj.get(key)
+        return list(value) if isinstance(value, list) else []
+    return _recover_key_array(text, key)
+
+
+_WINDOW_KEYS = ("locations", "entities", "accused_notes")
+
+
+class MalformedReply(ValueError):
+    """A window reply missing one of `_WINDOW_KEYS`: cut off or not JSON, never "found nothing"."""
+
+
+def parse_window_response(text):
+    """Parse one window's JSON reply; an `entities` item typed `location` moves into `locations`.
+
+    Raises `MalformedReply` when the reply is not one object and a key never
+    appears: the claude CLI returns only the last turn of a long answer, and that
+    tail used to parse as an empty window.
+    """
+    obj, parsed_ok = _parsed_extraction_object(text)
+    if parsed_ok and not any(key in obj for key in _WINDOW_KEYS):
+        parsed_ok = False  # the first balanced object was one item, not the reply
+    if not parsed_ok:
+        stripped = strip_fence((text or "").strip())
+        missing = [key for key in _WINDOW_KEYS if f'"{key}"' not in stripped]
+        if missing:
+            raise MalformedReply(
+                f"reply is cut off or not JSON: no {', '.join(missing)} "
+                f"({len(stripped):,} chars, starts {stripped[:60]!r})")
+    locations = [item for item in _extraction_list(obj, parsed_ok, "locations", text)
+                 if isinstance(item, dict)]
+    entities_raw = _extraction_list(obj, parsed_ok, "entities", text)
+    accused_notes = _extraction_list(obj, parsed_ok, "accused_notes", text)
+    entities = []
+    for item in entities_raw:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("relationship_type") or "").strip().lower() == LOCATION_SECTION:
+            locations.append({
+                "place_as_written": item.get("entity_name") or "",
+                "district": "",
+                "evidence": item.get("evidence") or "",
+                "notes": item.get("notes") or "",
+            })
+            continue
+        entities.append(item)
+    return WindowAnswer(locations=locations, entities=entities, accused_notes=accused_notes)
+
+
+@dataclass
+class Extraction:
+    """One source's extraction across every window it took: what to bind, what was refused,
+    and which windows were read."""
+    entities: list
+    accused_notes: list
+    location_binds: list
+    rejected: list
+    windows: list
+    #: Distinct location answers that passed grounding, bound or not.
+    location_answers: list = field(default_factory=list)
+    #: Grounded location answers that did not resolve: they go to review, not dropped.
+    location_review: list = field(default_factory=list)
+
+
+class PromptTooLarge(ValueError):
+    """One call's content is over `PROMPT_HARD_MAX`; it is refused, never truncated."""
+
+
+def _grounded(items, window_text):
+    """Split `items` on `entity_quote` against `window_text`: `(kept, rejected)`.
+
+    A kept item carries only the part of its quote the window backs.
+    """
+    kept, rejected = [], []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        quote = entity_quote(item.get("evidence") or "", window_text,
+                             item.get("entity_name") or item.get("name") or "")
+        if quote:
+            kept.append({**item, "evidence": quote})
+        else:
+            rejected.append({**item, "reason": "evidence not found in the source"})
+    return kept, rejected
+
+
+def _press_release_label(window):
+    """A press release is not a court order -- label it as what it is, same number format."""
+    return f"प्रेस विज्ञप्ति, अक्षर {window.start:,}–{window.end:,} (कुल {window.total:,})"
+
+
+def _read_window(api, gaz, text, cap_end, window, system_prompt, invoke_text, usage,
+                 system_suffix, label=None):
+    """One window: the LLM call, evidence grounding, and location resolution."""
+    content = f"{label or window.label()}\n\n{window.text}"
+    if len(content) > PROMPT_HARD_MAX:
+        raise PromptTooLarge(
+            f"{len(content):,} chars is over PROMPT_HARD_MAX ({PROMPT_HARD_MAX:,}); never truncated")
+    response = invoke_text(
+        system=system_prompt + system_suffix, content=content,
+        max_tokens=EXTRACTION_MAX_TOKENS, tier=tier_for("entities"), usage=usage)
+    answer = parse_window_response(response)
+    entities, rejected = _grounded(answer.entities, window.text)
+    accused_notes, notes_rejected = _grounded(answer.accused_notes, window.text)
+    rejected.extend(notes_rejected)
+    binds, loc_rejected = resolve_locations(api, gaz, answer.locations, text, cap_end)
+    ungrounded = [r for r in loc_rejected if r["stage"] == GROUNDING]
+    rejected.extend(ungrounded)
+    review = [r for r in loc_rejected if r["stage"] == RESOLUTION]
+    refused = {(r.get("place") or "", r.get("district") or "", r.get("evidence") or "") for r in ungrounded}
+    grounded = [a for a in answer.locations if isinstance(a, dict) and (
+        a.get("place_as_written") or "", a.get("district") or "", a.get("evidence") or "")
+        not in refused]
+    return entities, accused_notes, binds, rejected, grounded, review
+
+
+def _distinct(rows, key, into):
+    """Append each of `rows` to `into` unless `key(row)` is already there."""
+    seen = {key(row) for row in into}
+    for row in rows:
+        if key(row) not in seen:
+            seen.add(key(row))
+            into.append(row)
+
+
+def _answer_key(answer):
+    return place_key(answer.get("place_as_written") or answer.get("district") or "")
+
+
+def _review_key(row):
+    return (place_key(row.get("place") or row.get("district") or ""), row.get("reason"))
+
+
+def _new_accused_notes(case, kept_notes, candidates):
+    """`candidates` whose matched accused bind is not already filled by `kept_notes`.
+
+    Keeps the FIRST grounded note to reach a bind: a later window's restatement
+    of the same person's role ("सचिव, कृषि मन्त्रालय" for window 1's "तत्कालीन
+    सचिव, कृषि मन्त्रालय") is dropped here, before it can reach
+    `_settle_note_claims`'s "two different roles reached this bind" refusal and
+    erase the note `kept_notes` already secured. A note that never matches a
+    bind at all (unresolved or ambiguous name) is unaffected -- it cannot erase
+    anything -- and still accumulates for later human review.
+    """
+    already = set(accused_note_updates(case, kept_notes))
+    kept = []
+    for note in candidates:
+        if not isinstance(note, dict):
+            continue
+        matched = accused_note_updates(case, [note])
+        if matched and next(iter(matched)) in already:
+            continue
+        kept.append(note)
+    return kept
+
+
+def merge_window_entities(items):
+    """One item per `(normalise_name, bind_section)`: the first's fields, the first
+    non-empty note, and every evidence quote in `evidence_quotes`."""
+    merged, out = {}, []
+    for item in items:
+        name = (item.get("entity_name") or "").strip()
+        if not name:
+            out.append(item)
+            continue
+        quote = item.get("evidence") or ""
+        key = (normalise_name(name), bind_section(item))
+        if key not in merged:
+            merged[key] = {**item, "evidence_quotes": [quote] if quote else []}
+            out.append(merged[key])
+            continue
+        kept = merged[key]
+        if not (kept.get("notes") or "").strip() and (item.get("notes") or "").strip():
+            kept["notes"] = item["notes"]
+        if quote and quote not in kept["evidence_quotes"]:
+            kept["evidence_quotes"].append(quote)
+    return out
+
+
+def extract_from_source(api, gaz, case, source, invoke_text, usage, system_suffix="",
+                        max_windows=MAX_ENTITY_WINDOWS):
+    """Read `source` in growing start-windows, the court order and the press release alike.
+
+    The loop stops once a district has bound (or `case` already
+    holds one) and every reachable accused bind on `case` has a note
+    (`accused_missing_notes`), or at `max_windows`. A press release has no
+    caption, so its whole text counts for location grounding. A `LocationBind` already seen (by `nes_id`) in an
+    earlier window is not repeated; entities are merged across every window
+    read (`merge_window_entities`), and accused notes accumulate -- except a
+    note whose bind an earlier window already filled (`_new_accused_notes`).
+    `source.kind is None` makes no call at all.
+    """
+    if source.kind is None:
+        return Extraction([], [], [], [], [])
+
+    press = source.kind == "press_release"
+    prompt = PRESS_RELEASE_SYSTEM_PROMPT if press else COURT_ORDER_SYSTEM_PROMPT
+    text = source.text
+    cap_end = 0 if press else caption_end(text)
+    entities, accused_notes, location_binds, rejected, windows = [], [], [], [], []
+    seen_nes_ids, answers, reviews = set(), [], []
+    had_district = has_district_bind(case.get("entities") or [])
+    for window in start_windows(text, limit=max_windows):
+        w_entities, w_notes, w_binds, w_rejected, w_grounded, w_review = _read_window(
+            api, gaz, text, cap_end, window, prompt, invoke_text, usage, system_suffix,
+            label=_press_release_label(window) if press else None)
+        entities.extend(w_entities)
+        _distinct(w_grounded, _answer_key, answers)
+        _distinct(w_review, _review_key, reviews)
+        accused_notes.extend(_new_accused_notes(case, accused_notes, w_notes))
+        rejected.extend(w_rejected)
+        for bind in w_binds:
+            if bind.nes_id not in seen_nes_ids:
+                seen_nes_ids.add(bind.nes_id)
+                location_binds.append(bind)
+        windows.append((window.start, window.end))
+        has_district = had_district or any(DISTRICT_IRI_MARKER in bind.nes_id
+                                           for bind in location_binds)
+        if has_district and not accused_missing_notes(case, accused_notes):
+            break
+    return Extraction(merge_window_entities(entities), accused_notes, location_binds, rejected,
+                      windows, answers, reviews)
+
+
+#: What makes a bind a coded district (`location/district/<name>-npNNNN`).
+DISTRICT_IRI_MARKER = "/entity/location/district/"
+
+
+def has_district_bind(binds):
+    """True when any of `binds` is a coded district."""
+    return any(DISTRICT_IRI_MARKER in (b.get("nes_id") or "") for b in binds)
+
+
+def already_enriched(case):
+    """The extraction skip: the case holds a `related` bind AND a coded-district bind."""
+    binds = case.get("entities") or []
+    return (any(bind_relationship_type(b) == "related" for b in binds)
+            and has_district_bind(binds))
+
+
 def case_state(case):
     """A case's state as EVERY write gate reads it.
 
@@ -1061,6 +1598,11 @@ def verdict_case_refusal(case):
     return ""
 
 
+def verdict_text(source):
+    """The text the verdict step may read: the court order alone, never a press release."""
+    return source.text if source.kind == "court_order" and source.text.strip() else None
+
+
 def verdict_gate(case, court_text):
     """Whether this case's judgment may be read for per-defendant verdicts,
     and the reason it may not.
@@ -1077,15 +1619,20 @@ def verdict_gate(case, court_text):
 
 
 def _verdict_row(slug, name, nes_id, old_outcome, new_outcome, role, evidence,
-                 reason, written=False):
+                 reason, written=False, verdict=None):
     """One `*.verdicts.jsonl` row -- every accused bind considered, decided or not."""
+    verdict = verdict or {}
     return {"slug": slug, "name": name, "nes_id": nes_id,
             "old_outcome": old_outcome, "new_outcome": new_outcome,
             "role": role, "evidence": evidence, "reason": reason,
+            "verdict_reason": verdict.get("reason", ""),
+            "window": verdict.get("window", ""),
+            "windows_read": verdict.get("windows_read", 0),
             "written": written}
 
 
-def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
+def case_verdict_updates(slug, case, court_text, invoke_text, usage=None,
+                         max_back=MAX_VERDICT_BACK_CHUNKS):
     """Read one case's judgment for its accused binds: `(updates, rows, errors)`.
 
     `updates` is `apply_accused_updates`' input, keyed by `nes_id`; `rows` cover
@@ -1111,19 +1658,14 @@ def case_verdict_updates(slug, case, court_text, invoke_text, usage=None):
     if not targets:
         return {}, rows, []
     verdicts, errors = accused_verdicts(list(targets), court_text, invoke_text,
-                                        usage=usage)
+                                        usage=usage, max_back=max_back)
     updates = {}
     for name, nes_id in targets.items():
-        verdict = verdicts.get(name)
-        if verdict is None:
-            rows.append(_verdict_row(
-                slug, name, nes_id, old_outcome(nes_id), "", "", "",
-                "the judgment reply did not answer for this name"))
-            continue
+        verdict = verdicts[name]
         updates[nes_id] = {"outcome": verdict["outcome"], "notes": verdict["role"]}
         rows.append(_verdict_row(
             slug, name, nes_id, old_outcome(nes_id), verdict["outcome"],
-            verdict["role"], verdict["evidence"], ""))
+            verdict["role"], verdict["evidence"], "", verdict=verdict))
     return updates, rows, errors
 
 
@@ -1590,8 +2132,16 @@ def bind_section(item):
     return rel_type if rel_type in RELATIONSHIP_TYPES else DEFAULT_RELATIONSHIP_TYPE
 
 
-def plan_case_entities(api, case, etag, extracted_items, strict=False):
+def plan_case_entities(api, case, etag, extracted_items, strict=False, *, locations=(),
+                       location_review=()):
     """Resolve every extracted name for one case and build its write plan.
+
+    `locations` is Task 6's pre-resolved `LocationBind`s (from
+    `casework.location_gazetteer.resolve_locations`), each written straight into
+    the `location` section via `_bind_one` -- same `have` idempotency, same
+    `validate_new_bind`, no search. An extracted item whose own section is
+    `location` is refused instead of searched: see `LOCATION_MUST_COME_FROM_
+    GAZETTEER`.
 
     Guarantees: never plans a write for a non-DRAFT case, or for a case whose
     payload does not carry an `entities` key at all (see below); only BIND
@@ -1615,11 +2165,17 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     destructive whole-list replace with every existing bind missing.
 
     Every extracted name binds into the section its own `relationship_type`
-    names, for any of the nine the case API accepts. Three kinds of name do not
-    bind: an unrecognised section (no place to file it), a name no NES entity
-    matched at all (nothing to file), and an `accused` bind that would escalate an
-    entity the case already characterises another way (a human's call, not this
-    module's -- see the guard below).
+    names, for any of the eight searchable sections the case API accepts.
+    `location` is the ninth and is never searched here at all -- an extracted
+    item filed under it goes straight to `plan.review`; only a `LocationBind`
+    passed in via `locations` may reach the `location` section; each
+    `location_review` row (a grounded place `resolve_locations` could not
+    resolve) becomes a `location` review row. Otherwise, four
+    kinds of name do not bind: an unrecognised section (no place to file it), a
+    name no NES entity matched at all (nothing to file), a `location` (see
+    above), and an `accused` bind that would escalate an entity the case already
+    characterises another way (a human's call, not this module's -- see the
+    guard below).
 
     Bind identity is `(nes_id, relationship_type)`, matching the DB's
     `unique_case_entity_relationship_type` constraint, so one entity may hold two
@@ -1714,13 +2270,28 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     # leave a future reader hunting for the guard it used to serve.
 
     additions = []
+    # PRE-RESOLVED LOCATIONS, BOUND FIRST. Each `LocationBind` already carries a
+    # confirmed `nes_id` -- grounded against the source text and looked up in the
+    # NES gazetteer, never searched by name -- so it goes straight to `_bind_one`
+    # as a synthetic BIND at score 1.0, sharing `have`/`validate_new_bind` with
+    # every other section.
+    for lb in locations:
+        _bind_one(plan, lb.place, Decision(BIND, lb.nes_id, 1.0, lb.place, lb.via, ()),
+                  LOCATION_SECTION, lb.notes, have, additions, accused_ids)
+    for row in location_review:
+        why = row.get("reason") or ""
+        if row.get("gazetteer_reason"):
+            why += f"; gazetteer: {row['gazetteer_reason']}"
+        plan.review.append((row.get("place") or row.get("district") or "",
+                            Decision(REVIEW, None, 0.0, "", why, ()), LOCATION_SECTION))
+
     for item in extracted_items:
         name = (item.get("entity_name") or "").strip()
         if not name:
             continue
 
-        # Bind into whatever section the extraction names. `alleged`, `location`,
-        # `witness`, `victim` and the rest all bind.
+        # Bind into whatever section the extraction names. `alleged`, `witness`,
+        # `victim` and the rest all bind; `location` does not -- see below.
         #
         # A section the API does not accept is COERCED to `related` rather than
         # held: `related` is what the prompt itself defaults to, and the coercion
@@ -1732,6 +2303,17 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
         rel_type = bind_section(item)
         if rel_type != raw_type:
             plan.coerced.append((name, raw_type, rel_type))
+
+        # A LOCATION NAME IS NEVER SEARCHED. Only `resolve_locations` (Task 6)
+        # may bind this section -- it grounds the model's quote against the
+        # source text before the gazetteer lookup, which name search cannot do.
+        # Refused before spending a search, unlike the ACCUSED refusal below,
+        # which still records what the section claimed.
+        if rel_type == LOCATION_SECTION:
+            plan.review.append(
+                (name, Decision(REVIEW, None, 0.0, "", LOCATION_MUST_COME_FROM_GAZETTEER, ()),
+                 rel_type))
+            continue
 
         # THE LLM DOES NOT SUPPLY DEFENDANTS. `GET /courtcases/<court>/<number>/
         # entities` states them exactly -- for 078-CR-0038, हेम राज विष्ट and
@@ -2244,6 +2826,10 @@ def report_paths(paths):
             "extracted": f"{stem}.extracted.jsonl",
             "accused_notes": f"{stem}.accused_notes.jsonl",
             "created": f"{stem}.created.jsonl",
+            # Every answer grounding refused, with the reason; and every case
+            # that ended with no district, with the windows it read.
+            "dropped": f"{stem}.dropped.jsonl",
+            "location_missing": f"{stem}.location_missing.jsonl",
             # Every accused bind the verdict step LOOKED AT, decided or not --
             # a defendant left undecided is as much of a fact about the run as
             # one that was convicted, and this is the only place it is visible.
@@ -2319,87 +2905,6 @@ def write_nomatch_report(path, rows):
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _truncate_press_release(text, limit=None):
-    """Truncate press release, cutting at sentence boundary before limit."""
-    if not text:
-        return text
-    if limit is None:
-        limit = PRESS_RELEASE_CHARS
-    if len(text) <= limit:
-        return text
-
-    chunk = text[:limit]
-    for sep in ("।", "\n", ".", "!"):
-        idx = chunk.rfind(sep)
-        if idx >= limit // 2:
-            return chunk[: idx + 1]
-
-    return chunk
-
-
-def _enforce_prompt_budget(parts):
-    """Ensure combined prompt stays within budget."""
-    combined = "\n\n".join(parts)
-    if len(combined) <= PROMPT_HARD_MAX:
-        return combined
-
-    # Find largest part and truncate
-    largest_idx = max(range(len(parts)), key=lambda i: len(parts[i]))
-    current_overage = len(combined) - PROMPT_HARD_MAX
-    original = parts[largest_idx]
-    if len(original) > current_overage + 1000:
-        parts[largest_idx] = original[: len(original) - current_overage - 100]
-
-    combined = "\n\n".join(parts)
-    return combined[:PROMPT_HARD_MAX]
-
-
-def _build_content_parts(press_release_text, court_order_text):
-    """Build the LLM's user-prompt sections from the two independently-sourced texts.
-
-    A court order short enough to fit `THAHAR_CHARS` goes out ONCE, whole,
-    under the plain header. Longer, it contributes the UNION of
-    `court_order_head` (caption, party list) and `court_order_thahar` (the
-    operative section), as two separate labelled sections rather than one
-    joined block -- they are not contiguous in the source document, and
-    telling the model otherwise would mislead it about what it's reading. The
-    second header names the `ठहर खण्ड` only when the order actually carries
-    the marker; without one, `court_order_thahar` returns the ending."""
-    content_parts = []
-
-    if press_release_text:
-        if not court_order_text:
-            truncated = _truncate_press_release(
-                press_release_text, limit=PRESS_RELEASE_CHARS_NO_COURT
-            )
-        else:
-            truncated = _truncate_press_release(press_release_text)
-        content_parts.append("--- PRESS RELEASE ---")
-        content_parts.append(truncated)
-
-    if court_order_text:
-        content_parts.append("--- COURT ORDER ---")
-        if len(court_order_text) <= THAHAR_CHARS:
-            # The head is a prefix of this and the thahar window is a slice of
-            # it, so both readers would send text the model already has.
-            content_parts.append(court_order_text)
-        else:
-            content_parts.append(court_order_head(court_order_text))
-            content_parts.append(
-                "--- COURT ORDER (ठहर खण्ड) ---" if THAHAR_MARKER in court_order_text
-                else "--- COURT ORDER (अन्त्य) ---")
-            content_parts.append(court_order_thahar(court_order_text))
-
-    return content_parts
-
-
-def _parse_extraction_response(response_text):
-    """Extract entities and accused_notes from LLM response JSON."""
-    entities = parse_extraction_response(response_text, {"entities"}) or []
-    accused_notes = parse_extraction_response(response_text, {"accused_notes"}) or []
-    return entities, accused_notes
-
-
 def build_api(args):
     """Construct the client. Basic (local DEV_AUTH) unless a token is given.
 
@@ -2466,6 +2971,12 @@ def main(argv=None):
              "bind costs one extra LLM call per chunk of 20 defendants, and "
              "the outcome and role note it decides ride out in the SAME "
              "/entities write as the binds.")
+    ap.add_argument(
+        "--max-entity-windows", type=int, default=MAX_ENTITY_WINDOWS,
+        help="Most 30k start windows read per court order for entities and a district.")
+    ap.add_argument(
+        "--max-verdict-chunks", type=int, default=MAX_VERDICT_BACK_CHUNKS,
+        help="Most 18k chunks read back from the holding for verdicts (at most 4 more are read from it forward).")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -2508,7 +3019,7 @@ def main(argv=None):
     if args.dry_run:
         print("  --dry-run: printing what WOULD bind; no /entities writes will be made.")
     if args.force:
-        print("  --force: re-extracting even for cases with a 'related' bind already present")
+        print("  --force: re-extracting even for cases with a 'related' bind and a district")
     if args.verdicts:
         print("  --verdicts: reading each bound judgment for per-defendant outcomes")
     if args.strict:
@@ -2528,9 +3039,8 @@ def main(argv=None):
     # those 40 were a judgement call" are different facts, and rolling the
     # second into the first is how the uncertain ones stop getting checked.
     total_promoted = 0
-    # Cases skipped by the related-only idempotency gate. Reported separately
-    # because since the section widening they are not necessarily finished --
-    # see the gate's own comment below.
+    # Cases skipped by `already_enriched`. Reported separately because they are
+    # not necessarily finished -- see the gate's own comment below.
     total_skipped_enriched = 0
     # Binds that resolved and reached WOULD_PATCH, then lost at the write gate
     # (`entity_plan_refusal` -- a missing ETag, say). They are neither bound nor
@@ -2553,6 +3063,7 @@ def main(argv=None):
     bind_rows, review_rows, nomatch_rows, verdict_rows = [], [], [], []
     # Collected BEFORE resolution, so they survive a run where nothing binds.
     extracted_rows, accused_notes_rows = [], []
+    dropped_rows, location_missing_rows = [], []
     created_rows = []
     # Entities created THIS RUN, keyed by `(prefix, normalised name)` and shared
     # across cases: the same district office recurs, and each extra creation is a
@@ -2561,6 +3072,17 @@ def main(argv=None):
     run_entities = {}
     # Fetched on first use, not at startup -- see the call site.
     live_prefixes = None
+    # Loaded once, before the first case, so a failure stops the run before any
+    # write (a verdict-only case can PATCH before extraction ever runs): there is
+    # no fallback that binds a location without it.
+    gazetteer = None
+    if cases:
+        try:
+            gazetteer = load_gazetteer(api)
+        except Exception as exc:  # noqa: BLE001 - logged, then re-raised: it stops the run
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug="",
+                      step="gazetteer", status="error", detail=str(exc), level=logging.ERROR)
+            raise
 
     def record_decidedness(slug, binds):
         """Count one case's verdict coverage. Called at exactly one exit per case."""
@@ -2571,28 +3093,20 @@ def main(argv=None):
         if coverage == "partial":
             partially_decided.append(slug)
 
-    def extract_entities_for(slug, content_parts):
-        """One case's LLM extraction: `(valid_items, produced)`.
+    def extract_entities_for(slug, detail, source):
+        """One case: `(valid_items, produced, accused_notes, location_binds, location_review)`.
 
         Lifted out of the loop body so that every way extraction can come up
-        empty -- an unusable prompt, a failed call, a reply with nothing in it --
-        is a `return` rather than a `continue`. The verdict step below has to run
-        on a case whose extraction gave nothing, and a `continue` skipped it.
-        `produced` is False when the case would have been abandoned before, so
-        the caller can keep the old reporting exactly.
+        empty -- a failed call, a reply with nothing in it -- is a `return`
+        rather than a `continue`. The verdict step below has to run on a case
+        whose extraction gave nothing, and a `continue` skipped it. `produced`
+        is False when the case would have been abandoned before, so the caller
+        can keep the old reporting exactly.
         """
         nonlocal total_entities_extracted, total_accused_notes_extracted, live_prefixes
 
-        user_prompt = _enforce_prompt_budget(content_parts)
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                  step="prompt", status="ok", detail=f"{len(user_prompt)} chars")
-
-        if not user_prompt.strip():
-            report.record(slug, "entities", "skipped", "empty prompt after truncation")
-            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="prompt", status="skipped",
-                      detail="empty prompt after truncation", level=logging.WARNING)
-            return [], False, []
+                  step="prompt", status="ok", detail=f"{len(source.text)} chars")
 
         # The category list rides on the system prompt only when we might create
         # something. Fetched once per run, here as well as at the create step,
@@ -2601,14 +3115,16 @@ def main(argv=None):
             live_prefixes = read_live_prefixes(api)
 
         try:
-            response_text = invoke_text(
-                system=SYSTEM_PROMPT + prefix_prompt_section(
+            extraction = extract_from_source(
+                api, gazetteer, detail, source, invoke_text, usage,
+                system_suffix=prefix_prompt_section(
                     live_prefixes if args.create_entities else None),
-                content=user_prompt,
-                max_tokens=EXTRACTION_MAX_TOKENS,
-                tier=tier_for("entities"),
-                usage=usage,
-            )
+                max_windows=args.max_entity_windows)
+        except PromptTooLarge as exc:
+            report.record(slug, "entities", "error", f"prompt too large: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="prompt", status="error", detail=str(exc), level=logging.ERROR)
+            return [], False, [], [], []
         except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
             report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
@@ -2618,38 +3134,57 @@ def main(argv=None):
                 import traceback
 
                 traceback.print_exc()
-            return [], False, []
+            return [], False, [], [], []
 
-        entities_data, accused_notes = _parse_extraction_response(response_text)
+        for row in extraction.rejected:
+            dropped_rows.append({"slug": slug, **row})
+        # A DISTRICT IS MANDATORY. Recorded here, before anything else can drop the
+        # case, and only for a case that holds none already. The case's other
+        # binds are still written; this row is what a human checks.
+        if not (any(DISTRICT_IRI_MARKER in lb.nes_id for lb in extraction.location_binds)
+                or has_district_bind(detail.get("entities") or [])):
+            location_missing_rows.append({
+                "slug": slug, "source": source.kind, "windows": extraction.windows,
+                "rejected_locations": ([r for r in extraction.rejected if "place" in r]
+                                       + extraction.location_review)})
+            # An outcome status, so the ledger reads the case as failed on its district.
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="location", status="location_missing",
+                      detail=f"no district; windows {extraction.windows}",
+                      level=logging.WARNING)
+
+        accused_notes = extraction.accused_notes
         # Only two things are dropped here: a non-dict, and an item with no name.
         # Both are unrecordable -- `plan_case_entities` skips a nameless item
         # without putting it in ANY of its three lists, so `plan_summary` would
         # count it as already-bound (it derives that by subtraction).
         #
-        # The relationship_type is deliberately NOT filtered here. It used to be
-        # (`in ("location", "related")`), which silently discarded every other
-        # section before the planner could see it -- so widening the planner to
-        # all nine types would have been dead code for seven of them. One place
+        # The relationship_type is deliberately NOT filtered here. One place
         # decides which sections are bindable, and that place is the planner.
         valid_items = [
-            item for item in entities_data
+            item for item in extraction.entities
             if isinstance(item, dict) and (item.get("entity_name") or "").strip()
         ]
+        windows = f"windows {extraction.windows}"
 
-        if not valid_items and not accused_notes:
-            report.record(
-                slug, "entities", "skipped", "LLM returned no entities or accused notes")
+        # After grounding and the cross-window merge, so a name or a place repeated
+        # across windows counts once; grounding refusals are the dropped line.
+        total_entities_extracted += len(valid_items) + len(extraction.location_answers)
+        if not (valid_items or accused_notes or extraction.location_binds
+                or extraction.location_review):
+            why = ("no answer survived grounding" if extraction.rejected
+                   else "LLM returned no entities or accused notes")
+            report.record(slug, "entities", "skipped", why)
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="extract", status="skipped",
-                      detail="LLM returned no entities or accused notes",
+                      step="extract", status="skipped", detail=f"{why}; {windows}",
                       level=logging.WARNING)
-            return [], False, []
+            return [], False, [], [], []
 
-        total_entities_extracted += len(valid_items)
         total_accused_notes_extracted += len(accused_notes)
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="extract", status="ok",
-                  detail=f"{len(valid_items)} entities + {len(accused_notes)} accused_notes")
+                  detail=(f"{len(valid_items)} entities + {len(accused_notes)} accused_notes + "
+                          f"{len(extraction.location_binds)} location bind(s); {windows}"))
 
         # Record the extraction itself, here, before anything can drop it. Every
         # later exit -- an ETag failure, a refused plan, a whole case of
@@ -2660,11 +3195,13 @@ def main(argv=None):
                 "extracted": (item.get("entity_name") or "").strip(),
                 "relationship_type": (item.get("relationship_type") or "").strip().lower(),
                 "notes": (item.get("notes") or "").strip(),
+                "evidence": item.get("evidence_quotes") or [],
             })
         for note in accused_notes:
             if isinstance(note, dict):
                 accused_notes_rows.append({**note, "slug": slug})
-        return valid_items, True, accused_notes
+        return (valid_items, True, accused_notes, extraction.location_binds,
+                extraction.location_review)
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
@@ -2672,46 +3209,26 @@ def main(argv=None):
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
-        # A `related` bind is the marker that this stage has already run on this
-        # case, and it stays the key. Measured on production: 162 of 3,003 cases
-        # carry binds but no `related` one, and a bare `case.get("entities")`
-        # test skipped every single one of them.
+        # THE SKIP: a `related` bind AND a coded district (`already_enriched`).
+        # A `related` bind alone used to be enough, so a case enriched before
+        # locations were mandatory never got its district. The API read shape
+        # sends the section back under `type`; `bind_relationship_type` reads
+        # either key.
         #
-        # THE KEY IS NOW A PROXY, NOT AN EQUIVALENCE, and this is the deliberate
-        # choice. `related` used to be exactly and only what this stage wrote;
-        # since the section scope widened it also writes `accused`, `location`,
-        # `alleged`, `witness` and the rest. So a case enriched by an earlier
-        # related-only run is skipped here with its location and accused names
-        # never resolved. Re-keying the gate would re-spend an LLM call on
-        # thousands of already-enriched cases, which is a cost decision for
-        # whoever runs the campaign -- so the skip is COUNTED and reported in the
-        # summary with the `--force` pointer instead of being silently correct-
-        # looking. Widened-scope work on an old case is a `--force` re-run.
-        #
-        # The API is asymmetric: `validate_bind_item` WRITES `relationship_
-        # type`, but the read path (`cases/services/nes_resolver.py`, via
-        # `CaseSerializer.get_entities`) sends the relationship type back
-        # under `type` -- `relationship_type` never appears on a read. Same
-        # tolerance `current_entity_binds` already applies just above, so a
-        # hand-built dict using either key still behaves correctly.
-        existing_related = [
-            bind for bind in (case.get("entities") or [])
-            if bind_relationship_type(bind) == "related"
-        ]
         # THE SKIP IS EXTRACTION-ONLY SINCE THE VERDICT STEP LANDED. It stops
         # the premium extraction call, not the case: nearly every case the
         # verdict step targets has already been through an extraction run, so
         # sharing this gate with it would skip all of them. Without
         # `--verdicts` the skip is free again -- no detail read, nothing.
-        skip_extraction = bool(existing_related) and not args.force
+        skip_extraction = already_enriched(case) and not args.force
         if skip_extraction:
+            n_related = sum(1 for bind in (case.get("entities") or [])
+                            if bind_relationship_type(bind) == "related")
+            why = f"{n_related} 'related' bind(s) and a district already present"
             total_skipped_enriched += 1
-            report.record(
-                slug, "entities", "already",
-                f"{len(existing_related)} 'related' bind(s) already present")
+            report.record(slug, "entities", "already", why)
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-                      step="idempotency", status="already",
-                      detail=f"{len(existing_related)} 'related' bind(s) already present")
+                      step="idempotency", status="already", detail=why)
             if not args.verdicts:
                 continue
 
@@ -2724,16 +3241,14 @@ def main(argv=None):
                       level=logging.WARNING)
 
         if skip_extraction:
-            # Here for the verdicts only, and those read the court order alone --
-            # fetching the press release too would spend a markdown read per
-            # case on a prompt this run will never build. The clauses the case
-            # payload can answer run FIRST, so a case the gate refuses pays for
-            # no document fetch at all.
+            # Here for the verdicts only, and those read the court order alone. The
+            # clauses the case payload can answer run FIRST, so a case the gate
+            # refuses pays for no document fetch at all.
             court_text = None
             if not verdict_case_refusal(detail):
-                court_text, _court_unmet = source_text(detail, types=COURT_TYPES)
-                court_text = court_text.strip() or None
-            valid_items, produced, case_accused_notes = [], False, []
+                court_text = verdict_text(court_source(detail)[0])
+            valid_items, produced, case_accused_notes, location_binds, location_review = (
+                [], False, [], [], [])
         else:
             unmet = unmet_prerequisites(STAGE, detail)
             if unmet:
@@ -2744,35 +3259,24 @@ def main(argv=None):
                           detail="; ".join(unmet), level=logging.WARNING)
                 continue
 
-            press_text, press_unmet = source_text(detail, types=PRESS_TYPES)
-            court_text, court_unmet = source_text(detail, types=COURT_TYPES)
-            press_text = press_text.strip() or None
-            court_text = court_text.strip() or None
-
-            content_parts = _build_content_parts(press_text, court_text)
-            if not content_parts:
-                # Donor-preserved gate (donor line 404): skip only when BOTH
-                # press release and court order content are absent.
-                reasons = (press_unmet + court_unmet) or [
-                    "no press release or court order content"]
-                for reason in reasons:
-                    report.record(slug, "entities", "unmet", reason)
+            source = pick_source(detail)
+            if source.kind is None:
+                report.record(slug, "entities", "unmet", source.reason)
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
                           slug=slug, step="source", status="unmet",
-                          detail="; ".join(reasons), level=logging.WARNING)
+                          detail=source.reason, level=logging.WARNING)
                 continue
+            label = "court order" if source.kind == "court_order" else "press release"
+            fallback = f" ({source.reason})" if source.reason else ""
+            log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                      slug=slug, step="source", status="ok",
+                      detail=f"{label} {len(source.text)} chars{fallback}")
 
-            if press_text:
-                log_event(logger, paths["events"], run_id=run_id, stage="entities",
-                          slug=slug, step="source", status="ok",
-                          detail=f"press release {len(press_text)} chars")
-            if court_text:
-                log_event(logger, paths["events"], run_id=run_id, stage="entities",
-                          slug=slug, step="source", status="ok",
-                          detail=f"court order {len(court_text)} chars")
+            (valid_items, produced, case_accused_notes, location_binds,
+             location_review) = extract_entities_for(slug, detail, source)
 
-            valid_items, produced, case_accused_notes = extract_entities_for(
-                slug, content_parts)
+            # The order `pick_source` already fetched, never refetched.
+            court_text = verdict_text(source) if args.verdicts else None
 
         # THE VERDICT GATE, EVALUATED INDEPENDENTLY OF THE SKIP ABOVE. The
         # updates it produces are merged into the SAME whole-list replace the
@@ -2795,7 +3299,8 @@ def main(argv=None):
                     case_verdict_rows = verdict_skip_rows(slug, detail, why_not)
             else:
                 updates, case_verdict_rows, verdict_errors = case_verdict_updates(
-                    slug, detail, court_text, invoke_text, usage=usage)
+                    slug, detail, court_text, invoke_text, usage=usage,
+                    max_back=args.max_verdict_chunks)
 
         # Nothing extracted and no verdict to write: the extraction path already
         # recorded why, and there is no reason to spend the conditional re-read.
@@ -2828,7 +3333,8 @@ def main(argv=None):
                       level=logging.WARNING)
 
         plan = plan_case_entities(api, fresh, etag, valid_items,
-                                  strict=args.strict)
+                                  strict=args.strict, locations=location_binds,
+                                  location_review=location_review)
 
         # Two refusals reach here and NEITHER looked at a single extracted
         # name: a non-DRAFT state, and a payload with no `entities` key. Both
@@ -2928,8 +3434,8 @@ def main(argv=None):
         # filter. Off the gate because `verdict_case_refusal` turns down a
         # fully-settled case, which is exactly where the placeholders pile up.
         #
-        # A verdict's own role note wins: it is read from the judgment's
-        # operative section, where this one is a job title from the extraction.
+        # A verdict's own role note wins: it is read from the end of the
+        # judgment, where this one is a job title from the extraction.
         noted = {}
         for nes_id, note_update in accused_note_updates(
                 fresh, case_accused_notes).items():
@@ -3104,6 +3610,9 @@ def main(argv=None):
                           f"{len(changed_ids)} verdict update(s){note_detail}"))
 
     stats = report.summary()
+    # A failure beside the per-case statuses, not a `RunReport` row: see `location_missing_rows`.
+    if location_missing_rows:
+        stats["location_missing"] = len(location_missing_rows)
     print_summary(stats, args.dry_run, "Related-entity extraction")
     unmet_reasons = report.unmet_reasons()
     if unmet_reasons:
@@ -3117,6 +3626,8 @@ def main(argv=None):
     write_jsonl(reports["extracted"], extracted_rows)
     write_jsonl(reports["accused_notes"], accused_notes_rows)
     write_jsonl(reports["created"], created_rows)
+    write_jsonl(reports["dropped"], dropped_rows)
+    write_jsonl(reports["location_missing"], location_missing_rows)
     write_jsonl(reports["verdicts"], verdict_rows)
     write_nomatch_report(reports["nomatch"], nomatch_rows)
 
@@ -3178,6 +3689,10 @@ def main(argv=None):
             if len(partially_decided) > 20:
                 print(f"      ... and {len(partially_decided) - 20} more")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
+    # A failure, not a success: every case must end with a district.
+    print(f"  location_missing: {len(location_missing_rows)}  -> {reports['location_missing']}")
+    if dropped_rows:
+        print(f"  TOTAL answers dropped by grounding: {len(dropped_rows)}  -> {reports['dropped']}")
     if total_skipped_enriched:
         # EXTRACTION, not the case. The verdict gate is independent of this
         # skip, so some of these cases were written in this very run and
@@ -3185,10 +3700,10 @@ def main(argv=None):
         also = ("" if not args.verdicts
                 else " Their judgments were still read for verdicts.")
         print(f"  {total_skipped_enriched} case(s) skipped EXTRACTION as already "
-              "enriched, on the presence of a 'related' bind."
+              "enriched, on the presence of a 'related' bind and a district."
               f"{also} A case enriched before the section scope widened may "
-              "still have accused/location/witness names outstanding; re-run "
-              "those with --force to pick them up.")
+              "still have accused/witness names outstanding; re-run those with "
+              "--force to pick them up.")
     if total_refused_binds:
         print(f"  {total_refused_binds} resolved bind(s) were REFUSED at the write "
               "gate, not rejected by the matcher -- see the WOULD REFUSE lines "
@@ -3231,8 +3746,9 @@ def main(argv=None):
                   "extracted name(s) were already bound on their case(s), nothing "
                   "left to write for them.")
         else:
-            print("  This run bound zero entities. Every extracted name either went "
-                  "to review or matched no NES entity -- see the two files above.")
+            print("  This run bound zero entities. Every extracted name either failed "
+                  "grounding, went to review or matched no NES entity -- see the "
+                  "files above.")
 
     usage_summary = ""
     if usage.calls > 0:
