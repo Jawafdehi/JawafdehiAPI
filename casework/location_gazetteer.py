@@ -216,6 +216,9 @@ class Gazetteer:
             return PlaceDecision(claim_iri, matching[0], "")
         if len(matching) > 1:
             return PlaceDecision(claim_iri, None, "several named municipalities in the district; not bound")
+        if units and claim_iri not in named:
+            # Only the quote backs the claim, and the place's own municipality says otherwise.
+            return PlaceDecision(None, None, "the named municipality is in another district than the claim")
         if units:
             return PlaceDecision(claim_iri, None, "a named municipality sits in another district; not bound")
         return PlaceDecision(claim_iri, None, "")
