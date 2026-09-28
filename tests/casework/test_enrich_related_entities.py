@@ -7197,3 +7197,35 @@ def test_extraction_asks_for_low_effort_and_verdicts_keep_the_default(
     assert extraction and verdicts
     assert all(kw["effort"] == "low" and kw["max_tokens"] == 8000 for kw in extraction)
     assert all("effort" not in kw for kw in verdicts)
+
+
+class TestPartlyCopiedVerdictQuotes:
+    """A verdict quote is grounded by its word-for-word stretch, if that is at least half of it."""
+
+    ORDER = "तसर्थ " + HOLD_A + "। मिसिल नियमानुसार अभिलेख शाखामा बुझाइदिनू।"
+    COPIED = f"प्रतिवादी {RAM}लाई भ्रष्टाचारको कसुर गरेको"
+
+    def _decide(self, evidence, outcome="convicted"):
+        def answer(name, content):
+            return {"outcome": outcome, "role": "", "evidence": evidence}
+        return ere.accused_verdicts([RAM], self.ORDER, _window_stub(answer))
+
+    def test_a_reworded_last_word_still_decides_on_the_copied_stretch(self):
+        got, errors = self._decide(self.COPIED + " ठहर गरिन्छ")
+        assert (got[RAM]["outcome"], got[RAM]["reason"]) == ("convicted", "decided")
+        assert got[RAM]["evidence"].startswith(self.COPIED) and "गरिन्छ" not in got[RAM]["evidence"]
+        assert errors == []
+
+    def test_a_copied_stretch_under_half_the_quote_is_not_evidence(self):
+        invented = " भनी जिल्ला अदालतले पनि पहिले नै फैसला गरी कैद सजाय तोकिसकेको देखिन्छ"
+        got, _errors = self._decide(self.COPIED + invented)
+        assert (got[RAM]["outcome"], got[RAM]["reason"]) == ("charged", "evidence-not-found")
+
+    def test_a_short_copied_scrap_is_not_evidence(self):
+        got, _errors = self._decide(f"प्रतिवादी {RAM}लाई सफाई दिने ठहर गरियो")
+        assert got[RAM]["reason"] == "evidence-not-found"
+
+    def test_the_acquittal_veto_reads_the_reworded_tail_too(self):
+        got, errors = self._decide(self.COPIED + " भए पनि सफाई")
+        assert (got[RAM]["outcome"], got[RAM]["reason"]) == ("charged", "vetoed")
+        assert any("सफाई" in e for e in errors)

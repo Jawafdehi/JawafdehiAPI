@@ -3,7 +3,8 @@
 import re
 from dataclasses import dataclass
 
-from casework.common.grounding import has_word, location_quote_problem, normalise_for_match
+from casework.common.grounding import (has_word, location_quote_problem, normalise_for_match,
+                                       verbatim_quote)
 
 _SPLIT_SUB_METRO = re.compile(r"उप[\s\-‐–—]*महानगर")
 _SPLIT_PALIKA = re.compile(r"(गाउं|नगर)[\s\-‐–—]+पालिका")
@@ -141,6 +142,16 @@ class Gazetteer:
             # Keys, not forms: `खजुरा गाउँपालिका` and `खजुरा गाउंपालिका` are one entry, not two namesakes.
             for key in {place_key(form) for form in forms} - {""}:
                 self._unit_forms.setdefault(key, []).append((u["@id"], parent))
+        self._names: dict[str, set] = {}
+        for key, iri in self._district_forms.items():
+            self._names.setdefault(iri, set()).add(key)
+        for key, entries in self._unit_forms.items():
+            for iri, _parent in entries:
+                self._names.setdefault(iri, set()).add(key)
+
+    def names_for(self, *iris) -> set:
+        """Every key the gazetteer matches for these district or localunit IRIs."""
+        return set().union(*(self._names.get(iri, set()) for iri in iris if iri))
 
     def district_for(self, name: str) -> str | None:
         key = place_key(name)
@@ -311,16 +322,27 @@ def resolve_locations(
             rejected.append({"place": place, "district": district_claim, "evidence": evidence,
                              "reason": reason, "stage": stage, **extra})
 
-        problem = location_quote_problem(evidence, query, source_text, caption_end)
+        # Only the verbatim part of the quote grounds anything, so it is also what gets
+        # recorded; the place counts as in it when the gazetteer's own name for what it
+        # resolved to is, not only the phrase the model assembled (077-CR-0004).
+        verified = verbatim_quote(evidence, source_text)
+        decision = gaz.resolve(place, district_claim, verified or evidence)
+        names = gaz.names_for(decision.district, decision.localunit) if decision.district else ()
+        problem = location_quote_problem(evidence, query, source_text, caption_end,
+                                         names=names, fold=place_key)
         if problem:
             reject(problem, GROUNDING)
             continue
+        evidence = verified
 
-        decision = gaz.resolve(place, district_claim, evidence)
         if decision.district:
             emit(decision.district, notes, place, evidence, "gazetteer")
-            if decision.localunit:
+            quoted = place_key(evidence)
+            if decision.localunit and any(has_word(key, quoted)
+                                          for key in gaz.names_for(decision.localunit)):
                 emit(decision.localunit, notes, place, evidence, "gazetteer")
+            elif decision.localunit:
+                reject("the municipality is not in the quote; not bound")
             elif decision.reason:
                 reject(decision.reason)
             continue

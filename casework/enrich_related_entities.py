@@ -128,6 +128,7 @@ from casework.common.cli import (
 )
 from casework.common.grounding import (
     evidence_found, has_word, is_readable_devanagari, is_teaser, normalise_for_match,
+    verbatim_quote,
 )
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import materials_of_type, source_chunks
@@ -803,6 +804,8 @@ def _verdict_end(outcome, reason, window="", role="", evidence=""):
 
 #: A decided outcome stands only when the defendant's name is this close to its evidence.
 NAME_NEAR_EVIDENCE_CHARS = 1_500
+#: How much of a verdict quote must be word for word: a stretch this share of it, not a scrap.
+VERDICT_MIN_VERBATIM_SHARE = 0.5
 _DEVANAGARI_LETTER = re.compile(r"[ऀ-ॿ]")
 
 
@@ -843,11 +846,12 @@ def _window_ending(name, row, failure, window, errors, later_texts=()):
         return _verdict_end("charged", "conflict", label)
     if outcome not in TERMINAL_OUTCOMES:
         return _verdict_end("charged", "charged-answer", label, role=row["role"])
-    evidence = row["evidence"]
-    if not evidence_found(evidence, window.text):
+    # The name check runs on the verbatim part only; the सफाई veto reads the whole quote.
+    evidence = verbatim_quote(row["evidence"], window.text, min_share=VERDICT_MIN_VERBATIM_SHARE)
+    if not evidence:
         errors.append(f"{label}: {name}: evidence not found in the order")
         return _verdict_end("charged", "evidence-not-found", label)
-    if outcome == "convicted" and any(m in normalise_for_match(evidence)
+    if outcome == "convicted" and any(m in normalise_for_match(row["evidence"])
                                       for m in ACQUITTAL_MARKERS):
         errors.append(f"{label}: {name}: convicted vetoed, its evidence says सफाई")
         return _verdict_end("charged", "vetoed", label)

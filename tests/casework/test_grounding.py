@@ -1,7 +1,7 @@
 import pytest
 from casework.common.grounding import (
     evidence_found, has_word, is_readable_devanagari, is_teaser, location_quote_problem,
-    normalise_for_match,
+    normalise_for_match, verbatim_quote,
 )
 
 ORDER = ("**अध्यक्ष माननीय न्यायाधीश**\nजिल्ला कालिकोट स्थायी घर भई हाल बस्ने जयराज\n"
@@ -131,3 +131,59 @@ def test_a_place_differing_from_its_quote_only_by_punctuation_is_in_it():
 
 def test_a_district_joined_to_jilla_is_its_word():
     assert has_word("दाङ", "दाङजिल्ला, घोराही")
+
+
+# --- A quote the model only partly copied (077-CR-0004): the copied stretch grounds it. ---
+
+SEIZURE = "जिल्ला बाँके, खजुरा गाँउपालिका वडा नं.४ स्थित पूर्वमा बाटो भएको घरमा रकम बरामद भयो"
+REWORDED = SEIZURE + " भन्ने कुरा ठीक साँचो हो"  # the tail is the model's, not the order's
+
+
+def test_a_fully_copied_quote_is_all_verbatim():
+    assert verbatim_quote(SEIZURE, ORDER) == SEIZURE
+
+
+def test_a_reworded_tail_leaves_the_copied_stretch():
+    assert verbatim_quote(REWORDED, ORDER) == SEIZURE  # the quote's own spelling, not the folded form
+
+
+def test_a_copied_scrap_under_the_minimum_grounds_nothing():
+    assert verbatim_quote("रकम बरामद भयो भनी प्रहरीले प्रतिवेदन दिएको भन्ने कुरा", ORDER) == ""
+
+
+def test_a_copied_stretch_under_the_required_share_grounds_nothing():
+    assert verbatim_quote(REWORDED, ORDER, min_share=0.95) == ""
+
+
+def test_a_location_quote_with_a_reworded_tail_still_grounds():
+    assert location_quote_problem(REWORDED, "बाँके", ORDER, CAP) == ""
+
+
+def test_the_place_must_be_in_the_copied_stretch_not_the_reworded_tail():
+    ev = SEIZURE + " र यो घटना सुर्खेत जिल्लामा भएको हो"
+    assert location_quote_problem(ev, "सुर्खेत", ORDER, CAP) == "the place is not in its own evidence"
+
+
+def test_a_place_assembled_from_pieces_grounds_through_its_gazetteer_name():
+    ev = "जिल्ला बाँके, खजुरा गाँउपालिका वडा नं.४ स्थित पूर्वमा बाटो"
+    assert location_quote_problem(ev, "खजुरा गाउँपालिका, पूर्वको घर", ORDER, CAP) != ""
+    assert location_quote_problem(ev, "खजुरा गाउँपालिका, पूर्वको घर", ORDER, CAP,
+                                  names={normalise_for_match("बाँके")}) == ""
+
+
+def test_an_address_beside_every_mention_still_rejects():
+    ev = "जिल्ला कालिकोट स्थायी घर भई हाल बस्ने जयराज"
+    text = "मुद्धा:- भ्रष्टाचार\n" + ev + " ।"
+    assert "स्थायी" in location_quote_problem(ev, "कालिकोट", text, 0,
+                                                names={normalise_for_match("कालिकोट")})
+
+
+def test_one_mention_with_no_address_beside_it_is_enough():
+    ev = ("जिल्ला बाँके बस्ने रामले " + "रकम लिई आएको भनी दिएको बयान अनुसार " * 3
+          + "बाँके जिल्लाको कोहलपुर बजारमा रकम बरामद भयो")
+    assert location_quote_problem(ev, "बाँके", ev + " ।", 0) == ""
+
+
+def test_a_permanent_appointment_is_not_a_permanent_address():
+    ev = "तत्कालीन भगवानपुर गा.वि.स., रुपन्देहीमा मिति 2065/04/01 देखि कार्यालय सहायक पदमा स्थायी नियुक्ति लिएको"
+    assert location_quote_problem(ev, "रुपन्देही", ev + " ।", 0) == ""

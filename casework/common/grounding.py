@@ -4,6 +4,8 @@ import re
 import unicodedata
 
 MIN_EVIDENCE_CHARS = 12
+#: The shortest word-for-word stretch that grounds a quote the model only partly copied.
+MIN_VERBATIM_CHARS = 40
 MIN_DEVANAGARI_SHARE = 0.3
 TEASER_MIN_CHARS = 400
 _STRIP = dict.fromkeys(map(ord, "​‌‍﻿*_"), None)
@@ -15,8 +17,8 @@ LOCATION_REJECT_MARKERS = (
     "स्थायी", "जन्मस्थान", "बस्ने", "वतन", "घर भई", "टंगाल", "टङ्गाल",
     "विशेष अदालत", "बिशेष अदालत", "सर्वोच्च अदालत", "आयोगको कार्यालय", "क्षेत्रीय कार्यालय",
 )
-#: Phrases that carry a marker word without being an address (a standing committee).
-LOCATION_MARKER_EXCEPTIONS = ("स्थायी समिति",)
+#: Phrases that carry a marker word without being an address (a standing committee, a permanent post).
+LOCATION_MARKER_EXCEPTIONS = ("स्थायी समिति", "स्थायी नियुक्ति")
 #: How far from the place a marker counts. A court "sentence" is often a whole paragraph,
 #: and one naming the event place can also give other people's addresses 200 chars on
 #: (077-CR-0004); an address phrase sits right against its place (`X वडा नं. ५ बस्ने`).
@@ -44,7 +46,7 @@ def has_word(key: str, text: str) -> bool:
 
     Both are matched as given; normalise them the same way first.
     """
-    return bool(key) and re.search(rf"(?<![{_WORD}])" + re.escape(key) + _WORD_END, text) is not None
+    return next(iter(_word_matches(key, text)), None) is not None
 
 
 def evidence_found(evidence: str, text: str) -> bool:
@@ -52,26 +54,72 @@ def evidence_found(evidence: str, text: str) -> bool:
     return len(ev) >= MIN_EVIDENCE_CHARS and ev in normalise_for_match(text)
 
 
-def location_quote_problem(evidence: str, place: str, text: str, caption_end: int = 0) -> str:
-    """Why this quote cannot ground a location, or "" when it can."""
+def verbatim_quote(evidence: str, text: str, min_share: float = 0.0) -> str:
+    """The part of `evidence` that is word for word in `text`, as the quote wrote it; "" when too little is.
+
+    All of it when it is all there. Otherwise its longest run of whole words, which must be at
+    least `MIN_VERBATIM_CHARS` and `min_share` of the quote: the model copies a sentence and
+    rewords its last few words (077-CR-0004), and the stretch it did copy still grounds it.
+    """
     ev, body = normalise_for_match(evidence), normalise_for_match(text)
     if len(ev) < MIN_EVIDENCE_CHARS:
+        return ""
+    if ev in body:
+        return (evidence or "").strip()
+    words, best = (evidence or "").split(), ""
+    for i in range(len(words)):
+        lo, hi = i, len(words)
+        while lo < hi:  # the longest words[i:j] in body; any shorter prefix of it is in body too
+            mid = (lo + hi + 1) // 2
+            if normalise_for_match(" ".join(words[i:mid])) in body:
+                lo = mid
+            else:
+                hi = mid - 1
+        run = " ".join(words[i:lo])
+        if len(normalise_for_match(run)) > len(normalise_for_match(best)):
+            best = run
+    return best if len(normalise_for_match(best)) >= max(MIN_VERBATIM_CHARS, min_share * len(ev)) else ""
+
+
+def location_quote_problem(evidence: str, place: str, text: str, caption_end: int = 0,
+                           names=(), fold=None) -> str:
+    """Why this quote cannot ground a location, or "" when it can.
+
+    Only the verbatim part of the quote counts. The place is in it when the place as written
+    is, or when one of `names` is -- the gazetteer's own keys for what the place resolved to,
+    matched as words in `fold(quote)` -- so a place the model assembled from pieces of the
+    sentence still grounds. One mention with no address marker beside it is enough.
+    """
+    if len(normalise_for_match(evidence)) < MIN_EVIDENCE_CHARS:
         return "evidence too short"
-    if ev not in body:
+    ev = normalise_for_match(verbatim_quote(evidence, text))
+    if not ev:
         return "evidence not found in the source"
-    if body.find(ev, len(normalise_for_match(text[:caption_end]))) == -1:
+    if normalise_for_match(text).find(ev, len(normalise_for_match(text[:caption_end]))) == -1:
         return "evidence is only in the caption"
     loose_ev, loose_place = _loosen(ev), _loosen(place)
-    spans = [m.start() for m in re.finditer(re.escape(loose_place), loose_ev)] if loose_place else []
-    if not spans:
+    mentions = [(loose_ev, m.start(), m.end())
+                for m in re.finditer(re.escape(loose_place), loose_ev)] if loose_place else []
+    folded = fold(ev) if fold else ev
+    for key in names:
+        mentions += [(folded, m.start(), m.end()) for m in _word_matches(key, folded)]
+    if not mentions:
         return "the place is not in its own evidence"
-    for at in spans:
-        near = loose_ev[max(0, at - MARKER_BEFORE_CHARS):at + len(loose_place) + MARKER_AFTER_CHARS]
-        for phrase in LOCATION_MARKER_EXCEPTIONS:
-            near = near.replace(phrase, " ")
-        for marker in LOCATION_REJECT_MARKERS:
-            if has_word(marker, near):
-                return f"evidence carries {marker!r} beside the place: an address, CIAA or the court"
+    problems = [_marker_beside(within, start, end) for within, start, end in mentions]
+    return "" if "" in problems else problems[0]
+
+
+def _word_matches(key: str, text: str):
+    return re.finditer(rf"(?<![{_WORD}])" + re.escape(key) + _WORD_END, text) if key else ()
+
+
+def _marker_beside(text: str, start: int, end: int) -> str:
+    near = text[max(0, start - MARKER_BEFORE_CHARS):end + MARKER_AFTER_CHARS]
+    for phrase in LOCATION_MARKER_EXCEPTIONS:
+        near = near.replace(phrase, " ")
+    for marker in LOCATION_REJECT_MARKERS:
+        if has_word(marker, near):
+            return f"evidence carries {marker!r} beside the place: an address, CIAA or the court"
     return ""
 
 

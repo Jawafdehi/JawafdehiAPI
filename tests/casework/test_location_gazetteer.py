@@ -528,3 +528,50 @@ def test_a_split_palika_word_is_one_word():
     assert place_key("खजुरा गाउँ पालिका") == place_key("खजुरा गाउँपालिका")
     assert place_key("गोदावरी नगर पालिका") == place_key("गोदावरी नगरपालिका")
     assert place_key("काठमाडौं महानगर पालिका") == place_key("काठमाडौं महानगरपालिका")
+
+
+# --- A quote the model only partly copied, or a place it assembled (077-CR-0004). ---
+
+ARREST_TEXT = ("मिति २०७७।०३।२६ गते जिल्ला बाँके खजुरा गाउँपालिका वडा नं. ४ स्थित मिलनचोकबाट "
+               "लागू औषध सहित पक्राउ परेपछि रकम बरामद भएको हुँदा अनुसन्धान गरियो ।")
+ARREST_QUOTE = ("मिति २०७७।०३।२६ गते जिल्ला बाँके खजुरा गाउँपालिका वडा नं. ४ स्थित मिलनचोकबाट "
+                "लागू औषध सहित पक्राउ परेपछि रकम बरामद भएको ठीक साँचो हो")  # tail reworded
+
+
+def test_a_quote_with_a_reworded_tail_binds_on_its_copied_stretch(gaz):
+    answers = [{"place_as_written": "जिल्ला बाँके खजुरा गाउँपालिका", "district": "बाँके",
+                "evidence": ARREST_QUOTE, "notes": ""}]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, ARREST_TEXT, 0)
+    assert rejected == []
+    assert [b.nes_id for b in binds] == [BANKE, KHAJURA]
+    assert all(b.evidence in ARREST_TEXT and "साँचो" not in b.evidence for b in binds)
+    assert binds[0].evidence.endswith("बरामद भएको")
+
+
+def test_a_place_assembled_from_the_sentence_binds_through_its_names(gaz):
+    answers = [{"place_as_written": "खजुरा गाउँपालिका वडा नं. ४, मिलनचोक", "district": "बाँके",
+                "evidence": ARREST_QUOTE, "notes": ""}]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, ARREST_TEXT, 0)
+    assert rejected == []
+    assert [b.nes_id for b in binds] == [BANKE, KHAJURA]
+
+
+def test_a_municipality_only_in_the_place_binds_the_district_alone(gaz):
+    text = "घटना जिल्ला बाँकेमा भएको हो भनी मुचुल्कामा उल्लेख गरिएको छ र रकम बरामद भयो ।"
+    answers = [{"place_as_written": "जिल्ला बाँके, खजुरा गाउँपालिका", "district": "बाँके",
+                "evidence": "घटना जिल्ला बाँकेमा भएको हो भनी मुचुल्कामा उल्लेख गरिएको छ",
+                "notes": ""}]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, text, 0)
+    assert [b.nes_id for b in binds] == [BANKE]
+    assert [(r["stage"], r["reason"]) for r in rejected] == [
+        ("resolution", "the municipality is not in the quote; not bound")]
+
+
+def test_a_district_named_only_in_the_reworded_tail_is_refused(gaz):
+    text = "रकम बरामद भएको हुँदा प्रतिवादीहरु उपर मुद्दा दायर गर्ने निर्णय भयो ।"
+    answers = [{"place_as_written": "बाँके", "district": "बाँके",
+                "evidence": "रकम बरामद भएको हुँदा प्रतिवादीहरु उपर मुद्दा दायर गर्ने, बाँके जिल्लामा",
+                "notes": ""}]
+    binds, rejected = resolve_locations(_StubSearchApi(), gaz, answers, text, 0)
+    assert binds == []
+    assert rejected[0]["stage"] == "grounding"
