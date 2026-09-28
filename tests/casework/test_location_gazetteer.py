@@ -507,3 +507,24 @@ def test_two_spellings_of_one_municipality_are_one_municipality():
 def test_a_district_the_quote_names_grounds_the_claim(gaz):
     d = gaz.resolve("खजुरा गा.वि.स.", "बाँके", "बाँके जिल्ला खजुरा गा.वि.स. मा ठेक्का लगाइयो")
     assert (d.district, d.reason) == (BANKE, "")
+
+
+GHORAHI = unit("ghorahi-sub-metropolitian-city-51002", "घोराही उपमहानगरपालिका",
+               "Ghorahi Sub-Metropolitan City", DANG)
+
+
+@pytest.mark.parametrize("written", [
+    "घोराही उप-महानगरपालिका वडा नं. १४",
+    "घोराही उप महानगरपालिका वडा नं. १४",
+    "घोराही उप–महानगरपालिका वडा नं. १४",
+    "दाङजिल्ला, घोराही उप-महाननगरपालिका वडा नं. १४",
+])
+def test_a_split_or_misspelt_sub_metropolitan_city_binds(written):
+    g = Gazetteer(DISTRICTS, UNITS + [GHORAHI])
+    assert g.resolve(written, "दाङ").localunit == GHORAHI["@id"]
+
+
+def test_a_split_palika_word_is_one_word():
+    assert place_key("खजुरा गाउँ पालिका") == place_key("खजुरा गाउँपालिका")
+    assert place_key("गोदावरी नगर पालिका") == place_key("गोदावरी नगरपालिका")
+    assert place_key("काठमाडौं महानगर पालिका") == place_key("काठमाडौं महानगरपालिका")

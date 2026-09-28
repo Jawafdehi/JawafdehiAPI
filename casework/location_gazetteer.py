@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 from casework.common.grounding import has_word, location_quote_problem, normalise_for_match
 
+_SPLIT_SUB_METRO = re.compile(r"उप[\s\-‐–—]*महानगर")
+_SPLIT_PALIKA = re.compile(r"(गाउं|नगर)[\s\-‐–—]+पालिका")
 #: काठमाडौं as NES and the orders spell it: काठमाण्डौ, काठमान्डौ, काठमाडौ, काठमाण्डाै.
 _KATHMANDU = re.compile(r"काठमा(?:ण्ड|न्ड|ड)(?:ौ|ाै)ं?")
 
@@ -75,6 +77,10 @@ def place_key(text: str) -> str:
     for abbr, full in _ABBREVIATIONS:
         t = t.replace(abbr, full)
     t = _KATHMANDU.sub("काठमाडौं", t)
+    # Orders split the local-level word (`उप-महानगरपालिका`, `नगर पालिका`); NES never does.
+    t = t.replace("महाननगर", "महानगर")
+    t = _SPLIT_SUB_METRO.sub("उपमहानगर", t)
+    t = _SPLIT_PALIKA.sub(r"\1पालिका", t)
     # Lalitpur became a metropolitan city in 2017; older orders still say उपमहानगरपालिका.
     t = t.replace("ललितपुर उपमहानगरपालिका", "ललितपुर महानगरपालिका")
     t = t.replace("गांउ", "गाउं")
