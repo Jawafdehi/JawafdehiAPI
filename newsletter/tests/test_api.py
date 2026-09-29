@@ -252,6 +252,11 @@ def test_bad_whatsapp_numbers_are_rejected(client, number):
         ("+977 9812 345678", "+9779812345678"),
         ("(977) 981-2345678", "9779812345678"),
         ("", ""),
+        # Devanagari numerals transliterate rather than being rejected — on a
+        # Nepali-first site someone writing their own number is not making a
+        # mistake. Storing them verbatim would produce an undialable number.
+        ("+९७७ ९८१२३४५६७८", "+9779812345678"),
+        ("९८१२३४५६७८", "9812345678"),
     ],
 )
 def test_whatsapp_is_normalised(client, typed, stored):

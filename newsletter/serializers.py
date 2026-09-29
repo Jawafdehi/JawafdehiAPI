@@ -32,8 +32,17 @@ OPEN_HOUSE_REGIONS = (
 # Deliberately forgiving: digits with the separators people actually type, and an
 # optional leading +. Anything stricter rejects real numbers and the field is
 # optional anyway — a rejected signup costs more than a slightly messy number.
-_WHATSAPP_ALLOWED = re.compile(r"^\+?[\d\s().-]{5,31}$")
-_WHATSAPP_STRIP = re.compile(r"[^\d+]")
+#
+# ⚠️ `0-9`, never `\d`. Python's `\d` matches Unicode digits, so `\d` here would
+# accept Devanagari numerals and "normalise" ९८४१२३४५६७ into a number nobody can
+# dial — a realistic way to collect unusable contacts on a Nepali-first site.
+# Devanagari input is transliterated first (below) rather than rejected, so
+# someone typing their own numerals still gets a working number out.
+_WHATSAPP_ALLOWED = re.compile(r"^\+?[0-9\s().-]{5,31}$")
+_WHATSAPP_STRIP = re.compile(r"[^0-9+]")
+
+# U+0966..U+096F, in order, so str.translate maps them onto ASCII.
+_DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
 
 class NewsletterSubscriptionSerializer(serializers.Serializer):
@@ -75,6 +84,9 @@ class NewsletterSubscriptionSerializer(serializers.Serializer):
         """
         if not value:
             return ""
+        # Someone writing their own number in Devanagari is not making a mistake,
+        # so transliterate before validating rather than turning them away.
+        value = value.translate(_DEVANAGARI_DIGITS)
         if not _WHATSAPP_ALLOWED.match(value):
             raise serializers.ValidationError(
                 "Enter a WhatsApp number using digits, spaces, brackets, "
