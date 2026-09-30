@@ -157,15 +157,28 @@ def apply_convert_result(job, result: dict) -> None:
         logger.warning("material_convert %s: material gone before result apply", iri)
         return
 
-    # 1) Land the markdown in R2 as a roled MARKDOWN link (hashed filename).
+    # 1) Land the markdown in R2 as a roled MARKDOWN link, keyed on the
+    # transcript's own SHA-256.
+    #
+    # The filename here is a constant, and the storage backend keys objects on a
+    # hash of the NAME — so every material's transcript resolved to the SAME R2
+    # object, each conversion overwriting the last (six materials were observed
+    # sharing one .md URL in production, 2026-09-30). ``content_hash`` is what
+    # makes the key per-transcript; the constant name now only supplies the
+    # extension. Two materials whose text is byte-identical legitimately share one
+    # object.
+    #
     # Done OUTSIDE the DB transaction below — a network round-trip must not hold a
     # row lock. NOTE: store_file_as_link uses FILE_STORAGE_PREFIX (default
     # "case_uploads/"), so the .md currently lands under that shared prefix. The
     # material-specific R2 layout (docs/data-plane-design.md §3) is folded in with
     # the provenance work (§8 item 2); until then the link is correct, just not
     # prefix-isolated.
-    md_file = ContentFile(text.encode("utf-8"), name="material.md")
-    link = store_file_as_link(md_file, role="MARKDOWN")
+    md_bytes = text.encode("utf-8")
+    md_file = ContentFile(md_bytes, name="material.md")
+    link = store_file_as_link(
+        md_file, role="MARKDOWN", content_hash=hashlib.sha256(md_bytes).hexdigest()
+    )
 
     # 2) Read-modify-write the JSONB doc under a row lock so a concurrent write
     # (e.g. a re-upload upserting the same @id) can't clobber our text, or ours

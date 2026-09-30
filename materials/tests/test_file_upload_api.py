@@ -121,6 +121,52 @@ class MaterialFileUploadTests(_DbAPITestCase):
         self.assertEqual(len(media), 2)
         self.assertEqual(media[1]["jawafdehi:linkRole"], "ALTERNATE")
 
+    def test_upload_keys_the_stored_object_on_its_content_hash(self):
+        """The stored object must be addressed by its BYTES, not by the
+        client-supplied filename: the production backend maps every file sharing a
+        base name onto one key and overwrites without a recoverable version.
+
+        Under the test settings storage is FileSystemStorage, which uses the name
+        as given — so the digest is visible in the URL. In production the backend
+        salts and re-hashes that name; the key stays a pure function of the
+        content either way, which is the property being pinned.
+        """
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post(
+            self.URL,
+            {"file": self._pdf(), "material_type": "court_order"},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        media = resp.data["associatedMedia"][0]
+        self.assertIn(media["jawafdehi:provenance"]["sha256"], media["contentUrl"])
+
+    def test_same_filename_different_bytes_do_not_share_an_object(self):
+        """Two documents named ``order.pdf`` are two objects. 453 of the 6,234
+        Auditor General publications repeat a filename; before this they collided.
+        """
+        self.client.force_authenticate(user=self.user)
+        first = self.client.post(
+            self.URL,
+            {"file": self._pdf(), "material_type": "court_order"},
+            format="multipart",
+        )
+        second = self.client.post(
+            "/api/materials/nkp/2080-order-2/file",
+            {
+                "file": SimpleUploadedFile(
+                    "order.pdf", b"%PDF-1.4 OTHER", content_type="application/pdf"
+                ),
+                "material_type": "court_order",
+            },
+            format="multipart",
+        )
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.data)
+        self.assertNotEqual(
+            first.data["associatedMedia"][0]["contentUrl"],
+            second.data["associatedMedia"][0]["contentUrl"],
+        )
+
     def test_upload_new_material_requires_material_type(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(self.URL, {"file": self._pdf()}, format="multipart")

@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import re
 from urllib.parse import urljoin
 
 from django.conf import settings
@@ -33,6 +34,10 @@ from storages.backends.s3boto3 import S3Boto3Storage
 #: ``cases.models.SourceLinkRole.RAW`` (kept as a bare literal here so this
 #: module has no dependency on the cases app).
 DEFAULT_LINK_ROLE = "RAW"
+
+#: Exactly what ``hashlib.sha256(...).hexdigest()`` emits — the accepted shape of
+#: ``store_file_as_link(content_hash=...)``, which becomes part of a filename.
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 #: Content types for the media we serve, pinned rather than guessed. See
 #: :meth:`HashedFilenameS3Boto3Storage.get_object_parameters` — ``mimetypes``
@@ -189,13 +194,37 @@ def absolute_media_url(url: str) -> str:
     return urljoin(base + "/", url.lstrip("/")) if base else url
 
 
-def store_file_as_link(uploaded_file, role=DEFAULT_LINK_ROLE) -> dict:
+def store_file_as_link(uploaded_file, role=DEFAULT_LINK_ROLE, *, content_hash=None) -> dict:
     """Persist ``uploaded_file`` to storage and return its ``{link, role}`` dict.
 
     The default storage backend (HashedFilenameS3Boto3Storage in prod) hashes the
     file name (neutralizing any path-traversal in the client-supplied name) and
     prefixes it (``case_uploads/``), yielding the canonical permanent URL.
     ``role`` defaults to RAW but the caller may pass any source-link role.
+
+    ``content_hash`` (hex SHA-256 of the bytes) makes the object key a function of
+    the CONTENT instead of the filename, and callers that have one should pass it.
+    Keying on the name is unsafe here: the backend maps every file sharing a base
+    name onto one key, ``get_available_name`` is overridden never to suffix, and
+    nothing sets ``file_overwrite`` (django-storages defaults it True) — so the
+    second write silently replaces the first, with no R2 object version to recover
+    from. It also makes re-ingesting the same bytes a no-op rather than a copy.
+
+    The hash is validated rather than trusted: in production the backend re-hashes
+    whatever stem it is given, but under FileSystemStorage (dev, tests) the name
+    is used as-is, so a caller-supplied string must not be able to traverse.
     """
-    name = default_storage.save(uploaded_file.name, uploaded_file)
-    return {"link": absolute_media_url(default_storage.url(name)), "role": role}
+    name = uploaded_file.name
+    if content_hash is not None:
+        if not _SHA256_HEX.fullmatch(content_hash or ""):
+            raise ValueError(
+                "content_hash must be a lowercase hex SHA-256 digest "
+                f"(64 chars); got {content_hash!r}."
+            )
+        # Keep the extension — the Content-Type map keys on it (see
+        # get_object_parameters) — but normalize its case, so the ``.PDF``/``.pdf``
+        # mix common in scraped corpora cannot split one object into two.
+        _, ext = os.path.splitext(name or "")
+        name = f"{content_hash}{ext.lower()}"
+    stored = default_storage.save(name, uploaded_file)
+    return {"link": absolute_media_url(default_storage.url(stored)), "role": role}

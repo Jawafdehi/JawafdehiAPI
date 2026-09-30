@@ -189,6 +189,54 @@ def test_apply_result_noop_on_empty_text():
     assert "text" not in Material.objects.get(pk=iri).data
 
 
+@pytest.mark.django_db
+def test_each_transcript_gets_its_own_object_key():
+    """Regression: the markdown was stored under the constant name
+    ``material.md``, and the backend keys objects on a hash of the NAME — so every
+    material's transcript resolved to one R2 object and each conversion silently
+    overwrote the last. Six materials shared a single .md URL in production
+    (2026-09-30). The key must follow the transcript's bytes."""
+    seen = []
+
+    def _capture(md_file, role=None, content_hash=None):
+        seen.append(content_hash)
+        return {"link": f"https://cdn/{content_hash}.md", "role": role}
+
+    for ident, text in (("report-6", "पहिलो पाठ"), ("report-7", "दोस्रो पाठ")):
+        iri = build_material_iri("ciaa", ident)
+        _store(iri, [_mo("https://a/raw.pdf", "RAW")])
+        with patch("jawafdehi_shared.storage.store_file_as_link", _capture):
+            apply_convert_result(
+                _FakeJob(payload={"material_iri": iri}),
+                {"text": text, "source_url": "https://a/raw.pdf"},
+            )
+
+    assert len(seen) == 2
+    assert all(h is not None for h in seen), "no content_hash was passed"
+    assert seen[0] != seen[1], "two different transcripts shared one object key"
+
+
+@pytest.mark.django_db
+def test_identical_transcripts_share_one_object_key():
+    """The other direction: re-converting the same bytes must not make a copy."""
+    seen = []
+
+    def _capture(md_file, role=None, content_hash=None):
+        seen.append(content_hash)
+        return {"link": f"https://cdn/{content_hash}.md", "role": role}
+
+    for ident in ("report-8", "report-9"):
+        iri = build_material_iri("ciaa", ident)
+        _store(iri, [_mo("https://a/raw.pdf", "RAW")])
+        with patch("jawafdehi_shared.storage.store_file_as_link", _capture):
+            apply_convert_result(
+                _FakeJob(payload={"material_iri": iri}),
+                {"text": "उही पाठ", "source_url": "https://a/raw.pdf"},
+            )
+
+    assert seen[0] == seen[1]
+
+
 # --- enqueue dedup -----------------------------------------------------------
 
 
