@@ -204,6 +204,14 @@ SUGGEST_PREFIX_LENGTH = 1
 SUGGEST_MIN_WORD_LENGTH = 4
 SUGGEST_SIZE = 1
 
+# How much of a field the highlighter is allowed to re-analyze, in characters.
+# Must stay strictly below the index-level ``index.highlight.max_analyzed_offset``
+# (default 1,000,000) — a larger value is rejected outright. Kept a comfortable
+# margin under it rather than at 999,999 so lowering the index setting later
+# doesn't silently turn this into the error it exists to prevent. The rationale for
+# sending it at all is on the ``highlight`` block in :func:`build_query`.
+HIGHLIGHT_MAX_ANALYZER_OFFSET = 900_000
+
 # When ``lang`` narrows to one script, multiply that script's title boost so
 # same-language matches rank first WITHOUT excluding the other (cross-script
 # recall via the translit bridge is preserved — this is a re-rank, not a filter).
@@ -1066,14 +1074,46 @@ def build_query(
         # search_after pages are stable + complete.
         "sort": _sort_spec(sort),
         "query": {"bool": bool_query},
-        # Highlight the title/body so the envelope can carry a snippet. (Harmless
-        # in browse mode — there's no matched term to highlight.)
+        # Highlight the title/body so the envelope can carry a snippet.
+        #
+        # ``max_analyzer_offset`` is load-bearing, not a tuning knob. ``body`` is a
+        # plain ``text`` field — no ``index_options: offsets``, no ``term_vector``
+        # (see ``jawafdehi_shared.search.mappings``) — so the unified highlighter's
+        # offset source is ANALYSIS: it re-runs the analyzer over the whole stored
+        # value at query time. OpenSearch caps that at the index-level
+        # ``index.highlight.max_analyzed_offset`` (default 1,000,000 characters) and
+        # THROWS past it, and material bodies are untruncated OCR text — some of it
+        # well over a megabyte.
+        #
+        # The throw lands in the fetch phase and fails the WHOLE search (400 ->
+        # ``SearchUnavailable`` -> 503). It is checked per returned hit, on field
+        # length alone, before the field is matched against the query — so a hit
+        # that matched only on its title takes the search down too, as long as an
+        # oversized document sits on the page. That is Sentry JAWAFDEHI-API-4B,
+        # rare only because BM25's length norm keeps megabyte documents off page 1:
+        # 5 of the 346,008 live material documents are over the cap (2026-09-30),
+        # with another 21 between 500k and 1M and climbing as OCR is re-run.
+        #
+        # Setting the option makes that branch unreachable: the throw requires the
+        # per-field offset to be unset. Text past the offset is simply not analyzed,
+        # so an oversized document still matches and still ranks — it may just come
+        # back without a snippet.
+        #
+        # Two traps, both silent:
+        #   * OpenSearch spells the QUERY option ``max_analyzer_offset``; only the
+        #     INDEX setting is ``max_analyzed_offset`` (Elasticsearch uses the latter
+        #     for both). The wrong key is an unknown field -> parsing exception ->
+        #     400 on EVERY search. The suite mocks the client, so no test here would
+        #     catch that — only a live query would.
+        #   * it must stay strictly BELOW the index-level limit; a larger value is
+        #     its own throw.
         "highlight": {
+            "max_analyzer_offset": HIGHLIGHT_MAX_ANALYZER_OFFSET,
             "fields": {
                 "title_ne": {},
                 "title_en": {},
                 "body": {},
-            }
+            },
         },
         "aggs": aggs,
     }
