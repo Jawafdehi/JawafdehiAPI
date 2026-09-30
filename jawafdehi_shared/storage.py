@@ -205,14 +205,22 @@ def store_file_as_link(uploaded_file, role=DEFAULT_LINK_ROLE, *, content_hash=No
     ``content_hash`` (hex SHA-256 of the bytes) makes the object key a function of
     the CONTENT instead of the filename, and callers that have one should pass it.
     Keying on the name is unsafe here: the backend maps every file sharing a base
-    name onto one key, ``get_available_name`` is overridden never to suffix, and
-    nothing sets ``file_overwrite`` (django-storages defaults it True) — so the
-    second write silently replaces the first, with no R2 object version to recover
-    from. It also makes re-ingesting the same bytes a no-op rather than a copy.
+    name onto one key, and ``get_available_name`` is overridden never to suffix —
+    so the second write silently replaces the first, with no R2 object version to
+    recover from. Note that ``file_overwrite`` is NOT a second cause and flipping
+    ``AWS_S3_FILE_OVERWRITE`` is NOT a mitigation: it is read only by
+    ``S3Storage.get_available_name``, which the subclass fully overrides.
 
-    The hash is validated rather than trusted: in production the backend re-hashes
-    whatever stem it is given, but under FileSystemStorage (dev, tests) the name
-    is used as-is, so a caller-supplied string must not be able to traverse.
+    Under the production backend this also makes re-ingesting the same bytes a
+    no-op rather than a second copy. That part is backend-specific — under
+    FileSystemStorage (dev, tests) ``get_available_name`` suffixes on collision,
+    so the same bytes saved twice yield two files.
+
+    The hash is validated rather than trusted, because the value lands in a
+    filename. Django's ``Storage.save`` already rejects traversal via
+    ``validate_file_name``; this adds what that does not cover — subdirectory
+    separators and non-hex junk — and turns a caller's mistake into a clear error
+    at the call site instead of an obscure failure inside storage.
     """
     name = uploaded_file.name
     if content_hash is not None:

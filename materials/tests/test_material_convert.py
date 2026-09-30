@@ -194,8 +194,9 @@ def test_each_transcript_gets_its_own_object_key():
     """Regression: the markdown was stored under the constant name
     ``material.md``, and the backend keys objects on a hash of the NAME — so every
     material's transcript resolved to one R2 object and each conversion silently
-    overwrote the last. Six materials shared a single .md URL in production
-    (2026-09-30). The key must follow the transcript's bytes."""
+    overwrote the last. Seventeen materials shared a single .md URL in production
+    (measured 2026-09-30) — every material that had ever been converted. The key
+    must follow the transcript's bytes."""
     seen = []
 
     def _capture(md_file, role=None, content_hash=None):
@@ -234,7 +235,12 @@ def test_identical_transcripts_share_one_object_key():
                 {"text": "उही पाठ", "source_url": "https://a/raw.pdf"},
             )
 
-    assert seen[0] == seen[1]
+    assert len(seen) == 2
+    # Load-bearing: without it the test passes on ``None == None`` when the
+    # ``content_hash=`` argument is dropped from apply_convert_result, i.e. it
+    # would survive a revert of the very fix it exists to pin.
+    assert all(h is not None for h in seen), "no content_hash was passed"
+    assert seen[0] == seen[1], "identical transcripts were stored under two keys"
 
 
 # --- enqueue dedup -----------------------------------------------------------

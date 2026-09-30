@@ -162,11 +162,17 @@ def apply_convert_result(job, result: dict) -> None:
     #
     # The filename here is a constant, and the storage backend keys objects on a
     # hash of the NAME — so every material's transcript resolved to the SAME R2
-    # object, each conversion overwriting the last (six materials were observed
-    # sharing one .md URL in production, 2026-09-30). ``content_hash`` is what
-    # makes the key per-transcript; the constant name now only supplies the
-    # extension. Two materials whose text is byte-identical legitimately share one
-    # object.
+    # object, each conversion overwriting the last (seventeen materials — every
+    # material ever converted — were observed sharing one .md URL in production,
+    # measured 2026-09-30). ``content_hash`` is what makes the key per-transcript;
+    # the constant name now only supplies the extension. Two materials whose text
+    # is byte-identical legitimately share one object — safe only while nothing in
+    # this path ever DELETES a stored object, which is true today and is the
+    # reason cases/image_views.py made the opposite choice (uuid4) for images.
+    #
+    # This is forward-only: the materials already damaged still link to another
+    # document's transcript. Their own ``data["text"]`` below is per-row and
+    # correct, so a backfill can re-store from the DB without re-running OCR.
     #
     # Done OUTSIDE the DB transaction below — a network round-trip must not hold a
     # row lock. NOTE: store_file_as_link uses FILE_STORAGE_PREFIX (default

@@ -141,9 +141,16 @@ class MaterialFileUploadTests(_DbAPITestCase):
         media = resp.data["associatedMedia"][0]
         self.assertIn(media["jawafdehi:provenance"]["sha256"], media["contentUrl"])
 
-    def test_same_filename_different_bytes_do_not_share_an_object(self):
-        """Two documents named ``order.pdf`` are two objects. 453 of the 6,234
-        Auditor General publications repeat a filename; before this they collided.
+    def test_same_filename_different_bytes_are_keyed_on_their_own_digests(self):
+        """Two documents named ``order.pdf`` are two objects, each keyed on its
+        OWN bytes. Upstream corpora repeat filenames; before this they collided.
+
+        The assertion has to be that each URL carries its own digest, not merely
+        that the two URLs differ: storage under test is FileSystemStorage, whose
+        ``get_available_name`` appends a random suffix on a name collision — the
+        exact opposite of the production backend, which never suffixes. Two
+        same-named uploads therefore land on different URLs here even with the fix
+        reverted, so ``assertNotEqual`` alone would pass against the bug.
         """
         self.client.force_authenticate(user=self.user)
         first = self.client.post(
@@ -162,10 +169,14 @@ class MaterialFileUploadTests(_DbAPITestCase):
             format="multipart",
         )
         self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.data)
-        self.assertNotEqual(
-            first.data["associatedMedia"][0]["contentUrl"],
-            second.data["associatedMedia"][0]["contentUrl"],
-        )
+
+        media = [
+            first.data["associatedMedia"][0],
+            second.data["associatedMedia"][0],
+        ]
+        for mo in media:
+            self.assertIn(mo["jawafdehi:provenance"]["sha256"], mo["contentUrl"])
+        self.assertNotEqual(media[0]["contentUrl"], media[1]["contentUrl"])
 
     def test_upload_new_material_requires_material_type(self):
         self.client.force_authenticate(user=self.user)
