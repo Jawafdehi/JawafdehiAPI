@@ -81,6 +81,17 @@ def build_doc(obj: Any) -> dict[str, Any]:
     if material_type:
         doc["material_type"] = str(material_type)
 
+    # The publishing source token, indexed as a SCOPE rather than a facet (see
+    # ``search.service.SCOPE_FIELDS`` and the mapping comment). It is what the
+    # curated /materials series registry is keyed on — one series IS one source
+    # token — so a scoped search over a series needs it, while nothing offers the
+    # raw token list to a reader. Omitted when blank, for the same reason
+    # ``material_type`` is: a filter should exclude a doc that has no value rather
+    # than match it through an "" bucket.
+    source = getattr(obj, "source", None)
+    if source:
+        doc["source"] = str(source)
+
     # Gregorian dates (ISO). Carry Bikram Sambat verbatim (never coerced).
     # ``date`` is validated rather than passed through: this is JSON-LD from an
     # external scrape, and one row carrying a BS date here (``2081-02-29``)

@@ -105,14 +105,23 @@ def test_material_build_doc_shape_with_dates():
     assert "081-CR-0081" in doc["identifiers"]
 
 
-def test_material_build_doc_promotes_the_document_form():
-    """``material_type`` becomes a top-level facet field.
+def test_material_build_doc_promotes_the_document_form_and_the_source():
+    """``material_type`` becomes a top-level facet field, ``source`` a scope field.
 
-    The sibling ``source`` column is deliberately NOT promoted: it conflates
-    the publishing office with the document form (10 of its 30 production
-    tokens just restate the form, and the CIAA is split across two), so it is
-    not faceted until the column is normalised. ``source_app`` — the owning
-    APPLICATION — is a different field and keeps its own value.
+    ``source`` IS now indexed, which reverses half of an earlier decision and
+    keeps the other half. The objection stands and is unchanged: the column
+    conflates the publishing office with the document form (10 of its 30
+    production tokens just restate the form, and the CIAA is split across two),
+    so it must never be offered to a reader as a list of publishers — and it is
+    not, because it is absent from ``FACET_FIELDS`` and has no aggregation.
+
+    What changed is that filtering is a different act from faceting. The curated
+    /materials series registry is 1:1 with this column, so searching inside one
+    series needs to scope by it, with the token chosen by the registry rather
+    than by a reader picking from a bucket list. See ``search.service.SCOPE_FIELDS``.
+
+    ``source_app`` — the owning APPLICATION — is a different field and keeps its
+    own value.
     """
     iri = "https://jawafdehi.org/material/ciaa_press_release/1701"
     obj = SimpleNamespace(
@@ -124,9 +133,30 @@ def test_material_build_doc_promotes_the_document_form():
     )
     doc = material_index.build_doc(obj)
     assert doc["material_type"] == "press_release"
+    assert doc["source"] == "ciaa_press_release"
     assert doc["source_app"] == "ngm"
-    assert "source" not in doc
-    assert "material_source" not in doc
+
+
+def test_material_source_is_a_scope_and_never_a_facet():
+    """The half of the old decision that still holds, pinned so a later change
+    has to argue with it rather than drift past it: indexing ``source`` must not
+    put it in the facet registry, which would publish the token list."""
+    from search.service import FACET_FIELDS, SCOPE_FIELDS
+
+    assert "source" in SCOPE_FIELDS
+    assert "source" not in FACET_FIELDS
+    assert not set(SCOPE_FIELDS) & set(FACET_FIELDS)
+
+
+def test_material_build_doc_omits_a_blank_source():
+    """A blank column is left OUT, so a scoped search excludes the doc rather
+    than matching it through an "" bucket."""
+    iri = "https://jawafdehi.org/material/x/1"
+    obj = SimpleNamespace(
+        iri=iri, ident="1", source="", material_type="document",
+        data={"@id": iri, "@type": "CreativeWork", "name": {"ne": "क"}},
+    )
+    assert "source" not in material_index.build_doc(obj)
 
 
 def test_material_build_doc_omits_a_blank_document_form():

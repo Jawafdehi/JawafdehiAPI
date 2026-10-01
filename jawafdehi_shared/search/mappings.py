@@ -294,6 +294,23 @@ def common_mappings() -> dict[str, Any]:
                 # --rebuild generation. Until then the facet returns zero buckets
                 # and a filter matches nothing — safe degradation, no errors.
                 "material_type": {"type": "keyword"},
+                # The material's publishing source token (``Material.source``,
+                # the ``/material/<source>/<ident>`` IRI segment). Indexed as a
+                # SCOPE, not a facet: it is filterable but is deliberately NOT
+                # aggregated, because the column conflates the publishing office
+                # with the document form — a third of its production tokens just
+                # restate the form (``court_order``, ``charge_sheet``, ``news``)
+                # and the CIAA is split across two (``ciaa_press_release``,
+                # ``ciaa_annual_report``). Offering that list to a reader as
+                # "publisher" would be wrong; scoping a query to one token the
+                # curated series registry already chose is not. See
+                # ``search.service.SCOPE_FIELDS``, and ``material_type`` above
+                # for the facet that IS safe to show.
+                #
+                # Same rebuild caveat as ``material_type``: an existing index only
+                # gains the declared mapping on the next --rebuild generation.
+                # Until then a filter on it matches nothing — safe degradation.
+                "source": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get
                 # this declared type — an existing one picks the field up by dynamic
