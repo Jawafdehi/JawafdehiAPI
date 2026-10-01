@@ -231,6 +231,13 @@ class CaseListSerializer(serializers.ListSerializer):
         # One batched lookup for the whole page; keyed by nes_id so per-case
         # build_entity_binds(resolved) reads its slice via resolved.get(...).
         self.child.context["resolved_entities"] = resolve_entities(nes_ids)
+
+        from cases.services.appeal_verdicts import appeal_iris, resolve_appeal_verdicts
+
+        # Same for the appeal verdicts: one court query for the page, not one per card.
+        self.child.context["appeal_verdicts"] = resolve_appeal_verdicts(
+            iri for case in instances for iri in appeal_iris(case.dates)
+        )
         return super().to_representation(instances)
 
 
@@ -284,6 +291,24 @@ class CaseSerializer(serializers.ModelSerializer):
 
     def get_case_end_date(self, obj):
         return first_instance_dates((obj.dates or {}).get("stages") or [])[1]
+
+    # A sibling of ``dates``, not a key inside a stage: the enrichers PATCH back
+    # the stage list they read, and ``validate_stages`` refuses unknown keys.
+    appeal_verdicts = serializers.SerializerMethodField(
+        help_text="Each appeal stage's courtcase_iri mapped to that docket's "
+        "court verdict_type, unmapped (on an appeal, CLAIM_DENIED means the "
+        "appeal failed). Null while the appeal is pending or unclassified."
+    )
+
+    @extend_schema_field(serializers.DictField(child=serializers.CharField(allow_null=True)))
+    def get_appeal_verdicts(self, obj):
+        from cases.services.appeal_verdicts import appeal_iris, resolve_appeal_verdicts
+
+        iris = appeal_iris(obj.dates)
+        resolved = self.context.get("appeal_verdicts")
+        if resolved is None or any(iri not in resolved for iri in iris):
+            resolved = resolve_appeal_verdicts(iris)
+        return {iri: resolved[iri] for iri in iris}
 
     entities = serializers.SerializerMethodField(
         help_text="Entity binds for this case (NES entity id, relationship type, "
@@ -544,6 +569,7 @@ class CaseSerializer(serializers.ModelSerializer):
             "status_override",
             "proceedings_started_on",
             "proceedings_decided_on",
+            "appeal_verdicts",
             "entities",
             "tags",
             "description",
