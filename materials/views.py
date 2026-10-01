@@ -769,7 +769,11 @@ def material_file_upload(request, source: str, ident: str):
         content_length=uploaded.size,
         source_url=(request.data.get("source_url") or None),
     )
-    link = store_file_as_link(uploaded, role=role)
+    # The object key comes from the bytes, not the client-supplied filename: two
+    # uploads sharing a name would otherwise land on one key and the second would
+    # silently overwrite the first (see store_file_as_link). The digest is already
+    # in hand from the provenance capture above.
+    link = store_file_as_link(uploaded, role=role, content_hash=sha256)
     encoding, _ = mimetypes.guess_type(uploaded.name)
     provenance.attach_media_object(
         doc,

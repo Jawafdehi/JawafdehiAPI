@@ -134,14 +134,24 @@ batch writers (`courts/views.py:352+`).
 
 **R2 object layout (bytes only — provenance rides in the JSON-LD, not on disk):**
 ```
-<FILE_STORAGE_PREFIX><sha256-of-filename>.<ext>   raw capture + the .md markdown blob
+<FILE_STORAGE_PREFIX><sha256-of-stem>.<ext>   raw capture + the .md markdown blob
 ```
 Bytes are referenced by URL from the Material JSON-LD — **one copy**, no duplication of
-the storage bulk into the DB or the index. NOTE: `HashedFilenameS3Boto3Storage` hashes the
-*filename* (salted), and everything currently shares one `FILE_STORAGE_PREFIX`
-(default `case_uploads/`); the material-specific `material/<source>/<ident>/…` prefix
-layout is a remaining follow-up (it needs a storage-backend prefix override, orthogonal to
-the provenance record which is done).
+the storage bulk into the DB or the index.
+
+NOTE: `HashedFilenameS3Boto3Storage` hashes the *stem it is handed*, salted — and hashes it
+**twice** (`save()` hashes, then Django's `Storage.save` calls the overridden
+`get_available_name`, which hashes again). What that stem IS depends on the caller. Both
+material write paths — the upload endpoint and `material_convert` — now pass
+`store_file_as_link(..., content_hash=<sha256 of the bytes>)`, so their keys are a function
+of the CONTENT. Callers that pass no `content_hash` still key on the client-supplied
+filename, which is destructive when two differing files share a base name: the override
+never suffixes, so the second write silently replaces the first and R2 has no version to
+recover from. Prefer `content_hash` in any new caller.
+
+Everything still shares one `FILE_STORAGE_PREFIX` (default `case_uploads/`); the
+material-specific `material/<source>/<ident>/…` prefix layout is a remaining follow-up (it
+needs a storage-backend prefix override, orthogonal to the provenance record which is done).
 
 ### 3.1 How a Material links to its files (the field-level contract)
 
