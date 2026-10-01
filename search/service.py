@@ -337,6 +337,26 @@ ALL_MATERIAL_TYPES: tuple[str, ...] = (
 # ``test_search_court_type_enum_tracks_all_court_types``.
 ALL_COURT_TYPES: tuple[str, ...] = ("district", "high", "supreme", "special")
 
+# SCOPE fields: exact-match narrowing that is NOT a facet. Request param name ->
+# the keyword index field it filters.
+#
+# A facet (:data:`FACET_FIELDS`) is a list of options offered BACK to the reader,
+# so it carries an aggregation, and its clause goes to ``post_filter`` so the
+# facet does not narrow itself. A scope is the opposite: the caller already knows
+# the value, nothing enumerates it, and it defines WHICH CORPUS is being searched
+# — so it belongs in the query's ``bool.filter`` and narrows the hits and every
+# aggregation alike, exactly like the range bounds.
+#
+# ``source`` is the motivating case. The /materials series registry is 1:1 with
+# ``Material.source``, so "search inside the CIAA annual reports" is
+# ``?type=material&source=ciaa_annual_report&q=…``. Faceting that column would be
+# wrong — a third of its tokens restate the document form rather than naming a
+# publisher — but scoping to a token the registry already picked is not the same
+# act. ``material_type`` remains the facet that IS safe to show.
+SCOPE_FIELDS: dict[str, str] = {
+    "source": "source",
+}
+
 # Bucket count for each facet's ``terms`` aggregation. Most vocabularies fit
 # comfortably under the default; an entry here overrides it for the ones that
 # don't (e.g. a district facet must hold all 77 districts at once — at the
@@ -530,6 +550,24 @@ def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
             continue
         bounds.setdefault(field, {})[bound] = value
     return [{"range": {field: b}} for field, b in bounds.items()]
+
+
+def _scope_clauses(scopes: dict[str, list[str]] | None) -> list[dict[str, Any]]:
+    """``terms`` clauses for the corpus scopes (:data:`SCOPE_FIELDS`).
+
+    Iterates the registry rather than the caller's dict, for the same two reasons
+    :func:`_range_clauses` does: unknown params are ignored, and the emitted DSL
+    is byte-stable regardless of query-string order.
+
+    Repeated values union (``?source=a&source=b`` is either), matching how the
+    facet params behave; different scopes AND with each other.
+    """
+    clauses: list[dict[str, Any]] = []
+    for param, field in SCOPE_FIELDS.items():
+        values = (scopes or {}).get(param)
+        if values:
+            clauses.append({"terms": {field: list(values)}})
+    return clauses
 
 
 def _scoped(
@@ -734,6 +772,7 @@ def build_query(
     lang: str = "both",
     sort: str = SORT_RELEVANCE,
     filters: dict[str, list[str]] | None = None,
+    scopes: dict[str, list[str]] | None = None,
     ranges: dict[str, Any] | None = None,
     facet_queries: dict[str, str] | None = None,
     page: int = 1,
@@ -807,6 +846,11 @@ def build_query(
     # facet owns a range, so no facet may drop one; leaving them here means they
     # narrow the hits and every aggregation alike, exactly as before.
     range_clauses = _range_clauses(ranges)
+    # Scopes join the RANGE clauses in the query context, not the facet
+    # clauses in ``post_filter``: a scope says which corpus is being searched,
+    # so the aggregations must see it too — a facet's bucket counts should
+    # describe the scoped corpus, not the whole archive.
+    scope_clauses = _scope_clauses(scopes)
 
     # ``q`` is OPTIONAL. With a term, build the tuned recall+precision bool query;
     # with an empty/blank ``q`` it's a BROWSE — ``match_all`` so the facet filters,
@@ -877,7 +921,7 @@ def build_query(
         "must": must_clauses,
         # RANGE narrowing only (empty when nothing is requested). The exact-match
         # facet clauses moved to ``post_filter`` — see the aggs comment below.
-        "filter": range_clauses,
+        "filter": range_clauses + scope_clauses,
     }
     if has_query:
         # The only thing a search term adds: an adjacent-term (phrase) title match
@@ -1559,6 +1603,7 @@ class SearchService:
         lang: str = "both",
         sort: str = SORT_RELEVANCE,
         filters: dict[str, list[str]] | None = None,
+        scopes: dict[str, list[str]] | None = None,
         ranges: dict[str, Any] | None = None,
         facet_queries: dict[str, str] | None = None,
         page: int = 1,
@@ -1604,6 +1649,7 @@ class SearchService:
             lang=lang,
             sort=sort,
             filters=filters,
+            scopes=scopes,
             ranges=ranges,
             facet_queries=facet_queries,
             page=page,

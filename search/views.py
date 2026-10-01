@@ -32,6 +32,7 @@ from .service import (
     ALL_SORTS,
     ALL_TYPES,
     FACET_FIELDS,
+    SCOPE_FIELDS,
     MAX_FACET_Q_TEXT,
     MAX_PAGE_SIZE,
     RANGE_FIELDS,
@@ -81,6 +82,16 @@ class SearchQuerySerializer(serializers.Serializer):
     # each other. And a facet's own bucket list is computed WITHOUT its own filter,
     # so the options you did not pick stay listed (with the counts you would get by
     # switching to them) rather than disappearing the moment you pick one.
+    # CORPUS SCOPE, not a refine facet (see service.SCOPE_FIELDS). ``source``
+    # narrows to one material publishing source — the token the curated
+    # /materials series registry is keyed on, so "search inside the CIAA annual
+    # reports" is ?type=material&source=ciaa_annual_report&q=…. Unlike a facet it
+    # narrows the aggregations too, and no endpoint hands back the list of
+    # sources: the column mixes publishers with document forms, so it is scoped
+    # against but never offered. Repeatable; repeated values union.
+    source = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
     entity_type = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
@@ -298,6 +309,21 @@ class SearchQuerySerializer(serializers.Serializer):
             required=False,
             enum=list(ALL_SORTS),
             description="Result ordering. Defaults to relevance.",
+        ),
+        OpenApiParameter(
+            "source",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Corpus scope: restrict to one material publishing source (the "
+                "'/material/<source>/<ident>' IRI segment, e.g. "
+                "'ciaa_annual_report'). Repeatable; repeated values union. "
+                "Unlike a refine facet this also narrows the facet counts, and "
+                "no endpoint returns the list of sources — pair it with "
+                "?type=material. Inert for other result types."
+            ),
         ),
         OpenApiParameter(
             "entity_type",
@@ -519,6 +545,13 @@ class UnifiedSearchView(APIView):
         active_filters = {
             param: values for param in FACET_FIELDS if (values := data[param])
         }
+        # Corpus scopes, same registry discipline and same limit (a SCOPE_FIELDS
+        # entry still needs its serializer field above). Kept apart from the
+        # facets because they land in a different part of the query — see
+        # ``service.SCOPE_FIELDS``.
+        active_scopes = {
+            param: values for param in SCOPE_FIELDS if (values := data[param])
+        }
         # Range bounds are kept SEPARATE from the exact-match facets: they are a
         # different clause kind (``range`` vs ``terms``) and a different value shape
         # (a scalar, not a list). Emptiness is ``is None`` — a truthiness test would
@@ -546,6 +579,7 @@ class UnifiedSearchView(APIView):
                 lang=data["lang"],
                 sort=data["sort"],
                 filters=active_filters,
+                scopes=active_scopes,
                 ranges=active_ranges,
                 facet_queries=data["facet_q"] or None,
                 page=data["page"],
@@ -585,6 +619,7 @@ class UnifiedSearchView(APIView):
                 "page": data["page"],
                 "page_size": data["page_size"],
                 "filters": active_filters,
+                "scopes": active_scopes,
                 "ranges": active_ranges,
                 # Under a cursor the service ignores ``page`` (stays 1); pass it so
                 # the builder doesn't mistake a deep cursor page for the first page.

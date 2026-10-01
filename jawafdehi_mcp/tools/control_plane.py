@@ -161,6 +161,7 @@ class SearchControlPlaneTool(_ControlPlaneTool):
         "type",
         "lang",
         "sort",
+        "source",
         "entity_type",
         "case_type",
         "tags",
@@ -216,6 +217,15 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     "type": "string",
                     "enum": ["relevance", "newest", "oldest", "title", "featured"],
                     "default": "relevance",
+                },
+                # Corpus SCOPE, not a refine facet: restricts to one material
+                # publishing source (the ``/material/<source>/<ident>`` IRI
+                # segment, e.g. "ciaa_annual_report"). Unlike the facets below it
+                # also narrows the facet counts, and nothing returns the list of
+                # sources — pair it with ``type: ["material"]``.
+                "source": {
+                    "type": "array",
+                    "items": {"type": "string"},
                 },
                 "entity_type": {
                     "type": "array",

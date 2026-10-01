@@ -2242,3 +2242,70 @@ def test_serialize_hit_omits_the_stage_fields_before_the_rebuild():
 
     for key in ("case_track", "proceedings_started_on", "proceedings_decided_on"):
         assert key not in extra
+
+
+# --- corpus scopes (SCOPE_FIELDS) --------------------------------------------
+
+
+def test_scope_narrows_the_query_not_the_post_filter():
+    """A scope lands in the query's ``bool.filter``, beside the range bounds —
+    NOT in ``post_filter`` where the refine facets live.
+
+    The distinction is the whole point: a facet is excluded from its own
+    aggregation so the reader can still see the options they did not pick, but a
+    scope defines WHICH CORPUS is being searched, so the facet counts have to
+    describe the scoped corpus. Putting it in ``post_filter`` would leave every
+    facet counting the whole archive.
+    """
+    body = svc.build_query(q="बेरुजु", scopes={"source": ["ciaa_annual_report"]})
+
+    assert {"terms": {"source": ["ciaa_annual_report"]}} in body["query"]["bool"]["filter"]
+    assert "post_filter" not in body or {
+        "terms": {"source": ["ciaa_annual_report"]}
+    } not in body.get("post_filter", {}).get("bool", {}).get("filter", [])
+
+
+def test_scope_has_no_aggregation():
+    """Nothing publishes the source-token list. A ``source`` agg would do exactly
+    that, so its absence is the enforcement."""
+    body = svc.build_query(q="", scopes={"source": ["ciaa_annual_report"]})
+
+    assert "source" not in body.get("aggs", {})
+
+
+def test_scope_applies_to_a_browse_with_no_query():
+    """Browsing one series (`?source=…&sort=newest` with no `q`) is the default
+    state of the series page, so the scope must survive the match_all branch."""
+    body = svc.build_query(q="", scopes={"source": ["ag"]}, sort="newest")
+
+    assert body["query"]["bool"]["must"] == [{"match_all": {}}]
+    assert {"terms": {"source": ["ag"]}} in body["query"]["bool"]["filter"]
+
+
+def test_repeated_scope_values_union():
+    body = svc.build_query(q="", scopes={"source": ["ag", "nkp"]})
+
+    assert {"terms": {"source": ["ag", "nkp"]}} in body["query"]["bool"]["filter"]
+
+
+def test_absent_scope_emits_no_clause():
+    for scopes in (None, {}, {"source": []}):
+        body = svc.build_query(q="x", scopes=scopes)
+        assert body["query"]["bool"]["filter"] == []
+
+
+def test_unknown_scope_params_are_ignored():
+    """Driven off the registry, not the caller's dict — so a stray param cannot
+    inject a clause on an arbitrary field."""
+    body = svc.build_query(q="x", scopes={"nonsense": ["boom"]})
+
+    assert body["query"]["bool"]["filter"] == []
+
+
+def test_every_scope_field_is_declared_on_the_query_serializer():
+    """Same discipline the facet and range registries carry: a SCOPE_FIELDS entry
+    with no serializer field would resolve to nothing and be silently dropped."""
+    from search.views import SearchQuerySerializer
+
+    declared = set(SearchQuerySerializer().get_fields())
+    assert set(svc.SCOPE_FIELDS) <= declared
