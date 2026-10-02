@@ -1003,6 +1003,22 @@ class TestNgmMetrics:
                     "jawafdehi:datasetBucket": bucket,
                 },
             )
+        # A BLANK bucket. The ingest writes the key whether or not the upstream
+        # column held anything, so this is reachable — and `__isnull` does not
+        # remove it. It must be dropped, like the indexer drops it, or the
+        # payload grows a nameless bucket the frontend would render.
+        Material.objects.create(
+            iri="https://jawafdehi.org/material/official_report/oag-blank",
+            material_type="official_report",
+            source="official_report",
+            ident="oag-blank",
+            data={
+                "@id": "https://jawafdehi.org/material/official_report/oag-blank",
+                "@type": "Report",
+                "name": "Unclassified",
+                "jawafdehi:datasetBucket": "   ",
+            },
+        )
         # A material from another corpus, carrying NO bucket at all — the
         # overwhelmingly common case.
         Material.objects.create(
@@ -1031,4 +1047,4 @@ class TestNgmMetrics:
         # dwarf every real row in a payload the frontend renders.
         assert all(row["dataset_bucket"] for row in mats["by_dataset_bucket"])
         # It is still counted everywhere else.
-        assert mats["total"] == 4
+        assert mats["total"] == 5
