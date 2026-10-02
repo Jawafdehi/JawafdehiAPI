@@ -255,6 +255,11 @@ class CaseSerializer(serializers.ModelSerializer):
     schema discrepancy. The API now returns only the unified format as documented.
     """
 
+    # Whether ``get_entities`` emits each party's ``name``/``image``. OFF here and
+    # ON in ``CaseDetailSerializer``; see ``build_entity_binds`` for why the list
+    # payload and the search-index card must not carry them.
+    include_entity_identity = False
+
     # DEPRECATED read alias for the deployed SPA; drop one release after the
     # frontend reads ``offence_type``.
     case_type = serializers.CharField(source="offence_type", read_only=True)
@@ -360,6 +365,19 @@ class CaseSerializer(serializers.ModelSerializer):
                 "type": serializers.CharField(),
                 "outcome": serializers.CharField(),
                 "notes": serializers.CharField(allow_blank=True),
+                # DETAIL ONLY — absent from the list payload, hence not required.
+                # The shape is shared because `CaseDetailSerializer` turns these on
+                # with a class attribute rather than its own `get_entities`, so both
+                # responses are described by this one block.
+                "name": inline_serializer(
+                    name="CaseEntityName",
+                    required=False,
+                    fields={
+                        "en": serializers.CharField(allow_null=True),
+                        "ne": serializers.CharField(allow_null=True),
+                    },
+                ),
+                "image": serializers.URLField(allow_null=True, required=False),
             },
         )
     )
@@ -369,6 +387,9 @@ class CaseSerializer(serializers.ModelSerializer):
         Each entry is ``{nes_id, display_name, entity_type, type, outcome, notes}``
         where ``type`` is the relationship type. ``display_name``/``entity_type``
         come from the NES resolver (``None`` when NES can't resolve the id).
+
+        ``CaseDetailSerializer`` additionally emits ``name`` (``{"en", "ne"}``) and
+        ``image`` per bind — see ``include_entity_identity``.
 
         The per-bind ``notes`` is the party's PUBLIC role line and is returned to
         every caller — see ``build_entity_binds``. The case-level ``notes`` field
@@ -384,7 +405,9 @@ class CaseSerializer(serializers.ModelSerializer):
             resolved = self.context.get("resolved_entities")
             if resolved is None:
                 resolved = resolve_entities(rel.nes_id for rel in relationships)
-            return build_entity_binds(relationships, resolved)
+            return build_entity_binds(
+                relationships, resolved, include_identity=self.include_entity_identity
+            )
         except (ValueError, TypeError, AttributeError) as e:
             logger.error(
                 f"Error serializing entities for case {obj.slug}: {e}",
@@ -599,7 +622,26 @@ class CaseDetailSerializer(CaseSerializer):
     resolved title, material_type, and roled links from NGM. When the referenced
     material does not exist or has been soft-deleted, `material` carries a stub
     (display_name/material_type null, empty urls) so the response stays stable.
+
+    It also carries each party's `name`/`image` on the entity binds, which the
+    list payload deliberately does not — see `get_entities` below.
     """
+
+    # Carry each party's bilingual name and picture on the binds. This is what
+    # removes the case page's request fan-out: the SPA previously issued one
+    # `GET /api/entities/<iri>` per party to get these two fields — up to 255 on a
+    # single case — and with `CONN_MAX_AGE = 0` each opened its own Postgres
+    # connection against a ceiling of 100 shared with the consumers and CronJobs.
+    # That exhausted the ceiling and served intermittent 500s for nine days
+    # (COE 2026-09-29).
+    #
+    # It costs nothing server-side: `resolve_entities` already runs on this path,
+    # in ONE query, and already loads the whole JSON-LD document — it was simply
+    # discarding these two fields. No extra query, no extra connection.
+    #
+    # Detail-only on purpose — the list payload must not grow and the search index
+    # is built from the same `build_entity_binds`. See its docstring.
+    include_entity_identity = True
 
     @extend_schema_field(OpenApiTypes.OBJECT)
     def get_evidence(self, obj):
