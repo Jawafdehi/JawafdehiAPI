@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from cases import search_index as case_index
 from entities import search_index as entity_index
 from courts import search_index as courtcase_index
@@ -141,11 +143,115 @@ def test_material_source_is_a_scope_and_never_a_facet():
     """The half of the old decision that still holds, pinned so a later change
     has to argue with it rather than drift past it: indexing ``source`` must not
     put it in the facet registry, which would publish the token list."""
-    from search.service import FACET_FIELDS, SCOPE_FIELDS
+    from search.service import EXCLUDE_SCOPE_FIELDS, FACET_FIELDS, SCOPE_FIELDS
 
     assert "source" in SCOPE_FIELDS
     assert "source" not in FACET_FIELDS
     assert not set(SCOPE_FIELDS) & set(FACET_FIELDS)
+    # The negative registry is a third namespace and must not collide with
+    # either: a param in two registries would emit two contradictory clauses.
+    assert not set(EXCLUDE_SCOPE_FIELDS) & set(SCOPE_FIELDS)
+    assert not set(EXCLUDE_SCOPE_FIELDS) & set(FACET_FIELDS)
+
+
+def test_material_dataset_bucket_is_a_scope_and_never_a_facet():
+    """The document KIND is scoped against, never offered as options.
+
+    Sharper than the ``source`` case: these tokens come from the upstream
+    dataset's own slugified column, so the vocabulary includes things like
+    ``publication_auditor-general's--work-achievement``. Faceting it would
+    publish that list to a reader as if it were editorial.
+    """
+    from search.service import EXCLUDE_SCOPE_FIELDS, FACET_FIELDS, SCOPE_FIELDS
+
+    assert "dataset_bucket" in SCOPE_FIELDS
+    assert "dataset_bucket" not in FACET_FIELDS
+    assert EXCLUDE_SCOPE_FIELDS["dataset_bucket_exclude"] == "dataset_bucket"
+
+
+def test_material_build_doc_promotes_the_dataset_bucket():
+    """The kind rides as a top-level scope field, read from the JSON-LD."""
+    iri = "https://jawafdehi.org/material/official_report/oag-11102"
+    obj = SimpleNamespace(
+        iri=iri,
+        ident="oag-11102",
+        source="official_report",
+        material_type="official_report",
+        data={
+            "@id": iri,
+            "@type": "Report",
+            "name": {"ne": "महालेखापरीक्षकको ४८औं वार्षिक प्रतिवेदन"},
+            "jawafdehi:datasetBucket": "report_annual-report",
+        },
+    )
+    doc = material_index.build_doc(obj)
+    assert doc["dataset_bucket"] == "report_annual-report"
+    # The source stays what it was — the kind narrows WITHIN it, it does not
+    # replace it. Both clauses AND, which is what makes a shelf one pair.
+    assert doc["source"] == "official_report"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "   ",
+        {"ne": "वार्षिक"},
+        ["report_annual-report"],
+        123,
+    ],
+)
+def test_material_build_doc_omits_a_non_string_dataset_bucket(value):
+    """Anything that is not a non-blank string is DROPPED, not indexed.
+
+    This guard is load-bearing in a way the ``source``/``material_type`` ones are
+    not. Those read model CharFields; this reads JSON-LD shaped out of an
+    external corpus, where the ingest writes the key whether or not the upstream
+    column held anything. A dict or list against a ``keyword`` mapping is
+    rejected by the cluster and takes the WHOLE document down — the same failure
+    that aborted a full reindex on 2026-08-15 when one row carried a Bikram
+    Sambat value in a date field.
+    """
+    iri = "https://jawafdehi.org/material/official_report/oag-1"
+    obj = SimpleNamespace(
+        iri=iri,
+        ident="oag-1",
+        source="official_report",
+        material_type="official_report",
+        data={
+            "@id": iri,
+            "@type": "Report",
+            "name": {"ne": "क"},
+            "jawafdehi:datasetBucket": value,
+        },
+    )
+    assert "dataset_bucket" not in material_index.build_doc(obj)
+
+
+def test_material_build_doc_omits_the_dataset_bucket_when_absent():
+    """Almost every material in the corpus has no bucket at all. It must be
+    absent rather than written as "", so a scoped shelf excludes it."""
+    iri = "https://jawafdehi.org/material/nkp/1"
+    obj = SimpleNamespace(
+        iri=iri, ident="1", source="nkp", material_type="precedent",
+        data={"@id": iri, "@type": "CreativeWork", "name": {"ne": "क"}},
+    )
+    assert "dataset_bucket" not in material_index.build_doc(obj)
+
+
+def test_dataset_bucket_is_declared_keyword_in_the_mapping():
+    """``keyword`` is load-bearing, not a default.
+
+    Every token is hyphenated, ``common_mappings()`` declares no ``dynamic``
+    setting (so dynamic mapping is ON), and an undeclared field typed ``text``
+    is analyzed apart on the hyphen — after which a ``terms`` clause matches
+    NOTHING while still returning 200. ``source`` only escaped this because
+    ``official_report`` survives the standard analyzer as a single token.
+    """
+    from jawafdehi_shared.search.mappings import common_mappings
+
+    assert common_mappings()["properties"]["dataset_bucket"] == {"type": "keyword"}
 
 
 def test_material_build_doc_omits_a_blank_source():

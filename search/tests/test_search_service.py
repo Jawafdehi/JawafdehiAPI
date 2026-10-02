@@ -2294,6 +2294,88 @@ def test_absent_scope_emits_no_clause():
         assert body["query"]["bool"]["filter"] == []
 
 
+def test_dataset_bucket_scope_lands_in_the_filter():
+    """The document-kind scope behaves exactly like ``source``: filter context,
+    narrows the aggregations, no aggregation of its own."""
+    body = svc.build_query(q="", scopes={"dataset_bucket": ["report_annual-report"]})
+
+    assert {"terms": {"dataset_bucket": ["report_annual-report"]}} in body["query"]["bool"][
+        "filter"
+    ]
+    assert "dataset_bucket" not in body.get("aggs", {})
+
+
+def test_source_and_dataset_bucket_scopes_and_together():
+    """A shelf is the PAIR. Both clauses must be present and both must apply —
+    if they unioned, the Auditor General annual-report shelf would show every
+    annual report in the archive plus every Auditor General document."""
+    body = svc.build_query(
+        q="",
+        scopes={
+            "source": ["official_report"],
+            "dataset_bucket": ["report_annual-report"],
+        },
+    )
+    filters = body["query"]["bool"]["filter"]
+
+    assert {"terms": {"source": ["official_report"]}} in filters
+    assert {"terms": {"dataset_bucket": ["report_annual-report"]}} in filters
+
+
+def test_dataset_bucket_exclude_emits_a_must_not():
+    """The complement shelf. Nested inside ``filter`` so it stays in filter
+    context (unscored, cacheable) rather than being hoisted to the query's own
+    ``must_not``."""
+    body = svc.build_query(
+        q="", scopes={"dataset_bucket_exclude": ["report_annual-report"]}
+    )
+
+    assert {
+        "bool": {"must_not": {"terms": {"dataset_bucket": ["report_annual-report"]}}}
+    } in body["query"]["bool"]["filter"]
+
+
+def test_repeated_exclude_values_union_into_one_must_not():
+    """Four excluded kinds are four values on ONE param, not four clauses —
+    which is what makes the five shelves a partition rather than an
+    intersection that excludes everything."""
+    kinds = [
+        "report_annual-report",
+        "report_province-report",
+        "publication_audit-journals",
+        "publication_audit-bulletin",
+    ]
+    body = svc.build_query(q="", scopes={"dataset_bucket_exclude": kinds})
+    filters = body["query"]["bool"]["filter"]
+
+    assert len([c for c in filters if "bool" in c]) == 1
+    assert {"bool": {"must_not": {"terms": {"dataset_bucket": kinds}}}} in filters
+
+
+def test_positive_and_negative_scopes_on_one_field_coexist():
+    """Nothing stops a caller sending both; the registries are separate dicts,
+    so each emits its own clause and OpenSearch resolves the (empty)
+    intersection. Pinned so a later 'optimisation' does not drop one."""
+    body = svc.build_query(
+        q="",
+        scopes={"dataset_bucket": ["a"], "dataset_bucket_exclude": ["b"]},
+    )
+    filters = body["query"]["bool"]["filter"]
+
+    assert {"terms": {"dataset_bucket": ["a"]}} in filters
+    assert {"bool": {"must_not": {"terms": {"dataset_bucket": ["b"]}}}} in filters
+
+
+def test_every_exclude_scope_field_is_declared_on_the_query_serializer():
+    """Same trap as the positive registry, and the same reason it is a test: the
+    view builds ``active_scopes`` by INDEXING ``validated_data`` per registry
+    key, so a registry entry with no serializer field raises KeyError on EVERY
+    search request, not just a scoped one."""
+    from search.views import SearchQuerySerializer
+
+    assert set(svc.EXCLUDE_SCOPE_FIELDS) <= set(SearchQuerySerializer().fields)
+
+
 def test_unknown_scope_params_are_ignored():
     """Driven off the registry, not the caller's dict — so a stray param cannot
     inject a clause on an arbitrary field."""

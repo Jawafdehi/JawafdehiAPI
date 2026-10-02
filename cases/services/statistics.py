@@ -24,6 +24,7 @@ from collections import defaultdict
 
 from django.db import connections
 from django.db.models import Count, Q, Sum
+from django.db.models.fields.json import KeyTextTransform
 from django.db.models.functions import Substr
 from django.utils import timezone
 
@@ -132,6 +133,7 @@ def bootstrap_placeholder() -> dict:
             "by_type": [],
             "by_source": [],
             "by_source_type": [],
+            "by_dataset_bucket": [],
             "counts": {
                 "with_description": 0,
                 "with_url": 0,
@@ -488,6 +490,27 @@ def _materials_metrics():
         # snapshot payload is byte-stable between refreshes (CDN-cache friendly).
         .order_by("-count", "source", "material_type")
     )
+    # Source×KIND cross-tab, the counterpart to the ``dataset_bucket`` search
+    # scope. ``by_source`` cannot feed a /materials shelf that is narrower than a
+    # source token, and several are: every Auditor General document carries
+    # ``official_report`` while only 18 of 228 are annual reports.
+    #
+    # Keyed on (source, dataset_bucket) rather than the bucket alone because a
+    # shelf is that pair — the bucket vocabulary is per-corpus and nothing
+    # guarantees two ingests will not mint the same token.
+    #
+    # Rows with no bucket are EXCLUDED rather than grouped under null. Almost
+    # every material in the corpus has none (the field only exists on documents
+    # ingested from a classified dataset), so a null group would be a ~346k-row
+    # bucket that means "not applicable" and would dwarf every real row in a
+    # payload the frontend renders.
+    by_dataset_bucket = list(
+        live.annotate(dataset_bucket=KeyTextTransform("jawafdehi:datasetBucket", "data"))
+        .exclude(dataset_bucket__isnull=True)
+        .values("source", "dataset_bucket")
+        .annotate(count=Count("iri"))
+        .order_by("-count", "source", "dataset_bucket")
+    )
 
     # Completeness signals over the stored schema.org JSON-LD doc. On Postgres
     # answered with JSON-key existence lookups; sqlite (empty local / test DB)
@@ -504,6 +527,7 @@ def _materials_metrics():
         "by_type": by_type,
         "by_source": by_source,
         "by_source_type": by_source_type,
+        "by_dataset_bucket": by_dataset_bucket,
         "counts": {
             "with_description": with_description,
             "with_url": with_url,
