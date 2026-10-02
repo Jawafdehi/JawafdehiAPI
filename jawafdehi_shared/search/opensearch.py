@@ -103,6 +103,36 @@ def create_index(
     return True
 
 
+def put_field_mappings(client, name: str, properties: dict[str, Any]) -> dict[str, Any]:
+    """Add field mappings to the EXISTING index ``name``. Returns the response.
+
+    The additive half of :func:`create_index`, which deliberately no-ops on an
+    index that already exists — so a field declared in ``common_mappings()``
+    after an index was created never reaches it.
+
+    Why this exists rather than "just rebuild": ``reindex_materials --rebuild``
+    DROPS and recreates ``ngm-materials`` in place. There is no alias and no
+    generation to swap (that is ``reindex_courtcases``), so a rebuild is an
+    outage window over 346k documents on an index with a history of OOM kills.
+    A mapping PUT is seconds, online, and idempotent.
+
+    Safe to re-run: OpenSearch accepts an additive property and accepts a
+    re-PUT of an identical one. It REJECTS a change to an existing field's type
+    with a 400 and changes nothing — which is the behaviour we want, because
+    silently retyping a live field would corrupt every query against it.
+
+    This does NOT backfill. Documents indexed before the PUT carry no value for
+    the new field and a ``terms`` clause excludes them until they are re-indexed
+    (``reindex_materials --since``). Land the mapping BEFORE deploying an indexer
+    that emits the field: writing an undeclared field to an index with dynamic
+    mapping on (the default here — ``common_mappings()`` sets no ``dynamic``)
+    types it from the first value seen, and a hyphenated token typed ``text`` is
+    analyzed apart, so a ``terms`` clause then matches nothing while still
+    returning 200.
+    """
+    return client.indices.put_mapping(index=name, body={"properties": properties})
+
+
 def ensure_indices(client=None, names: tuple[str, ...] | list[str] | None = None) -> list[str]:
     """Ensure every unified-search index exists with the bilingual config.
 

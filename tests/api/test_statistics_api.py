@@ -974,3 +974,77 @@ class TestNgmMetrics:
         assert mats["total"] == 1
         assert {row["source"] for row in mats["by_source"]} == {"nkp"}
         assert {row["material_type"] for row in mats["by_type"]} == {"Legislation"}
+
+    def test_by_dataset_bucket_splits_one_source_into_kinds(self, api_client):
+        """``by_source`` cannot count a /materials shelf narrower than a source
+        token, and several are. Every Office of the Auditor General document
+        carries ``official_report``; only some are annual reports. This cross-tab
+        is what lets a shelf show its own number.
+
+        Keyed on the PAIR, because the bucket vocabulary is per-corpus and
+        nothing stops two ingests minting the same token.
+        """
+        kinds = {
+            "oag-annual": "report_annual-report",
+            "oag-journal": "publication_audit-journals",
+            "oag-journal-2": "publication_audit-journals",
+        }
+        for ident, bucket in kinds.items():
+            iri = f"https://jawafdehi.org/material/official_report/{ident}"
+            Material.objects.create(
+                iri=iri,
+                material_type="official_report",
+                source="official_report",
+                ident=ident,
+                data={
+                    "@id": iri,
+                    "@type": "Report",
+                    "name": "OAG document",
+                    "jawafdehi:datasetBucket": bucket,
+                },
+            )
+        # A BLANK bucket. The ingest writes the key whether or not the upstream
+        # column held anything, so this is reachable — and `__isnull` does not
+        # remove it. It must be dropped, like the indexer drops it, or the
+        # payload grows a nameless bucket the frontend would render.
+        Material.objects.create(
+            iri="https://jawafdehi.org/material/official_report/oag-blank",
+            material_type="official_report",
+            source="official_report",
+            ident="oag-blank",
+            data={
+                "@id": "https://jawafdehi.org/material/official_report/oag-blank",
+                "@type": "Report",
+                "name": "Unclassified",
+                "jawafdehi:datasetBucket": "   ",
+            },
+        )
+        # A material from another corpus, carrying NO bucket at all — the
+        # overwhelmingly common case.
+        Material.objects.create(
+            iri="https://jawafdehi.org/material/nkp/no-bucket",
+            material_type="precedent",
+            source="nkp",
+            ident="no-bucket",
+            data={
+                "@id": "https://jawafdehi.org/material/nkp/no-bucket",
+                "@type": "CreativeWork",
+                "name": "Precedent",
+            },
+        )
+
+        mats = api_client.get("/api/statistics/").json()["materials"]
+        by_bucket = {
+            (row["source"], row["dataset_bucket"]): row["count"]
+            for row in mats["by_dataset_bucket"]
+        }
+        assert by_bucket == {
+            ("official_report", "report_annual-report"): 1,
+            ("official_report", "publication_audit-journals"): 2,
+        }
+        # The bucketless row is EXCLUDED, not grouped under null. In production
+        # that null group would be ~346k rows meaning "not applicable" and would
+        # dwarf every real row in a payload the frontend renders.
+        assert all(row["dataset_bucket"] for row in mats["by_dataset_bucket"])
+        # It is still counted everywhere else.
+        assert mats["total"] == 5

@@ -311,6 +311,41 @@ def common_mappings() -> dict[str, Any]:
                 # gains the declared mapping on the next --rebuild generation.
                 # Until then a filter on it matches nothing — safe degradation.
                 "source": {"type": "keyword"},
+                # The document KIND within a publishing source, from the material's
+                # ``jawafdehi:datasetBucket`` (set at ingest from the upstream
+                # corpus's own classification). A second corpus SCOPE alongside
+                # ``source``, for the same reason and with the same discipline —
+                # see ``search.service.SCOPE_FIELDS``.
+                #
+                # It exists because ``source`` alone is too coarse to shelve by.
+                # All 228 Office of the Auditor General documents share the token
+                # ``official_report``, but only 18 are annual reports; the rest are
+                # province audit reports, the audit journal, audit bulletins and
+                # nine other kinds. The /materials series registry is 1:1 with
+                # ``source``, so without this field no shelf can be narrower than
+                # its token and a shelf titled "annual reports" holds 210 documents
+                # that are not.
+                #
+                # ``keyword`` is LOAD-BEARING, not a default. Every token is
+                # hyphenated and underscored (``report_annual-report``,
+                # ``publication_audit-journals``) and this mapping declares no
+                # ``dynamic`` setting, so OpenSearch's default dynamic mapping would
+                # type an undeclared field as ``text``: the standard analyzer splits
+                # on the hyphen, and a ``terms`` clause then matches NOTHING while
+                # still returning 200. ``source`` only escaped this because
+                # ``official_report`` happens to survive the analyzer as one token.
+                #
+                # NOT faceted, deliberately: the vocabulary is the upstream
+                # dataset's raw slugified column — ``publication_auditor-general's--
+                # work-achievement`` is not a label to hand a reader. The registry
+                # picks the token; nothing enumerates the list back.
+                #
+                # Unlike ``material_type``/``source`` above, this one does NOT wait
+                # for the next --rebuild: ``reindex_materials --rebuild`` DROPS and
+                # recreates the index in place (no alias, no generation — that is
+                # ``reindex_courtcases``), so it is an outage, not a swap. Land this
+                # field on the live index with ``migrate_search_mappings`` instead.
+                "dataset_bucket": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get
                 # this declared type — an existing one picks the field up by dynamic
