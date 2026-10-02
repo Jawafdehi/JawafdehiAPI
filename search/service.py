@@ -1328,6 +1328,18 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
         if raw.get(key) is not None:
             extra[key] = raw[key]
 
+    # Material-only: the document KIND, so a result card can name the shelf the
+    # document actually belongs to. Without it a client holding only ``source``
+    # must guess, and guesses wrong for most of a mixed corpus — 210 of the 228
+    # ``official_report`` documents are not annual reports.
+    #
+    # Read from ``raw`` rather than the top-level ``dataset_bucket``: raw carries
+    # it on every doc written since the ingest, while the indexed field only
+    # appears after the backfill. Same reasoning as ``court`` above — one source,
+    # no precedence question, no window where the response loses the kind.
+    if result_type == "material" and raw.get("jawafdehi:datasetBucket") is not None:
+        extra["dataset_bucket"] = raw["jawafdehi:datasetBucket"]
+
     # Case-only, and gated on the doc type rather than copied with the block
     # above, because ``status`` carries TWO vocabularies: Jawafdehi cases write
     # the derived lifecycle, NGM courtcase docs write their scraper enrichment

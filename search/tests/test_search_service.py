@@ -471,6 +471,49 @@ def test_serialize_hit_omits_weight_for_a_doc_indexed_before_the_field():
     assert "weight" not in svc._serialize_hit(hit)["extra"]
 
 
+def test_serialize_hit_surfaces_the_material_dataset_bucket():
+    """A material hit carries its document KIND back, so a result card can name
+    the shelf it belongs to. A client holding only ``source`` has to guess, and
+    guesses wrong for 210 of the 228 ``official_report`` documents.
+
+    Sourced from ``raw``, which carries it on every doc written since the ingest,
+    rather than the top-level indexed field, which only appears after the
+    backfill — so this works during the window between the two.
+    """
+    hit = {
+        "_index": "ngm-materials",
+        "_source": {
+            "iri": "https://jawafdehi.org/material/official_report/oag-11318",
+            "raw": {"jawafdehi:datasetBucket": "publication_audit-journals"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    assert extra["dataset_bucket"] == "publication_audit-journals"
+
+
+def test_serialize_hit_omits_the_dataset_bucket_when_the_doc_has_none():
+    """Almost every material has no kind. ABSENT, not None — a null would make a
+    client render an empty shelf label rather than fall back."""
+    hit = {
+        "_index": "ngm-materials",
+        "_source": {"iri": "https://jawafdehi.org/material/nkp/1", "raw": {}},
+    }
+    assert "dataset_bucket" not in svc._serialize_hit(hit)["extra"]
+
+
+def test_serialize_hit_never_leaks_a_dataset_bucket_onto_another_type():
+    """Gated on the result type, like ``status`` above: a court case or case doc
+    must not grow a material-only key because its raw happened to carry one."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/kathmandudc/081-CR-0081",
+            "raw": {"jawafdehi:datasetBucket": "report_annual-report"},
+        },
+    }
+    assert "dataset_bucket" not in svc._serialize_hit(hit)["extra"]
+
+
 def test_serialize_hit_surfaces_the_court_geography_a_client_filtered_on():
     """A court-case hit carries back the three court fields the new ?court_type /
     ?district / ?province filters select on, so a client can render and re-filter
