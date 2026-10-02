@@ -123,6 +123,38 @@ def test_build_query_caps_page_size():
     assert body["size"] == svc.MAX_PAGE_SIZE
 
 
+@pytest.mark.parametrize("q", ["x", "", "शेर"])
+def test_build_query_bounds_highlight_analysis(q):
+    """Every query shape caps highlight re-analysis, not just the term searches.
+
+    ``body`` is analyzed at query time (no offsets/term vectors in the mapping),
+    and OpenSearch fails the whole search when a returned document's field is
+    longer than the index-level cap. Material bodies are untruncated OCR text, so
+    that 503 is reachable from ordinary queries — the cap is checked per returned
+    hit, before the field is matched, so a hit that matched on its title alone is
+    enough. Parametrized because the bound belongs to the request, not to the
+    query that happened to produce it.
+    """
+    highlight = build_query(q=q)["highlight"]
+    assert highlight["max_analyzer_offset"] == svc.HIGHLIGHT_MAX_ANALYZER_OFFSET
+    # Strictly below the index-level default; at-or-above is its own error.
+    assert highlight["max_analyzer_offset"] < 1_000_000
+
+
+def test_build_query_highlight_uses_the_opensearch_spelling():
+    """Guard the option NAME, which is the half of this that can't fail loudly.
+
+    OpenSearch's query option is ``max_analyzer_offset``; ``max_analyzed_offset``
+    is the INDEX setting (and Elasticsearch's name for both), so it reads like the
+    correct spelling and is an inviting "typo" to fix. It is an unknown field in a
+    highlight block — a parsing exception, i.e. a 400 on every search, which this
+    suite's mocked client would never notice.
+    """
+    highlight = build_query(q="x")["highlight"]
+    assert "max_analyzed_offset" not in highlight
+    assert "max_analyzed_offset" not in json.dumps(highlight)
+
+
 # ── index selection (type filter) ──────────────────────────────────────────────
 
 
