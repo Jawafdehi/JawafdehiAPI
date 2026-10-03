@@ -163,6 +163,17 @@ class Command(BaseCommand):
         ``limit`` rows. The tail is never reached, and when the burst ages out of
         the window it is gone for good.
         """
+        backfilled = dockets.backfilled_in_window(window)
+        if backfilled:
+            # Not a warning. These rows are excluded on purpose and the run is
+            # healthy — but a backfill can add most of a million rows to the
+            # hearings table without moving the signal count, and an operator
+            # comparing the two needs to see why rather than suspect the producer.
+            self.stdout.write(
+                f"  ({backfilled} backfilled row(s) in the window were not emitted: "
+                "projections of records already held, not new facts)"
+            )
+
         missed = 0
         for subject, total in sorted(dockets.window_totals(window).items()):
             if total <= limit:

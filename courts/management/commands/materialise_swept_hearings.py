@@ -33,6 +33,21 @@ writes nothing and a part-finished run resumes safely. Additive only — it neve
 updates or deletes an existing hearing row, so the tiers that always worked
 cannot regress.
 
+**Rows are tagged ``HEARING_SOURCE_BACKFILL``, not ``HEARING_SOURCE_SWEEP``, and
+that tag is what makes the run safe to start.** ``case_events.producers.dockets``
+keys its window on ``created_at``, so every row written here would otherwise read
+as a hearing discovered this minute. That producer has no watermark and a
+per-kind ``--limit``: rows past the cap are not deferred, they are dropped, and
+when the window slides they are gone. A tier backfill is several times the cap on
+its own, so an untagged run does not just emit noise — it destroys the genuine
+hearings scraped alongside it. The producer excludes this tag, which is why this
+command no longer needs the signals cron suspended while it runs.
+
+The supreme tier was backfilled on 2026-10-03 before the tag existed, so those
+780,825 rows carry ``register_sweep`` and are indistinguishable from live sweep
+writes. Nothing reads them as current any more — they have long since aged out of
+any window — but a query that counts sweep-sourced supreme rows is counting both.
+
 ~180k cases across supreme + district. The materialiser costs one ``exists()``
 and at most one INSERT per stored hearing — no batching, deliberately, because
 that per-date check is what makes the run resumable and additive. Budget for
@@ -44,7 +59,7 @@ a rollout SIGKILLs exec'd processes mid-run.
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Q
 
-from courts.models import CourtCase
+from courts.models import HEARING_SOURCE_BACKFILL, CourtCase
 from courts.scraper import base, registry
 from courts.scraper.rows import ParsedEnrichment
 
@@ -123,6 +138,7 @@ class Command(BaseCommand):
                 court_id,
                 case_number,
                 ParsedEnrichment(extra_data=extra_data or {}),
+                source=HEARING_SOURCE_BACKFILL,
             )
             if rows:
                 written += rows
