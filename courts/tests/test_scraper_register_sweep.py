@@ -159,8 +159,10 @@ class TestMaterialiseDetailHearings(_NgmTestCase):
         h = CourtCaseHearing.objects.using("ngm").get(
             case_number="076-CR-0294", hearing_date_bs="2076-10-03"
         )
-        # A detail page publishes no serial/bench/judges. Fabricating an ordinal
-        # would put invented court data in a real column.
+        # No detail page publishes a serial or a bench. Fabricating an ordinal
+        # would put invented court data in a real column. Judges are a different
+        # case — the special court's detail page carries none, but supreme's and
+        # district's do, so judge_names is null here and populated there.
         assert h.serial_no is None
         assert h.judge_names is None
         assert h.bench is None
@@ -220,3 +222,111 @@ class TestMaterialiseDetailHearings(_NgmTestCase):
             .count()
             == 2
         )
+
+
+class TestMaterialiseEveryParserShape(_NgmTestCase):
+    """Every parser's ``enrichment_hearings`` shape, not just the special court's.
+
+    The four parsers disagree on the key names inside that list, and for a long
+    time the materialiser read only the ``special``/``high`` names. Against a
+    ``supreme`` or ``district`` payload it therefore skipped every hearing and
+    returned 0 — writing nothing, raising nothing, logging nothing. Roughly 180k
+    swept cases ended up holding a full timeline in JSON and no relational rows,
+    which every hearing-level query reads as "this case was never listed".
+
+    A single-court fixture is what let that through, so each shape is asserted
+    here against a payload copied from a real stored row.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for identifier in ("supreme", "kathmandudc", "patanhc"):
+            Court.objects.using("ngm").get_or_create(
+                identifier=identifier,
+                defaults={"court_type": "", "full_name_nepali": ""},
+            )
+
+    def test_supreme_shape_writes_rows_with_status_order_and_judges(self):
+        # Copied from supreme 078-CR-0041: date/status/order_type/judges.
+        e = _enrichment(
+            extra_data={
+                "enrichment_hearings": [
+                    {
+                        "date": "2078-11-03",
+                        "type": "hearing",
+                        "judges": "मा.न्या. श्री दीपककुमार कार्की, मा.न्या. श्री सपना प्रधान मल्ल,",
+                        "status": "हेर्न नभ्याइने",
+                    },
+                    {
+                        "date": "2082-03-20",
+                        "type": "hearing",
+                        "judges": "मा.न्या. श्री सपना प्रधान मल्ल, मा.न्या. श्री नृपध्वज निरौला,",
+                        "status": "फैसला",
+                        "order_type": "सदर",
+                    },
+                ]
+            }
+        )
+        assert materialise_detail_hearings("supreme", "078-CR-0041", e) == 2
+        last = CourtCaseHearing.objects.using("ngm").get(
+            court_id="supreme", case_number="078-CR-0041", hearing_date_bs="2082-03-20"
+        )
+        assert last.case_status == "फैसला"
+        assert last.decision_type == "सदर"
+        assert last.judge_names == (
+            "मा.न्या. श्री सपना प्रधान मल्ल, मा.न्या. श्री नृपध्वज निरौला,"
+        )
+
+    def test_district_shape_writes_rows_with_order_and_judge(self):
+        # District emits judge/order singular, and no status column at all.
+        e = _enrichment(
+            extra_data={
+                "enrichment_hearings": [
+                    {
+                        "date": "2080-05-12",
+                        "type": "पेशी",
+                        "division": "इजलास १",
+                        "judge": "मा.न्या. श्री राम बहादुर",
+                        "order": "तारेख तोकिएको",
+                    }
+                ]
+            }
+        )
+        assert materialise_detail_hearings("kathmandudc", "080-CR-0001", e) == 1
+        h = CourtCaseHearing.objects.using("ngm").get(
+            court_id="kathmandudc", case_number="080-CR-0001"
+        )
+        assert h.decision_type == "तारेख तोकिएको"
+        assert h.judge_names == "मा.न्या. श्री राम बहादुर"
+        # ``type`` is the sitting's kind, not its outcome — it must not be read
+        # as a status.
+        assert h.case_status is None
+
+    def test_high_shape_still_uses_the_original_key_names(self):
+        # The shape that always worked. Guards against an alias change that fixes
+        # supreme by breaking the 236k rows already written for the high courts.
+        e = _enrichment(
+            extra_data={
+                "enrichment_hearings": [
+                    {
+                        "hearing_date": "2079-06-10",
+                        "case_status": "पेशी",
+                        "decision_type": "स्थगित",
+                    }
+                ]
+            }
+        )
+        assert materialise_detail_hearings("patanhc", "079-CR-0002", e) == 1
+        h = CourtCaseHearing.objects.using("ngm").get(
+            court_id="patanhc", case_number="079-CR-0002"
+        )
+        assert h.case_status == "पेशी"
+        assert h.decision_type == "स्थगित"
+
+    def test_a_shape_with_no_recognised_date_key_still_writes_nothing(self):
+        # The original failure mode, kept as a test: an unrecognised payload must
+        # skip quietly rather than invent a date.
+        e = _enrichment(
+            extra_data={"enrichment_hearings": [{"मिती": "2079-06-10"}, None]}
+        )
+        assert materialise_detail_hearings("supreme", "079-CR-0003", e) == 0
