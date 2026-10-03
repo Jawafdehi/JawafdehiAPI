@@ -17,7 +17,14 @@ from django.db import transaction
 from django.utils import timezone
 
 from courts import case_status as cs
-from courts.models import CaseEntity, Court, CourtCase, CourtCaseHearing, ScrapedDate
+from courts.models import (
+    HEARING_SOURCE_SWEEP,
+    CaseEntity,
+    Court,
+    CourtCase,
+    CourtCaseHearing,
+    ScrapedDate,
+)
 from courts.scraper.rows import ParsedCase, ParsedEnrichment, ParsedHearing
 from courts.scraper.text import desep_judges
 
@@ -431,6 +438,7 @@ def materialise_detail_hearings(
     enrichment: ParsedEnrichment,
     *,
     using: str = NGM_DB,
+    source: str = HEARING_SOURCE_SWEEP,
 ) -> int:
     """Turn a detail page's hearing list into ``CourtCaseHearing`` rows.
 
@@ -451,6 +459,13 @@ def materialise_detail_hearings(
       here would seed a clean column with fake dates for rows nobody asked for.
 
     ``bench`` stays null — no detail page publishes one.
+
+    ``source`` is stamped into each row's ``extra_data`` and defaults to the live
+    sweep. An offline backfill must pass ``HEARING_SOURCE_BACKFILL`` instead: the
+    rows are identical, but one is a hearing we have just discovered and the
+    other is a projection of JSON we have held for months, and
+    :mod:`case_events.producers.dockets` has to tell them apart — it keys its
+    window on ``created_at``, which a backfill resets on records that are not new.
     """
     from jawafdehi_shared.dates import bs_to_ad
 
@@ -482,7 +497,7 @@ def materialise_detail_hearings(
             decision_type=_detail_field(hearing, _DETAIL_DECISION_KEYS),
             judge_names=desep_judges(_detail_field(hearing, _DETAIL_JUDGE_KEYS)),
             scraped_at=timezone.now(),
-            extra_data={"source": "register_sweep"},
+            extra_data={"source": source},
         )
         written += 1
     return written

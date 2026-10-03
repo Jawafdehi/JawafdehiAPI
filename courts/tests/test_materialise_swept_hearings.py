@@ -12,7 +12,13 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
-from courts.models import Court, CourtCase, CourtCaseHearing
+from courts.models import (
+    HEARING_SOURCE_BACKFILL,
+    HEARING_SOURCE_SWEEP,
+    Court,
+    CourtCase,
+    CourtCaseHearing,
+)
 
 SUPREME_HEARINGS = [
     {
@@ -72,7 +78,24 @@ class MaterialiseSweptHearingsTests(TestCase):
         decided = self._hearings().get(hearing_date_bs="2082-03-20")
         assert decided.decision_type == "सदर"
         assert decided.judge_names == "मा.न्या. श्री सपना प्रधान मल्ल,"
-        assert decided.extra_data["source"] == "register_sweep"
+
+    def test_rows_are_tagged_as_backfill_not_as_a_live_sweep(self):
+        """The tag is what lets this run with the signals cron untouched.
+
+        ``case_events.producers.dockets`` keys its window on ``created_at``, so
+        every row here would otherwise read as a hearing discovered this minute.
+        That producer has no watermark and a per-kind limit, so a tier backfill
+        does not just add noise — it pushes the window's genuine hearings past
+        the cap, where they are dropped and never retried. This assertion is the
+        contract: change the tag and that failure comes back.
+        """
+        self._case("078-CR-0041", SUPREME_HEARINGS)
+        self._run("--court", "supreme", "--apply")
+
+        assert {h.extra_data["source"] for h in self._hearings()} == {
+            HEARING_SOURCE_BACKFILL
+        }
+        assert HEARING_SOURCE_BACKFILL != HEARING_SOURCE_SWEEP
 
     def test_second_pass_writes_nothing(self):
         # The run is resumable and re-runnable: a Job that dies halfway can be
