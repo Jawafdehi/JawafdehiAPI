@@ -863,11 +863,19 @@ if not TESTING:
         # outgrew the cap, failed the deploy outright.
         #
         # Deliberately LOWER than the ``user`` tier this would otherwise fall
-        # into. The build's need is knowable (roughly one read per published
-        # page), so the cap is sized to it with room for growth and repeated
-        # deploys, rather than handing a credential that lives in a CI
-        # environment variable the full authenticated allowance.
-        "prerender": os.getenv("THROTTLE_RATE_PRERENDER", "10000/hour"),
+        # into (30000/hour in production), because the build's need is knowable
+        # and the credential lives in a CI environment variable — it should not
+        # hold the full authenticated allowance.
+        #
+        # Sized from a measured full build on 2026-10-03: 105 case-list pages +
+        # 2,088 case details + 685 entity batches + 174 browse pages + 1 count,
+        # and the sitemap step walks the case list again in its own process, for
+        # ~3,157 requests. Two deploys in an hour is ordinary, so the floor is
+        # ~6,300; 20000 leaves room for a third and for the corpus to roughly
+        # double. ⚠️ It HAS doubled twice in a day (463 -> 921 -> 2,088 cases,
+        # 2026-10-02 to 2026-10-03), so treat this as tunable, not settled —
+        # that is what the env override is for.
+        "prerender": os.getenv("THROTTLE_RATE_PRERENDER", "20000/hour"),
     }
 else:
     # Under the test runner, ensure no throttle classes/rates leak through.
