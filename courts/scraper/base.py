@@ -48,12 +48,17 @@ _DETAIL_JUDGE_KEYS = ("judge_names", "judges", "judge")
 
 
 def _detail_field(hearing: object, keys: tuple[str, ...]) -> str | None:
-    """First non-empty value among ``keys`` in a detail-page hearing dict."""
+    """First non-empty string among ``keys`` in a detail-page hearing dict.
+
+    A non-string value is ignored rather than coerced. These land in CharFields
+    and every parser emits text here, so a non-string means the payload isn't the
+    shape this reads — better skipped than stringified into a court record.
+    """
     if not isinstance(hearing, dict):
         return None
     for key in keys:
         value = hearing.get(key)
-        if value:
+        if isinstance(value, str) and value:
             return value
     return None
 
