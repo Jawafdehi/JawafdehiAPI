@@ -249,7 +249,34 @@ This **retires object-level assignment-gating**:
 | `Caseworker` | `moderator` + `contributor` (+ legacy `caseworker`) | The single content-staff role, with the old Moderator's powers; `is_staff` + CMS. |
 | `ReadOnly` | `readonly` | Org-wide read incl. casework. |
 | `JobPoller` | `job_poller` | Machine role: review read+write, jobs consume. |
+| `Prerender` | `prerender` | Machine role that authorizes **nothing** — see 8.4. |
 | *(none — anonymous)* | — | Replaces `Public`. |
+
+### 8.4 The `Prerender` role (added 2026-10-03)
+
+The jawafdehi.org build pre-renders every published page on each production
+deploy. Done anonymously that competed with real visitors for the single
+1000/hour `anon` bucket, and once the archive outgrew the cap it failed the
+deploy outright.
+
+The fix is a machine user (`sa-prerender`) holding one role whose **only** effect
+is to select a throttle scope: `prerender`, rated by `THROTTLE_RATE_PRERENDER`
+and deliberately set *below* the `user` tier, since the build's need is knowable
+and the credential lives in a CI environment variable.
+
+**The role must keep granting nothing.** Build responses are written into static
+HTML served to everyone, so anything this principal can see that an anonymous
+caller cannot gets published. That holds today for a structural reason — every
+gate is an allowlist of group names and `Prerender` is in none of them, while
+`can_view_case` and the serializer's casework flag are both
+`is_admin_or_moderator | is_readonly`. Verified against production before the
+role existed in Django: a DRAFT case returns 404 to `sa-prerender` and 200 to
+`sa-readonly`. `tests/test_prerender_role.py` pins it.
+
+⚠️ **The group row must exist before the role does anything.** OIDC sync only
+*attaches* existing groups (point 11 below), so `manage.py create_groups` has to
+run after deploy. Until it does, the holder is a role-less authenticated user and
+falls into the shared `user` tier — degraded, not broken.
 
 ### 8.6 Django-admin & CMS access (decided — corner case A1/C8)
 

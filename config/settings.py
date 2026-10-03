@@ -855,6 +855,19 @@ if not TESTING:
     REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
         "anon": os.getenv("THROTTLE_RATE_ANON", "1000/hour"),
         "user": os.getenv("THROTTLE_RATE_USER", "5000/hour"),
+        # The jawafdehi.org build's own bucket, reached only by holders of the
+        # permissionless ``prerender`` role (SyncedUserRateThrottle). A full
+        # production deploy pre-renders every case and entity page, so it spends
+        # thousands of reads in a few minutes; run anonymously that both starved
+        # real visitors of the 1000/hour anon bucket and, once the archive
+        # outgrew the cap, failed the deploy outright.
+        #
+        # Deliberately LOWER than the ``user`` tier this would otherwise fall
+        # into. The build's need is knowable (roughly one read per published
+        # page), so the cap is sized to it with room for growth and repeated
+        # deploys, rather than handing a credential that lives in a CI
+        # environment variable the full authenticated allowance.
+        "prerender": os.getenv("THROTTLE_RATE_PRERENDER", "10000/hour"),
     }
 else:
     # Under the test runner, ensure no throttle classes/rates leak through.
