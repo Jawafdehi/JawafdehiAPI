@@ -16,9 +16,10 @@ from cases.models import (
 
 class Command(BaseCommand):
     help = (
-        "Create user groups (Caseworker, ReadOnly, JobPoller) with appropriate "
-        "permissions. v3 authz model: admin == is_superuser (no group); the "
-        "single content-staff role is Caseworker (folds in the old Moderator)."
+        "Create user groups (Caseworker, ReadOnly, JobPoller, Prerender) with "
+        "appropriate permissions. v3 authz model: admin == is_superuser (no "
+        "group); the single content-staff role is Caseworker (folds in the old "
+        "Moderator); Prerender deliberately carries none."
     )
 
     def handle(self, *args, **options):
@@ -143,5 +144,24 @@ class Command(BaseCommand):
                 relationship_permissions["view"],
             ]
         )
+
+        # Prerender: the jawafdehi.org build's machine role. It holds NO
+        # permissions and is named by NO gate, so its holder sees exactly what an
+        # anonymous visitor sees. The group exists only so SyncedUserRateThrottle
+        # can route the build into its own bucket (THROTTLE_RATE_PRERENDER)
+        # instead of the 1000/hour anonymous one it was competing for.
+        #
+        # The empty permission set is the invariant, not an oversight: the build
+        # writes what it fetches into static HTML that is served to everyone, so
+        # granting this group anything would publish it. ``.set([])`` is
+        # unconditional for the same reason JobPoller's is — it repairs a group
+        # that was granted something by hand.
+        prerender_group, created = Group.objects.get_or_create(name="Prerender")
+        if created:
+            self.stdout.write(self.style.SUCCESS("Created Prerender group"))
+        else:
+            self.stdout.write("Prerender group already exists")
+
+        prerender_group.permissions.set([])
 
         self.stdout.write(self.style.SUCCESS("Successfully configured all groups"))
