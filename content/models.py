@@ -57,6 +57,24 @@ class ArticleIndexPage(Page):
     subpage_types = ["content.ArticlePage"]
     max_count = 1
 
+    # NOT previewable, and the empty list is the fix rather than an oversight.
+    #
+    # This is a headless CMS: there are no page templates (see ArticlePage below).
+    # Wagtail's default preview therefore tried to render
+    # `content/article_index_page.html`, which does not exist and should not, so
+    # every click of Preview on the edit screen raised TemplateDoesNotExist and
+    # returned 500 — Sentry JAWAFDEHI-API-17, firing since 2026-06-24.
+    #
+    # ArticlePage avoids this with HeadlessPreviewMixin, which redirects the
+    # preview iframe to the SPA. That is not available here: the SPA's preview
+    # target (`/updates/preview`) fetches the draft and renders it through
+    # `ArticleView`, so handing it an index page would swap a server 500 for a
+    # broken client render. Giving this page a preview surface of its own is a
+    # feature, not a bug fix — and a container whose single editable field is
+    # `intro` has little to show. `is_previewable()` is `bool(preview_modes)`, so
+    # this removes the button and makes the error unreachable.
+    preview_modes = []
+
     content_panels = Page.content_panels + [FieldPanel("intro")]
     api_fields = [APIField("intro")]
 

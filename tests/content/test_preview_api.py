@@ -123,3 +123,37 @@ def test_preview_listing_route_not_exposed(client):
     # The endpoint must not double as a second published-pages listing.
     resp = client.get("/api/cms/v2/page_preview/", **JSON)
     assert resp.status_code == 404
+
+
+# --- ArticleIndexPage is deliberately not previewable -------------------------
+#
+# The index page is a plain `Page` in a headless CMS, so Wagtail's default
+# preview tried to render `content/article_index_page.html` — a template that
+# does not exist and should not. Every click of Preview on its edit screen
+# returned 500 (Sentry JAWAFDEHI-API-17, firing since 2026-06-24, most recently
+# 2026-10-05 from `/newsroom/pages/3/edit/preview/`).
+#
+# `ArticlePage` solves the same problem with `HeadlessPreviewMixin`, which
+# redirects the iframe to the SPA. That is not reusable here: the SPA's preview
+# target renders an `ArticleView`, so an index page would break it instead. So
+# the button is removed rather than pointed somewhere that cannot render it.
+
+
+@pytest.mark.django_db
+def test_article_index_page_is_not_previewable():
+    index = ArticleIndexPage.objects.first()
+    assert index is not None, "ArticleIndexPage missing — content.0002 not applied"
+
+    assert index.preview_modes == []
+    # `is_previewable()` is what the edit screen asks before offering the button.
+    assert index.is_previewable() is False
+
+
+@pytest.mark.django_db
+def test_article_page_is_still_previewable():
+    """The contrast that makes the assertion above mean something: removing the
+    index page's preview must not disturb the article preview, which is the one
+    editors actually use and which `HeadlessPreviewMixin` serves."""
+    article = _make_published_article()
+
+    assert article.is_previewable() is True
