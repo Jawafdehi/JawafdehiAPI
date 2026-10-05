@@ -503,6 +503,49 @@ def test_serialize_hit_omits_weight_for_a_doc_indexed_before_the_field():
     assert "weight" not in svc._serialize_hit(hit)["extra"]
 
 
+def test_serialize_hit_surfaces_the_material_dataset_bucket():
+    """A material hit carries its document KIND back, so a result card can name
+    the shelf it belongs to. A client holding only ``source`` has to guess, and
+    guesses wrong for 210 of the 228 ``official_report`` documents.
+
+    Sourced from ``raw``, which carries it on every doc written since the ingest,
+    rather than the top-level indexed field, which only appears after the
+    backfill — so this works during the window between the two.
+    """
+    hit = {
+        "_index": "ngm-materials",
+        "_source": {
+            "iri": "https://jawafdehi.org/material/official_report/oag-11318",
+            "raw": {"jawafdehi:datasetBucket": "publication_audit-journals"},
+        },
+    }
+    extra = svc._serialize_hit(hit)["extra"]
+    assert extra["dataset_bucket"] == "publication_audit-journals"
+
+
+def test_serialize_hit_omits_the_dataset_bucket_when_the_doc_has_none():
+    """Almost every material has no kind. ABSENT, not None — a null would make a
+    client render an empty shelf label rather than fall back."""
+    hit = {
+        "_index": "ngm-materials",
+        "_source": {"iri": "https://jawafdehi.org/material/nkp/1", "raw": {}},
+    }
+    assert "dataset_bucket" not in svc._serialize_hit(hit)["extra"]
+
+
+def test_serialize_hit_never_leaks_a_dataset_bucket_onto_another_type():
+    """Gated on the result type, like ``status`` above: a court case or case doc
+    must not grow a material-only key because its raw happened to carry one."""
+    hit = {
+        "_index": "ngm-courtcases",
+        "_source": {
+            "iri": "https://jawafdehi.org/courtcase/kathmandudc/081-CR-0081",
+            "raw": {"jawafdehi:datasetBucket": "report_annual-report"},
+        },
+    }
+    assert "dataset_bucket" not in svc._serialize_hit(hit)["extra"]
+
+
 def test_serialize_hit_surfaces_the_court_geography_a_client_filtered_on():
     """A court-case hit carries back the three court fields the new ?court_type /
     ?district / ?province filters select on, so a client can render and re-filter
@@ -2324,6 +2367,88 @@ def test_absent_scope_emits_no_clause():
     for scopes in (None, {}, {"source": []}):
         body = svc.build_query(q="x", scopes=scopes)
         assert body["query"]["bool"]["filter"] == []
+
+
+def test_dataset_bucket_scope_lands_in_the_filter():
+    """The document-kind scope behaves exactly like ``source``: filter context,
+    narrows the aggregations, no aggregation of its own."""
+    body = svc.build_query(q="", scopes={"dataset_bucket": ["report_annual-report"]})
+
+    assert {"terms": {"dataset_bucket": ["report_annual-report"]}} in body["query"]["bool"][
+        "filter"
+    ]
+    assert "dataset_bucket" not in body.get("aggs", {})
+
+
+def test_source_and_dataset_bucket_scopes_and_together():
+    """A shelf is the PAIR. Both clauses must be present and both must apply —
+    if they unioned, the Auditor General annual-report shelf would show every
+    annual report in the archive plus every Auditor General document."""
+    body = svc.build_query(
+        q="",
+        scopes={
+            "source": ["official_report"],
+            "dataset_bucket": ["report_annual-report"],
+        },
+    )
+    filters = body["query"]["bool"]["filter"]
+
+    assert {"terms": {"source": ["official_report"]}} in filters
+    assert {"terms": {"dataset_bucket": ["report_annual-report"]}} in filters
+
+
+def test_dataset_bucket_exclude_emits_a_must_not():
+    """The complement shelf. Nested inside ``filter`` so it stays in filter
+    context (unscored, cacheable) rather than being hoisted to the query's own
+    ``must_not``."""
+    body = svc.build_query(
+        q="", scopes={"dataset_bucket_exclude": ["report_annual-report"]}
+    )
+
+    assert {
+        "bool": {"must_not": {"terms": {"dataset_bucket": ["report_annual-report"]}}}
+    } in body["query"]["bool"]["filter"]
+
+
+def test_repeated_exclude_values_union_into_one_must_not():
+    """Four excluded kinds are four values on ONE param, not four clauses —
+    which is what makes the five shelves a partition rather than an
+    intersection that excludes everything."""
+    kinds = [
+        "report_annual-report",
+        "report_province-report",
+        "publication_audit-journals",
+        "publication_audit-bulletin",
+    ]
+    body = svc.build_query(q="", scopes={"dataset_bucket_exclude": kinds})
+    filters = body["query"]["bool"]["filter"]
+
+    assert len([c for c in filters if "bool" in c]) == 1
+    assert {"bool": {"must_not": {"terms": {"dataset_bucket": kinds}}}} in filters
+
+
+def test_positive_and_negative_scopes_on_one_field_coexist():
+    """Nothing stops a caller sending both; the registries are separate dicts,
+    so each emits its own clause and OpenSearch resolves the (empty)
+    intersection. Pinned so a later 'optimisation' does not drop one."""
+    body = svc.build_query(
+        q="",
+        scopes={"dataset_bucket": ["a"], "dataset_bucket_exclude": ["b"]},
+    )
+    filters = body["query"]["bool"]["filter"]
+
+    assert {"terms": {"dataset_bucket": ["a"]}} in filters
+    assert {"bool": {"must_not": {"terms": {"dataset_bucket": ["b"]}}}} in filters
+
+
+def test_every_exclude_scope_field_is_declared_on_the_query_serializer():
+    """Same trap as the positive registry, and the same reason it is a test: the
+    view builds ``active_scopes`` by INDEXING ``validated_data`` per registry
+    key, so a registry entry with no serializer field raises KeyError on EVERY
+    search request, not just a scoped one."""
+    from search.views import SearchQuerySerializer
+
+    assert set(svc.EXCLUDE_SCOPE_FIELDS) <= set(SearchQuerySerializer().fields)
 
 
 def test_unknown_scope_params_are_ignored():

@@ -49,6 +49,34 @@ def test_create_index_skips_when_present():
     client.indices.create.assert_not_called()
 
 
+def test_put_field_mappings_sends_only_the_properties_block():
+    """The additive counterpart to ``create_index``, which no-ops on an existing
+    index and so never delivers a field declared after the index was made.
+
+    The body must be ``{"properties": …}`` and nothing else — a settings block
+    here would be rejected, and an index/mappings wrapper would be stored as a
+    field literally called "mappings"."""
+    client = MagicMock()
+    opensearch.put_field_mappings(
+        client, "ngm-materials", {"dataset_bucket": {"type": "keyword"}}
+    )
+    client.indices.put_mapping.assert_called_once_with(
+        index="ngm-materials",
+        body={"properties": {"dataset_bucket": {"type": "keyword"}}},
+    )
+
+
+def test_put_field_mappings_never_creates_or_deletes():
+    """It is an online mutation of a live index. If this ever starts dropping or
+    recreating, a 60-second migration silently becomes an outage over 346k
+    documents — ``reindex_materials --rebuild`` drops the index in place, with no
+    alias to swap behind."""
+    client = MagicMock()
+    opensearch.put_field_mappings(client, "ngm-materials", {"x": {"type": "keyword"}})
+    client.indices.create.assert_not_called()
+    client.indices.delete.assert_not_called()
+
+
 def test_ensure_indices_builds_the_four_names():
     client = MagicMock()
     client.indices.exists.return_value = False

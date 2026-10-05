@@ -361,8 +361,33 @@ ALL_COURT_TYPES: tuple[str, ...] = ("district", "high", "supreme", "special")
 # wrong — a third of its tokens restate the document form rather than naming a
 # publisher — but scoping to a token the registry already picked is not the same
 # act. ``material_type`` remains the facet that IS safe to show.
+# ``dataset_bucket`` is the second, and exists because ``source`` is too coarse to
+# shelve by: all 228 Auditor General documents share the token ``official_report``
+# and only 18 are annual reports — the rest are province audit reports, the audit
+# journal, audit bulletins and nine other kinds. It is emphatically NOT a facet,
+# for a sharper version of the same reason as ``source``: the vocabulary is the
+# upstream dataset's raw slugified column, and
+# ``publication_auditor-general's--work-achievement`` is not a label to hand a
+# reader. The registry picks the token; nothing enumerates the list back.
 SCOPE_FIELDS: dict[str, str] = {
     "source": "source",
+    "dataset_bucket": "dataset_bucket",
+}
+
+# NEGATIVE scopes: same registry discipline, ``must_not`` instead of ``must``.
+# Request param name -> the keyword index field it excludes.
+#
+# This exists for exactly one shape: a curated shelf that means "everything in
+# this source that the other shelves did not claim". Enumerating the dozen-odd
+# remaining tokens in the frontend registry would work until the upstream corpus
+# mints a new one — and then those documents belong to no shelf at all, silently.
+# Stated as a complement, the shelves are a provable partition of whatever the
+# source actually contains, and a new token lands in "other" instead of nowhere.
+#
+# Repeated values union into one ``must_not``, so excluding four tokens is four
+# values on one param, not four params.
+EXCLUDE_SCOPE_FIELDS: dict[str, str] = {
+    "dataset_bucket_exclude": "dataset_bucket",
 }
 
 # Bucket count for each facet's ``terms`` aggregation. Most vocabularies fit
@@ -569,12 +594,27 @@ def _scope_clauses(scopes: dict[str, list[str]] | None) -> list[dict[str, Any]]:
 
     Repeated values union (``?source=a&source=b`` is either), matching how the
     facet params behave; different scopes AND with each other.
+
+    :data:`EXCLUDE_SCOPE_FIELDS` emits the negation of the same clause. The
+    ``bool.must_not`` is nested inside the ``filter`` array rather than hoisted
+    to the query's own ``must_not``, which keeps it in filter context (no
+    scoring, cacheable) and keeps this function's contract intact: it returns a
+    list of filter clauses and the caller appends them, unchanged.
+
+    A document with NO value for the field is NOT excluded by ``must_not`` —
+    which is the behaviour a complement shelf wants (the one Auditor General row
+    carrying no bucket belongs in "other", not nowhere), and the mirror of the
+    positive clause excluding it.
     """
     clauses: list[dict[str, Any]] = []
     for param, field in SCOPE_FIELDS.items():
         values = (scopes or {}).get(param)
         if values:
             clauses.append({"terms": {field: list(values)}})
+    for param, field in EXCLUDE_SCOPE_FIELDS.items():
+        values = (scopes or {}).get(param)
+        if values:
+            clauses.append({"bool": {"must_not": {"terms": {field: list(values)}}}})
     return clauses
 
 
@@ -1327,6 +1367,18 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     for key in ("case_type", "case_status", "court", "case_number", "parties"):
         if raw.get(key) is not None:
             extra[key] = raw[key]
+
+    # Material-only: the document KIND, so a result card can name the shelf the
+    # document actually belongs to. Without it a client holding only ``source``
+    # must guess, and guesses wrong for most of a mixed corpus — 210 of the 228
+    # ``official_report`` documents are not annual reports.
+    #
+    # Read from ``raw`` rather than the top-level ``dataset_bucket``: raw carries
+    # it on every doc written since the ingest, while the indexed field only
+    # appears after the backfill. Same reasoning as ``court`` above — one source,
+    # no precedence question, no window where the response loses the kind.
+    if result_type == "material" and raw.get("jawafdehi:datasetBucket") is not None:
+        extra["dataset_bucket"] = raw["jawafdehi:datasetBucket"]
 
     # Case-only, and gated on the doc type rather than copied with the block
     # above, because ``status`` carries TWO vocabularies: Jawafdehi cases write
