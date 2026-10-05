@@ -855,6 +855,27 @@ if not TESTING:
     REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
         "anon": os.getenv("THROTTLE_RATE_ANON", "1000/hour"),
         "user": os.getenv("THROTTLE_RATE_USER", "5000/hour"),
+        # The jawafdehi.org build's own bucket, reached only by holders of the
+        # permissionless ``prerender`` role (SyncedUserRateThrottle). A full
+        # production deploy pre-renders every case and entity page, so it spends
+        # thousands of reads in a few minutes; run anonymously that both starved
+        # real visitors of the 1000/hour anon bucket and, once the archive
+        # outgrew the cap, failed the deploy outright.
+        #
+        # Deliberately LOWER than the ``user`` tier this would otherwise fall
+        # into (30000/hour in production), because the build's need is knowable
+        # and the credential lives in a CI environment variable — it should not
+        # hold the full authenticated allowance.
+        #
+        # Sized from a measured full build on 2026-10-03: 105 case-list pages +
+        # 2,088 case details + 685 entity batches + 174 browse pages + 1 count,
+        # and the sitemap step walks the case list again in its own process, for
+        # ~3,157 requests. Two deploys in an hour is ordinary, so the floor is
+        # ~6,300; 20000 leaves room for a third and for the corpus to roughly
+        # double. ⚠️ It HAS doubled twice in a day (463 -> 921 -> 2,088 cases,
+        # 2026-10-02 to 2026-10-03), so treat this as tunable, not settled —
+        # that is what the env override is for.
+        "prerender": os.getenv("THROTTLE_RATE_PRERENDER", "20000/hour"),
     }
 else:
     # Under the test runner, ensure no throttle classes/rates leak through.

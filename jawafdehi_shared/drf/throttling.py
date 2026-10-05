@@ -36,6 +36,10 @@ Configuration (env)
                             back to DRF's stock per-process behaviour, so nothing
                             changes where no sync target is provisioned.
 * ``THROTTLE_SYNC_INTERVAL`` seconds between background flushes (default 2.0).
+
+Scopes are ``anon``, ``user``, and ``prerender`` — the last one reached only by
+members of the ``Prerender`` group, so the site build gets its own bucket rather
+than competing with visitors for the anonymous cap. See ``_is_prerender``.
 """
 
 from __future__ import annotations
@@ -236,9 +240,71 @@ class _AsyncSyncedMixin:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Per-principal scope routing
+# ---------------------------------------------------------------------------
+# The jawafdehi.org build pre-renders the whole archive on every production
+# deploy, which is thousands of reads in a few minutes. Done anonymously that
+# competes with real visitors for the single 1000/hour ``anon`` bucket and, once
+# the archive outgrew the cap, simply failed the deploy. It now authenticates as
+# a machine user holding the ``prerender`` role, whose ONLY effect is to land
+# here: its own bucket, its own rate, isolated from both the anonymous cap and
+# the shared ``user`` tier.
+#
+# The role grants no access — see DEFAULT_ROLE_TO_GROUP in
+# jawafdehi_shared/auth/oidc.py for why that emptiness is load-bearing.
+PRERENDER_GROUP = "Prerender"
+PRERENDER_SCOPE = "prerender"
+
+
+def _is_prerender(request) -> bool:
+    """Whether this request is the site build (a ``Prerender`` group member).
+
+    Cached on the request object — the same trick ``cases.serializers`` uses for
+    its casework-access flag — because a throttle instance is rebuilt per request
+    and this would otherwise be one group query per throttle per request.
+    Anonymous traffic never reaches the query at all.
+    """
+    user = getattr(request, "user", None)
+    if not (user and getattr(user, "is_authenticated", False)):
+        return False
+
+    cached = getattr(request, "_jawafdehi_is_prerender", None)
+    if cached is not None:
+        return cached
+
+    result = user.groups.filter(name=PRERENDER_GROUP).exists()
+    try:
+        request._jawafdehi_is_prerender = result
+    except Exception:  # pragma: no cover  # noqa: BLE001 - immutable request is fine; this is only a cache
+        pass
+    return result
+
+
 class SyncedAnonRateThrottle(_AsyncSyncedMixin, AnonRateThrottle):
     """Anonymous bucket (scope ``anon``), reconciled asynchronously."""
 
 
 class SyncedUserRateThrottle(_AsyncSyncedMixin, UserRateThrottle):
-    """Authenticated bucket (scope ``user``), reconciled asynchronously."""
+    """Authenticated bucket (scope ``user``), reconciled asynchronously.
+
+    Members of the ``Prerender`` group are re-pointed at the ``prerender`` scope
+    before the decision runs. Scope drives BOTH the rate and the cache key
+    (``SimpleRateThrottle.get_cache_key`` formats ``throttle_<scope>_<ident>``),
+    so this is a genuinely separate bucket rather than a different ceiling on a
+    shared counter — the build cannot exhaust the tier everyone else is on, and
+    nothing else can exhaust the build's.
+
+    Falls through to ``user`` when no ``prerender`` rate is configured, which is
+    what keeps dev and the test runner (where DEFAULT_THROTTLE_RATES is emptied)
+    behaving exactly as before.
+    """
+
+    def allow_request(self, request, view):
+        if _is_prerender(request):
+            rate = self.THROTTLE_RATES.get(PRERENDER_SCOPE)
+            if rate:
+                self.scope = PRERENDER_SCOPE
+                self.rate = rate
+                self.num_requests, self.duration = self.parse_rate(rate)
+        return super().allow_request(request, view)
