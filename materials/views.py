@@ -141,6 +141,39 @@ def _with_admin_visibility(row) -> dict:
     return doc
 
 
+# The one unbounded field in a material document: OCR'd body text, which on the
+# Auditor General reports runs to 1.9 MB in a single row. Everything else is
+# metadata — measured across a live page, the next largest field (associatedMedia)
+# peaks at 2 KB, and `text` is 940x it.
+_ABRIDGED_FIELD = "text"
+
+
+def _abridged(doc: dict) -> dict:
+    """A list-shaped copy of a material document: metadata, no body text.
+
+    ``GET /api/materials/`` renders whole stored JSON-LD documents, so a page of
+    50 shipped **41.5 MB uncompressed / 7.2 MB zstd**, of which ``text`` was
+    99.6%. Nothing consumes it there — the admin table renders Name/Type/@id and
+    the evidence picker renders names — and it cost ~6s of TTFB per call in
+    detoast, serialization and compression.
+
+    Abridged rather than silently truncated: a consumer that just found no
+    ``text`` key cannot tell "this document has none" from "it was withheld", so
+    the flag is what makes the omission honest. ``@id`` is on every row and
+    ``GET /api/materials/<source>/<ident>`` remains the complete document, so
+    nothing is withdrawn from the open dataset — only moved one fetch away.
+
+    Takes a dict that is ALREADY a copy (``row.data`` is the live model
+    attribute; mutating it would corrupt the in-memory instance for anything
+    downstream in the same request).
+    """
+    if _ABRIDGED_FIELD not in doc:
+        return doc
+    doc.pop(_ABRIDGED_FIELD)
+    doc["jawafdehi:textOmitted"] = True
+    return doc
+
+
 def _clean_policy(body):
     """Extract + validate an optional ``visibility_policy`` from a write body.
 
@@ -832,6 +865,10 @@ def _list_materials(request) -> Response:
     Visibility (ADR: cases own no documents): anon/non-privileged callers see
     only LISTED materials; an authed caseworker/readonly/NGM principal sees all
     live rows (so the admin table can manage in-review/draft evidence).
+
+    Rows are ABRIDGED: the ``text`` body is omitted and flagged with
+    ``jawafdehi:textOmitted``. See :func:`_abridged`. Fetch
+    ``/api/materials/<source>/<ident>`` for the complete document.
     """
     from .models import Visibility
 
@@ -849,10 +886,14 @@ def _list_materials(request) -> Response:
     page = paginator.paginate_queryset(qs, request)
 
     # Authed callers get the cached visibility + policy per row (for the admin
-    # table); anon callers get the raw JSON-LD unchanged.
+    # table). Both branches are abridged — see `_abridged`. The anon branch must
+    # copy first: `row.data` is the live model attribute, and popping from it
+    # would mutate the instance rather than the response.
     def _render(rows):
         return [
-            _with_admin_visibility(row) if can_see_nonpublic else row.data
+            _abridged(
+                _with_admin_visibility(row) if can_see_nonpublic else dict(row.data)
+            )
             for row in rows
         ]
 
