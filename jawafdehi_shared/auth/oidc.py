@@ -293,6 +293,27 @@ def extract_role_keys(claims: dict) -> set[str]:
     return keys
 
 
+def roles_claim_present(claims: dict) -> bool:
+    """True when ``claims`` carried a trusted role claim at all.
+
+    ``extract_role_keys`` returns an empty set for two very different inputs:
+    the IdP asserted that this user holds no roles, and the IdP sent no role
+    claim whatsoever (a dropped scope, or a Zitadel flattening action that
+    stopped firing). Only the first is a revocation; treating the second as one
+    silently strips a working user's access. Callers that write permissions
+    MUST tell them apart.
+    """
+    claim_name = getattr(settings, "OIDC_ROLES_CLAIM", DEFAULT_ROLES_CLAIM)
+    trusted_projects = _trusted_project_ids()
+    for name in claims or {}:
+        if name == claim_name:
+            return True
+        m = _PER_PROJECT_ROLES_CLAIM_RE.match(name)
+        if m is not None and m.group(1) in trusted_projects:
+            return True
+    return False
+
+
 class OIDCAuthentication(authentication.BaseAuthentication):
     """Validate a Zitadel JWT access token and sync roles -> Django Groups.
 

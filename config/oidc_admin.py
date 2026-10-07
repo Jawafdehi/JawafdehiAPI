@@ -11,6 +11,8 @@ gates the session-based /django-admin/.
 
 from __future__ import annotations
 
+import logging
+
 from django.contrib.auth.models import Group
 from django.core.exceptions import PermissionDenied
 from mozilla_django_oidc.auth import OIDCAuthenticationBackend
@@ -19,7 +21,10 @@ from jawafdehi_shared.auth.oidc import (
     DEFAULT_ROLE_TO_GROUP,
     DEFAULT_SUPERUSER_ROLE,
     extract_role_keys,
+    roles_claim_present,
 )
+
+logger = logging.getLogger(__name__)
 
 # Project roles that grant Django-admin access (is_staff). v3: every role key
 # that maps to the content-staff Caseworker group gets is_staff so content staff
@@ -42,7 +47,36 @@ def _roles_from_claims(claims: dict) -> set[str]:
     return roles
 
 
+def _roles_claim_present(claims: dict) -> bool:
+    """True when userinfo carried role information in EITHER shape.
+
+    The flattened ``roles`` list (written by a Zitadel action) and the raw
+    project-roles claim are both valid sources here; a payload carrying neither
+    tells us nothing about the user's roles.
+    """
+    return "roles" in (claims or {}) or roles_claim_present(claims)
+
+
 def _apply_roles(user, claims: dict) -> None:
+    """Mirror the IdP's role claim onto the Django user.
+
+    A MISSING role claim is not a revocation. ``OIDC_RP_SCOPES`` does not
+    request a roles scope, so roles reach this backend only via Zitadel's
+    flattening action — and if that action stops firing, every subsequent login
+    would otherwise clear the user's groups and ``is_staff``. For content staff
+    that silently revokes Wagtail admin access, which Wagtail then renders as an
+    endless login redirect rather than an error (see
+    ``content.middleware.WagtailAdminAccessMiddleware``). Treat an absent claim
+    as "unknown", leave the existing grants alone, and say so loudly.
+    """
+    if not _roles_claim_present(claims):
+        logger.warning(
+            "OIDC userinfo for user id=%s carried no role claim; keeping "
+            "existing groups and staff flags. Check the Zitadel role-flattening "
+            "action if this repeats.",
+            user.pk,
+        )
+        return
     roles = _roles_from_claims(claims)
     user.is_superuser = DEFAULT_SUPERUSER_ROLE in roles
     user.is_staff = user.is_superuser or bool(roles & STAFF_ROLES)

@@ -371,6 +371,10 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # 403 instead of an endless SSO login bounce for a signed-in user with no
+    # CMS role. BEFORE the read-replica router so its permission lookup hits the
+    # primary — a freshly granted role must take effect on the next request.
+    "content.middleware.WagtailAdminAccessMiddleware",
     # After auth so session/user reads use the primary; steers the VIEW's
     # anonymous public reads to the DB read replica (config.db_router).
     "config.middleware.ReadReplicaRoutingMiddleware",
