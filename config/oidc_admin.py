@@ -23,6 +23,7 @@ from jawafdehi_shared.auth.oidc import (
     extract_role_keys,
     roles_claim_present,
 )
+from jawafdehi_shared.auth.subject import bind_subject, resolve_existing_user
 
 logger = logging.getLogger(__name__)
 
@@ -96,21 +97,44 @@ class AdminOIDCBackend(OIDCAuthenticationBackend):
         return super().get_token(payload)
 
     def filter_users_by_claims(self, claims):
+        """Resolve on ``sub`` first, falling back to the email claim.
+
+        Matching on email alone is what made an address change mint a second,
+        empty account: the claim is mutable, so the moment someone moved to an
+        ``@jawafdehi.org`` address this stopped finding the row holding their
+        byline and history. The shared resolver keys on ``sub`` and binds it, so
+        a person is found by email at most once and by identity afterwards.
+        """
+        subject = claims.get("sub") or ""
         email = (claims.get("email") or "").lower()
-        if not email:
+        if not subject and not email:
             return self.UserModel.objects.none()
-        return self.UserModel.objects.filter(email__iexact=email)
+
+        user = resolve_existing_user(claims)
+        if user is None:
+            return self.UserModel.objects.none()
+        return self.UserModel.objects.filter(pk=user.pk)
 
     def create_user(self, claims):
         email = (claims.get("email") or "").lower()
         if not email:
             raise PermissionDenied("Email claim is required to create a user.")
+        subject = claims.get("sub") or ""
+        # Username has historically been the address, which is fine until two
+        # Zitadel accounts share one. That happens here (duplicate
+        # self-registered users), and the resolver deliberately refuses to let
+        # the second adopt the first's row — so without this fallback the
+        # username collides and the login 500s instead of creating an account.
+        username = email
+        if self.UserModel.objects.filter(username=username).exists():
+            username = subject or email
         user = self.UserModel.objects.create_user(
-            username=email,
+            username=username,
             email=email,
             first_name=claims.get("given_name", ""),
             last_name=claims.get("family_name", ""),
         )
+        bind_subject(user, subject)
         _apply_roles(user, claims)
         return user
 
@@ -121,5 +145,8 @@ class AdminOIDCBackend(OIDCAuthenticationBackend):
         user.first_name = claims.get("given_name", "")
         user.last_name = claims.get("family_name", "")
         user.save(update_fields=["email", "first_name", "last_name"])
+        # Late-bind anyone matched by email on this login, so the next one goes
+        # through the subject branch and survives a further address change.
+        bind_subject(user, claims.get("sub") or "")
         _apply_roles(user, claims)
         return user

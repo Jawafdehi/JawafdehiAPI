@@ -1540,7 +1540,9 @@ class Case(models.Model):
             return self.status_override
 
         stages = (self.dates or {}).get("stages") or []
-        court = [s for s in stages if isinstance(s, dict) and s.get("stage") in COURT_STAGES]
+        court = [
+            s for s in stages if isinstance(s, dict) and s.get("stage") in COURT_STAGES
+        ]
         open_court = [s for s in court if not s.get("end")]
 
         if open_court:
@@ -1568,7 +1570,9 @@ class Case(models.Model):
             return CaseStatus.CONCLUDED
 
         if not court and any(
-            isinstance(s, dict) and s.get("stage") == "investigation" and not s.get("end")
+            isinstance(s, dict)
+            and s.get("stage") == "investigation"
+            and not s.get("end")
             for s in stages
         ):
             return CaseStatus.UNDER_INVESTIGATION
@@ -1934,6 +1938,51 @@ class ChatUserIdentity(models.Model):
     def __str__(self):
         user_display = self.user.get_username() if self.user else "(unmapped)"
         return f"{self.owui_user_id} -> {user_display}"
+
+
+class OIDCIdentity(models.Model):
+    """The stable link from a Zitadel ``sub`` to the Django user it means.
+
+    Both login paths used to derive the user from a *mutable* claim and they
+    disagreed about which one: the DRF bearer authenticator keyed on ``sub``
+    (minting numeric usernames) while the Django-admin session backend keyed on
+    the email claim (minting named ones). One person therefore ended up with two
+    rows — the named one carrying the byline and ``AuthorProfile`` slug, the
+    numeric one carrying every ``CaseStateChange``.
+
+    Moving staff onto ``@jawafdehi.org`` addresses made that worse: the email
+    claim is not stable, so changing it minted a *third*, empty row and silently
+    detached the person from their own history. ``sub`` is the only identifier
+    Zitadel guarantees never changes, including across an email or login-name
+    change, so it is what the user is keyed on now.
+
+    One row per subject, one per user: the OneToOne is what stops two subjects
+    quietly converging on a single account.
+    """
+
+    subject = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+        help_text="The OIDC `sub` claim — Zitadel's immutable user id.",
+    )
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="oidc_identity",
+        help_text="The Django user this subject resolves to.",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When this subject was first bound to the user.",
+    )
+
+    class Meta:
+        verbose_name = "OIDC Identity"
+        verbose_name_plural = "OIDC Identities"
+
+    def __str__(self):
+        return f"{self.subject} -> {self.user.get_username()}"
 
 
 class StatisticsSnapshot(models.Model):
