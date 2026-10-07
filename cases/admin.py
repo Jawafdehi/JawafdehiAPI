@@ -17,6 +17,7 @@ from .models import (
     CaseStateChange,
     ChatUserIdentity,
     Feedback,
+    OIDCIdentity,
     RelationshipType,
 )
 from .rules.predicates import (
@@ -329,6 +330,7 @@ class CaseEntityRelationshipInlineFormSet(BaseInlineFormSet):
             return
         if self.instance.state not in {CaseState.IN_REVIEW, CaseState.PUBLISHED}:
             return
+
         # Every case type only requires a named SUBJECT — any non-location entity
         # (person or organization). The former CORRUPTION-only "at least one
         # ACCUSED" hard gate is retired so systemic / unsubstantiated cases (no
@@ -446,7 +448,10 @@ class AuthorProfileAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         ("Contact", {"fields": ("email", "links")}),
         (
             "Metadata",
-            {"fields": ("credited_cases", "created_at", "updated_at"), "classes": ("collapse",)},
+            {
+                "fields": ("credited_cases", "created_at", "updated_at"),
+                "classes": ("collapse",),
+            },
         ),
     )
 
@@ -976,6 +981,22 @@ class ChatUserIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
             },
         ),
     )
+
+
+@admin.register(OIDCIdentity)
+class OIDCIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
+    """Which Zitadel subject resolves to which Django user.
+
+    Worth being able to read directly: when someone reports that their history
+    or byline has vanished after a sign-in, this is the table that answers it.
+    """
+
+    list_display = ("subject", "user", "created_at")
+    list_select_related = ("user",)
+    search_fields = ("subject", "user__username", "user__email")
+    list_filter = ("created_at",)
+    autocomplete_fields = ("user",)
+    readonly_fields = ("created_at",)
 
 
 @admin.register(CaseStateChange)

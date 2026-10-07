@@ -48,6 +48,8 @@ from django.contrib.auth.models import Group
 from jwt import PyJWKClient
 from rest_framework import authentication, exceptions
 
+from jawafdehi_shared.auth.subject import resolve_user
+
 User = get_user_model()
 
 # The Zitadel project-role key that, when present in a token, additionally
@@ -358,14 +360,12 @@ class OIDCAuthentication(authentication.BaseAuthentication):
         admin role is present and cleared to False when it is absent (so a
         revoked admin role immediately drops superuser, not just the group).
         """
+        # Keyed on ``sub`` via the shared resolver, which also adopts the rows
+        # the two login paths created before they agreed on an identifier (see
+        # jawafdehi_shared.auth.subject). A new user still gets the subject as
+        # its username, preserving the shape of every account made this way.
         sub = claims["sub"]
-        user, _ = User.objects.get_or_create(
-            username=sub,
-            defaults={
-                "email": claims.get("email", "") or "",
-                "is_active": True,
-            },
-        )
+        user, _ = resolve_user(claims, create_defaults={"username": sub})
 
         role_to_group = getattr(settings, "OIDC_ROLE_TO_GROUP", DEFAULT_ROLE_TO_GROUP)
         role_keys = extract_role_keys(claims)
