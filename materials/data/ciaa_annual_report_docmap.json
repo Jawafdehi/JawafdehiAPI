@@ -1,4 +1,5 @@
 {
+  "_readme": "Maps an upstream dataset document (doc_id) to the material ident that holds the same PDF. Hand-written and reviewed, NOT derived: the archive's titles cannot be parsed into fiscal years reliably. See notes below and docs/document-extraction.md. ingest_document_extraction rejects this file if it is not total and 1:1, and aborts if a dataset document is missing from it.",
   "dataset": "damo-da/ciaa-annual-reports",
   "source": "ciaa_annual_report",
   "documents": {
@@ -38,6 +39,15 @@
     "ciaa-2080-81": "9ad112a186a0b4ed",
     "ciaa-2081-82": "ee0b4f80b24b8665"
   },
+  "notes": {
+    "ciaa-2048-49": "The ident says 2050_051 and that is NOT a mistake here: this is the 2nd annual report, whose archived title carries the wrong fiscal year. The 2nd report covers BS 2048/49. The 4th report (ciaa-2050-51) is the one that genuinely is 2050/051. Do not 'fix' this by matching the strings.",
+    "ciaa-2070-71": "The ident carries no fiscal year at all ('24th Annual Report'). The 24th report is BS 2070/71, which the two excluded executive summaries confirm by dating themselves AD 2013/14.",
+    "ciaa-2076-77": "Devanagari title, ordinal spelled out: तीसौं (30th), २०७६/७७.",
+    "ciaa-2079-80": "Devanagari title: तेत्तिसौँ (33rd), २०७९/८०.",
+    "ciaa-2080-81": "Devanagari title: चौतिसौँ (34th), २०८०/८१.",
+    "ciaa-2081-82": "Devanagari title: पैँतिसौँ (35th), २०८१/८२."
+  },
+  "excluded_readme": "Materials deliberately given NO extraction. Each is an executive summary that shares a fiscal year with a mapped report but is a different, shorter PDF — attaching the full report's tables to it would claim it contains tables it does not.",
   "excluded": {
     "12._26th_ciaa_report_summary_2073_148671038326thexecutivesummary_for_web1_13cbae15": "executive summary of the 26th report",
     "14._25th_annual_report_fiscal_year_2071_72_summary_nepali_1454578127akh_executive_summary72nepaliinnerfinal_1722b373": "summary of the 25th (ne)",

@@ -535,3 +535,23 @@ class ShippedDocMapTests(TestCase):
         # year with a mapped report but are a different, shorter PDF.
         overlap = set(documents.values()) & set(docmap["excluded"])
         self.assertEqual(overlap, set())
+
+    def test_the_counterintuitive_entries_keep_their_explanation(self):
+        # `"ciaa-2048-49": "40._2nd_annual_report_2050_051_…"` reads like a bug —
+        # the doc_id and the ident disagree about the year. It is correct, and the
+        # note beside it is the only thing standing between a future reader and a
+        # well-meaning "fix" that silently mis-attaches a report's tables.
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "data"
+            / "ciaa_annual_report_docmap.json"
+        )
+        docmap = json.loads(path.read_text())
+        notes = docmap.get("notes", {})
+        for doc_id in ("ciaa-2048-49", "ciaa-2070-71"):
+            self.assertIn(doc_id, docmap["documents"])
+            self.assertTrue(
+                notes.get(doc_id, "").strip(),
+                f"{doc_id} maps to an ident whose title disagrees with it; "
+                "it must carry a note saying why",
+            )
