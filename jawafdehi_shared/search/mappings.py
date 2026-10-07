@@ -340,11 +340,13 @@ def common_mappings() -> dict[str, Any]:
                 # work-achievement`` is not a label to hand a reader. The registry
                 # picks the token; nothing enumerates the list back.
                 #
-                # Unlike ``material_type``/``source`` above, this one does NOT wait
-                # for the next --rebuild: ``reindex_materials --rebuild`` DROPS and
-                # recreates the index in place (no alias, no generation — that is
-                # ``reindex_courtcases``), so it is an outage, not a swap. Land this
-                # field on the live index with ``migrate_search_mappings`` instead.
+                # Unlike ``material_type``/``source`` above, this one did not wait
+                # for the next --rebuild: it was landed on the live index with
+                # ``migrate_search_mappings``, which is seconds instead of a
+                # re-stream of ~346k documents. (A rebuild would also have been
+                # safe — it builds a new generation and swaps the alias; the
+                # "--rebuild drops the index" line in ``reindex_materials``'s
+                # module docstring is stale.)
                 "dataset_bucket": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get

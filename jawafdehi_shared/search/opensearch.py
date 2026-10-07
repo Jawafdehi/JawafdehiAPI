@@ -110,11 +110,21 @@ def put_field_mappings(client, name: str, properties: dict[str, Any]) -> dict[st
     index that already exists — so a field declared in ``common_mappings()``
     after an index was created never reaches it.
 
-    Why this exists rather than "just rebuild": ``reindex_materials --rebuild``
-    DROPS and recreates ``ngm-materials`` in place. There is no alias and no
-    generation to swap (that is ``reindex_courtcases``), so a rebuild is an
-    outage window over 346k documents on an index with a history of OOM kills.
-    A mapping PUT is seconds, online, and idempotent.
+    Why this exists rather than "just rebuild": a PUT is seconds and re-streams
+    nothing, where a rebuild re-indexes all ~346k materials.
+
+    An earlier version of this docstring justified it as avoiding an outage, on
+    the strength of ``reindex_materials``'s module docstring, which still says
+    ``--rebuild`` "drops + recreates the index". That is stale: since the
+    generation work, :mod:`jawafdehi_shared.search.reindex` builds a new
+    generation alongside the live one and swaps the alias atomically, keeping the
+    old one serving if the new one fails validation. A rebuild is online. The
+    argument here is cost, not safety.
+
+    ``name`` may be an alias — OpenSearch resolves it server-side for the PUT.
+    Reading a mapping back does NOT work that way: ``get_mapping`` answers keyed
+    by the concrete index, so a caller verifying the result must resolve the
+    alias itself (:func:`jawafdehi_shared.search.aliases.resolve_alias`).
 
     Safe to re-run: OpenSearch accepts an additive property and accepts a
     re-PUT of an identical one. It REJECTS a change to an existing field's type
