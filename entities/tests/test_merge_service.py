@@ -38,7 +38,7 @@ def _seed_pair():
 def _merge(**kwargs):
     kwargs.setdefault("survivor_iri", JHAPA)
     kwargs.setdefault("duplicate_iris", [LOOSE])
-    kwargs.setdefault("author_id", "oidc:377592055028777324")
+    kwargs.setdefault("author_id", "oidc:000000000000000001")
     return EntityMergeService().merge(**kwargs)
 
 

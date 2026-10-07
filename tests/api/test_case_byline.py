@@ -181,14 +181,14 @@ def test_republishing_a_legacy_case_does_require_a_byline():
 def test_crediting_someone_creates_their_profile_and_slug():
     """"Every case author has a slug" holds by construction, not by backfill."""
     user = get_user_model().objects.create_user(
-        username="rujit", first_name="Rujit", last_name="Kafle"
+        username="asmita", first_name="Asmita", last_name="Thapa"
     )
     case = _make_case()
     CaseAuthor.objects.create(case=case, user=user)
 
     profile = AuthorProfile.objects.get(user=user)
-    assert profile.slug == "rujit-kafle"
-    assert profile.display_name == "Rujit Kafle"
+    assert profile.slug == "asmita-thapa"
+    assert profile.display_name == "Asmita Thapa"
     # Empty until someone fills it in, so it is not published yet.
     assert profile.has_public_page is False
 
@@ -236,22 +236,22 @@ def test_a_slug_is_generated_even_for_a_name_with_no_latin_letters():
 def test_renaming_an_account_does_not_change_the_profile_name():
     """The profile name is the canonical one; the account name only seeds it."""
     user = get_user_model().objects.create_user(
-        username="sambhav", first_name="Sambhav", last_name="Koirala"
+        username="bikash", first_name="Bikash", last_name="Shrestha"
     )
     case = _make_case()
     CaseAuthor.objects.create(case=case, user=user)
 
-    user.last_name = "Koirala-Sharma"
+    user.last_name = "Shrestha-Magar"
     user.save()
 
-    assert AuthorProfile.objects.get(user=user).display_name == "Sambhav Koirala"
+    assert AuthorProfile.objects.get(user=user).display_name == "Bikash Shrestha"
 
 
 @pytest.mark.django_db
 def test_a_title_is_per_person_so_it_shows_on_every_case_they_wrote():
     """The point of moving it off the join: one fact, stored once."""
     user = get_user_model().objects.create_user(
-        username="sambhav2", first_name="Sambhav", last_name="Koirala"
+        username="bikash2", first_name="Bikash", last_name="Shrestha"
     )
     first = _make_case(state=CaseState.PUBLISHED)
     second = _make_case(state=CaseState.PUBLISHED)
@@ -259,34 +259,34 @@ def test_a_title_is_per_person_so_it_shows_on_every_case_they_wrote():
     CaseAuthor.objects.create(case=second, user=user)
 
     profile = AuthorProfile.objects.get(user=user)
-    profile.title = "BALLB 4th Year Student"
+    profile.title = "Research Intern"
     profile.save()
 
     for case in (first, second):
         response = APIClient().get(URL.format(case.slug))
-        assert response.data["authors"][0]["title"] == "BALLB 4th Year Student"
+        assert response.data["authors"][0]["title"] == "Research Intern"
 
 
 @pytest.mark.django_db
 def test_nepali_name_falls_back_to_english_when_unset():
     user = get_user_model().objects.create_user(
-        username="niroj", first_name="Niroj", last_name="Aryal"
+        username="chandra", first_name="Chandra", last_name="Gurung"
     )
     case = _make_case()
     CaseAuthor.objects.create(case=case, user=user)
     profile = AuthorProfile.objects.get(user=user)
 
-    assert profile.name_for_language("ne") == "Niroj Aryal"
-    profile.name_ne = "\u0928\u093f\u0930\u094b\u091c \u0905\u0930\u094d\u092f\u093e\u0932"
+    assert profile.name_for_language("ne") == "Chandra Gurung"
+    profile.name_ne = "\u091a\u0928\u094d\u0926\u094d\u0930 \u0917\u0941\u0930\u0941\u0919"
     profile.save()
-    assert profile.name_for_language("ne") == "\u0928\u093f\u0930\u094b\u091c \u0905\u0930\u094d\u092f\u093e\u0932"
-    assert profile.name_for_language("en") == "Niroj Aryal"
+    assert profile.name_for_language("ne") == "\u091a\u0928\u094d\u0926\u094d\u0930 \u0917\u0941\u0930\u0941\u0919"
+    assert profile.name_for_language("en") == "Chandra Gurung"
 
 
 @pytest.mark.django_db
 def test_deleting_a_credited_account_is_refused():
     """PROTECT, not SET_NULL: losing the row would silently strip a byline."""
-    user = get_user_model().objects.create_user(username="subodh")
+    user = get_user_model().objects.create_user(username="dlamichhane2")
     case = _make_case()
     CaseAuthor.objects.create(case=case, user=user)
 
@@ -502,14 +502,14 @@ def test_publish_date_can_be_cleared_back_to_null_on_a_draft():
 @pytest.mark.django_db
 def test_anonymous_reader_gets_the_byline_but_not_account_ids():
     case = _make_case(state=CaseState.PUBLISHED)
-    credit_author(case, title="BALLB 4th Year Student")
+    credit_author(case, title="Research Intern")
 
     response = APIClient().get(URL.format(case.slug))
 
     assert response.status_code == 200
     author = response.data["authors"][0]
     assert author["display_name"] == "Byline Author"
-    assert author["title"] == "BALLB 4th Year Student"
+    assert author["title"] == "Research Intern"
     assert author["slug"] == "byline-author"
     assert "user_id" not in author
     assert response.data["case_publish_date"] == "2026-08-01"
@@ -566,11 +566,11 @@ def test_picker_omits_deactivated_accounts():
 def test_picker_search_matches_names_and_usernames():
     user = _caseworker("picker-search")
     target = get_user_model().objects.create_user(
-        username="skandel", first_name="Subodh", last_name="Kandel"
+        username="dlamichhane", first_name="Deepa", last_name="Lamichhane"
     )
 
-    by_name = _client(user).get(PICKER_URL, {"search": "Subodh"})
-    by_username = _client(user).get(PICKER_URL, {"search": "skandel"})
+    by_name = _client(user).get(PICKER_URL, {"search": "Deepa"})
+    by_username = _client(user).get(PICKER_URL, {"search": "dlamichhane"})
 
     assert [row["id"] for row in by_name.data] == [target.id]
     assert [row["id"] for row in by_username.data] == [target.id]
@@ -601,7 +601,7 @@ def test_picker_is_not_truncated_by_the_default_page_size():
 def _published_profile(username="published-author", **fields):
     """A credited author whose profile has been filled in and published."""
     user = get_user_model().objects.create_user(
-        username=username, first_name="Subodh", last_name="Kandel"
+        username=username, first_name="Deepa", last_name="Lamichhane"
     )
     case = _make_case(state=CaseState.PUBLISHED)
     CaseAuthor.objects.create(case=case, user=user)
@@ -617,18 +617,18 @@ def _published_profile(username="published-author", **fields):
 def test_author_page_is_public_and_returns_the_profile():
     _user, profile, _case = _published_profile(
         title="Caseworker",
-        bio="Documents CIAA procurement cases. **Law student** at TU.",
-        photo_url="https://s3.jawafdehi.org/team/subodh.jpeg",
-        links=[{"type": "instagram", "value": "https://instagram.com/subodh"}],
+        bio="Documents CIAA procurement cases. **Law student**.",
+        photo_url="https://s3.jawafdehi.org/team/example.jpeg",
+        links=[{"type": "instagram", "value": "https://instagram.com/example"}],
     )
 
     response = APIClient().get(f"/api/authors/{profile.slug}/")
 
     assert response.status_code == 200
-    assert response.data["display_name"] == "Subodh Kandel"
+    assert response.data["display_name"] == "Deepa Lamichhane"
     assert response.data["title"] == "Caseworker"
     assert response.data["bio"].startswith("Documents CIAA procurement cases.")
-    assert response.data["photo_url"] == "https://s3.jawafdehi.org/team/subodh.jpeg"
+    assert response.data["photo_url"] == "https://s3.jawafdehi.org/team/example.jpeg"
     assert response.data["links"][0]["type"] == "instagram"
 
 
