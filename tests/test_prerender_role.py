@@ -51,7 +51,7 @@ User = get_user_model()
 def prerender_user(db):
     """A principal holding the prerender role and nothing else."""
     user = User.objects.create_user(
-        username="393507336624276852",  # machine users are keyed by OIDC sub
+        username="000000000000000002",  # machine users are keyed by OIDC sub
         email="",
         password="testpass123",
     )

@@ -543,17 +543,17 @@ class AuthorProfile(models.Model):
     """The person behind a byline: one row per credited contributor.
 
     Everything here is PER-PERSON, which is the whole point of splitting it out
-    of the byline. The old free-text ``public_notes`` carried "(BALLB 4th Year
-    Student)" on three of Sambhav Koirala's eleven cases and nowhere else — not
-    because his role differed case to case, but because a hand-copied line drifts.
-    A description belongs to the person, so it is stored once and shows on every
+    of the byline. The old free-text ``public_notes`` carried a contributor's
+    qualification on three of their cases and nowhere else — not because their
+    role differed case to case, but because a hand-copied line drifts. A
+    description belongs to the person, so it is stored once and shows on every
     case they wrote.
 
-    The trade-off, accepted deliberately: a title goes stale ("BALLB 4th Year
-    Student" will not be true next year), and updating it changes the byline on
-    every case that person ever wrote. That is the correct behaviour for a
-    fact about a person, and it is why there is no per-case name snapshot — a
-    byline points at a person, it does not freeze them.
+    The trade-off, accepted deliberately: a title goes stale (a student
+    qualification will not be true next year), and updating it changes the
+    byline on every case that person ever wrote. That is the correct behaviour
+    for a fact about a person, and it is why there is no per-case name snapshot
+    — a byline points at a person, it does not freeze them.
 
     The profile is auto-created the first time someone is credited (see
     ``ensure_for``), so every case author has a slug from the moment they are

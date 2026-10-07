@@ -27,13 +27,13 @@ URL = "/api/authors/{}/og-card.jpg"
 
 def _profile(**fields) -> AuthorProfile:
     user = User.objects.create_user(
-        username=fields.pop("username", "rujit"),
-        first_name=fields.pop("first_name", "Rujit"),
-        last_name=fields.pop("last_name", "Kafle"),
+        username=fields.pop("username", "asmita"),
+        first_name=fields.pop("first_name", "Asmita"),
+        last_name=fields.pop("last_name", "Thapa"),
     )
     defaults = dict(
-        slug="rujit-kafle",
-        name_ne="रुजित काफ्ले",
+        slug="asmita-thapa",
+        name_ne="अस्मिता थापा",
         title="Caseworker",
         has_public_page=True,
     )
@@ -190,7 +190,7 @@ def test_card_503s_rather_than_publish_an_unshaped_nepali_name(monkeypatch):
 
 
 def _render(**kwargs) -> Image.Image:
-    defaults = dict(display_name="Rujit Kafle", name_ne="रुजित काफ्ले", title="Caseworker")
+    defaults = dict(display_name="Asmita Thapa", name_ne="अस्मिता थापा", title="Caseworker")
     defaults.update(kwargs)
     return Image.open(BytesIO(og_cards.render_author_card(**defaults)))
 
@@ -246,7 +246,7 @@ def test_renderer_shapes_devanagari_when_raqm_is_present():
         "https://kubernetes.default.svc/x.png",
         "https://evil.example.com/x.png",
         # Not https at all.
-        "http://jawafdehi.org/assets/teammembers/rujit.webp",
+        "http://jawafdehi.org/assets/teammembers/example.webp",
         "file:///etc/passwd",
         "",
     ],

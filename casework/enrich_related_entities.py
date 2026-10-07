@@ -449,7 +449,7 @@ RELATIONSHIP_TYPES = (
 #: The section this enricher refuses outright. Defendants come from the NGM
 #: court record (`casework/court_record.py::defendant_names`), which states them
 #: instead of guessing, and an accused bind is the only one that may carry
-#: `outcome`. Confirmed with Gaurav's supervisor on 2026-08-06.
+#: `outcome`. Confirmed with the editorial lead on 2026-08-06.
 ACCUSED_SECTION = "accused"
 
 #: The one section that never creates. NES holds all 77 districts from a
