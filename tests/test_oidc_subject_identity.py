@@ -20,6 +20,7 @@ from django.contrib.auth import get_user_model
 
 from cases.models import OIDCIdentity
 from config.oidc_admin import AdminOIDCBackend
+from jawafdehi_shared.auth import subject as subject_mod
 from jawafdehi_shared.auth.subject import resolve_user
 
 User = get_user_model()
@@ -152,3 +153,44 @@ def test_shared_email_does_not_hijack_an_already_bound_user():
     assert claimant.pk != owner.pk
     assert OIDCIdentity.objects.get(subject="aaa").user_id == owner.pk
     assert OIDCIdentity.objects.get(subject="bbb").user_id == claimant.pk
+
+
+@pytest.mark.django_db(transaction=True)
+def test_login_survives_the_window_before_the_table_is_migrated():
+    """Deploys do not auto-migrate, so the table can be absent under live code.
+
+    The new image rolls before `migrate` runs. If the resolver assumed its table
+    existed, every OIDC login in that window would raise ProgrammingError — on
+    the bearer API and the admin session path alike. It must fall back to the
+    legacy email/username lookups instead, exactly as it behaved before this
+    table was introduced.
+    """
+    from django.db import connection
+
+    legacy = User.objects.create(username="person", email="person@gmail.com")
+
+    with connection.schema_editor() as editor:
+        editor.delete_model(OIDCIdentity)
+    subject_mod.reset_table_cache()
+    try:
+        resolved, created = resolve_user(_claims(email="person@gmail.com"))
+        assert not created
+        assert resolved.pk == legacy.pk
+
+        fresh, created = resolve_user(_claims(sub="zzz", email="new@example.com"))
+        assert created
+        assert fresh.email == "new@example.com"
+    finally:
+        with connection.schema_editor() as editor:
+            editor.create_model(OIDCIdentity)
+        subject_mod.reset_table_cache()
+
+
+@pytest.mark.django_db
+def test_binding_resumes_once_the_table_exists():
+    """The absent-table result must not be cached, or it would need a restart."""
+    subject_mod.reset_table_cache()
+
+    user, _ = resolve_user(_claims())
+
+    assert OIDCIdentity.objects.filter(subject=SUBJECT, user=user).exists()

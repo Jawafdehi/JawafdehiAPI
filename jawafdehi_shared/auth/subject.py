@@ -45,22 +45,64 @@ from __future__ import annotations
 from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.core.exceptions import AppRegistryNotReady
-from django.db import IntegrityError, transaction
+from django.db import (
+    DEFAULT_DB_ALIAS,
+    DatabaseError,
+    IntegrityError,
+    connections,
+    router,
+    transaction,
+)
 
 User = get_user_model()
 
 
-def _identity_model():
-    """The OIDCIdentity model, or None when ``cases`` is not installed.
+#: Set once the identity table has been seen. Only the positive result is
+#: cached: before the migration runs we must keep re-checking, so the binding
+#: starts working the moment it is applied rather than after a restart.
+_TABLE_CONFIRMED = False
 
-    This package is imported by services that do not all ship the ``cases`` app,
-    so the binding is best-effort: without the model we fall back to the legacy
-    lookups and behave exactly as before rather than failing a login.
+
+def _identity_model():
+    """The OIDCIdentity model, or None when it is not usable yet.
+
+    Two separate reasons it may be unusable, and both must degrade to the legacy
+    lookups rather than fail a login:
+
+    * ``cases`` is not installed — this package is imported by services that do
+      not all ship that app;
+    * the app is installed but its **table does not exist yet**. Deploys here do
+      not auto-migrate, so between the image rolling and ``migrate`` running,
+      querying it would raise ``ProgrammingError`` on *every* OIDC login, across
+      both the bearer API and the admin session path. An authentication outage
+      is a steep price for a window that is supposed to be a no-op, so the table
+      is checked rather than assumed.
     """
     try:
-        return apps.get_model("cases", "OIDCIdentity")
+        model = apps.get_model("cases", "OIDCIdentity")
     except (LookupError, AppRegistryNotReady):
         return None
+
+    global _TABLE_CONFIRMED
+    if _TABLE_CONFIRMED:
+        return model
+
+    table = model._meta.db_table
+    try:
+        connection = connections[router.db_for_read(model) or DEFAULT_DB_ALIAS]
+        if table not in set(connection.introspection.table_names()):
+            return None
+    except DatabaseError:
+        return None
+
+    _TABLE_CONFIRMED = True
+    return model
+
+
+def reset_table_cache() -> None:
+    """Forget that the table was seen. For tests that drop it underneath us."""
+    global _TABLE_CONFIRMED
+    _TABLE_CONFIRMED = False
 
 
 def bind_subject(user, subject: str) -> None:
