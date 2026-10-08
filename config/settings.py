@@ -721,6 +721,40 @@ WAGTAIL_SITE_NAME = "Jawafdehi Newsroom"
 WAGTAILADMIN_BASE_URL = os.getenv(
     "WAGTAILADMIN_BASE_URL", "https://portal.jawafdehi.org"
 )
+# Silence treebeard.E001 — it is upstream's to fix, not ours, and it is the
+# single loudest line in our logs.
+#
+# django-treebeard 5.3 added a check on every MP_Node subclass: if the model's
+# default manager doesn't subclass ``treebeard.mp_tree.MP_NodeManager``, emit
+# ``treebeard.E001``. Wagtail 7.4.2 trips it twice over, with managers we do not
+# own and cannot subclass from here:
+#
+#     wagtail/models/pages.py:142   class BasePageManager(models.Manager)
+#     wagtail/models/media.py:33    class BaseCollectionManager(models.Manager)
+#
+# Both are plain ``models.Manager``, and both reach the check through
+# ``.from_queryset(...)``, which is why the reported class names are the
+# generated ``django.db.models.manager.BasePageManagerFromPageQuerySet`` and
+# ``...BaseCollectionManagerFromCollectionQuerySet`` rather than anything
+# greppable in either tree. Nothing in this repo defines or wraps them — checked.
+#
+# Django runs the system checks on EVERY management command, so this costs two
+# warnings per invocation on every cron pod we run: ~3,200 log lines a week
+# across platform-jobs-processor, reap, refresh, platform-bus-consumers and
+# ngm-court-scrape, measured over 7 days on 2026-10-08. That was ~40% of all
+# error-shaped log volume in the platform namespace, and it buried real errors.
+#
+# It is safe to silence and nothing is being hidden today: treebeard raises it as
+# ``checks.Warning`` (``treebeard/mp_tree.py:1144``), despite the ``E`` in the id —
+# so it has never blocked a command, only printed. What it genuinely warns about
+# is a FUTURE break ("This will cause an error in Treebeard 6").
+#
+# So this entry is temporary and has an owner: it must come out — not be widened —
+# when either Wagtail ships MP_NodeManager-derived managers or we are about to
+# take django-treebeard 6. Re-check on any Wagtail or treebeard bump; if the
+# warning is gone, delete this. Keep the list to this one id so an unrelated
+# check can still fail loudly.
+SILENCED_SYSTEM_CHECKS = ["treebeard.E001"]
 # ---------------------------------------------------------------------------
 # Outbound email — DISABLED.
 # ---------------------------------------------------------------------------
