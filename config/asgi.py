@@ -26,6 +26,11 @@ MCP_AUXILIARY_PATHS = frozenset(
     }
 )
 
+# Stand-in for a server port the ASGI server could not report. Matches the value
+# Django falls back to when ``scope["server"]`` is missing altogether
+# (``django/core/handlers/asgi.py:85``). See ``_with_known_server_port``.
+UNKNOWN_SERVER_PORT = 0
+
 
 class PlatformASGIApplication:
     """Route MCP protocol traffic while leaving every other path to Django."""
@@ -38,6 +43,57 @@ class PlatformASGIApplication:
     def _is_mcp_request(scope) -> bool:
         path = scope.get("path", "")
         return path in MCP_PROTOCOL_PATHS or path in MCP_AUXILIARY_PATHS
+
+    @staticmethod
+    def _with_known_server_port(scope):
+        """Repair ``scope["server"] == (host, None)`` before Django reads it.
+
+        An ASGI server MAY report the port as ``None`` — the spec allows it, and
+        uvicorn does exactly that when the socket has no meaningful port. Django
+        does not defend against it. ``ASGIRequest.__init__`` stringifies the
+        element unconditionally::
+
+            # django/core/handlers/asgi.py:82
+            self.META["SERVER_PORT"] = str(self.scope["server"][1])
+
+        so a ``None`` port becomes the literal string ``"None"``, not the
+        ``"0"`` that the ``else`` branch two lines down would have supplied —
+        that branch only runs when ``server`` is absent ENTIRELY, which is why
+        this slips through. ``HttpRequest.get_port()`` then hands ``"None"`` to
+        anything that treats a port as a number.
+
+        It reached production as an unhandled 500 (Sentry JAWAFDEHI-API-TR, first
+        seen 2026-08-13). Wagtail's redirect middleware runs on every 404 and
+        calls ``Site.find_for_request`` -> ``get_site_for_hostname``, which puts
+        the value straight into an ``IntegerField`` lookup::
+
+            ValueError: invalid literal for int() with base 10: 'None'
+            ValueError: Field 'port' expected a number but got 'None'.
+
+        So any 404 — an unknown case slug, say — returned 500 instead on every
+        request whose scope carried a null port.
+
+        ``USE_X_FORWARDED_PORT`` is NOT the fix. ``get_port()`` only consults
+        ``X-Forwarded-Port`` when the header is present, and the reported events
+        carry no ``X-Forwarded-*`` headers at all (in-cluster callers reaching
+        the Service directly, bypassing Traefik) — it would fall straight back to
+        the same broken ``SERVER_PORT``.
+
+        Normalising to ``0`` rather than inferring 80/443 from the scheme is
+        deliberate, on two counts. It is the value Django itself uses for an
+        unknown port, so nothing downstream meets a number it would not already
+        have met. And it cannot collide: Wagtail matches ``Q(port=port) |
+        Q(is_default_site=True)``, so a guessed 80 or 443 could silently select a
+        DIFFERENT ``Site`` row and reroute the request, whereas ``0`` matches no
+        row and falls back to the default site — which is the correct answer when
+        the port is genuinely unknown.
+        """
+        server = scope.get("server")
+        if not server or server[1] is not None:
+            return scope
+        repaired = dict(scope)
+        repaired["server"] = (server[0], UNKNOWN_SERVER_PORT)
+        return repaired
 
     @staticmethod
     def _mcp_scope(scope):
@@ -67,9 +123,11 @@ class PlatformASGIApplication:
         if scope["type"] == "lifespan":
             await self.mcp_app(scope, receive, send)
             return
-        if scope["type"] == "http" and self._is_mcp_request(scope):
-            await self.mcp_app(self._mcp_scope(scope), receive, send)
-            return
+        if scope["type"] == "http":
+            scope = self._with_known_server_port(scope)
+            if self._is_mcp_request(scope):
+                await self.mcp_app(self._mcp_scope(scope), receive, send)
+                return
         await self.django_app(scope, receive, send)
 
 
