@@ -1,9 +1,30 @@
 """Load extracted tables and charts for a corpus of already-ingested materials.
 
+Two ways in. In production, let the command fetch the dataset itself — one
+command, nothing to stage, and the revision is captured automatically:
+
+    uv run python manage.py ingest_document_extraction \
+        --map materials/data/ciaa_annual_report_docmap.json \
+        --download
+
+Or point it at parquet already on disk, for offline work and the tests:
+
     uv run python manage.py ingest_document_extraction \
         --map materials/data/ciaa_annual_report_docmap.json \
         --parquet-dir /path/to/dataset \
         --revision <upstream commit sha>
+
+``--download`` exists so that running this in the cluster is a plain
+``kubectl exec`` of ONE command. The alternative — staging ~3 MB of parquet into
+a pod first — needs a Job, a ConfigMap'd shell script and a manifest to review,
+which is a lot of apparatus for an operation that runs about once a year when the
+CIAA publishes. The pod already has egress to Hugging Face; this just uses it.
+
+Note that it is a FLAG, not an id: the dataset downloaded is always the one the
+map names. The map's id is what lands in every row's ``dataset`` provenance
+field, so letting the command line name a different source could only ever make
+the two disagree — and on this platform a provenance field that can lie is worse
+than no field at all.
 
 The command is the ONLY CIAA-aware piece of this feature; the schema it writes
 into is generic (see materials.models.DocumentExtraction). To onboard a second
@@ -24,6 +45,8 @@ from __future__ import annotations
 
 import json
 import math
+import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -51,15 +74,107 @@ REQUIRED_TABLES = ("documents", "tables", "figures", "figure_data")
 #: number of bound parameters per statement.
 POINT_BATCH = 500
 
+HF_API = "https://huggingface.co/api/datasets"
 
-def _rows(con: duckdb.DuckDBPyConnection, path: Path, order_by: str) -> list[dict]:
-    """Read a parquet file into a list of dicts, deterministically ordered.
+#: The git ref the parquet actually lives on. Hugging Face auto-converts a
+#: dataset to parquet on a SEPARATE branch, and that branch has its own sha —
+#: for this corpus, main is eafef6d7 (16:11:22Z) while refs/convert/parquet is
+#: c3c6c673 (16:12:25Z). Recording main's sha would stamp every row with a
+#: revision whose bytes were never loaded, which is the failure this field
+#: exists to prevent. Percent-encoded because it is a URL path segment.
+PARQUET_REF = "refs%2Fconvert%2Fparquet"
+
+#: Per-file download timeout. The largest table in the CIAA corpus is ~2.5 MB.
+DOWNLOAD_TIMEOUT = 300
+
+
+def _get_json(url: str, timeout: int = 60) -> Any:
+    """GET and parse JSON, mapping every failure mode onto OSError.
+
+    ``urlopen`` raises OSError subclasses for the network, but a proxy or WAF
+    that answers 200 with an HTML interstitial gets past that and blows up in
+    ``json.load`` as a ValueError instead. The caller turns OSError into a
+    CommandError, so normalise here rather than leaking a traceback.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.load(response)
+    except ValueError as exc:  # JSONDecodeError is a ValueError
+        raise OSError(f"{url} did not return JSON: {exc}") from exc
+
+
+def _fetch_dataset(dataset: str, dest: Path, log) -> str:
+    """Download the parquet this command reads into ``dest``; return its revision.
+
+    Only the four configs ``REQUIRED_TABLES`` names. A dataset of this shape also
+    publishes ``pages`` and ``table_cells``, which are an order of magnitude
+    larger and unused — the transcript is not this command's to load, and a
+    table's content rides in its ``markdown``.
+
+    Each config is written to its own subdirectory, one file per shard. Hugging
+    Face splits a large config across several parquet files and publishes the
+    list; reading a hardcoded ``0.parquet`` would silently load a prefix of a
+    sharded table and quietly drop the rest. Today every config here is one
+    shard, which is exactly why this has to be handled before it is not.
+    """
+    meta = _get_json(f"{HF_API}/{dataset}/revision/{PARQUET_REF}")
+    revision = (meta or {}).get("sha") or "" if isinstance(meta, dict) else ""
+    log(f"  dataset {dataset} @ {revision or 'unknown revision'} (parquet branch)")
+
+    shards = _get_json(f"{HF_API}/{dataset}/parquet")
+    if not isinstance(shards, dict):
+        raise OSError("parquet shard listing was not an object")
+
+    for name in REQUIRED_TABLES:
+        urls = (shards.get(name) or {}).get("train") or []
+        if not urls:
+            raise OSError(f"dataset publishes no parquet for config {name!r}")
+        config_dir = dest / name
+        config_dir.mkdir(parents=True, exist_ok=True)
+        total = 0
+        for index, url in enumerate(urls):
+            with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response:
+                body = response.read()
+            (config_dir / f"{index}.parquet").write_bytes(body)
+            total += len(body)
+        shard_note = "" if len(urls) == 1 else f" in {len(urls)} shards"
+        log(f"  {name}  {total / 1024:.0f} KiB{shard_note}")
+    return revision
+
+
+def _config_sources(parquet_dir: Path) -> dict[str, list[str]] | None:
+    """Locate each required config's parquet, or None if any is missing.
+
+    Two layouts are supported, because the two ways in produce different ones:
+    ``--parquet-dir`` points at a directory of flat ``<config>.parquet`` files,
+    while ``--download`` writes ``<config>/<shard>.parquet`` so a sharded config
+    stays whole. A config found in both places prefers the sharded directory.
+    """
+    found: dict[str, list[str]] = {}
+    for name in REQUIRED_TABLES:
+        sharded = sorted((parquet_dir / name).glob("*.parquet"))
+        flat = parquet_dir / f"{name}.parquet"
+        if sharded:
+            found[name] = [str(p) for p in sharded]
+        elif flat.is_file():
+            found[name] = [str(flat)]
+        else:
+            return None
+    return found
+
+
+def _rows(
+    con: duckdb.DuckDBPyConnection, sources: list[str], order_by: str
+) -> list[dict]:
+    """Read one config's parquet into a list of dicts, deterministically ordered.
 
     The order matters: ``ordinal`` is assigned from it and becomes the public URL
-    key, so an unordered read would renumber every table on re-ingest.
+    key, so an unordered read would renumber every table on re-ingest. Passing
+    the shard list to a single ``read_parquet`` makes duckdb sort ACROSS shards,
+    which reading them one at a time and concatenating would not.
     """
     cur = con.execute(
-        f"SELECT * FROM read_parquet(?) ORDER BY {order_by}", [str(path)]
+        f"SELECT * FROM read_parquet(?) ORDER BY {order_by}", [sources]
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -159,15 +274,31 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser) -> None:
         parser.add_argument("--map", required=True, help="Path to the docmap JSON.")
-        parser.add_argument(
+        # Exactly one source. argparse enforces it so the command cannot be run
+        # ambiguously — pointing at both a download and a directory would leave
+        # which one won up to reading the implementation.
+        source = parser.add_mutually_exclusive_group(required=True)
+        source.add_argument(
+            "--download",
+            action="store_true",
+            help=(
+                "Fetch the parquet from the Hugging Face dataset the map names, "
+                "and record its revision automatically."
+            ),
+        )
+        source.add_argument(
             "--parquet-dir",
-            required=True,
             help="Directory holding documents/tables/figures/figure_data parquet.",
         )
         parser.add_argument(
             "--revision",
             default="",
-            help="Upstream dataset revision (commit sha) recorded as provenance.",
+            help=(
+                "Upstream dataset revision recorded as provenance. For use with "
+                "--parquet-dir, where nothing can determine it; rejected with "
+                "--download, which reads the real one from the dataset. May be "
+                "left blank, in which case no revision is recorded."
+            ),
         )
         parser.add_argument(
             "--dry-run",
@@ -176,12 +307,52 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options) -> None:
+        if options["download"] and options["revision"]:
+            # Not merely redundant: a hand-pasted sha silently winning over the
+            # one read from the bytes actually downloaded is the same
+            # provenance-can-lie failure --download exists to close.
+            raise CommandError(
+                "--revision cannot be combined with --download; the revision is "
+                "read from the dataset. Use it only with --parquet-dir."
+            )
+        if options["download"]:
+            # The temp dir is torn down on the way out, including when the ingest
+            # raises: a failed run must not leave a few MB of parquet behind in a
+            # long-lived pod.
+            with tempfile.TemporaryDirectory(prefix="extraction-") as tmp:
+                self._run(options, Path(tmp))
+        else:
+            self._run(options, Path(options["parquet_dir"]))
+
+    def _run(self, options: dict, parquet_dir: Path) -> None:
         docmap = self._load_map(Path(options["map"]))
-        parquet_dir = Path(options["parquet_dir"])
-        paths = {name: parquet_dir / f"{name}.parquet" for name in REQUIRED_TABLES}
-        missing = [str(p) for p in paths.values() if not p.is_file()]
-        if missing:
-            raise CommandError("missing parquet file(s): " + ", ".join(missing))
+
+        revision = options["revision"]
+        if options["download"]:
+            # Download the dataset the MAP names, never one named separately on
+            # the command line. The map's id is what gets written to every row's
+            # `dataset` provenance field, so a second, independent source for
+            # "where the bytes came from" could only ever let the two disagree —
+            # and a provenance field that can lie is worse than no field.
+            try:
+                fetched = _fetch_dataset(
+                    docmap["dataset"], parquet_dir, self.stdout.write
+                )
+            except OSError as exc:
+                # Urllib's failures (DNS, TLS, timeout, HTTP error) are all OSError
+                # subclasses. A network problem is not a traceback-worthy bug.
+                raise CommandError(
+                    f"could not download dataset {docmap['dataset']!r}: {exc}"
+                ) from exc
+            revision = fetched
+        options = {**options, "revision": revision}
+
+        paths = _config_sources(parquet_dir)
+        if paths is None:
+            raise CommandError(
+                f"{parquet_dir} does not hold a parquet file for each of: "
+                + ", ".join(REQUIRED_TABLES)
+            )
 
         source = docmap["source"]
         dataset = docmap["dataset"]

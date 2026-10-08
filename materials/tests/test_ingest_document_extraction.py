@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 from io import StringIO
+from unittest.mock import patch
 from pathlib import Path
 
 import duckdb
@@ -25,6 +26,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
+from materials.management.commands import ingest_document_extraction as mod
 from materials.jsonld import MATERIAL_CONTEXT
 from materials.models import (
     DocumentExtraction,
@@ -502,7 +504,7 @@ class IngestCommandTests(TestCase):
         (self.dir / "figures.parquet").unlink()
         with self.assertRaises(CommandError) as ctx:
             self._run()
-        self.assertIn("missing parquet", str(ctx.exception))
+        self.assertIn("does not hold a parquet file", str(ctx.exception))
 
     def test_dry_run_writes_nothing(self):
         output = self._run(dry_run=True)
@@ -555,3 +557,232 @@ class ShippedDocMapTests(TestCase):
                 f"{doc_id} maps to an ident whose title disagrees with it; "
                 "it must carry a note saying why",
             )
+
+
+class IngestFromDatasetTests(TestCase):
+    """``--download``: the command fetches its own parquet.
+
+    This is what makes running the ingest in the cluster a plain `kubectl exec`
+    of one command rather than a Job with a ConfigMap'd staging script.
+    """
+
+    databases = "__all__"
+
+    def setUp(self):
+        import shutil
+        import tempfile
+
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.iri = f"https://jawafdehi.org/material/{SOURCE}/{IDENT}"
+        Material.objects.create(
+            iri=self.iri,
+            material_type="document",
+            source=SOURCE,
+            ident=IDENT,
+            data={
+                "@context": MATERIAL_CONTEXT,
+                "@type": "DigitalDocument",
+                "@id": self.iri,
+                "name": {"ne": "२८औं"},
+            },
+        )
+        # Build the parquet once, then serve its bytes from the fake download.
+        _write_parquet(
+            self.dir, "documents", DOC_COLUMNS, [(DOC_ID, 255, "likhit", "clean", "")]
+        )
+        _write_parquet(
+            self.dir,
+            "tables",
+            TABLE_COLUMNS,
+            [(f"{DOC_ID}#p0018#t1", DOC_ID, 18, 1, "", "[]", 9, 4, "tight", "| x |")],
+        )
+        _write_parquet(self.dir, "figures", FIGURE_COLUMNS, [])
+        _write_parquet(self.dir, "figure_data", POINT_COLUMNS, [])
+        for name, cols in (
+            ("documents", DOC_COLUMNS),
+            ("tables", TABLE_COLUMNS),
+            ("figures", FIGURE_COLUMNS),
+            ("figure_data", POINT_COLUMNS),
+        ):
+            _write_parquet(self.dir, f"{name}-empty", cols, [])
+        self.map_path = self.dir / "map.json"
+        self.map_path.write_text(
+            json.dumps(
+                {
+                    "dataset": "damo-da/ciaa-annual-reports",
+                    "source": SOURCE,
+                    "documents": {DOC_ID: IDENT},
+                }
+            )
+        )
+        self.requested = []
+
+    def _fake_urlopen(self, sha="abc123sha", fail_on=None, shards=1):
+        """Stand in for the three Hugging Face endpoints the command touches:
+        the parquet branch's revision, the shard listing, and the files."""
+        import contextlib
+        import io
+
+        outer = self
+
+        def listing():
+            return {
+                name: {
+                    "train": [
+                        f"https://hf.test/{name}/{i}.parquet" for i in range(shards)
+                    ]
+                }
+                for name in mod.REQUIRED_TABLES
+            }
+
+        @contextlib.contextmanager
+        def opener(url, timeout=None):
+            outer.requested.append(url)
+            if fail_on and fail_on in url:
+                raise OSError("network unreachable")
+            if "/revision/" in url:
+                yield io.BytesIO(json.dumps({"sha": sha}).encode())
+            elif url.endswith("/parquet"):
+                yield io.BytesIO(json.dumps(listing()).encode())
+            else:
+                name, shard = url.split("/")[-2], url.split("/")[-1]
+                # Real shards hold DIFFERENT rows; only shard 0 carries data here
+                # so a multi-shard read does not re-insert the same uid.
+                suffix = "" if shard == "0.parquet" else "-empty"
+                yield io.BytesIO((outer.dir / f"{name}{suffix}.parquet").read_bytes())
+
+        return opener
+
+    def _run(self, **kwargs):
+        out = StringIO()
+        with patch.object(mod.urllib.request, "urlopen", self._fake_urlopen(**kwargs.pop("fake", {}))):
+            call_command(
+                "ingest_document_extraction",
+                map=str(self.map_path),
+                download=True,
+                stdout=out,
+                **kwargs,
+            )
+        return out.getvalue()
+
+    def test_downloads_and_ingests(self):
+        self._run()
+        self.assertEqual(DocumentExtraction.objects.count(), 1)
+        self.assertEqual(ExtractedTable.objects.count(), 1)
+
+    def test_records_the_datasets_own_revision(self):
+        # The whole point of --download: provenance without the operator having to
+        # look a sha up and paste it correctly.
+        self._run()
+        self.assertEqual(DocumentExtraction.objects.get().dataset_revision, "abc123sha")
+
+    def test_a_sharded_config_is_loaded_whole(self):
+        # Hugging Face splits a large config across several parquet files. A
+        # hardcoded 0.parquet would load a prefix and silently drop the rest.
+        self._run(fake={"shards": 3})
+        files = [u for u in self.requested if u.endswith(".parquet")]
+        self.assertEqual(len(files), 12, f"expected 3 shards x 4 configs: {files}")
+
+    def test_fetches_only_the_four_configs_it_reads(self):
+        # `pages` and `table_cells` are an order of magnitude larger and unused.
+        self._run()
+        fetched = sorted({u.split("/")[-2] for u in self.requested if u.endswith(".parquet")})
+        self.assertEqual(fetched, ["documents", "figure_data", "figures", "tables"])
+
+    def test_a_download_failure_is_a_command_error_not_a_traceback(self):
+        with self.assertRaises(CommandError) as ctx:
+            self._run(fake={"fail_on": "hf.test/tables/"})
+        self.assertIn("could not download dataset", str(ctx.exception))
+        self.assertEqual(DocumentExtraction.objects.count(), 0)
+
+    def test_the_downloaded_parquet_is_not_left_behind(self):
+        # A long-lived pod must not accumulate a few MB per run.
+        import tempfile
+
+        before = set(Path(tempfile.gettempdir()).glob("extraction-*"))
+        self._run()
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("extraction-*")), before)
+
+    def test_temp_dir_is_cleaned_up_even_when_the_ingest_fails(self):
+        import tempfile
+
+        Material.objects.filter(pk=self.iri).delete()
+        before = set(Path(tempfile.gettempdir()).glob("extraction-*"))
+        with self.assertRaises(CommandError):
+            self._run()
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("extraction-*")), before)
+
+    def test_downloads_the_dataset_the_map_names(self):
+        # The map's id is what lands in every row's `dataset` provenance field.
+        # If the bytes could come from somewhere the command line named instead,
+        # the two could disagree and the recorded provenance would be a lie —
+        # which is the one thing that field must not be able to do.
+        self._run()
+        # The file URLs come from HF's own shard listing; what must be pinned to
+        # the map is which DATASET we asked, i.e. the two api.huggingface calls.
+        api_calls = [u for u in self.requested if u.startswith(mod.HF_API)]
+        self.assertEqual(len(api_calls), 2, f"expected revision + listing: {api_calls}")
+        self.assertTrue(
+            all("damo-da/ciaa-annual-reports" in u for u in api_calls),
+            f"asked a dataset the map does not name: {api_calls}",
+        )
+        self.assertEqual(
+            DocumentExtraction.objects.get().dataset, "damo-da/ciaa-annual-reports"
+        )
+
+    def test_revision_comes_from_the_parquet_branch_not_the_default_branch(self):
+        # Hugging Face auto-converts a dataset to parquet on a SEPARATE git ref
+        # with its own sha. For this corpus main is eafef6d7 and
+        # refs/convert/parquet is c3c6c673, a minute apart. Reading main's sha
+        # would stamp every row with a revision whose bytes were never loaded —
+        # the exact failure the provenance field exists to prevent.
+        self._run()
+        revision_calls = [u for u in self.requested if "/revision/" in u]
+        self.assertTrue(revision_calls, f"never asked a ref for its sha: {self.requested}")
+        self.assertIn("refs%2Fconvert%2Fparquet", revision_calls[0])
+        self.assertNotIn(
+            f"{mod.HF_API}/damo-da/ciaa-annual-reports\n",
+            "\n".join(self.requested) + "\n",
+        )
+
+    def test_dry_run_downloads_but_writes_nothing(self):
+        output = self._run(dry_run=True)
+        self.assertIn("dry run OK", output)
+        self.assertEqual(DocumentExtraction.objects.count(), 0)
+
+
+class IngestSourceArgumentTests(TestCase):
+    databases = "__all__"
+
+    def test_neither_source_is_rejected(self):
+        with self.assertRaises(CommandError):
+            call_command("ingest_document_extraction", map="/nope.json")
+
+    def test_both_sources_at_once_are_rejected(self):
+        # Ambiguous: which one wins should not be a question anyone has to answer
+        # by reading the implementation.
+        with self.assertRaises(CommandError):
+            call_command(
+                "ingest_document_extraction",
+                map="/nope.json",
+                download=True,
+                parquet_dir="/tmp",
+            )
+
+
+class IngestRevisionArgumentTests(TestCase):
+    databases = "__all__"
+
+    def test_revision_cannot_be_combined_with_download(self):
+        # A hand-pasted sha silently winning over the one read from the bytes
+        # actually downloaded is the same provenance-can-lie failure --download
+        # exists to close.
+        with self.assertRaises(CommandError) as ctx:
+            call_command(
+                "ingest_document_extraction",
+                map="/nope.json",
+                download=True,
+                revision="deadbeef",
+            )
+        self.assertIn("cannot be combined with --download", str(ctx.exception))
