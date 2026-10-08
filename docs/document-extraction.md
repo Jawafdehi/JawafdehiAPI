@@ -78,6 +78,23 @@ path unescaped.)
 
 ## Ingest
 
+The command fetches the dataset itself, so running it in the cluster is one
+`kubectl exec` with nothing to stage:
+
+```bash
+kubectl -n platform exec deploy/jawafdehi-platform -- \
+  /app/.venv/bin/python manage.py ingest_document_extraction \
+    --map materials/data/ciaa_annual_report_docmap.json \
+    --dataset damo-da/ciaa-annual-reports \
+    --dry-run
+```
+
+Drop `--dry-run` for the real run. The revision is read from the dataset and
+recorded on every row, so there is no sha to look up and paste.
+
+For offline work and the tests, point it at parquet already on disk instead —
+`--dataset` and `--parquet-dir` are mutually exclusive and one is required:
+
 ```bash
 uv run python manage.py ingest_document_extraction \
     --map materials/data/ciaa_annual_report_docmap.json \
@@ -85,8 +102,19 @@ uv run python manage.py ingest_document_extraction \
     --revision <upstream commit sha>
 ```
 
-Reads parquet via duckdb (already a dependency). `--dry-run` resolves and
-validates without writing.
+Reads parquet via duckdb (already a dependency). Only the four configs it
+actually needs are downloaded — `pages` and `table_cells` are an order of
+magnitude larger and unused, since the transcript is not this command's to load
+and a table's content rides in its `markdown`. The download lands in a temporary
+directory that is removed on the way out, including when the ingest fails, so a
+long-lived pod does not accumulate a few MB per run.
+
+**No Kubernetes manifest is needed for this.** An earlier version of this work
+shipped a suspended CronJob with a ConfigMap'd staging script; it was withdrawn
+unmerged once the pod was confirmed to have egress to Hugging Face. The "run bulk
+work as a Job, never `exec`" convention in `infra` exists for the `reindex-*`
+jobs, which are twenty-minute, 345k-document grinds that get OOM-killed — this is
+seconds and one transaction.
 
 **Resolve everything, then write, or write nothing.** The whole write phase is one
 transaction. A partially-ingested corpus would put the tab on some reports and not
@@ -128,7 +156,14 @@ cannot quietly fail to appear.
 ## Rollout
 
 1. Merge, deploy. **The migration is manual** — Keel auto-deploys the image but
-   does not run migrations.
+   does not run migrations:
+   `kubectl -n platform exec deploy/jawafdehi-platform -- /app/.venv/bin/python manage.py migrate materials --database=ngm`
+   (done for `0006` on 2026-10-08).
 2. Run the ingest with `--dry-run`, then for real.
 3. The frontend tab ships separately and degrades to "no tab" on the 404, so the
    order of 2 and 3 does not matter.
+
+Between 1 and 2 the `/extraction` routes answer a JSON 404 (`No extracted data
+for this material`), which is also the steady state for the ~everything else in
+the archive that has no extraction. A **500** there means step 1 was skipped: the
+image shipped without the tables.

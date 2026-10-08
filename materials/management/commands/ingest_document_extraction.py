@@ -1,9 +1,24 @@
 """Load extracted tables and charts for a corpus of already-ingested materials.
 
+Two ways in. In production, let the command fetch the dataset itself — one
+command, nothing to stage, and the revision is captured automatically:
+
+    uv run python manage.py ingest_document_extraction \
+        --map materials/data/ciaa_annual_report_docmap.json \
+        --dataset damo-da/ciaa-annual-reports
+
+Or point it at parquet already on disk, for offline work and the tests:
+
     uv run python manage.py ingest_document_extraction \
         --map materials/data/ciaa_annual_report_docmap.json \
         --parquet-dir /path/to/dataset \
         --revision <upstream commit sha>
+
+``--dataset`` exists so that running this in the cluster is a plain
+``kubectl exec`` of ONE command. The alternative — staging ~3 MB of parquet into
+a pod first — needs a Job, a ConfigMap'd shell script and a manifest to review,
+which is a lot of apparatus for an operation that runs about once a year when the
+CIAA publishes. The pod already has egress to Hugging Face; this just uses it.
 
 The command is the ONLY CIAA-aware piece of this feature; the schema it writes
 into is generic (see materials.models.DocumentExtraction). To onboard a second
@@ -24,6 +39,8 @@ from __future__ import annotations
 
 import json
 import math
+import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +67,35 @@ REQUIRED_TABLES = ("documents", "tables", "figures", "figure_data")
 #: to tens of thousands of rows per corpus, and sqlite (the test gate) caps the
 #: number of bound parameters per statement.
 POINT_BATCH = 500
+
+#: Hugging Face dataset API. The parquet endpoint serves the auto-converted copy
+#: of the dataset's current default branch and takes no revision parameter, so
+#: the revision is read separately from the dataset's own metadata.
+HF_API = "https://huggingface.co/api/datasets"
+
+#: Per-file download timeout. The largest table in the CIAA corpus is ~2.5 MB.
+DOWNLOAD_TIMEOUT = 300
+
+
+def _fetch_dataset(dataset: str, dest: Path, log) -> str:
+    """Download the parquet this command reads into ``dest``; return the revision.
+
+    Only the four configs ``REQUIRED_TABLES`` names. A dataset of this shape also
+    publishes ``pages`` and ``table_cells``, which are an order of magnitude
+    larger and unused — the transcript is not this command's to load, and a
+    table's content rides in its ``markdown``.
+    """
+    with urllib.request.urlopen(f"{HF_API}/{dataset}", timeout=60) as response:
+        revision = json.load(response).get("sha") or ""
+    log(f"  dataset {dataset} @ {revision or 'unknown revision'}")
+
+    for name in REQUIRED_TABLES:
+        url = f"{HF_API}/{dataset}/parquet/{name}/train/0.parquet"
+        with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response:
+            body = response.read()
+        (dest / f"{name}.parquet").write_bytes(body)
+        log(f"  {name}.parquet  {len(body) / 1024:.0f} KiB")
+    return revision
 
 
 def _rows(con: duckdb.DuckDBPyConnection, path: Path, order_by: str) -> list[dict]:
@@ -159,15 +205,28 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser) -> None:
         parser.add_argument("--map", required=True, help="Path to the docmap JSON.")
-        parser.add_argument(
+        # Exactly one source. argparse enforces it so the command cannot be run
+        # ambiguously — pointing at both a download and a directory would leave
+        # which one won up to reading the implementation.
+        source = parser.add_mutually_exclusive_group(required=True)
+        source.add_argument(
+            "--dataset",
+            help=(
+                "Hugging Face dataset id to download the parquet from, e.g. "
+                "damo-da/ciaa-annual-reports. Records its revision automatically."
+            ),
+        )
+        source.add_argument(
             "--parquet-dir",
-            required=True,
             help="Directory holding documents/tables/figures/figure_data parquet.",
         )
         parser.add_argument(
             "--revision",
             default="",
-            help="Upstream dataset revision (commit sha) recorded as provenance.",
+            help=(
+                "Upstream dataset revision recorded as provenance. Required only "
+                "with --parquet-dir; --dataset reads it from the dataset itself."
+            ),
         )
         parser.add_argument(
             "--dry-run",
@@ -176,8 +235,35 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options) -> None:
+        if options["dataset"]:
+            # The temp dir is torn down on the way out, including when the ingest
+            # raises: a failed run must not leave a few MB of parquet behind in a
+            # long-lived pod.
+            with tempfile.TemporaryDirectory(prefix="extraction-") as tmp:
+                self._run(options, Path(tmp))
+        else:
+            self._run(options, Path(options["parquet_dir"]))
+
+    def _run(self, options: dict, parquet_dir: Path) -> None:
         docmap = self._load_map(Path(options["map"]))
-        parquet_dir = Path(options["parquet_dir"])
+
+        revision = options["revision"]
+        if options["dataset"]:
+            try:
+                fetched = _fetch_dataset(
+                    options["dataset"], parquet_dir, self.stdout.write
+                )
+            except OSError as exc:
+                # Urllib's failures (DNS, TLS, timeout, HTTP error) are all OSError
+                # subclasses. A network problem is not a traceback-worthy bug.
+                raise CommandError(
+                    f"could not download dataset {options['dataset']!r}: {exc}"
+                ) from exc
+            # An explicit --revision still wins: it lets an operator label a run
+            # when the dataset's own metadata is unavailable or wrong.
+            revision = revision or fetched
+        options = {**options, "revision": revision}
+
         paths = {name: parquet_dir / f"{name}.parquet" for name in REQUIRED_TABLES}
         missing = [str(p) for p in paths.values() if not p.is_file()]
         if missing:

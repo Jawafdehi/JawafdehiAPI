@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 from io import StringIO
+from unittest.mock import patch
 from pathlib import Path
 
 import duckdb
@@ -25,6 +26,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
+from materials.management.commands import ingest_document_extraction as mod
 from materials.jsonld import MATERIAL_CONTEXT
 from materials.models import (
     DocumentExtraction,
@@ -554,4 +556,153 @@ class ShippedDocMapTests(TestCase):
                 notes.get(doc_id, "").strip(),
                 f"{doc_id} maps to an ident whose title disagrees with it; "
                 "it must carry a note saying why",
+            )
+
+
+class IngestFromDatasetTests(TestCase):
+    """``--dataset``: the command fetches its own parquet.
+
+    This is what makes running the ingest in the cluster a plain `kubectl exec`
+    of one command rather than a Job with a ConfigMap'd staging script.
+    """
+
+    databases = "__all__"
+
+    def setUp(self):
+        import shutil
+        import tempfile
+
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.iri = f"https://jawafdehi.org/material/{SOURCE}/{IDENT}"
+        Material.objects.create(
+            iri=self.iri,
+            material_type="document",
+            source=SOURCE,
+            ident=IDENT,
+            data={
+                "@context": MATERIAL_CONTEXT,
+                "@type": "DigitalDocument",
+                "@id": self.iri,
+                "name": {"ne": "२८औं"},
+            },
+        )
+        # Build the parquet once, then serve its bytes from the fake download.
+        _write_parquet(
+            self.dir, "documents", DOC_COLUMNS, [(DOC_ID, 255, "likhit", "clean", "")]
+        )
+        _write_parquet(
+            self.dir,
+            "tables",
+            TABLE_COLUMNS,
+            [(f"{DOC_ID}#p0018#t1", DOC_ID, 18, 1, "", "[]", 9, 4, "tight", "| x |")],
+        )
+        _write_parquet(self.dir, "figures", FIGURE_COLUMNS, [])
+        _write_parquet(self.dir, "figure_data", POINT_COLUMNS, [])
+        self.map_path = self.dir / "map.json"
+        self.map_path.write_text(
+            json.dumps({"dataset": "d", "source": SOURCE, "documents": {DOC_ID: IDENT}})
+        )
+        self.requested = []
+
+    def _fake_urlopen(self, sha="abc123sha", fail_on=None):
+        """Stand in for the Hugging Face API + parquet endpoints."""
+        import contextlib
+        import io
+
+        outer = self
+
+        @contextlib.contextmanager
+        def opener(url, timeout=None):
+            outer.requested.append(url)
+            if fail_on and fail_on in url:
+                raise OSError("network unreachable")
+            if "/parquet/" in url:
+                name = url.split("/parquet/")[1].split("/")[0]
+                yield io.BytesIO((outer.dir / f"{name}.parquet").read_bytes())
+            else:
+                yield io.BytesIO(json.dumps({"sha": sha}).encode())
+
+        return opener
+
+    def _run(self, **kwargs):
+        out = StringIO()
+        with patch.object(mod.urllib.request, "urlopen", self._fake_urlopen(**kwargs.pop("fake", {}))):
+            call_command(
+                "ingest_document_extraction",
+                map=str(self.map_path),
+                dataset="damo-da/ciaa-annual-reports",
+                stdout=out,
+                **kwargs,
+            )
+        return out.getvalue()
+
+    def test_downloads_and_ingests(self):
+        self._run()
+        self.assertEqual(DocumentExtraction.objects.count(), 1)
+        self.assertEqual(ExtractedTable.objects.count(), 1)
+
+    def test_records_the_datasets_own_revision(self):
+        # The whole point of --dataset: provenance without the operator having to
+        # look a sha up and paste it correctly.
+        self._run()
+        self.assertEqual(DocumentExtraction.objects.get().dataset_revision, "abc123sha")
+
+    def test_explicit_revision_still_wins(self):
+        self._run(revision="operator-label")
+        self.assertEqual(
+            DocumentExtraction.objects.get().dataset_revision, "operator-label"
+        )
+
+    def test_fetches_only_the_four_configs_it_reads(self):
+        # `pages` and `table_cells` are an order of magnitude larger and unused.
+        self._run()
+        fetched = [u.split("/parquet/")[1].split("/")[0] for u in self.requested if "/parquet/" in u]
+        self.assertEqual(sorted(fetched), ["documents", "figure_data", "figures", "tables"])
+
+    def test_a_download_failure_is_a_command_error_not_a_traceback(self):
+        with self.assertRaises(CommandError) as ctx:
+            self._run(fake={"fail_on": "/parquet/tables/"})
+        self.assertIn("could not download dataset", str(ctx.exception))
+        self.assertEqual(DocumentExtraction.objects.count(), 0)
+
+    def test_the_downloaded_parquet_is_not_left_behind(self):
+        # A long-lived pod must not accumulate a few MB per run.
+        import tempfile
+
+        before = set(Path(tempfile.gettempdir()).glob("extraction-*"))
+        self._run()
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("extraction-*")), before)
+
+    def test_temp_dir_is_cleaned_up_even_when_the_ingest_fails(self):
+        import tempfile
+
+        Material.objects.filter(pk=self.iri).delete()
+        before = set(Path(tempfile.gettempdir()).glob("extraction-*"))
+        with self.assertRaises(CommandError):
+            self._run()
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("extraction-*")), before)
+
+    def test_dry_run_downloads_but_writes_nothing(self):
+        output = self._run(dry_run=True)
+        self.assertIn("dry run OK", output)
+        self.assertEqual(DocumentExtraction.objects.count(), 0)
+
+
+class IngestSourceArgumentTests(TestCase):
+    databases = "__all__"
+
+    def test_neither_source_is_rejected(self):
+        with self.assertRaises(CommandError):
+            call_command("ingest_document_extraction", map="/nope.json")
+
+    def test_both_sources_at_once_are_rejected(self):
+        # Ambiguous: which one wins should not be a question anyone has to answer
+        # by reading the implementation.
+        with self.assertRaises(CommandError):
+            call_command(
+                "ingest_document_extraction",
+                map="/nope.json",
+                dataset="a/b",
+                parquet_dir="/tmp",
             )
