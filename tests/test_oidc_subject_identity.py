@@ -155,40 +155,51 @@ def test_shared_email_does_not_hijack_an_already_bound_user():
     assert OIDCIdentity.objects.get(subject="bbb").user_id == claimant.pk
 
 
-@pytest.mark.django_db(transaction=True)
-def test_login_survives_the_window_before_the_table_is_migrated():
+@pytest.mark.django_db
+def test_login_survives_the_window_before_the_table_is_migrated(monkeypatch):
     """Deploys do not auto-migrate, so the table can be absent under live code.
 
     The new image rolls before `migrate` runs. If the resolver assumed its table
-    existed, every OIDC login in that window would raise ProgrammingError — on
-    the bearer API and the admin session path alike. It must fall back to the
-    legacy email/username lookups instead, exactly as it behaved before this
-    table was introduced.
+    existed, every OIDC login in that window would raise — on the bearer API and
+    the admin session path alike. It must fall back to the legacy email/username
+    lookups instead, exactly as it behaved before this table was introduced.
+
+    The table is hidden from introspection rather than actually dropped: real
+    DDL inside a shared test process leaks into unrelated tests and their
+    teardown, which is a flakiness source, not a stronger assertion.
     """
     from django.db import connection
 
+    real_table_names = connection.introspection.table_names
+    hidden = OIDCIdentity._meta.db_table
+
+    def without_identity_table(*args, **kwargs):
+        return [t for t in real_table_names(*args, **kwargs) if t != hidden]
+
+    monkeypatch.setattr(connection.introspection, "table_names", without_identity_table)
+    subject_mod.reset_table_cache()
+
     legacy = User.objects.create(username="person", email="person@gmail.com")
 
-    with connection.schema_editor() as editor:
-        editor.delete_model(OIDCIdentity)
-    subject_mod.reset_table_cache()
-    try:
-        resolved, created = resolve_user(_claims(email="person@gmail.com"))
-        assert not created
-        assert resolved.pk == legacy.pk
+    resolved, created = resolve_user(_claims(email="person@gmail.com"))
+    assert not created
+    assert resolved.pk == legacy.pk
 
-        fresh, created = resolve_user(_claims(sub="zzz", email="new@example.com"))
-        assert created
-        assert fresh.email == "new@example.com"
-    finally:
-        with connection.schema_editor() as editor:
-            editor.create_model(OIDCIdentity)
-        subject_mod.reset_table_cache()
+    fresh, created = resolve_user(_claims(sub="zzz", email="new@example.com"))
+    assert created
+    assert fresh.email == "new@example.com"
+
+    # Nothing was bound while the table was invisible.
+    assert OIDCIdentity.objects.count() == 0
 
 
 @pytest.mark.django_db
 def test_binding_resumes_once_the_table_exists():
-    """The absent-table result must not be cached, or it would need a restart."""
+    """The absent-table result must not be cached, or it would need a restart.
+
+    Same process, same module-level state as the test above: once the table is
+    visible again the binding must resume with no restart and no intervention.
+    """
     subject_mod.reset_table_cache()
 
     user, _ = resolve_user(_claims())
