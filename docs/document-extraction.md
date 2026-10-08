@@ -85,7 +85,7 @@ The command fetches the dataset itself, so running it in the cluster is one
 kubectl -n platform exec deploy/jawafdehi-platform -- \
   /app/.venv/bin/python manage.py ingest_document_extraction \
     --map materials/data/ciaa_annual_report_docmap.json \
-    --dataset damo-da/ciaa-annual-reports \
+    --download \
     --dry-run
 ```
 
@@ -93,7 +93,7 @@ Drop `--dry-run` for the real run. The revision is read from the dataset and
 recorded on every row, so there is no sha to look up and paste.
 
 For offline work and the tests, point it at parquet already on disk instead —
-`--dataset` and `--parquet-dir` are mutually exclusive and one is required:
+`--download` and `--parquet-dir` are mutually exclusive and one is required:
 
 ```bash
 uv run python manage.py ingest_document_extraction \

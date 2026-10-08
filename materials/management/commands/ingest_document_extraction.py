@@ -5,7 +5,7 @@ command, nothing to stage, and the revision is captured automatically:
 
     uv run python manage.py ingest_document_extraction \
         --map materials/data/ciaa_annual_report_docmap.json \
-        --dataset damo-da/ciaa-annual-reports
+        --download
 
 Or point it at parquet already on disk, for offline work and the tests:
 
@@ -14,11 +14,17 @@ Or point it at parquet already on disk, for offline work and the tests:
         --parquet-dir /path/to/dataset \
         --revision <upstream commit sha>
 
-``--dataset`` exists so that running this in the cluster is a plain
+``--download`` exists so that running this in the cluster is a plain
 ``kubectl exec`` of ONE command. The alternative — staging ~3 MB of parquet into
 a pod first — needs a Job, a ConfigMap'd shell script and a manifest to review,
 which is a lot of apparatus for an operation that runs about once a year when the
 CIAA publishes. The pod already has egress to Hugging Face; this just uses it.
+
+Note that it is a FLAG, not an id: the dataset downloaded is always the one the
+map names. The map's id is what lands in every row's ``dataset`` provenance
+field, so letting the command line name a different source could only ever make
+the two disagree — and on this platform a provenance field that can lie is worse
+than no field at all.
 
 The command is the ONLY CIAA-aware piece of this feature; the schema it writes
 into is generic (see materials.models.DocumentExtraction). To onboard a second
@@ -210,10 +216,11 @@ class Command(BaseCommand):
         # which one won up to reading the implementation.
         source = parser.add_mutually_exclusive_group(required=True)
         source.add_argument(
-            "--dataset",
+            "--download",
+            action="store_true",
             help=(
-                "Hugging Face dataset id to download the parquet from, e.g. "
-                "damo-da/ciaa-annual-reports. Records its revision automatically."
+                "Fetch the parquet from the Hugging Face dataset the map names, "
+                "and record its revision automatically."
             ),
         )
         source.add_argument(
@@ -235,7 +242,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options) -> None:
-        if options["dataset"]:
+        if options["download"]:
             # The temp dir is torn down on the way out, including when the ingest
             # raises: a failed run must not leave a few MB of parquet behind in a
             # long-lived pod.
@@ -248,16 +255,21 @@ class Command(BaseCommand):
         docmap = self._load_map(Path(options["map"]))
 
         revision = options["revision"]
-        if options["dataset"]:
+        if options["download"]:
+            # Download the dataset the MAP names, never one named separately on
+            # the command line. The map's id is what gets written to every row's
+            # `dataset` provenance field, so a second, independent source for
+            # "where the bytes came from" could only ever let the two disagree —
+            # and a provenance field that can lie is worse than no field.
             try:
                 fetched = _fetch_dataset(
-                    options["dataset"], parquet_dir, self.stdout.write
+                    docmap["dataset"], parquet_dir, self.stdout.write
                 )
             except OSError as exc:
                 # Urllib's failures (DNS, TLS, timeout, HTTP error) are all OSError
                 # subclasses. A network problem is not a traceback-worthy bug.
                 raise CommandError(
-                    f"could not download dataset {options['dataset']!r}: {exc}"
+                    f"could not download dataset {docmap['dataset']!r}: {exc}"
                 ) from exc
             # An explicit --revision still wins: it lets an operator label a run
             # when the dataset's own metadata is unavailable or wrong.

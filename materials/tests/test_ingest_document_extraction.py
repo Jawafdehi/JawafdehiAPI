@@ -601,7 +601,13 @@ class IngestFromDatasetTests(TestCase):
         _write_parquet(self.dir, "figure_data", POINT_COLUMNS, [])
         self.map_path = self.dir / "map.json"
         self.map_path.write_text(
-            json.dumps({"dataset": "d", "source": SOURCE, "documents": {DOC_ID: IDENT}})
+            json.dumps(
+                {
+                    "dataset": "damo-da/ciaa-annual-reports",
+                    "source": SOURCE,
+                    "documents": {DOC_ID: IDENT},
+                }
+            )
         )
         self.requested = []
 
@@ -631,7 +637,7 @@ class IngestFromDatasetTests(TestCase):
             call_command(
                 "ingest_document_extraction",
                 map=str(self.map_path),
-                dataset="damo-da/ciaa-annual-reports",
+                download=True,
                 stdout=out,
                 **kwargs,
             )
@@ -683,6 +689,22 @@ class IngestFromDatasetTests(TestCase):
             self._run()
         self.assertEqual(set(Path(tempfile.gettempdir()).glob("extraction-*")), before)
 
+    def test_downloads_the_dataset_the_map_names(self):
+        # The map's id is what lands in every row's `dataset` provenance field.
+        # If the bytes could come from somewhere the command line named instead,
+        # the two could disagree and the recorded provenance would be a lie —
+        # which is the one thing that field must not be able to do.
+        self._run()
+        api_calls = [u for u in self.requested if "/parquet/" not in u]
+        self.assertTrue(
+            all("damo-da/ciaa-annual-reports" in u for u in self.requested),
+            f"fetched from something other than the map's dataset: {self.requested}",
+        )
+        self.assertTrue(api_calls, "the revision was never read")
+        self.assertEqual(
+            DocumentExtraction.objects.get().dataset, "damo-da/ciaa-annual-reports"
+        )
+
     def test_dry_run_downloads_but_writes_nothing(self):
         output = self._run(dry_run=True)
         self.assertIn("dry run OK", output)
@@ -703,6 +725,6 @@ class IngestSourceArgumentTests(TestCase):
             call_command(
                 "ingest_document_extraction",
                 map="/nope.json",
-                dataset="a/b",
+                download=True,
                 parquet_dir="/tmp",
             )
