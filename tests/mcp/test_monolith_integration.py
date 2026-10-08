@@ -2,6 +2,7 @@
 
 import json
 
+import httpx
 import pytest
 from asgiref.testing import ApplicationCommunicator
 from mcp.shared.version import LATEST_PROTOCOL_VERSION
@@ -330,6 +331,59 @@ async def test_anonymous_http_tool_does_not_forward_service_token(monkeypatch):
         "path": "/api/entity_prefixes",
         "authorization": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_embedded_scope_carries_the_scheme_default_port(monkeypatch):
+    """The embedded scope must name a port, as a real network call would.
+
+    ``httpx.URL.port`` is ``None`` for a default-port URL, so without this the
+    scope reads ``server=(host, None)`` and Django records the *string*
+    ``"None"`` as ``SERVER_PORT``.
+    """
+    seen = {}
+
+    async def fake_django(scope, receive, send):
+        seen["server"] = scope["server"]
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": []}
+        )
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    configure_embedded_api(fake_django)
+    transport_token = current_transport.set("http")
+    monkeypatch.setenv("JAWAFDEHI_API_BASE_URL", "https://api.jawafdehi.test")
+    try:
+        async with httpx.AsyncClient(**embedded_api_client_kwargs()) as client:
+            await client.get("https://api.jawafdehi.test/api/health")
+    finally:
+        current_transport.reset(transport_token)
+        configure_embedded_api(django_application)
+
+    assert seen["server"] == ("api.jawafdehi.test", 443)
+
+
+@pytest.mark.django_db
+@pytest.mark.asyncio
+async def test_embedded_unknown_slug_is_a_404_not_a_500():
+    """A slug that matches no case must reach the MCP caller as a 404.
+
+    Wagtail's ``RedirectMiddleware`` runs only on 404 responses and looks the
+    Site up by ``(hostname, port)``, so a scope whose port is ``None`` turned
+    every embedded 404 into a 500 — "no such case" became indistinguishable
+    from "the platform is down".
+    """
+    transport_token = current_transport.set("http")
+    configure_embedded_api(django_application)
+    try:
+        async with httpx.AsyncClient(**embedded_api_client_kwargs()) as client:
+            response = await client.get(
+                "http://testserver/api/cases/no-such-case-slug/"
+            )
+    finally:
+        current_transport.reset(transport_token)
+
+    assert response.status_code == 404
 
 
 def test_non_http_transport_keeps_remote_client_behavior():

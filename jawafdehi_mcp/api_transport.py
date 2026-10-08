@@ -7,6 +7,7 @@ import math
 import os
 import threading
 import weakref
+from collections.abc import MutableMapping
 from typing import Any
 
 import httpx
@@ -76,6 +77,45 @@ def _release_limiter_when_done(
         pass
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _with_scheme_default_port(application: Any) -> Any:
+    """Fill in the scope's port when httpx leaves it unset.
+
+    ``httpx.ASGITransport`` builds the scope as ``server=(url.host, url.port)``
+    and ``httpx.URL.port`` is ``None`` for a default-port URL, so a call to
+    ``https://api.jawafdehi.org`` arrives with no port at all. Django's
+    ``ASGIRequest`` stringifies whatever it is handed, leaving ``SERVER_PORT``
+    as the literal ``"None"`` — and anything that reads the port back as a
+    number then fails deep inside the request.
+
+    That is not hypothetical: Wagtail's ``RedirectMiddleware`` runs on every
+    404, looks the ``Site`` up by ``(hostname, port)``, and raised
+    ``Field 'port' expected a number but got 'None'`` — so an embedded 404
+    reached the MCP caller as a 500 and "no such case" was indistinguishable
+    from an outage. Substituting the scheme's default port is exactly what the
+    network path would have supplied.
+    """
+
+    async def application_with_port(
+        scope: MutableMapping[str, Any],
+        receive: Any,
+        send: Any,
+    ) -> None:
+        server = scope.get("server")
+        if (
+            scope.get("type") == "http"
+            and server is not None
+            and server[1] is None
+        ):
+            port = _DEFAULT_PORTS.get(scope.get("scheme"), 80)
+            scope = {**scope, "server": (server[0], port)}
+        await application(scope, receive, send)
+
+    return application_with_port
+
+
 class BoundedASGITransport(httpx.AsyncBaseTransport):
     """ASGI transport with a real deadline and shared concurrency bound.
 
@@ -86,7 +126,7 @@ class BoundedASGITransport(httpx.AsyncBaseTransport):
 
     def __init__(self, application: Any) -> None:
         self._transport = httpx.ASGITransport(
-            app=application,
+            app=_with_scheme_default_port(application),
             raise_app_exceptions=False,
         )
 
