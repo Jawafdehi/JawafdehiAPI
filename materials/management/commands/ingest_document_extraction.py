@@ -74,44 +74,107 @@ REQUIRED_TABLES = ("documents", "tables", "figures", "figure_data")
 #: number of bound parameters per statement.
 POINT_BATCH = 500
 
-#: Hugging Face dataset API. The parquet endpoint serves the auto-converted copy
-#: of the dataset's current default branch and takes no revision parameter, so
-#: the revision is read separately from the dataset's own metadata.
 HF_API = "https://huggingface.co/api/datasets"
+
+#: The git ref the parquet actually lives on. Hugging Face auto-converts a
+#: dataset to parquet on a SEPARATE branch, and that branch has its own sha —
+#: for this corpus, main is eafef6d7 (16:11:22Z) while refs/convert/parquet is
+#: c3c6c673 (16:12:25Z). Recording main's sha would stamp every row with a
+#: revision whose bytes were never loaded, which is the failure this field
+#: exists to prevent. Percent-encoded because it is a URL path segment.
+PARQUET_REF = "refs%2Fconvert%2Fparquet"
 
 #: Per-file download timeout. The largest table in the CIAA corpus is ~2.5 MB.
 DOWNLOAD_TIMEOUT = 300
 
 
+def _get_json(url: str, timeout: int = 60) -> Any:
+    """GET and parse JSON, mapping every failure mode onto OSError.
+
+    ``urlopen`` raises OSError subclasses for the network, but a proxy or WAF
+    that answers 200 with an HTML interstitial gets past that and blows up in
+    ``json.load`` as a ValueError instead. The caller turns OSError into a
+    CommandError, so normalise here rather than leaking a traceback.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.load(response)
+    except ValueError as exc:  # JSONDecodeError is a ValueError
+        raise OSError(f"{url} did not return JSON: {exc}") from exc
+
+
 def _fetch_dataset(dataset: str, dest: Path, log) -> str:
-    """Download the parquet this command reads into ``dest``; return the revision.
+    """Download the parquet this command reads into ``dest``; return its revision.
 
     Only the four configs ``REQUIRED_TABLES`` names. A dataset of this shape also
     publishes ``pages`` and ``table_cells``, which are an order of magnitude
     larger and unused — the transcript is not this command's to load, and a
     table's content rides in its ``markdown``.
+
+    Each config is written to its own subdirectory, one file per shard. Hugging
+    Face splits a large config across several parquet files and publishes the
+    list; reading a hardcoded ``0.parquet`` would silently load a prefix of a
+    sharded table and quietly drop the rest. Today every config here is one
+    shard, which is exactly why this has to be handled before it is not.
     """
-    with urllib.request.urlopen(f"{HF_API}/{dataset}", timeout=60) as response:
-        revision = json.load(response).get("sha") or ""
-    log(f"  dataset {dataset} @ {revision or 'unknown revision'}")
+    meta = _get_json(f"{HF_API}/{dataset}/revision/{PARQUET_REF}")
+    revision = (meta or {}).get("sha") or "" if isinstance(meta, dict) else ""
+    log(f"  dataset {dataset} @ {revision or 'unknown revision'} (parquet branch)")
+
+    shards = _get_json(f"{HF_API}/{dataset}/parquet")
+    if not isinstance(shards, dict):
+        raise OSError("parquet shard listing was not an object")
 
     for name in REQUIRED_TABLES:
-        url = f"{HF_API}/{dataset}/parquet/{name}/train/0.parquet"
-        with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response:
-            body = response.read()
-        (dest / f"{name}.parquet").write_bytes(body)
-        log(f"  {name}.parquet  {len(body) / 1024:.0f} KiB")
+        urls = (shards.get(name) or {}).get("train") or []
+        if not urls:
+            raise OSError(f"dataset publishes no parquet for config {name!r}")
+        config_dir = dest / name
+        config_dir.mkdir(parents=True, exist_ok=True)
+        total = 0
+        for index, url in enumerate(urls):
+            with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response:
+                body = response.read()
+            (config_dir / f"{index}.parquet").write_bytes(body)
+            total += len(body)
+        shard_note = "" if len(urls) == 1 else f" in {len(urls)} shards"
+        log(f"  {name}  {total / 1024:.0f} KiB{shard_note}")
     return revision
 
 
-def _rows(con: duckdb.DuckDBPyConnection, path: Path, order_by: str) -> list[dict]:
-    """Read a parquet file into a list of dicts, deterministically ordered.
+def _config_sources(parquet_dir: Path) -> dict[str, list[str]] | None:
+    """Locate each required config's parquet, or None if any is missing.
+
+    Two layouts are supported, because the two ways in produce different ones:
+    ``--parquet-dir`` points at a directory of flat ``<config>.parquet`` files,
+    while ``--download`` writes ``<config>/<shard>.parquet`` so a sharded config
+    stays whole. A config found in both places prefers the sharded directory.
+    """
+    found: dict[str, list[str]] = {}
+    for name in REQUIRED_TABLES:
+        sharded = sorted((parquet_dir / name).glob("*.parquet"))
+        flat = parquet_dir / f"{name}.parquet"
+        if sharded:
+            found[name] = [str(p) for p in sharded]
+        elif flat.is_file():
+            found[name] = [str(flat)]
+        else:
+            return None
+    return found
+
+
+def _rows(
+    con: duckdb.DuckDBPyConnection, sources: list[str], order_by: str
+) -> list[dict]:
+    """Read one config's parquet into a list of dicts, deterministically ordered.
 
     The order matters: ``ordinal`` is assigned from it and becomes the public URL
-    key, so an unordered read would renumber every table on re-ingest.
+    key, so an unordered read would renumber every table on re-ingest. Passing
+    the shard list to a single ``read_parquet`` makes duckdb sort ACROSS shards,
+    which reading them one at a time and concatenating would not.
     """
     cur = con.execute(
-        f"SELECT * FROM read_parquet(?) ORDER BY {order_by}", [str(path)]
+        f"SELECT * FROM read_parquet(?) ORDER BY {order_by}", [sources]
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -231,8 +294,10 @@ class Command(BaseCommand):
             "--revision",
             default="",
             help=(
-                "Upstream dataset revision recorded as provenance. Required only "
-                "with --parquet-dir; --dataset reads it from the dataset itself."
+                "Upstream dataset revision recorded as provenance. For use with "
+                "--parquet-dir, where nothing can determine it; rejected with "
+                "--download, which reads the real one from the dataset. May be "
+                "left blank, in which case no revision is recorded."
             ),
         )
         parser.add_argument(
@@ -242,6 +307,14 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options) -> None:
+        if options["download"] and options["revision"]:
+            # Not merely redundant: a hand-pasted sha silently winning over the
+            # one read from the bytes actually downloaded is the same
+            # provenance-can-lie failure --download exists to close.
+            raise CommandError(
+                "--revision cannot be combined with --download; the revision is "
+                "read from the dataset. Use it only with --parquet-dir."
+            )
         if options["download"]:
             # The temp dir is torn down on the way out, including when the ingest
             # raises: a failed run must not leave a few MB of parquet behind in a
@@ -271,15 +344,15 @@ class Command(BaseCommand):
                 raise CommandError(
                     f"could not download dataset {docmap['dataset']!r}: {exc}"
                 ) from exc
-            # An explicit --revision still wins: it lets an operator label a run
-            # when the dataset's own metadata is unavailable or wrong.
-            revision = revision or fetched
+            revision = fetched
         options = {**options, "revision": revision}
 
-        paths = {name: parquet_dir / f"{name}.parquet" for name in REQUIRED_TABLES}
-        missing = [str(p) for p in paths.values() if not p.is_file()]
-        if missing:
-            raise CommandError("missing parquet file(s): " + ", ".join(missing))
+        paths = _config_sources(parquet_dir)
+        if paths is None:
+            raise CommandError(
+                f"{parquet_dir} does not hold a parquet file for each of: "
+                + ", ".join(REQUIRED_TABLES)
+            )
 
         source = docmap["source"]
         dataset = docmap["dataset"]

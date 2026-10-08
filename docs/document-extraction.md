@@ -92,6 +92,14 @@ kubectl -n platform exec deploy/jawafdehi-platform -- \
 Drop `--dry-run` for the real run. The revision is read from the dataset and
 recorded on every row, so there is no sha to look up and paste.
 
+The recorded revision is the sha of **`refs/convert/parquet`**, not of the
+dataset's default branch. Hugging Face auto-converts a dataset to parquet on a
+separate ref with its own sha — for this corpus main is `eafef6d7` and the
+parquet branch is `c3c6c673`, a minute apart. Recording main would stamp every
+row with a revision whose bytes were never loaded. For the same reason
+`--revision` is *rejected* with `--download`: a hand-pasted sha silently
+beating the real one is the same failure.
+
 For offline work and the tests, point it at parquet already on disk instead —
 `--download` and `--parquet-dir` are mutually exclusive and one is required:
 
@@ -102,8 +110,10 @@ uv run python manage.py ingest_document_extraction \
     --revision <upstream commit sha>
 ```
 
-Reads parquet via duckdb (already a dependency). Only the four configs it
-actually needs are downloaded — `pages` and `table_cells` are an order of
+Reads parquet via duckdb (already a dependency). All of a config's shards are
+downloaded and read together — Hugging Face splits a large config across several
+files, and a hardcoded `0.parquet` would load a prefix and silently drop the
+rest. Only the four configs it actually needs are downloaded — `pages` and `table_cells` are an order of
 magnitude larger and unused, since the transcript is not this command's to load
 and a table's content rides in its `markdown`. The download lands in a temporary
 directory that is removed on the way out, including when the ingest fails, so a
