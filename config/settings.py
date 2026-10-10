@@ -726,8 +726,16 @@ WAGTAILADMIN_BASE_URL = os.getenv(
 #
 # django-treebeard 5.3 added a check on every MP_Node subclass: if the model's
 # default manager doesn't subclass ``treebeard.mp_tree.MP_NodeManager``, emit
-# ``treebeard.E001``. Wagtail 7.4.2 trips it twice over, with managers we do not
-# own and cannot subclass from here:
+# ``treebeard.E001``. It fires FOUR times here, once per MP_Node model:
+#
+#     wagtailcore.Collection          \ upstream's own
+#     wagtailcore.Page                /
+#     content.ArticleIndexPage        \ ours — but see below
+#     content.ArticlePage             /
+#
+# The last two being ours does NOT make this ours to fix. The check is on the
+# MODEL's default manager, and every Wagtail ``Page`` subclass inherits
+# Wagtail's:
 #
 #     wagtail/models/pages.py:142   class BasePageManager(models.Manager)
 #     wagtail/models/media.py:33    class BaseCollectionManager(models.Manager)
@@ -736,12 +744,15 @@ WAGTAILADMIN_BASE_URL = os.getenv(
 # ``.from_queryset(...)``, which is why the reported class names are the
 # generated ``django.db.models.manager.BasePageManagerFromPageQuerySet`` and
 # ``...BaseCollectionManagerFromCollectionQuerySet`` rather than anything
-# greppable in either tree. Nothing in this repo defines or wraps them — checked.
+# greppable in either tree. So the count grows with our page models while the
+# cause stays upstream — which is exactly why the test pins the count at 4: a
+# fifth is far more likely to be a tree model whose manager we DO control.
 #
-# Django runs the system checks on EVERY management command, so this costs two
+# Django runs the system checks on EVERY management command, so this costs four
 # warnings per invocation on every cron pod we run: ~3,200 log lines a week
 # across platform-jobs-processor, reap, refresh, platform-bus-consumers and
-# ngm-court-scrape, measured over 7 days on 2026-10-08. That was ~40% of all
+# ngm-court-scrape — counted from VictoriaLogs over the 7 days to 2026-10-08,
+# not extrapolated from the per-invocation figure. That was ~40% of all
 # error-shaped log volume in the platform namespace, and it buried real errors.
 #
 # It is safe to silence and nothing is being hidden today: treebeard raises it as
