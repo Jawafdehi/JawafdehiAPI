@@ -3,7 +3,13 @@
 That silence is deliberate but temporary — the reasoning is beside
 ``SILENCED_SYSTEM_CHECKS``. These tests are what makes it temporary rather than
 permanent: one fails the day upstream fixes the warning (so we delete the entry),
-and one fails the day something *else* starts being hidden by it.
+one fails if it is ever escalated to an Error, and one fails the day something
+*else* starts being hidden by it.
+
+Deliberately NOT here: an assertion that the whole project's check run is clean.
+That is a project-wide invariant, it would red-line this treebeard-specific
+module on any unrelated dependency bump, and under settings_test it would only
+ever prove cleanliness on sqlite anyway.
 """
 
 from django.conf import settings
@@ -60,32 +66,29 @@ def test_treebeard_message_is_still_only_a_warning():
     )
 
 
-def test_silencing_hides_only_the_four_known_upstream_models():
-    """Pin WHICH objects are silenced, not just the id.
+def test_silencing_hides_only_managers_we_do_not_own():
+    """Pin WHICH managers are silenced — the only part that is ours to judge.
 
-    Comparing ids alone is too weak: a new MP_Node in this repo with a plain
-    manager raises the same id, gets swallowed by the same silence, and nothing
-    fails — verified by probe. The four below are the known set; two are
-    Wagtail's own and two are ours (every Wagtail ``Page`` subclass is an
-    MP_Node, so our page models trip the same upstream manager).
+    An earlier version of this test pinned the COUNT at 4. That was wrong twice
+    over: it red-lined on any new Wagtail page type (routine, and its failure
+    message prescribed a fix that cannot be applied, since the manager is
+    Wagtail's), and it never checked identity, so a same-count substitution —
+    drop a page model, add a repo-owned MP_Node with a plain manager — passed
+    green while hiding a warning that genuinely IS ours to fix.
 
-    A fifth entry here means someone added a tree model whose manager genuinely
-    is ours to fix. Fix the manager rather than widening this list.
+    The message's ``obj`` is the MANAGER class, not the model, and every Wagtail
+    ``Page`` subclass shares one. So the manager set is invariant under adding
+    page models and changes exactly when someone introduces a tree model whose
+    manager we control. That is the signal worth failing on.
     """
     silenced = [m for m in run_checks() if m.is_silenced()]
 
     assert {m.id for m in silenced} == {"treebeard.E001"}
-    assert len(silenced) == 4, (
-        "The set of objects silenced by treebeard.E001 changed. Expected the 4 "
-        "known MP_Node models (wagtailcore Collection + Page, and our "
-        "content.ArticleIndexPage + content.ArticlePage); got "
-        f"{len(silenced)}. A new one is probably a model of ours whose manager "
-        "should subclass MP_NodeManager instead of being silenced."
+    assert {m.obj.__name__ for m in silenced} == {
+        "BasePageManagerFromPageQuerySet",
+        "BaseCollectionManagerFromCollectionQuerySet",
+    }, (
+        "A treebeard.E001 is being silenced for a manager that is not one of "
+        "Wagtail's two. If the manager is ours, make it subclass "
+        "MP_NodeManager instead of letting this silence swallow it."
     )
-
-
-def test_no_system_check_issues_survive_unsilenced():
-    """The check run is clean, so a new warning is visible instead of buried."""
-    unsilenced = [m for m in run_checks() if not m.is_silenced()]
-
-    assert unsilenced == [], "\n".join(str(m) for m in unsilenced)
