@@ -294,6 +294,60 @@ def common_mappings() -> dict[str, Any]:
                 # --rebuild generation. Until then the facet returns zero buckets
                 # and a filter matches nothing — safe degradation, no errors.
                 "material_type": {"type": "keyword"},
+                # The material's publishing source token (``Material.source``,
+                # the ``/material/<source>/<ident>`` IRI segment). Indexed as a
+                # SCOPE, not a facet: it is filterable but is deliberately NOT
+                # aggregated, because the column conflates the publishing office
+                # with the document form — a third of its production tokens just
+                # restate the form (``court_order``, ``charge_sheet``, ``news``)
+                # and the CIAA is split across two (``ciaa_press_release``,
+                # ``ciaa_annual_report``). Offering that list to a reader as
+                # "publisher" would be wrong; scoping a query to one token the
+                # curated series registry already chose is not. See
+                # ``search.service.SCOPE_FIELDS``, and ``material_type`` above
+                # for the facet that IS safe to show.
+                #
+                # Same rebuild caveat as ``material_type``: an existing index only
+                # gains the declared mapping on the next --rebuild generation.
+                # Until then a filter on it matches nothing — safe degradation.
+                "source": {"type": "keyword"},
+                # The document KIND within a publishing source, from the material's
+                # ``jawafdehi:datasetBucket`` (set at ingest from the upstream
+                # corpus's own classification). A second corpus SCOPE alongside
+                # ``source``, for the same reason and with the same discipline —
+                # see ``search.service.SCOPE_FIELDS``.
+                #
+                # It exists because ``source`` alone is too coarse to shelve by.
+                # All 228 Office of the Auditor General documents share the token
+                # ``official_report``, but only 18 are annual reports; the rest are
+                # province audit reports, the audit journal, audit bulletins and
+                # nine other kinds. The /materials series registry is 1:1 with
+                # ``source``, so without this field no shelf can be narrower than
+                # its token and a shelf titled "annual reports" holds 210 documents
+                # that are not.
+                #
+                # ``keyword`` is LOAD-BEARING, not a default. Every token is
+                # hyphenated and underscored (``report_annual-report``,
+                # ``publication_audit-journals``) and this mapping declares no
+                # ``dynamic`` setting, so OpenSearch's default dynamic mapping would
+                # type an undeclared field as ``text``: the standard analyzer splits
+                # on the hyphen, and a ``terms`` clause then matches NOTHING while
+                # still returning 200. ``source`` only escaped this because
+                # ``official_report`` happens to survive the analyzer as one token.
+                #
+                # NOT faceted, deliberately: the vocabulary is the upstream
+                # dataset's raw slugified column — ``publication_auditor-general's--
+                # work-achievement`` is not a label to hand a reader. The registry
+                # picks the token; nothing enumerates the list back.
+                #
+                # Unlike ``material_type``/``source`` above, this one did not wait
+                # for the next --rebuild: it was landed on the live index with
+                # ``migrate_search_mappings``, which is seconds instead of a
+                # re-stream of ~346k documents. (A rebuild would also have been
+                # safe — it builds a new generation and swaps the alias; the
+                # "--rebuild drops the index" line in ``reindex_materials``'s
+                # module docstring is stale.)
+                "dataset_bucket": {"type": "keyword"},
                 # Editorial priority behind the ``featured`` sort; cases-only, same
                 # single-type pattern as ``case_status`` above. Only FRESH indices get
                 # this declared type — an existing one picks the field up by dynamic

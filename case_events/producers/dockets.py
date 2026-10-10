@@ -33,6 +33,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import structlog
+from django.db.models import Q
 from django.utils import timezone
 
 from case_events import subjects
@@ -92,20 +93,57 @@ def _courtcase_iri(court_id: str, case_number: str) -> str | None:
         return None
 
 
+def _hearings_in_window(since):
+    """Hearing rows in the window that represent something we have just learned.
+
+    One queryset, shared by :func:`hearing_signals` and :func:`window_totals`,
+    because the saturation report is only meaningful if it counts exactly the
+    rows the emitter would walk. Two filters that drifted apart would report
+    "emitted 5000 of 812004" against a window holding 9000 emittable rows, and
+    the non-zero exit built on that number would fail every run forever.
+
+    **Excludes rows a backfill projected out of JSON we already held.** This
+    producer keys on ``created_at``, which is right for everything a scraper
+    writes — but a backfill stamps a fresh ``created_at`` on records the mirror
+    has had for months, so without this they arrive as a flood of discoveries
+    that are not discoveries. There is no watermark here (see the module
+    docstring), so such a flood does not merely add noise: it pushes the window's
+    genuine rows past ``limit``, where they are dropped and stay dropped. The
+    supreme tier alone put 780,825 of these in one window.
+
+    **The predicate is spelled out rather than written as ``exclude``, and that
+    is not style.** ``exclude(extra_data__source=...)`` compiles to ``NOT
+    (extra_data -> 'source' = ...)``, and for a row whose ``extra_data`` is a dict
+    with no ``source`` key that inner comparison is SQL NULL, so ``NOT NULL`` is
+    NULL and the row is dropped. Django special-cases a null *column* but not a
+    missing *key*. Every hearing carrying any other annotation would vanish from
+    the producer silently — a quiet window and a healthy exit code, with the
+    facts gone once it slid. The explicit ``isnull`` branch restores them.
+    """
+    from courts.models import HEARING_SOURCE_BACKFILL, CourtCaseHearing
+
+    return CourtCaseHearing.objects.filter(created_at__gte=since).filter(
+        Q(extra_data__source__isnull=True)
+        | ~Q(extra_data__source=HEARING_SOURCE_BACKFILL)
+    )
+
+
 def hearing_signals(since, limit: int = DEFAULT_LIMIT):
     """Yield ``(subject, payload, refs, dedup_key, occurred_at)`` for new hearings.
 
     Keyed on ``created_at`` rather than ``hearing_date_ad``: a hearing scheduled
     for next month is news the day we scrape it, not the day it happens, and a
     hearing backfilled from an old cause list is news now.
-    """
-    from courts.models import CourtCaseHearing
 
+    "Backfilled from an old cause list" means a listing we had not seen before.
+    A row re-projected from JSON this mirror already stored is a different thing
+    and is excluded — see :func:`_hearings_in_window`.
+    """
     # No select_related("court"): `court` is a FK whose db_column IS the court
     # identifier, so `row.court_id` is already the string the IRI needs. Joining
     # `courts` would be a wasted join on every row of a 5000-row scan to fetch a
     # value we hold.
-    rows = CourtCaseHearing.objects.filter(created_at__gte=since).order_by("created_at")[:limit]
+    rows = _hearings_in_window(since).order_by("created_at")[:limit]
     for row in rows:
         iri = _courtcase_iri(row.court_id, row.case_number)
         if iri is None:
@@ -201,14 +239,17 @@ def window_totals(window_hours: int = DEFAULT_WINDOW_HOURS) -> dict[str, int]:
     watermark, the 3231 rows this run did not reach are not deferred, they are
     dropped, and they stay dropped once the window slides past them. An
     operator seeing only "5000" has no way to tell a capped run from a busy one.
+
+    Counts emittable rows, so backfilled projections are out of both this and the
+    scan — see :func:`_hearings_in_window`. They are reported separately by
+    :func:`backfilled_in_window`, never folded in here: a number that drove a
+    non-zero exit would then be complaining about rows nothing intends to emit.
     """
-    from courts.models import CourtCase, CourtCaseHearing
+    from courts.models import CourtCase
 
     since = timezone.now() - timedelta(hours=window_hours)
     return {
-        subjects.SIGNAL_DOCKET_HEARING_ADDED: CourtCaseHearing.objects.filter(
-            created_at__gte=since
-        ).count(),
+        subjects.SIGNAL_DOCKET_HEARING_ADDED: _hearings_in_window(since).count(),
         subjects.SIGNAL_DOCKET_VERDICT_ENTERED: CourtCase.objects.filter(
             updated_at__gte=since,
             verdict_date_ad__isnull=False,
@@ -218,6 +259,22 @@ def window_totals(window_hours: int = DEFAULT_WINDOW_HOURS) -> dict[str, int]:
         .exclude(verdict_type="")
         .count(),
     }
+
+
+def backfilled_in_window(window_hours: int = DEFAULT_WINDOW_HOURS) -> int:
+    """How many rows in the window were skipped as backfilled projections.
+
+    Reported rather than silently dropped. Without it, a tier backfill makes the
+    hearings table grow by the better part of a million rows while the signal
+    count does not move, and an operator checking the two against each other has
+    no way to tell a working exclusion from a broken producer.
+    """
+    from courts.models import HEARING_SOURCE_BACKFILL, CourtCaseHearing
+
+    since = timezone.now() - timedelta(hours=window_hours)
+    return CourtCaseHearing.objects.filter(
+        created_at__gte=since, extra_data__source=HEARING_SOURCE_BACKFILL
+    ).count()
 
 
 def publish_window(

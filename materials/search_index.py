@@ -81,6 +81,33 @@ def build_doc(obj: Any) -> dict[str, Any]:
     if material_type:
         doc["material_type"] = str(material_type)
 
+    # The publishing source token, indexed as a SCOPE rather than a facet (see
+    # ``search.service.SCOPE_FIELDS`` and the mapping comment). It is what the
+    # curated /materials series registry is keyed on — one series IS one source
+    # token — so a scoped search over a series needs it, while nothing offers the
+    # raw token list to a reader. Omitted when blank, for the same reason
+    # ``material_type`` is: a filter should exclude a doc that has no value rather
+    # than match it through an "" bucket.
+    source = getattr(obj, "source", None)
+    if source:
+        doc["source"] = str(source)
+
+    # The document KIND within that source — a SECOND scope, because ``source``
+    # alone is too coarse to shelve by: all 228 Auditor General documents carry
+    # ``official_report`` and only 18 of them are annual reports.
+    #
+    # Unlike ``source``/``material_type`` above, this value does NOT come from a
+    # model CharField — it comes from JSON-LD shaped out of an external corpus,
+    # where the ingest writes the key whether or not the upstream column was
+    # populated. So the type guard is load-bearing, not defensive boilerplate: a
+    # dict/list/None reaching a ``keyword`` mapping is rejected by the cluster
+    # and takes the WHOLE document down, which is exactly how one BS date
+    # aborted a reindex on 2026-08-15 (see the ``date`` note below). Validate,
+    # drop, and let ``raw`` keep the original.
+    dataset_bucket = data.get("jawafdehi:datasetBucket")
+    if isinstance(dataset_bucket, str) and dataset_bucket.strip():
+        doc["dataset_bucket"] = dataset_bucket.strip()
+
     # Gregorian dates (ISO). Carry Bikram Sambat verbatim (never coerced).
     # ``date`` is validated rather than passed through: this is JSON-LD from an
     # external scrape, and one row carrying a BS date here (``2081-02-29``)

@@ -17,10 +17,68 @@ from django.db import transaction
 from django.utils import timezone
 
 from courts import case_status as cs
-from courts.models import CaseEntity, Court, CourtCase, CourtCaseHearing, ScrapedDate
+from courts.models import (
+    HEARING_SOURCE_SWEEP,
+    CaseEntity,
+    Court,
+    CourtCase,
+    CourtCaseHearing,
+    ScrapedDate,
+)
 from courts.scraper.rows import ParsedCase, ParsedEnrichment, ParsedHearing
+from courts.scraper.text import desep_judges
 
 NGM_DB = "ngm"
+
+# ── detail-page hearing keys ─────────────────────────────────────────────────
+# The four parsers do NOT agree on the key names inside
+# ``extra_data["enrichment_hearings"]``, and nothing enforces that they should —
+# the list is parser-shaped JSON, not a typed row. ``special``/``high`` emit
+# ``hearing_date``/``case_status``/``decision_type``; ``supreme`` emits
+# ``date``/``status``/``order_type``/``judges``; ``district`` emits
+# ``date``/``order``/``judge``.
+#
+# ``materialise_detail_hearings`` originally read the special/high names only, so
+# for supreme and district it skipped every hearing and returned 0 having written
+# nothing — silently, since an absent date is a legitimate skip. That left ~180k
+# swept cases holding a full hearing timeline in JSON and zero relational rows,
+# which reads downstream as "the court never listed this case".
+#
+# Aliasing here rather than renaming in the parsers is deliberate: the JSON is
+# already persisted in the parser-specific shape on hundreds of thousands of
+# rows, so changing the producer would orphan every stored record. Order matters
+# only in that the first key present wins; the sets are disjoint in practice.
+_DETAIL_DATE_KEYS = ("hearing_date", "date")
+_DETAIL_STATUS_KEYS = ("case_status", "status")
+_DETAIL_DECISION_KEYS = ("decision_type", "order_type", "order")
+_DETAIL_JUDGE_KEYS = ("judge_names", "judges", "judge")
+
+
+def _detail_field(hearing: object, keys: tuple[str, ...]) -> str | None:
+    """First non-empty string among ``keys`` in a detail-page hearing dict.
+
+    A non-string value is ignored rather than coerced. These land in CharFields
+    and every parser emits text here, so a non-string means the payload isn't the
+    shape this reads — better skipped than stringified into a court record.
+    """
+    if not isinstance(hearing, dict):
+        return None
+    for key in keys:
+        value = hearing.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def recognised_hearing_date(hearing: object) -> str | None:
+    """The BS date of a stored detail-page hearing, under any parser's key name.
+
+    Public because a caller counting what :func:`materialise_detail_hearings`
+    *would* write has to apply the same recognition rule — if it guesses, a dry
+    run stops being evidence about the real one.
+    """
+    return _detail_field(hearing, _DETAIL_DATE_KEYS)
+
 
 # Court-owned typed columns the enrichment may set. The cause-list upsert writes
 # listing fields only, with ONE exception: a decisive sitting promotes
@@ -380,6 +438,7 @@ def materialise_detail_hearings(
     enrichment: ParsedEnrichment,
     *,
     using: str = NGM_DB,
+    source: str = HEARING_SOURCE_SWEEP,
 ) -> int:
     """Turn a detail page's hearing list into ``CourtCaseHearing`` rows.
 
@@ -399,14 +458,21 @@ def materialise_detail_hearings(
       NOT NULL and the cause-list path falls back to ``1900-01-01``; emitting that
       here would seed a clean column with fake dates for rows nobody asked for.
 
-    ``judge_names``/``bench`` stay null — the detail page carries neither.
+    ``bench`` stays null — no detail page publishes one.
+
+    ``source`` is stamped into each row's ``extra_data`` and defaults to the live
+    sweep. An offline backfill must pass ``HEARING_SOURCE_BACKFILL`` instead: the
+    rows are identical, but one is a hearing we have just discovered and the
+    other is a projection of JSON we have held for months, and
+    :mod:`case_events.producers.dockets` has to tell them apart — it keys its
+    window on ``created_at``, which a backfill resets on records that are not new.
     """
     from jawafdehi_shared.dates import bs_to_ad
 
     rows = (enrichment.extra_data or {}).get("enrichment_hearings") or []
     written = 0
     for hearing in rows:
-        date_bs = (hearing or {}).get("hearing_date")
+        date_bs = _detail_field(hearing, _DETAIL_DATE_KEYS)
         if not date_bs:
             continue
         date_ad = bs_to_ad(date_bs)
@@ -427,10 +493,11 @@ def materialise_detail_hearings(
             case_number=case_number,
             hearing_date_bs=date_bs,
             hearing_date_ad=date_ad,
-            case_status=hearing.get("case_status") or None,
-            decision_type=hearing.get("decision_type") or None,
+            case_status=_detail_field(hearing, _DETAIL_STATUS_KEYS),
+            decision_type=_detail_field(hearing, _DETAIL_DECISION_KEYS),
+            judge_names=desep_judges(_detail_field(hearing, _DETAIL_JUDGE_KEYS)),
             scraped_at=timezone.now(),
-            extra_data={"source": "register_sweep"},
+            extra_data={"source": source},
         )
         written += 1
     return written

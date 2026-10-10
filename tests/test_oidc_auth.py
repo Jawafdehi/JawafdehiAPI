@@ -426,7 +426,7 @@ def test_extract_role_keys_reads_per_project_claim(settings):
     # claim — the generic claim is absent even with projectRoleAssertion on.
     machine_claims = {
         f"urn:zitadel:iam:org:project:{AUDIENCE}:roles": {
-            "review_assistant": {"377588697018728812": "zitadel.auth.jawafdehi.org"}
+            "review_assistant": {"000000000000000001": "zitadel.auth.example.org"}
         }
     }
     assert oidc_auth.extract_role_keys(machine_claims) == {"review_assistant"}

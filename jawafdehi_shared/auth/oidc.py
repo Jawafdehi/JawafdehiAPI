@@ -48,6 +48,8 @@ from django.contrib.auth.models import Group
 from jwt import PyJWKClient
 from rest_framework import authentication, exceptions
 
+from jawafdehi_shared.auth.subject import resolve_user
+
 User = get_user_model()
 
 # The Zitadel project-role key that, when present in a token, additionally
@@ -89,7 +91,7 @@ def _trusted_project_ids() -> set[str]:
 
 # Default Zitadel project-role key -> existing Django Group name. Overridable via
 # settings.OIDC_ROLE_TO_GROUP. The Group names mirror those the predicates and
-# create_groups.py use (Caseworker, ReadOnly, JobPoller).
+# create_groups.py use (Caseworker, ReadOnly, JobPoller, Prerender).
 #
 # Role model (v3):
 #   admin      -> (no group) user.is_superuser=True, set in _sync_user; the sole
@@ -99,6 +101,22 @@ def _trusted_project_ids() -> set[str]:
 #   caseworker -> Caseworker  ) legacy `caseworker` key — collapse to Caseworker.
 #   readonly   -> ReadOnly     (system-wide read INCLUDING casework view)
 #   job_poller -> JobPoller    (machine role: review r/w + jobs consume)
+#   prerender  -> Prerender    (machine role that grants NOTHING — read on)
+#
+# ``Prerender`` is deliberately a role that authorizes no access at all. Every
+# gate in this codebase is an allowlist of group NAMES (Caseworker, ReadOnly,
+# JobPoller, NGM_*), so a group outside those sets is admitted by none of them,
+# and ``can_view_case``/the serializer's casework flag are both
+# ``is_admin_or_moderator | is_readonly`` — neither of which it satisfies. Its
+# holder therefore sees exactly what an anonymous visitor sees: PUBLISHED on the
+# list, 404 on a DRAFT. The group exists ONLY so the throttle can give the
+# jawafdehi.org build its own bucket (see jawafdehi_shared/drf/throttling.py).
+#
+# That emptiness is the whole point and it is load-bearing: the build publishes
+# its responses as static HTML served to everyone, so the moment this role can
+# see something anonymous callers cannot, the build starts baking non-public
+# data into public files. Never add "Prerender" to a permission set or to any
+# of the group allowlists; tests/test_prerender_role.py pins that.
 #
 # Retired: the Admin/Public/Moderator groups and the NGM_{Silver,Gold,Platinum}
 # tiers. Unmapped role keys (e.g. a stale `public`/`ngm_gold` token) are silently
@@ -109,6 +127,7 @@ DEFAULT_ROLE_TO_GROUP = {
     "caseworker": "Caseworker",
     "readonly": "ReadOnly",
     "job_poller": "JobPoller",
+    "prerender": "Prerender",
 }
 
 
@@ -276,6 +295,27 @@ def extract_role_keys(claims: dict) -> set[str]:
     return keys
 
 
+def roles_claim_present(claims: dict) -> bool:
+    """True when ``claims`` carried a trusted role claim at all.
+
+    ``extract_role_keys`` returns an empty set for two very different inputs:
+    the IdP asserted that this user holds no roles, and the IdP sent no role
+    claim whatsoever (a dropped scope, or a Zitadel flattening action that
+    stopped firing). Only the first is a revocation; treating the second as one
+    silently strips a working user's access. Callers that write permissions
+    MUST tell them apart.
+    """
+    claim_name = getattr(settings, "OIDC_ROLES_CLAIM", DEFAULT_ROLES_CLAIM)
+    trusted_projects = _trusted_project_ids()
+    for name in claims or {}:
+        if name == claim_name:
+            return True
+        m = _PER_PROJECT_ROLES_CLAIM_RE.match(name)
+        if m is not None and m.group(1) in trusted_projects:
+            return True
+    return False
+
+
 class OIDCAuthentication(authentication.BaseAuthentication):
     """Validate a Zitadel JWT access token and sync roles -> Django Groups.
 
@@ -320,14 +360,12 @@ class OIDCAuthentication(authentication.BaseAuthentication):
         admin role is present and cleared to False when it is absent (so a
         revoked admin role immediately drops superuser, not just the group).
         """
+        # Keyed on ``sub`` via the shared resolver, which also adopts the rows
+        # the two login paths created before they agreed on an identifier (see
+        # jawafdehi_shared.auth.subject). A new user still gets the subject as
+        # its username, preserving the shape of every account made this way.
         sub = claims["sub"]
-        user, _ = User.objects.get_or_create(
-            username=sub,
-            defaults={
-                "email": claims.get("email", "") or "",
-                "is_active": True,
-            },
-        )
+        user, _ = resolve_user(claims, create_defaults={"username": sub})
 
         role_to_group = getattr(settings, "OIDC_ROLE_TO_GROUP", DEFAULT_ROLE_TO_GROUP)
         role_keys = extract_role_keys(claims)

@@ -14,11 +14,35 @@ from cases.models import (
 )
 
 
+def _set_owned_permissions(group, owned_content_type_ids, permissions):
+    """Replace only the permissions this command owns, keeping the rest.
+
+    This command owns the case-domain model permissions; the Wagtail ones on the
+    same groups belong to ``content.permissions.sync_cms_group_permissions``,
+    which adds them on ``post_migrate``. A blanket ``permissions.set()`` here
+    does not respect that split — it drops every permission it does not itself
+    list, so running this command after ``migrate`` silently revoked
+    ``wagtailadmin.access_admin`` from ``Caseworker`` and locked every caseworker
+    out of the Newsroom. The page and collection permissions live in their own
+    tables and survived, which is why the loss was invisible until someone tried
+    to open the CMS.
+
+    Scoping the replace to the owned content types keeps this command
+    authoritative over its own domain (a hand-granted case permission is still
+    repaired) and inert everywhere else.
+    """
+    foreign = list(
+        group.permissions.exclude(content_type_id__in=owned_content_type_ids)
+    )
+    group.permissions.set(list(permissions) + foreign)
+
+
 class Command(BaseCommand):
     help = (
-        "Create user groups (Caseworker, ReadOnly, JobPoller) with appropriate "
-        "permissions. v3 authz model: admin == is_superuser (no group); the "
-        "single content-staff role is Caseworker (folds in the old Moderator)."
+        "Create user groups (Caseworker, ReadOnly, JobPoller, Prerender) with "
+        "appropriate permissions. v3 authz model: admin == is_superuser (no "
+        "group); the single content-staff role is Caseworker (folds in the old "
+        "Moderator); Prerender deliberately carries none."
     )
 
     def handle(self, *args, **options):
@@ -97,7 +121,11 @@ class Command(BaseCommand):
         else:
             self.stdout.write("Caseworker group already exists")
 
-        caseworker_group.permissions.set(
+        owned_content_type_ids = {case_ct.pk, relationship_ct.pk}
+
+        _set_owned_permissions(
+            caseworker_group,
+            owned_content_type_ids,
             [
                 case_permissions["view"],
                 case_permissions["add"],
@@ -107,7 +135,7 @@ class Command(BaseCommand):
                 relationship_permissions["add"],
                 relationship_permissions["change"],
                 relationship_permissions["delete"],
-            ]
+            ],
         )
 
         # JobPoller: the machine role (the review poller). Review/jobs access is
@@ -137,11 +165,35 @@ class Command(BaseCommand):
         else:
             self.stdout.write("ReadOnly group already exists")
 
-        readonly_group.permissions.set(
+        _set_owned_permissions(
+            readonly_group,
+            owned_content_type_ids,
             [
                 case_permissions["view"],
                 relationship_permissions["view"],
-            ]
+            ],
         )
+
+        # Prerender: the jawafdehi.org build's machine role. It holds NO
+        # permissions and is named by NO gate, so its holder sees exactly what an
+        # anonymous visitor sees. The group exists only so SyncedUserRateThrottle
+        # can route the build into its own bucket (THROTTLE_RATE_PRERENDER)
+        # instead of the 1000/hour anonymous one it was competing for.
+        #
+        # The empty permission set is the invariant, not an oversight: the build
+        # writes what it fetches into static HTML that is served to everyone, so
+        # granting this group anything would publish it. ``.set([])`` is
+        # unconditional for the same reason JobPoller's is — it repairs a group
+        # that was granted something by hand. These two machine roles are
+        # deliberately NOT scoped the way Caseworker/ReadOnly are: neither is
+        # ever meant to hold a CMS permission, so stripping everything is the
+        # invariant rather than a bug.
+        prerender_group, created = Group.objects.get_or_create(name="Prerender")
+        if created:
+            self.stdout.write(self.style.SUCCESS("Created Prerender group"))
+        else:
+            self.stdout.write("Prerender group already exists")
+
+        prerender_group.permissions.set([])
 
         self.stdout.write(self.style.SUCCESS("Successfully configured all groups"))

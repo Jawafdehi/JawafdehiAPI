@@ -203,3 +203,201 @@ class Material(models.Model):
             data=data,
             visibility_policy=default_policy_for(parsed.source),
         )
+
+
+# ── Extracted document data ──────────────────────────────────────────────────
+#
+# A ``Material`` is the *published document*: its JSON-LD metadata plus, where we
+# have it, a flat transcript. These four models carry the STRUCTURE recovered
+# from inside that document — the ruled tables and the charts, with the charts'
+# underlying series — as rows rather than prose.
+#
+# They are deliberately generic: nothing here knows about the CIAA. The
+# CIAA-specific part (which upstream document maps to which material) lives in
+# the ingest command, not in the schema, so a second corpus needs no migration.
+#
+# All four live in the ``ngm`` database alongside ``Material`` (see
+# config.db_router), so the FKs below never cross a database.
+
+
+class DocumentExtraction(models.Model):
+    """One extraction pass over one material's source document.
+
+    Exists to hang provenance off: *which* upstream dataset produced these rows,
+    at which revision, and what that dataset says about its own quality. The
+    tables and figures below cascade from it, so a re-ingest is a delete of this
+    row plus a fresh insert — there is no partial-update path to get wrong.
+    """
+
+    # PK *is* the material: one extraction per document, and the join key is the
+    # IRI the rest of the platform already uses.
+    material = models.OneToOneField(
+        "materials.Material",
+        on_delete=models.CASCADE,
+        primary_key=True,
+        related_name="extraction",
+        db_column="material_iri",
+    )
+    # The upstream dataset's own id for this document (e.g. ``ciaa-2074-75``).
+    # Recorded so a row can be traced back to its source without the mapping file.
+    doc_id = models.CharField(max_length=120, db_index=True)
+    # Dataset coordinates, e.g. ``damo-da/ciaa-annual-reports`` + a commit sha.
+    # Blank revision is tolerated: not every source is a content-addressed repo.
+    dataset = models.CharField(max_length=200)
+    dataset_revision = models.CharField(max_length=80, blank=True)
+    # What the upstream says about the document and its own confidence. Free-form
+    # on purpose — these are another project's vocabularies, and pinning them to
+    # a TextChoices here would turn their next added verdict into our 500.
+    page_count = models.PositiveIntegerField(default=0)
+    text_source = models.CharField(max_length=40, blank=True)
+    transcript_verdict = models.CharField(max_length=40, blank=True)
+    figures_verdict = models.CharField(max_length=40, blank=True)
+    ingested_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "material_document_extractions"
+
+    def __str__(self) -> str:
+        return f"{self.doc_id} ({self.material_id})"
+
+
+class ExtractedTable(models.Model):
+    """One ruled table lifted out of the document, kept as markdown.
+
+    Markdown rather than cells: the published artefact is a *rendered* table, and
+    a cell grid would be a second representation to keep in sync for no reader
+    benefit. The largest single table in the CIAA corpus is ~170 KiB, which is
+    why the manifest endpoint omits this column and a table is fetched on demand.
+    """
+
+    extraction = models.ForeignKey(
+        DocumentExtraction, on_delete=models.CASCADE, related_name="tables"
+    )
+    # 1-based position within the document — presentation order ONLY. It is
+    # recomputed on every ingest, so a revision that recovers a table missed in
+    # the middle of a report shifts every later one. Never address a table by it.
+    ordinal = models.PositiveIntegerField()
+    # The stable, URL-safe handle: ``p0018-t1`` (page 18, first table on it).
+    # Derived from coordinates that describe where the table physically IS, so it
+    # survives the upstream gaining or losing tables elsewhere in the document —
+    # which ``ordinal`` does not, and which would otherwise make a saved link
+    # silently resolve to a different table. The upstream ``uid`` would do as
+    # well but carries a ``#`` that cannot sit in a path unescaped.
+    key = models.CharField(max_length=40)
+    uid = models.CharField(max_length=160)
+    page_no = models.PositiveIntegerField()
+    index_on_page = models.PositiveSmallIntegerField(default=1)
+    # The prose introducing the table, where it has any — frequently a real
+    # caption ("तालिका २.१ …"), frequently just a trailing colon. Long: the
+    # observed maximum is ~1.3 kB.
+    caption = models.TextField(blank=True)
+    # The header row as a list of strings. Ragged and repetitive in the source
+    # (merged header cells arrive as empty strings), so it is stored as-is
+    # rather than normalised into something that would lose the column count.
+    header = models.JSONField(default=list, blank=True)
+    n_rows = models.PositiveIntegerField(default=0)
+    n_cols = models.PositiveIntegerField(default=0)
+    # How the upstream rates this table's fidelity (``tight`` / ``ocr_vision``).
+    fidelity = models.CharField(max_length=40, blank=True)
+    markdown = models.TextField()
+
+    class Meta:
+        db_table = "material_extracted_tables"
+        ordering = ("ordinal",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["extraction", "ordinal"], name="uniq_extracted_table_ordinal"
+            ),
+            models.UniqueConstraint(
+                fields=["extraction", "key"], name="uniq_extracted_table_key"
+            ),
+            models.UniqueConstraint(
+                fields=["extraction", "uid"], name="uniq_extracted_table_uid"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.uid
+
+
+class ExtractedFigure(models.Model):
+    """One chart found in the document, with its series in ``points``."""
+
+    extraction = models.ForeignKey(
+        DocumentExtraction, on_delete=models.CASCADE, related_name="figures"
+    )
+    # Presentation order only — see the note on ExtractedTable.ordinal.
+    ordinal = models.PositiveIntegerField()
+    # Stable handle, ``p0018-f1``. Figures ride inline in the manifest rather
+    # than having a route of their own, but a client still needs something
+    # durable to anchor or deep-link a chart to.
+    key = models.CharField(max_length=40)
+    uid = models.CharField(max_length=160)
+    page_no = models.PositiveIntegerField()
+    index_on_page = models.PositiveSmallIntegerField(default=1)
+    title = models.TextField(blank=True)
+    # Upstream's own chart vocabulary, which is wider and less tidy than an enum
+    # would be (``pie``, ``pie_3d``, ``stacked bar`` AND ``stacked_bar``). Kept
+    # verbatim; normalising is a presentation decision, not a storage one.
+    chart_type = models.CharField(max_length=40, blank=True)
+    unit = models.CharField(max_length=80, blank=True)
+    x_axis = models.CharField(max_length=300, blank=True)
+    y_axis = models.CharField(max_length=300, blank=True)
+    # The transcriber's reasoning about this chart — how a disputed value was
+    # resolved, which total it reconciles against. Long (observed ~4.8 kB) and
+    # worth keeping: it is the audit trail behind every number in ``points``.
+    notes = models.TextField(blank=True)
+    verify_note = models.TextField(blank=True)
+    # Upstream's verification flag. Nullable because "not checked" and "checked
+    # and found wanting" are different claims and the UI renders them differently.
+    verified = models.BooleanField(null=True, blank=True)
+
+    class Meta:
+        db_table = "material_extracted_figures"
+        ordering = ("ordinal",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["extraction", "ordinal"], name="uniq_extracted_figure_ordinal"
+            ),
+            models.UniqueConstraint(
+                fields=["extraction", "key"], name="uniq_extracted_figure_key"
+            ),
+            models.UniqueConstraint(
+                fields=["extraction", "uid"], name="uniq_extracted_figure_uid"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.uid
+
+
+class ExtractedFigurePoint(models.Model):
+    """One datum of one chart: a value, its label, and which series it belongs to.
+
+    ``is_estimated`` is the load-bearing field. A point read off a chart image is
+    not the same claim as one read from a printed figure, and the two must never
+    be presented as equivalent — the API returns it on every point and the UI is
+    expected to show it.
+    """
+
+    figure = models.ForeignKey(
+        ExtractedFigure, on_delete=models.CASCADE, related_name="points"
+    )
+    point_index = models.PositiveIntegerField()
+    label = models.CharField(max_length=300, blank=True)
+    series = models.CharField(max_length=300, blank=True)
+    # Nullable: a chart can name a category it prints no value for.
+    value = models.FloatField(null=True, blank=True)
+    is_estimated = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "material_extracted_figure_points"
+        ordering = ("point_index", "id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["figure", "point_index"], name="uniq_figure_point_index"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.figure_id}#{self.point_index}"

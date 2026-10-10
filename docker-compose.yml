@@ -31,27 +31,47 @@ services:
       retries: 10
 
   minio:
-    # Pulled from quay.io, not Docker Hub: Docker Hub stopped serving
-    # `minio/minio` to anonymous clients around 2026-09-11, which broke the e2e
-    # job at stack bring-up on every PR ("pull access denied ... repository does
-    # not exist or may require 'docker login'"). quay.io still serves the image
-    # anonymously at the same digest.
+    # ⚠️ THIRD registry move, and the last one worth making. MinIO restricted
+    # `minio/minio` on Docker Hub to anonymous clients around 2026-09-11; we
+    # moved here to quay.io; quay.io was restricted the same way around
+    # 2026-09-28. That failure skips `build-and-push` in the publish workflow,
+    # so NOTHING reached production between 23 and 29 September — a six-day
+    # outage whose only symptom was a red check nobody was gating on.
     #
-    # Pinned, not `latest`: the community repo was archived in 2025, so this is
-    # the last community release and there is nothing to float to — an unpinned
-    # tag buys no updates and is exactly what let an upstream change break CI.
-    # See docs/shared/research/COST-AUDIT.md (MinIO is on the WATCH list).
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: server /data --console-address ":9001"
+    # Verified 2026-09-29, anonymously and per-registry: docker.io/minio/minio,
+    # quay.io/minio/minio, quay.io/minio/mc, mirror.gcr.io and public.ecr.aws
+    # all return 401/404 for EVERY tag, old releases included. The community
+    # image is no longer obtainable anywhere without a MinIO account, so there
+    # is no version of "repin MinIO's own image" that works.
+    #
+    # `bitnamilegacy/minio` is a genuine MinIO build that still serves
+    # anonymously, so the S3 semantics the app is written against are unchanged.
+    # It is a frozen ARCHIVE — it will not be updated, which is fine for a test
+    # dependency and is why it is pinned by DIGEST rather than tag.
+    #
+    # If this is withdrawn too, stop chasing MinIO: mirror an image into our own
+    # registry so no upstream licence change can break CI again, or move to
+    # SeaweedFS's S3 gateway (Apache-2.0). See docs/shared/research/COST-AUDIT.md
+    # (MinIO is on the WATCH list — this is the risk it was listed for).
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
+    # No `command:` override. This image's entrypoint runs Bitnami's own
+    # run.sh, which starts `minio server` itself; passing `server /data` here
+    # replaces that and the container exits.
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    volumes: ["miniodata:/data"]
+    # Bitnami runs as UID 1001 and keeps data under /bitnami/minio/data, not
+    # /data. Mounting the old path leaves the server writing somewhere the
+    # volume does not cover, so state silently vanishes between runs.
+    volumes: ["miniodata:/bitnami/minio/data"]
     ports:
       - "${COMPOSE_HOST_BIND:-0.0.0.0}:${MINIO_API_PORT:-49000}:9000"
       - "${COMPOSE_HOST_BIND:-0.0.0.0}:${MINIO_CONSOLE_PORT:-49001}:9001"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      # Not `mc ready local`: that needs an `mc` alias named `local`, which the
+      # official image preconfigured and this one does not. The HTTP liveness
+      # endpoint is part of MinIO itself and needs nothing set up.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10

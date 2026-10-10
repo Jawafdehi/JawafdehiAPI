@@ -45,7 +45,13 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
 from . import jsonld
 from . import provenance
-from .models import Material, Policy
+from .extraction_api import (
+    load_extraction,
+    manifest_payload,
+    table_payload,
+    version_token,
+)
+from .models import ExtractedTable, Material, Policy
 from .patch_validation import (
     MAX_MATERIAL_DOC_BYTES,
     MAX_PATCH_BODY_BYTES,
@@ -138,6 +144,39 @@ def _with_admin_visibility(row) -> dict:
     doc = dict(row.data)
     doc["jawafdehi:visibility"] = row.visibility
     doc["jawafdehi:visibilityPolicy"] = row.visibility_policy
+    return doc
+
+
+# The one unbounded field in a material document: OCR'd body text, which on the
+# Auditor General reports runs to 1.9 MB in a single row. Everything else is
+# metadata — measured across a live page, the next largest field (associatedMedia)
+# peaks at 2 KB, and `text` is 940x it.
+_ABRIDGED_FIELD = "text"
+
+
+def _abridged(doc: dict) -> dict:
+    """A list-shaped copy of a material document: metadata, no body text.
+
+    ``GET /api/materials/`` renders whole stored JSON-LD documents, so a page of
+    50 shipped **41.5 MB uncompressed / 7.2 MB zstd**, of which ``text`` was
+    99.6%. Nothing consumes it there — the admin table renders Name/Type/@id and
+    the evidence picker renders names — and it cost ~6s of TTFB per call in
+    detoast, serialization and compression.
+
+    Abridged rather than silently truncated: a consumer that just found no
+    ``text`` key cannot tell "this document has none" from "it was withheld", so
+    the flag is what makes the omission honest. ``@id`` is on every row and
+    ``GET /api/materials/<source>/<ident>`` remains the complete document, so
+    nothing is withdrawn from the open dataset — only moved one fetch away.
+
+    Takes a dict that is ALREADY a copy (``row.data`` is the live model
+    attribute; mutating it would corrupt the in-memory instance for anything
+    downstream in the same request).
+    """
+    if _ABRIDGED_FIELD not in doc:
+        return doc
+    doc.pop(_ABRIDGED_FIELD)
+    doc["jawafdehi:textOmitted"] = True
     return doc
 
 
@@ -769,7 +808,11 @@ def material_file_upload(request, source: str, ident: str):
         content_length=uploaded.size,
         source_url=(request.data.get("source_url") or None),
     )
-    link = store_file_as_link(uploaded, role=role)
+    # The object key comes from the bytes, not the client-supplied filename: two
+    # uploads sharing a name would otherwise land on one key and the second would
+    # silently overwrite the first (see store_file_as_link). The digest is already
+    # in hand from the provenance capture above.
+    link = store_file_as_link(uploaded, role=role, content_hash=sha256)
     encoding, _ = mimetypes.guess_type(uploaded.name)
     provenance.attach_media_object(
         doc,
@@ -828,6 +871,10 @@ def _list_materials(request) -> Response:
     Visibility (ADR: cases own no documents): anon/non-privileged callers see
     only LISTED materials; an authed caseworker/readonly/NGM principal sees all
     live rows (so the admin table can manage in-review/draft evidence).
+
+    Rows are ABRIDGED: the ``text`` body is omitted and flagged with
+    ``jawafdehi:textOmitted``. See :func:`_abridged`. Fetch
+    ``/api/materials/<source>/<ident>`` for the complete document.
     """
     from .models import Visibility
 
@@ -845,10 +892,14 @@ def _list_materials(request) -> Response:
     page = paginator.paginate_queryset(qs, request)
 
     # Authed callers get the cached visibility + policy per row (for the admin
-    # table); anon callers get the raw JSON-LD unchanged.
+    # table). Both branches are abridged — see `_abridged`. The anon branch must
+    # copy first: `row.data` is the live model attribute, and popping from it
+    # would mutate the instance rather than the response.
     def _render(rows):
         return [
-            _with_admin_visibility(row) if can_see_nonpublic else row.data
+            _abridged(
+                _with_admin_visibility(row) if can_see_nonpublic else dict(row.data)
+            )
             for row in rows
         ]
 
@@ -952,3 +1003,105 @@ def material_by_iri(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     return _material_read_response(request, iri)
+
+
+def _resolve_for_extraction(request, source: str, ident: str):
+    """Shared preamble for the two extraction routes.
+
+    Returns ``(iri, None)`` once the material is known to exist AND to be visible
+    to this caller, else ``(None, <error Response>)``.
+
+    The visibility gate is the whole point of routing through ``_resolve_material``
+    rather than querying ``DocumentExtraction`` directly. An extraction is derived
+    from a material, so it inherits that material's publication tier — without
+    this, a PRIVATE (draft-case evidence) document's tables would be readable by
+    anyone who guessed the sub-path, which is precisely the leak the material
+    read plane exists to prevent.
+    """
+    try:
+        iri = build_material_iri(source, ident)
+    except ValueError:
+        return None, Response(
+            {"detail": "Invalid material source/ident."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    data, _row = _resolve_material(
+        iri, include_nonpublic=_can_see_nonpublic(request), with_row=True
+    )
+    if data is None:
+        resp = Response(
+            {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+        patch_vary_headers(resp, ("Authorization",))
+        return None, resp
+    return iri, None
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def material_extraction(request, source: str, ident: str):
+    """``GET /api/materials/<source>/<ident>/extraction`` → the manifest.
+
+    Provenance, every chart with its full series, and a stub per ruled table
+    (ordinal, page, caption, dimensions — no markdown). Fetch a table's markdown
+    from ``/extraction/tables/<ordinal>``; see ``materials.extraction_api`` for
+    why the two are split.
+
+    404 when the material has no extraction, which is the common case — most
+    materials are a single scraped page, not a transcribed report. A client uses
+    that 404 to decide not to offer the tab at all.
+
+    ``Vary: Authorization`` because *whether this URL exists* depends on the
+    caller: a non-public material 404s for anon and resolves for a caseworker.
+    Without it a shared cache could store one answer and serve it to the other.
+    """
+    iri, error = _resolve_for_extraction(request, source, ident)
+    if error is not None:
+        return error
+
+    extraction = load_extraction(iri)
+    if extraction is None:
+        resp = Response(
+            {"detail": "No extracted data for this material."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+        patch_vary_headers(resp, ("Authorization",))
+        return resp
+
+    resp = Response(manifest_payload(extraction))
+    resp["ETag"] = version_token(extraction)
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def material_extraction_table(request, source: str, ident: str, key: str):
+    """``GET /api/materials/<source>/<ident>/extraction/tables/<key>``.
+
+    One ruled table, markdown included. ``key`` is the manifest's ``key``
+    (``p0018-t1`` — page 18, first table on it), NOT its ``ordinal``: ordinals are
+    presentation order and are recomputed on every ingest, so addressing by one
+    would make a saved link quietly resolve to a *different* table as soon as the
+    upstream recovered a table missed earlier in the report.
+    """
+    iri, error = _resolve_for_extraction(request, source, ident)
+    if error is not None:
+        return error
+
+    table = (
+        ExtractedTable.objects.using("ngm")
+        .filter(extraction_id=iri, key=key)
+        .first()
+    )
+    if table is None:
+        resp = Response(
+            {"detail": "No such table for this material."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+        patch_vary_headers(resp, ("Authorization",))
+        return resp
+
+    resp = Response(table_payload(table))
+    patch_vary_headers(resp, ("Authorization",))
+    return resp

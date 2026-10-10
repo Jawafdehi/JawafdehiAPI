@@ -209,6 +209,14 @@ SUGGEST_PREFIX_LENGTH = 1
 SUGGEST_MIN_WORD_LENGTH = 4
 SUGGEST_SIZE = 1
 
+# How much of a field the highlighter is allowed to re-analyze, in characters.
+# Must stay strictly below the index-level ``index.highlight.max_analyzed_offset``
+# (default 1,000,000) — a larger value is rejected outright. Kept a comfortable
+# margin under it rather than at 999,999 so lowering the index setting later
+# doesn't silently turn this into the error it exists to prevent. The rationale for
+# sending it at all is on the ``highlight`` block in :func:`build_query`.
+HIGHLIGHT_MAX_ANALYZER_OFFSET = 900_000
+
 # When ``lang`` narrows to one script, multiply that script's title boost so
 # same-language matches rank first WITHOUT excluding the other (cross-script
 # recall via the translit bridge is preserved — this is a re-rank, not a filter).
@@ -341,6 +349,51 @@ ALL_MATERIAL_TYPES: tuple[str, ...] = (
 # ``sort``, and is pinned to this tuple by
 # ``test_search_court_type_enum_tracks_all_court_types``.
 ALL_COURT_TYPES: tuple[str, ...] = ("district", "high", "supreme", "special")
+
+# SCOPE fields: exact-match narrowing that is NOT a facet. Request param name ->
+# the keyword index field it filters.
+#
+# A facet (:data:`FACET_FIELDS`) is a list of options offered BACK to the reader,
+# so it carries an aggregation, and its clause goes to ``post_filter`` so the
+# facet does not narrow itself. A scope is the opposite: the caller already knows
+# the value, nothing enumerates it, and it defines WHICH CORPUS is being searched
+# — so it belongs in the query's ``bool.filter`` and narrows the hits and every
+# aggregation alike, exactly like the range bounds.
+#
+# ``source`` is the motivating case. The /materials series registry is 1:1 with
+# ``Material.source``, so "search inside the CIAA annual reports" is
+# ``?type=material&source=ciaa_annual_report&q=…``. Faceting that column would be
+# wrong — a third of its tokens restate the document form rather than naming a
+# publisher — but scoping to a token the registry already picked is not the same
+# act. ``material_type`` remains the facet that IS safe to show.
+# ``dataset_bucket`` is the second, and exists because ``source`` is too coarse to
+# shelve by: all 228 Auditor General documents share the token ``official_report``
+# and only 18 are annual reports — the rest are province audit reports, the audit
+# journal, audit bulletins and nine other kinds. It is emphatically NOT a facet,
+# for a sharper version of the same reason as ``source``: the vocabulary is the
+# upstream dataset's raw slugified column, and
+# ``publication_auditor-general's--work-achievement`` is not a label to hand a
+# reader. The registry picks the token; nothing enumerates the list back.
+SCOPE_FIELDS: dict[str, str] = {
+    "source": "source",
+    "dataset_bucket": "dataset_bucket",
+}
+
+# NEGATIVE scopes: same registry discipline, ``must_not`` instead of ``must``.
+# Request param name -> the keyword index field it excludes.
+#
+# This exists for exactly one shape: a curated shelf that means "everything in
+# this source that the other shelves did not claim". Enumerating the dozen-odd
+# remaining tokens in the frontend registry would work until the upstream corpus
+# mints a new one — and then those documents belong to no shelf at all, silently.
+# Stated as a complement, the shelves are a provable partition of whatever the
+# source actually contains, and a new token lands in "other" instead of nowhere.
+#
+# Repeated values union into one ``must_not``, so excluding four tokens is four
+# values on one param, not four params.
+EXCLUDE_SCOPE_FIELDS: dict[str, str] = {
+    "dataset_bucket_exclude": "dataset_bucket",
+}
 
 # Bucket count for each facet's ``terms`` aggregation. Most vocabularies fit
 # comfortably under the default; an entry here overrides it for the ones that
@@ -597,6 +650,39 @@ def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [{"range": {field: b}} for field, b in bounds.items()]
 
 
+def _scope_clauses(scopes: dict[str, list[str]] | None) -> list[dict[str, Any]]:
+    """``terms`` clauses for the corpus scopes (:data:`SCOPE_FIELDS`).
+
+    Iterates the registry rather than the caller's dict, for the same two reasons
+    :func:`_range_clauses` does: unknown params are ignored, and the emitted DSL
+    is byte-stable regardless of query-string order.
+
+    Repeated values union (``?source=a&source=b`` is either), matching how the
+    facet params behave; different scopes AND with each other.
+
+    :data:`EXCLUDE_SCOPE_FIELDS` emits the negation of the same clause. The
+    ``bool.must_not`` is nested inside the ``filter`` array rather than hoisted
+    to the query's own ``must_not``, which keeps it in filter context (no
+    scoring, cacheable) and keeps this function's contract intact: it returns a
+    list of filter clauses and the caller appends them, unchanged.
+
+    A document with NO value for the field is NOT excluded by ``must_not`` —
+    which is the behaviour a complement shelf wants (the one Auditor General row
+    carrying no bucket belongs in "other", not nowhere), and the mirror of the
+    positive clause excluding it.
+    """
+    clauses: list[dict[str, Any]] = []
+    for param, field in SCOPE_FIELDS.items():
+        values = (scopes or {}).get(param)
+        if values:
+            clauses.append({"terms": {field: list(values)}})
+    for param, field in EXCLUDE_SCOPE_FIELDS.items():
+        values = (scopes or {}).get(param)
+        if values:
+            clauses.append({"bool": {"must_not": {"terms": {field: list(values)}}}})
+    return clauses
+
+
 def _scoped(
     agg: dict[str, Any], others: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -799,6 +885,7 @@ def build_query(
     lang: str = "both",
     sort: str = SORT_RELEVANCE,
     filters: dict[str, list[str]] | None = None,
+    scopes: dict[str, list[str]] | None = None,
     ranges: dict[str, Any] | None = None,
     facet_queries: dict[str, str] | None = None,
     page: int = 1,
@@ -878,6 +965,11 @@ def build_query(
     # facet owns a range, so no facet may drop one; leaving them here means they
     # narrow the hits and every aggregation alike, exactly as before.
     range_clauses = _range_clauses(ranges)
+    # Scopes join the RANGE clauses in the query context, not the facet
+    # clauses in ``post_filter``: a scope says which corpus is being searched,
+    # so the aggregations must see it too — a facet's bucket counts should
+    # describe the scoped corpus, not the whole archive.
+    scope_clauses = _scope_clauses(scopes)
     # Entity visibility gate — ANDed alongside the caller's own narrowing, and
     # applied at EVERY type selection (an entity must stay hidden on the default
     # "All records" tab too, not only on ?type=entity).
@@ -896,6 +988,7 @@ def build_query(
     visibility_clauses = _visibility_clauses(include_unreferenced)
     filter_clauses: list[dict[str, Any]] = [
         *range_clauses,
+        *scope_clauses,
         *visibility_clauses,
     ]
 
@@ -966,9 +1059,9 @@ def build_query(
         # Recall clause: at least one of the bilingual fields must match, or
         # match_all when browsing.
         "must": must_clauses,
-        # RANGE narrowing plus the entity visibility gate (empty when nothing is
-        # requested and the gate is off). The exact-match facet clauses moved to
-        # ``post_filter`` — see the aggs comment below.
+        # RANGE narrowing, the search scopes, and the entity visibility gate
+        # (empty when nothing is requested). The exact-match facet clauses moved
+        # to ``post_filter`` — see the aggs comment below.
         "filter": filter_clauses,
     }
     if has_query:
@@ -1158,14 +1251,46 @@ def build_query(
         # search_after pages are stable + complete.
         "sort": _sort_spec(sort),
         "query": {"bool": bool_query},
-        # Highlight the title/body so the envelope can carry a snippet. (Harmless
-        # in browse mode — there's no matched term to highlight.)
+        # Highlight the title/body so the envelope can carry a snippet.
+        #
+        # ``max_analyzer_offset`` is load-bearing, not a tuning knob. ``body`` is a
+        # plain ``text`` field — no ``index_options: offsets``, no ``term_vector``
+        # (see ``jawafdehi_shared.search.mappings``) — so the unified highlighter's
+        # offset source is ANALYSIS: it re-runs the analyzer over the whole stored
+        # value at query time. OpenSearch caps that at the index-level
+        # ``index.highlight.max_analyzed_offset`` (default 1,000,000 characters) and
+        # THROWS past it, and material bodies are untruncated OCR text — some of it
+        # well over a megabyte.
+        #
+        # The throw lands in the fetch phase and fails the WHOLE search (400 ->
+        # ``SearchUnavailable`` -> 503). It is checked per returned hit, on field
+        # length alone, before the field is matched against the query — so a hit
+        # that matched only on its title takes the search down too, as long as an
+        # oversized document sits on the page. That is Sentry JAWAFDEHI-API-4B,
+        # rare only because BM25's length norm keeps megabyte documents off page 1:
+        # 5 of the 346,008 live material documents are over the cap (2026-09-30),
+        # with another 21 between 500k and 1M and climbing as OCR is re-run.
+        #
+        # Setting the option makes that branch unreachable: the throw requires the
+        # per-field offset to be unset. Text past the offset is simply not analyzed,
+        # so an oversized document still matches and still ranks — it may just come
+        # back without a snippet.
+        #
+        # Two traps, both silent:
+        #   * OpenSearch spells the QUERY option ``max_analyzer_offset``; only the
+        #     INDEX setting is ``max_analyzed_offset`` (Elasticsearch uses the latter
+        #     for both). The wrong key is an unknown field -> parsing exception ->
+        #     400 on EVERY search. The suite mocks the client, so no test here would
+        #     catch that — only a live query would.
+        #   * it must stay strictly BELOW the index-level limit; a larger value is
+        #     its own throw.
         "highlight": {
+            "max_analyzer_offset": HIGHLIGHT_MAX_ANALYZER_OFFSET,
             "fields": {
                 "title_ne": {},
                 "title_en": {},
                 "body": {},
-            }
+            },
         },
         "aggs": aggs,
     }
@@ -1335,6 +1460,18 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     for key in ("case_type", "case_status", "court", "case_number", "parties"):
         if raw.get(key) is not None:
             extra[key] = raw[key]
+
+    # Material-only: the document KIND, so a result card can name the shelf the
+    # document actually belongs to. Without it a client holding only ``source``
+    # must guess, and guesses wrong for most of a mixed corpus — 210 of the 228
+    # ``official_report`` documents are not annual reports.
+    #
+    # Read from ``raw`` rather than the top-level ``dataset_bucket``: raw carries
+    # it on every doc written since the ingest, while the indexed field only
+    # appears after the backfill. Same reasoning as ``court`` above — one source,
+    # no precedence question, no window where the response loses the kind.
+    if result_type == "material" and raw.get("jawafdehi:datasetBucket") is not None:
+        extra["dataset_bucket"] = raw["jawafdehi:datasetBucket"]
 
     # Case-only, and gated on the doc type rather than copied with the block
     # above, because ``status`` carries TWO vocabularies: Jawafdehi cases write
@@ -1651,6 +1788,7 @@ class SearchService:
         lang: str = "both",
         sort: str = SORT_RELEVANCE,
         filters: dict[str, list[str]] | None = None,
+        scopes: dict[str, list[str]] | None = None,
         ranges: dict[str, Any] | None = None,
         facet_queries: dict[str, str] | None = None,
         page: int = 1,
@@ -1697,6 +1835,7 @@ class SearchService:
             lang=lang,
             sort=sort,
             filters=filters,
+            scopes=scopes,
             ranges=ranges,
             facet_queries=facet_queries,
             page=page,

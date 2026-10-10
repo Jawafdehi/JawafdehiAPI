@@ -992,7 +992,7 @@ def test_patch_entity_notes_echoed_back_not_blanked():
     # concluded the write was discarded. The write was fine — the echo was built
     # as CaseSerializer(case) with no context, so _viewer_has_casework_access saw
     # no request, returned False, and blanked every internal note on the way out.
-    user = _contributor("subodh")
+    user = _contributor("editor")
     case = _make_case()
     _bind(case, "rajiva-rimala")
 

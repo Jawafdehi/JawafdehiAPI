@@ -1,0 +1,1021 @@
+{
+"districts": [
+{
+"@id": "https://jawafdehi.org/entity/location/district/achham-np0769",
+"name": {
+"en": "Achham",
+"ne": "अछाम"
+},
+"alternateName": [
+"Acham"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/arghakhanchi-np0550",
+"name": {
+"en": "Arghakhanchi",
+"ne": "अर्घाखाँची"
+},
+"alternateName": [
+"Argha Khanci"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/baglung-np0443",
+"name": {
+"en": "Baglung",
+"ne": "बागलुङ"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/baitadi-np0774",
+"name": {
+"en": "Baitadi",
+"ne": "बैतडी"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/bajhang-np0767",
+"name": {
+"en": "Bajhang",
+"ne": "बझाङ"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/bajura-np0768",
+"name": {
+"en": "Bajura",
+"ne": "बाजुरा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/banke-np0557",
+"name": {
+"en": "Banke",
+"ne": "बाँके"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/bara-np0233",
+"name": {
+"en": "Bara",
+"ne": "बारा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/madhesh-np02"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/bardiya-np0558",
+"name": {
+"en": "Bardiya",
+"ne": "बर्दिया"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/bhaktapur-np0326",
+"name": {
+"en": "Bhaktapur",
+"ne": "भक्तपुर"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/bhojpur-np0110",
+"name": {
+"en": "Bhojpur",
+"ne": "भोजपुर"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/chitawan-np0335",
+"name": {
+"en": "Chitwan",
+"ne": "चितवन"
+},
+"alternateName": [
+"Chitawan"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/dadeldhura-np0773",
+"name": {
+"en": "Dadeldhura",
+"ne": "डँडेलधुरा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/dailekh-np0661",
+"name": {
+"en": "Dailekh",
+"ne": "दैलेख"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/dang-np0556",
+"name": {
+"en": "Dang",
+"ne": "दाङ"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/darchula-np0775",
+"name": {
+"en": "Darchula",
+"ne": "दार्चुला"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/dhading-np0330",
+"name": {
+"en": "Dhading",
+"ne": "धादिङ"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/dhankuta-np0107",
+"name": {
+"en": "Dhankuta",
+"ne": "धनकुटा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/dhanusa-np0217",
+"name": {
+"en": "Dhanusha",
+"ne": "धनुषा"
+},
+"alternateName": [
+"Dhanusa"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/madhesh-np02"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/dolakha-np0322",
+"name": {
+"en": "Dolakha",
+"ne": "दोलखा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/dolpa-np0662",
+"name": {
+"en": "Dolpa",
+"ne": "डोल्पा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/doti-np0770",
+"name": {
+"en": "Doti",
+"ne": "डोटी"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/gorkha-np0436",
+"name": {
+"en": "Gorkha",
+"ne": "गोरखा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/gulmi-np0551",
+"name": {
+"en": "Gulmi",
+"ne": "गुल्मी"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/humla-np0666",
+"name": {
+"en": "Humla",
+"ne": "हुम्ला"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/ilam-np0103",
+"name": {
+"en": "Ilam",
+"ne": "इलाम"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/jajarkot-np0660",
+"name": {
+"en": "Jajarkot",
+"ne": "जाजरकोट"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/jhapa-np0104",
+"name": {
+"en": "Jhapa",
+"ne": "झापा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/jumla-np0663",
+"name": {
+"en": "Jumla",
+"ne": "जुम्ला"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/kailali-np0771",
+"name": {
+"en": "Kailali",
+"ne": "कैलाली"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/kalikot-np0664",
+"name": {
+"en": "Kalikot",
+"ne": "कालिकोट"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/kanchanpur-np0772",
+"name": {
+"en": "Kanchanpur",
+"ne": "कञ्चनपुर"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/sudur-paschim-np07"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/kapilbastu-np0549",
+"name": {
+"en": "Kapilvastu",
+"ne": "कपिलवस्तु"
+},
+"alternateName": [
+"Kapilbastu",
+"Kapilvastu District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/kaski-np0439",
+"name": {
+"en": "Kaski",
+"ne": "कास्की"
+},
+"alternateName": [
+"Kaski District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/kathmandu-np0327",
+"name": {
+"en": "Kathmandu",
+"ne": "काठमाडौँ"
+},
+"alternateName": [
+"Kathmandu District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/kavrepalanchok-np0324",
+"name": {
+"en": "Kavrepalanchok",
+"ne": "काभ्रेपलाञ्चोक"
+},
+"alternateName": [
+"Kavrepalanchok District",
+"Kabrepalanchok District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/khotang-np0112",
+"name": {
+"en": "Khotang",
+"ne": "खोटाङ"
+},
+"alternateName": [
+"Khotang District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/lalitpur-np0325",
+"name": {
+"en": "Lalitpur",
+"ne": "ललितपुर"
+},
+"alternateName": [
+"Lalitpur District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/lamjung-np0437",
+"name": {
+"en": "Lamjung",
+"ne": "लमजुङ"
+},
+"alternateName": [
+"Lamjung District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/mahottari-np0218",
+"name": {
+"en": "Mahottari",
+"ne": "महोत्तरी"
+},
+"alternateName": [
+"Mahottari District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/madhesh-np02"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/makwanpur-np0331",
+"name": {
+"en": "Makwanpur",
+"ne": "मकवानपुर"
+},
+"alternateName": [
+"Makwanpur District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/manang-np0438",
+"name": {
+"en": "Manang",
+"ne": "मनाङ"
+},
+"alternateName": [
+"Manang District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/morang-np0105",
+"name": {
+"en": "Morang",
+"ne": "मोरङ"
+},
+"alternateName": [
+"Morang District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/mugu-np0665",
+"name": {
+"en": "Mugu",
+"ne": "मुगु"
+},
+"alternateName": [
+"Mugu District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/mustang-np0445",
+"name": {
+"en": "Mustang",
+"ne": "मुस्ताङ"
+},
+"alternateName": [
+"Mustang District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/myagdi-np0444",
+"name": {
+"en": "Myagdi",
+"ne": "म्याग्दी"
+},
+"alternateName": [
+"Myagdi District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/nawalparasi-east-np0447",
+"name": {
+"en": "Nawalparasi East",
+"ne": "नवलपरासी (बर्दघाट सुस्तापूर्व)"
+},
+"alternateName": [
+"Nawalparasi (Bardghat Sustapur East) District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/nawalparasi-west-np0547",
+"name": {
+"en": "Nawalparasi West",
+"ne": "नवलपरासी"
+},
+"alternateName": [
+"Nawalparasi (Bardghat Sustapur West) District",
+"नवलपरासी (बर्दघाट सुस्तापश्चिम)"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/nuwakot-np0328",
+"name": {
+"en": "Nuwakot",
+"ne": "नुवाकोट"
+},
+"alternateName": [
+"Nuwakot District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/okhaldhunga-np0113",
+"name": {
+"en": "Okhaldhunga",
+"ne": "ओखलढुङ्गा"
+},
+"alternateName": [
+"Okhaldhunga District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/palpa-np0546",
+"name": {
+"en": "Palpa",
+"ne": "पाल्पा"
+},
+"alternateName": [
+"Palpa District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/panchthar-np0102",
+"name": {
+"en": "Panchthar",
+"ne": "पाँचथर"
+},
+"alternateName": [
+"Panchthar District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/parbat-np0442",
+"name": {
+"en": "Parbat",
+"ne": "पर्वत"
+},
+"alternateName": [
+"Parvat District",
+"Parwat District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/parsa-np0234",
+"name": {
+"en": "Parsa",
+"ne": "पर्सा"
+},
+"alternateName": [
+"Parsa District"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/madhesh-np02"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/pyuthan-np0555",
+"name": {
+"en": "Pyuthan",
+"ne": "प्यूठान"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/ramechhap-np0321",
+"name": {
+"en": "Ramechhap",
+"ne": "रामेछाप"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/rasuwa-np0329",
+"name": {
+"en": "Rasuwa",
+"ne": "रसुवा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/rautahat-np0232",
+"name": {
+"en": "Rautahat",
+"ne": "रौतहट"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/madhesh-np02"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/rolpa-np0554",
+"name": {
+"en": "Rolpa",
+"ne": "रोल्पा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/rukum-east-np0552",
+"name": {
+"en": "Rukum East"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/rukum-west-np0652",
+"name": {
+"en": "Rukum West",
+"ne": "रुकुम (पश्चिम)"
+},
+"alternateName": [
+"Rukum (West)"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/rupandehi-np0548",
+"name": {
+"en": "Rupandehi",
+"ne": "रुपन्देही"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/lumbini-np05"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/salyan-np0653",
+"name": {
+"en": "Salyan",
+"ne": "सल्यान"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/sankhuwasabha-np0109",
+"name": {
+"en": "Sankhuwasabha",
+"ne": "संखुवासभा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/saptari-np0215",
+"name": {
+"en": "Saptari",
+"ne": "सप्तरी"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/madhesh-np02"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/sarlahi-np0219",
+"name": {
+"en": "Sarlahi",
+"ne": "सर्लाही"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/madhesh-np02"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/sindhuli-np0320",
+"name": {
+"en": "Sindhuli",
+"ne": "सिन्धुली"
+},
+"alternateName": [
+"Sindhuali"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/sindhupalchok-np0323",
+"name": {
+"en": "Sindhupalchok",
+"ne": "सिन्धुपाल्चोक"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/bagmati-np03"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/siraha-np0216",
+"name": {
+"en": "Siraha",
+"ne": "सिरहा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/madhesh-np02"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/solukhumbu-np0111",
+"name": {
+"en": "Solukhumbu",
+"ne": "सोलुखुम्बु"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/sunsari-np0106",
+"name": {
+"en": "Sunsari",
+"ne": "सुनसरी"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/surkhet-np0659",
+"name": {
+"en": "Surkhet",
+"ne": "सुर्खेत"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/karnali-np06"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/syangja-np0441",
+"name": {
+"en": "Syangja",
+"ne": "स्याङजा"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/tanahu-np0440",
+"name": {
+"en": "Tanahun",
+"ne": "तनहुँ"
+},
+"alternateName": [
+"Tanahu"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/gandaki-np04"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/taplejung-np0101",
+"name": {
+"en": "Taplejung",
+"ne": "ताप्लेजुङ"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/terhathum-np0108",
+"name": {
+"en": "Terhathum",
+"ne": "तेह्रथुम"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/district/udayapur-np0114",
+"name": {
+"en": "Udayapur",
+"ne": "उदयपुर"
+},
+"alternateName": [
+"Udaypur"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/province/koshi-np01"
+}
+}
+],
+"localunits": [
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/barbardiya-municipality-51202",
+"name": {
+"en": "Barbaridya Municipality",
+"ne": "बारबर्दिया नगरपालिका"
+},
+"alternateName": [
+"Barbardiya Municipality"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/bardiya-np0558"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/bhaktapur-municipality-30702",
+"name": {
+"en": "Bhaktapur Municipality",
+"ne": "भक्तपुर नगरपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/bhaktapur-np0326"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/kathmandu-metropolitian-city-30608",
+"name": {
+"en": "Kathmandu Metropolitan City",
+"ne": "काठमाण्डौ महानगरपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/kathmandu-np0327"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/khajura-gaunpalika-51104",
+"name": {
+"en": "Khajura Rural Municipality",
+"ne": "खजुरा गाउँपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/banke-np0557"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/lalitpur-metropolitian-city-30802",
+"name": {
+"en": "Lalitpur Metropolitan City",
+"ne": "ललितपुर महानगरपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/lalitpur-np0325"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/madi-gaunpalika-40501",
+"name": {
+"en": "Madi Rural Municipality",
+"ne": "मादी गाउँपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/kaski-np0439"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/madi-gaunpalika-50205",
+"name": {
+"en": "Madi Rural Municipality",
+"ne": "मादी गाउँपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/rolpa-np0554"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/madi-municipality-10209",
+"name": {
+"en": "Madi Municipality",
+"ne": "मादी नगरपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/sankhuwasabha-np0109"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/madi-municipality-31307",
+"name": {
+"en": "Madi Municipality",
+"ne": "मादी नगरपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/chitawan-np0335"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/musikot-municipality-50404",
+"name": {
+"en": "Musikot Municipality",
+"ne": "मुसिकोट नगरपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/gulmi-np0551"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/musikot-municipality-60804",
+"name": {
+"en": "Musikot Municipality",
+"ne": "मुसिकोट नगरपालिका"
+},
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/rukum-west-np0652"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/sunkoshi-gaunpalika-10407",
+"name": {
+"en": "Sunakosi Rural Municipality",
+"ne": "सुनकोशी गाउँपालिका"
+},
+"alternateName": [
+"Sunakoushi Rural Municipality"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/okhaldhunga-np0113"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/sunkoshi-gaunpalika-30212",
+"name": {
+"en": "Sunakosi Rural Municipality",
+"ne": "सुनकोशी गाउँपालिका"
+},
+"alternateName": [
+"Sunakoushi Rural Municipality"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/sindhupalchok-np0323"
+}
+},
+{
+"@id": "https://jawafdehi.org/entity/location/localunit/sunkoshi-gaunpalika-31106",
+"name": {
+"en": "Sunakosi Rural Municipality",
+"ne": "सुनकोशी गाउँपालिका"
+},
+"alternateName": [
+"Sunakoushi Rural Municipality"
+],
+"containedInPlace": {
+"@id": "https://jawafdehi.org/entity/location/district/sindhuli-np0320"
+}
+}
+]
+}

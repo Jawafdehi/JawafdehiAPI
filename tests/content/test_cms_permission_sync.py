@@ -167,6 +167,66 @@ def test_managed_maps_agree_with_granted_rows():
         group = Group.objects.get(name=name)
         assert _page_codenames(group) == set(expected)
 
+
+@pytest.mark.django_db
+def test_create_groups_after_sync_keeps_newsroom_access():
+    """``create_groups`` must not revoke the CMS access this handler grants.
+
+    The two commands co-own ``Caseworker.permissions``: this handler adds
+    ``wagtailadmin.access_admin`` on ``post_migrate``, while ``create_groups``
+    owns the case-domain model permissions. Because deploys run ``migrate``
+    first and ``create_groups`` second, a blanket ``permissions.set()`` in the
+    latter dropped access_admin every time — and since the page and collection
+    rows live in separate tables they survived untouched, so the group still
+    looked fully provisioned while every caseworker got a 403 from
+    ``content.middleware.WagtailAdminAccessMiddleware``.
+
+    Pins the real deploy order, not either command in isolation.
+    """
+    from django.contrib.auth.models import Group
+    from django.core.management import call_command
+
+    sync_cms_group_permissions(using="default")
+    group = Group.objects.get(name="Caseworker")
+    assert _has_access_admin(group)
+
+    call_command("create_groups", verbosity=0)
+
+    group.refresh_from_db()
+    assert _has_access_admin(group), (
+        "create_groups revoked wagtailadmin.access_admin from Caseworker"
+    )
+    # The case-domain permissions it does own are still applied authoritatively.
+    assert group.permissions.filter(codename="delete_case").exists()
+    # And the Wagtail page/collection grants are untouched.
+    assert "publish_page" in _page_codenames(group)
+
+
+@pytest.mark.django_db
+def test_create_groups_still_authoritative_over_case_permissions():
+    """Scoping the replace must not weaken it inside the case domain.
+
+    ``create_groups`` stays the single owner of the case-domain model
+    permissions, so a hand-granted one outside its map is still revoked.
+    """
+    from django.contrib.auth.models import Group, Permission
+    from django.core.management import call_command
+
+    call_command("create_groups", verbosity=0)
+    readonly = Group.objects.get(name="ReadOnly")
+
+    # ReadOnly is view-only; grant it a case write permission by hand.
+    add_case = Permission.objects.get(
+        content_type__app_label="cases", codename="add_case"
+    )
+    readonly.permissions.add(add_case)
+
+    call_command("create_groups", verbosity=0)
+
+    readonly.refresh_from_db()
+    assert not readonly.permissions.filter(codename="add_case").exists()
+    assert readonly.permissions.filter(codename="view_case").exists()
+
     for name, expected in GROUP_COLLECTION_PERMS.items():
         group = Group.objects.get(name=name)
         assert _collection_codenames(group) == set(expected)

@@ -156,14 +156,20 @@ Each run gets a `run_id` and writes two files under `work/enricher-runs/`
 - `…-<stage>-<run_id>.log` — human-readable, UTC-timestamped
 - `…-<stage>-<run_id>.events.jsonl` — one JSON event per case/step
 
-`enrich_related_entities` writes five more, sharing that stem. The first two are the
-answer to "what did the model actually find", which the counts in the log do not give
-you — they survive a run that binds nothing:
+`enrich_related_entities` reads the court order first and the press release only when
+there is no readable order; every answer must quote its source, and every case must
+end with a district (spec: jawafdehi-meta
+`docs/2026-09-25-related-entities-court-order-first/design.md`). It writes seven more
+files, sharing that stem. The first two are the answer to "what did the model actually
+find", which the counts in the log do not give you — they survive a run that binds
+nothing:
 
 | File | Holds |
 |------|-------|
-| `.extracted.jsonl` | Every extracted name with its section and notes, per case |
+| `.extracted.jsonl` | Every extracted name with its section, notes and evidence quotes, per case |
 | `.accused_notes.jsonl` | The `accused_notes` array |
+| `.dropped.jsonl` | Every answer whose evidence quote failed grounding, with the reason. A grounded place that does not resolve to a district or municipality goes to `.review.jsonl` instead |
+| `.location_missing.jsonl` | Every case that ended with no district: its source, the windows read, the refused locations |
 | `.binds.jsonl` | Each bind, with the candidates that lost |
 | `.created.jsonl` | Each entity created or refused, with the reason |
 | `.nomatch.md` | Names still unmatched, grouped, with a Role column |

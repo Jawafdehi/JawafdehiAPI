@@ -32,7 +32,9 @@ from .service import (
     ALL_MATERIAL_TYPES,
     ALL_SORTS,
     ALL_TYPES,
+    EXCLUDE_SCOPE_FIELDS,
     FACET_FIELDS,
+    SCOPE_FIELDS,
     MAX_FACET_Q_TEXT,
     MAX_PAGE_SIZE,
     RANGE_FIELDS,
@@ -82,6 +84,31 @@ class SearchQuerySerializer(serializers.Serializer):
     # each other. And a facet's own bucket list is computed WITHOUT its own filter,
     # so the options you did not pick stay listed (with the counts you would get by
     # switching to them) rather than disappearing the moment you pick one.
+    # CORPUS SCOPE, not a refine facet (see service.SCOPE_FIELDS). ``source``
+    # narrows to one material publishing source — the token the curated
+    # /materials series registry is keyed on, so "search inside the CIAA annual
+    # reports" is ?type=material&source=ciaa_annual_report&q=…. Unlike a facet it
+    # narrows the aggregations too, and no endpoint hands back the list of
+    # sources: the column mixes publishers with document forms, so it is scoped
+    # against but never offered. Repeatable; repeated values union.
+    source = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
+    # CORPUS SCOPE, the document KIND within a source (see
+    # service.SCOPE_FIELDS). ``source`` alone cannot shelve the Auditor General
+    # corpus: all 228 documents carry ``official_report`` and 18 are annual
+    # reports. Not faceted and not enumerated anywhere — the series registry
+    # picks the token. Repeatable; repeated values union. Material-only.
+    dataset_bucket = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
+    # The NEGATION of the above (service.EXCLUDE_SCOPE_FIELDS), for a shelf that
+    # means "everything this source holds that the other shelves did not claim".
+    # Repeated values union into ONE must_not. A document with no bucket at all
+    # is not excluded, so it lands in the complement rather than nowhere.
+    dataset_bucket_exclude = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
     entity_type = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
@@ -304,6 +331,52 @@ class SearchQuerySerializer(serializers.Serializer):
             required=False,
             enum=list(ALL_SORTS),
             description="Result ordering. Defaults to relevance.",
+        ),
+        OpenApiParameter(
+            "source",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Corpus scope: restrict to one material publishing source (the "
+                "'/material/<source>/<ident>' IRI segment, e.g. "
+                "'ciaa_annual_report'). Repeatable; repeated values union. "
+                "Unlike a refine facet this also narrows the facet counts, and "
+                "no endpoint returns the list of sources — pair it with "
+                "?type=material. Inert for other result types."
+            ),
+        ),
+        OpenApiParameter(
+            "dataset_bucket",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Corpus scope: restrict to one document KIND within a source "
+                "(e.g. 'report_annual-report'). Narrower than ?source=, which "
+                "for some corpora mixes many kinds under one token — all 228 "
+                "Auditor General documents are 'official_report' and only 18 "
+                "are annual reports. Repeatable; repeated values union. Like "
+                "?source= this also narrows the facet counts, and no endpoint "
+                "returns the list of values. Pair with ?type=material; inert "
+                "for other result types."
+            ),
+        ),
+        OpenApiParameter(
+            "dataset_bucket_exclude",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "The negation of ?dataset_bucket=: exclude these document "
+                "kinds. For a shelf meaning 'everything this source holds that "
+                "the named kinds did not claim'. Repeatable; repeated values "
+                "union into one exclusion. A document carrying no kind at all "
+                "is NOT excluded."
+            ),
         ),
         OpenApiParameter(
             "entity_type",
@@ -546,6 +619,17 @@ class UnifiedSearchView(APIView):
         active_filters = {
             param: values for param in FACET_FIELDS if (values := data[param])
         }
+        # Corpus scopes, same registry discipline and same limit (a SCOPE_FIELDS
+        # entry still needs its serializer field above). Kept apart from the
+        # facets because they land in a different part of the query — see
+        # ``service.SCOPE_FIELDS``.
+        # Both scope registries, positive and negative — they are one dict to the
+        # service, which tells them apart by which registry the param is in.
+        active_scopes = {
+            param: values
+            for param in (*SCOPE_FIELDS, *EXCLUDE_SCOPE_FIELDS)
+            if (values := data[param])
+        }
         # Range bounds are kept SEPARATE from the exact-match facets: they are a
         # different clause kind (``range`` vs ``terms``) and a different value shape
         # (a scalar, not a list). Emptiness is ``is None`` — a truthiness test would
@@ -585,6 +669,7 @@ class UnifiedSearchView(APIView):
                 lang=data["lang"],
                 sort=data["sort"],
                 filters=active_filters,
+                scopes=active_scopes,
                 ranges=active_ranges,
                 facet_queries=data["facet_q"] or None,
                 page=data["page"],
@@ -625,6 +710,7 @@ class UnifiedSearchView(APIView):
                 "page": data["page"],
                 "page_size": data["page_size"],
                 "filters": active_filters,
+                "scopes": active_scopes,
                 "ranges": active_ranges,
                 # Under a cursor the service ignores ``page`` (stays 1); pass it so
                 # the builder doesn't mistake a deep cursor page for the first page.

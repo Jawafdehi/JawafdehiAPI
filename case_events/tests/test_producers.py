@@ -135,6 +135,104 @@ class TestHearingSignals:
         assert len(list(dockets.hearing_signals(timezone.now() - timedelta(hours=1), limit=2))) == 2
 
 
+class TestBackfilledHearingsAreNotDiscoveries:
+    """A projection of JSON we already held must not enter the window.
+
+    The producer keys on ``created_at``, so a backfill stamps "discovered now" on
+    records months old. With no watermark and a per-kind limit, a tier backfill
+    does not merely add noise — it pushes the window's genuine rows past the cap,
+    where they are dropped permanently.
+
+    The exclusion is written with ``exclude`` for a reason the first two tests
+    pin down: the cause-list crawl writes no ``extra_data`` at all, so anything
+    phrased as a positive filter on the wanted sources silently discards the
+    entire cause-list corpus — which is nearly every real signal — while looking
+    exactly like a quiet window.
+    """
+
+    def _since(self):
+        return timezone.now() - timedelta(hours=1)
+
+    def test_a_causelist_hearing_with_no_extra_data_still_emits(self):
+        court = make_court()
+        make_hearing(court)  # extra_data is NULL, as the cause-list path leaves it
+
+        assert len(list(dockets.hearing_signals(self._since()))) == 1
+
+    def test_a_hearing_with_extra_data_but_no_source_key_still_emits(self):
+        court = make_court()
+        make_hearing(court, extra_data={"note": "something else entirely"})
+
+        assert len(list(dockets.hearing_signals(self._since()))) == 1
+
+    def test_a_live_sweep_hearing_still_emits(self):
+        """The sweep discovers cases nobody listed. Those hearings ARE news."""
+        from courts.models import HEARING_SOURCE_SWEEP
+
+        court = make_court()
+        make_hearing(court, extra_data={"source": HEARING_SOURCE_SWEEP})
+
+        assert len(list(dockets.hearing_signals(self._since()))) == 1
+
+    def test_a_backfilled_hearing_does_not_emit(self):
+        from courts.models import HEARING_SOURCE_BACKFILL
+
+        court = make_court()
+        make_hearing(court, extra_data={"source": HEARING_SOURCE_BACKFILL})
+
+        assert list(dockets.hearing_signals(self._since())) == []
+
+    def test_a_backfill_flood_does_not_crowd_out_the_real_hearing(self):
+        """The failure this whole change exists to prevent.
+
+        Ten backfilled rows written before one real one, against a limit of
+        three. Ordered by ``created_at`` and unfiltered, the real hearing never
+        makes the cut — and it is never retried, because the next run rescans the
+        same window in the same order.
+        """
+        from courts.models import HEARING_SOURCE_BACKFILL
+
+        court = make_court()
+        for i in range(10):
+            make_hearing(
+                court,
+                case_number=f"082-CR-{i:04d}",
+                hearing_date_bs=f"2082-11-{i + 1:02d}",
+                extra_data={"source": HEARING_SOURCE_BACKFILL},
+            )
+        make_hearing(court, case_number="082-CR-9999", hearing_date_bs="2082-12-20")
+
+        signals = list(dockets.hearing_signals(self._since(), limit=3))
+
+        assert [s[1]["case_number"] for s in signals] == ["082-CR-9999"]
+
+    def test_window_totals_counts_what_the_scan_would_walk(self):
+        """If these two drift, the saturation report and its non-zero exit lie."""
+        from courts.models import HEARING_SOURCE_BACKFILL
+
+        court = make_court()
+        make_hearing(court, case_number="082-CR-0001")
+        make_hearing(
+            court,
+            case_number="082-CR-0002",
+            extra_data={"source": HEARING_SOURCE_BACKFILL},
+        )
+
+        totals = dockets.window_totals(window_hours=1)
+
+        assert totals[subjects.SIGNAL_DOCKET_HEARING_ADDED] == 1
+        assert dockets.backfilled_in_window(window_hours=1) == 1
+
+    def test_backfilled_rows_outside_the_window_are_not_counted(self):
+        from courts.models import HEARING_SOURCE_BACKFILL, CourtCaseHearing
+
+        court = make_court()
+        make_hearing(court, extra_data={"source": HEARING_SOURCE_BACKFILL})
+        CourtCaseHearing.objects.update(created_at=timezone.now() - timedelta(days=10))
+
+        assert dockets.backfilled_in_window(window_hours=1) == 0
+
+
 class TestVerdictSignals:
     def test_a_decided_case_becomes_a_verdict_signal(self):
         court = make_court()

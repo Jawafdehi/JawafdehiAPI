@@ -44,7 +44,33 @@ logger = logging.getLogger("newsletter.views")
 _SENDPULSE_CONFLICT_STATUS = 409
 
 
-def _send_welcome_email(client: SendPulseClient, email: str, first_name: str) -> None:
+# One shared address book serves the newsletter and the Open House, so
+# ``consent_source`` is what tells them apart — including which welcome to send.
+# An Open House signup asked to be told about sessions; greeting them as a
+# newsletter subscriber would answer a question they did not ask.
+_OPEN_HOUSE_CONSENT_PREFIX = "openhouse"
+
+
+def _welcome_for(consent_source: str) -> tuple[str, str]:
+    """Pick the welcome template and subject for a signup's origin."""
+    if consent_source.strip().lower().startswith(_OPEN_HOUSE_CONSENT_PREFIX):
+        return (
+            "newsletter/openhouse_welcome_email.html",
+            getattr(
+                settings,
+                "SENDPULSE_OPEN_HOUSE_WELCOME_SUBJECT",
+                "You're on the list — Jawafdehi Open House",
+            ),
+        )
+    return (
+        "newsletter/welcome_email.html",
+        getattr(settings, "SENDPULSE_WELCOME_SUBJECT", "Welcome to Jawafdehi"),
+    )
+
+
+def _send_welcome_email(
+    client: SendPulseClient, email: str, first_name: str, consent_source: str = ""
+) -> None:
     """Best-effort welcome email on subscribe.
 
     Double opt-in isn't available via SendPulse's API for this account, so the
@@ -54,8 +80,8 @@ def _send_welcome_email(client: SendPulseClient, email: str, first_name: str) ->
     if not getattr(settings, "SENDPULSE_WELCOME_EMAIL", False) or not client.can_send_email:
         return
     try:
-        html = render_to_string("newsletter/welcome_email.html", {"first_name": first_name})
-        subject = getattr(settings, "SENDPULSE_WELCOME_SUBJECT", "Welcome to Jawafdehi")
+        template, subject = _welcome_for(consent_source)
+        html = render_to_string(template, {"first_name": first_name})
         client.send_email(email, subject, html, to_name=first_name)
     except Exception as exc:  # noqa: BLE001 — welcome is best-effort, never block subscribe
         logger.warning("Newsletter welcome email failed (subscribe still succeeded): %s", exc)
@@ -150,6 +176,15 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
                     "locale": data.get("locale", ""),
                     "consent_source": data["consentSource"],
                     "privacy_version": data["privacyVersion"],
+                    # The address book stores the full name as `name`, but every
+                    # campaign template reads `{{first_name}}` — unset, that
+                    # renders as a bare "Namaste ,". Send both.
+                    "first_name": data["firstName"],
+                    # Open House fields. Always sent, blank when absent, so a
+                    # contact's shape does not depend on which form created it.
+                    "region": data.get("region", ""),
+                    "whatsapp": data.get("whatsapp", ""),
+                    "organisation": data.get("organisation", ""),
                 },
             )
         except SendPulseError as exc:
@@ -178,7 +213,7 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
                 status=status.HTTP_202_ACCEPTED,
             )
 
-        _send_welcome_email(client, email, data["firstName"])
+        _send_welcome_email(client, email, data["firstName"], data["consentSource"])
 
         return Response(
             {

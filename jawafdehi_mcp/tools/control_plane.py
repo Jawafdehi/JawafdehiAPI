@@ -161,6 +161,9 @@ class SearchControlPlaneTool(_ControlPlaneTool):
         "type",
         "lang",
         "sort",
+        "source",
+        "dataset_bucket",
+        "dataset_bucket_exclude",
         "entity_type",
         "case_type",
         "tags",
@@ -217,6 +220,32 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     "type": "string",
                     "enum": ["relevance", "newest", "oldest", "title", "featured"],
                     "default": "relevance",
+                },
+                # Corpus SCOPE, not a refine facet: restricts to one material
+                # publishing source (the ``/material/<source>/<ident>`` IRI
+                # segment, e.g. "ciaa_annual_report"). Unlike the facets below it
+                # also narrows the facet counts, and nothing returns the list of
+                # sources — pair it with ``type: ["material"]``.
+                "source": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                # Corpus SCOPE one level finer than ``source``: the document KIND
+                # within it (e.g. "report_annual-report"). Needed because one
+                # source token can hold many kinds — every Auditor General
+                # document is ``official_report``, and only 18 of 228 are annual
+                # reports. Like ``source`` it narrows the facet counts and is
+                # never enumerated back; pair it with ``type: ["material"]``.
+                "dataset_bucket": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                # The negation: exclude these kinds. For "everything in this
+                # source the named kinds did not claim". A document carrying no
+                # kind at all is NOT excluded.
+                "dataset_bucket_exclude": {
+                    "type": "array",
+                    "items": {"type": "string"},
                 },
                 "entity_type": {
                     "type": "array",

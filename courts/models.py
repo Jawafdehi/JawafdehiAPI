@@ -136,6 +136,30 @@ class CourtCase(models.Model):
         return build_courtcase_iri(self.court_id, self.case_number)
 
 
+# ── hearing provenance ───────────────────────────────────────────────────────
+# Values written to ``CourtCaseHearing.extra_data["source"]``. They live here
+# rather than next to either writer because a writer (courts.scraper.base) and a
+# reader (case_events.producers.dockets) both need the vocabulary, and neither
+# should have to import the other to get it.
+#
+# The cause-list crawl writes no source at all — ``extra_data`` stays null — so a
+# row with no key is a cause-list row, not a row of unknown origin. Any query
+# that singles out a source must therefore use ``exclude``, never a positive
+# filter on the complement, or it silently drops the entire cause-list corpus.
+
+#: Written off a case's detail page while the register sweep was discovering it.
+#: The case was new to us at that moment, so the hearing was news too.
+HEARING_SOURCE_SWEEP = "register_sweep"
+
+#: Written by ``materialise_swept_hearings`` out of ``enrichment_hearings`` JSON
+#: this mirror has held, unqueryably, since the sweep that stored it. Identical
+#: in shape to a swept row and distinct in the only way that matters: the fact is
+#: not new, only the relational projection of it is. A signal asserts "we just
+#: learned this", which for these rows is false — so
+#: :mod:`case_events.producers.dockets` excludes them from its window.
+HEARING_SOURCE_BACKFILL = "swept_hearing_backfill"
+
+
 class CourtCaseHearing(models.Model):
     """One causelist appearance for a case. Ported from the FastAPI
     ``court_case_hearings`` table. Keyed by an autoincrement ``id``; the
