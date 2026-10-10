@@ -53,12 +53,13 @@ class Result:
     what: str
     before: str
     after: str
-    #: Rows the action needs INSERTED, as unsaved instances. An action never
-    #: writes: it edits the material it was handed in memory and hands anything
-    #: new back here, so ``handle`` remains the single place that touches the
-    #: database and a dry run provably cannot write. Only ``move_source`` uses
-    #: it — everything else edits in place.
-    pending: tuple[Material, ...] = ()
+    #: Rows BESIDES the corrected material that this action needs written — an
+    #: INSERT for ``move_source``'s new IRI, an UPDATE for the survivor whose
+    #: Nepali title ``soft_delete_stub`` promotes. An action never writes: it
+    #: edits in memory and hands anything else back here, so ``handle`` stays
+    #: the single place that touches the database and a dry run provably cannot
+    #: write.
+    also_save: tuple[Material, ...] = ()
 
 
 def _name(material: Material) -> dict[str, Any]:
@@ -141,23 +142,33 @@ def collapse_repeated_suffix() -> Callable[[Material], Result]:
     return action
 
 
-def soft_delete_duplicate(survivor_ident: str) -> Callable[[Material], Result]:
-    """Flag a row deleted, but only once its survivor is proven to exist.
+def _survivor(ident: str) -> Material:
+    """The row a deletion is predicated on, or a Skip explaining why not.
 
-    The three checks below are the whole point of doing this in a command rather
-    than by hand: a soft-delete whose survivor is missing (or is itself deleted,
-    or holds different text) removes a document from the public archive and
-    leaves nothing in its place.
+    Checked for every deletion because a soft-delete whose survivor is missing
+    — or is itself deleted — removes a document from a public accountability
+    archive and leaves nothing in its place.
+    """
+    survivor = Material.objects.filter(source=OAG_SOURCE, ident=ident).first()
+    if survivor is None:
+        raise Skip(f"survivor {ident} not found")
+    if survivor.is_deleted:
+        raise Skip(f"survivor {ident} is itself deleted")
+    return survivor
+
+
+def soft_delete_duplicate(survivor_ident: str) -> Callable[[Material], Result]:
+    """Flag a row deleted, but only once it is proven to be an EXACT copy.
+
+    "Exact" is the operative word and is narrower than it sounds — see
+    ``soft_delete_stub`` for the other shape this corpus has, and the note on
+    ``oag-11657`` in the corrections table for a pair this deliberately refuses.
     """
 
     def action(material: Material) -> Result:
         if material.is_deleted:
             raise Skip("already deleted")
-        survivor = Material.objects.filter(source=OAG_SOURCE, ident=survivor_ident).first()
-        if survivor is None:
-            raise Skip(f"survivor {survivor_ident} not found")
-        if survivor.is_deleted:
-            raise Skip(f"survivor {survivor_ident} is itself deleted")
+        survivor = _survivor(survivor_ident)
         mine, theirs = _text(material), _text(survivor)
         if not mine or not theirs:
             raise Skip("one of the pair has no transcript to compare")
@@ -165,6 +176,71 @@ def soft_delete_duplicate(survivor_ident: str) -> Callable[[Material], Result]:
             raise Skip(f"transcript differs from {survivor_ident} — not a duplicate")
         material.is_deleted = True
         return Result(material.ident, "soft-delete", "live", f"deleted (dup of {survivor_ident})")
+
+    return action
+
+
+#: The fields whose ABSENCE makes a row a stub. Named rather than inferred,
+#: because "has no content" is a claim about this specific row as inspected on
+#: 2026-10-09 — it carries a name, a description and an ``associatedMedia`` link
+#: to ``old.oag.gov.np``, and nothing else. ``text`` is checked separately, it
+#: being the one whose presence on the SURVIVOR is also required.
+STUB_MUST_LACK = ("encoding", "publisher", "datePublished", "numberOfPages")
+
+
+def soft_delete_stub(survivor_ident: str) -> Callable[[Material], Result]:
+    """Flag a CONTENT-FREE row deleted, keeping any Nepali title it carries.
+
+    The other duplicate shape in this corpus. ``20260321.a19b89d0`` holds a name
+    and a link to ``old.oag.gov.np`` and nothing else — no transcript, no
+    publisher, no date, no mirrored file — while a full row for the same report
+    sits beside it. ``soft_delete_duplicate`` cannot express that: its proof is
+    transcript equality, and a stub has no transcript to compare, so it would
+    skip forever rather than delete. The proof here is the opposite one — this
+    row carries no content and the survivor does.
+
+    The stub's Nepali title is promoted to the survivor first, when the survivor
+    has none. Only 18 of these 228 rows have a Nepali name at all, so deleting
+    one of them to tidy up a duplicate would destroy the scarcer thing to save
+    the commoner one.
+    """
+
+    def action(material: Material) -> Result:
+        if material.is_deleted:
+            raise Skip("already deleted")
+        # The whole justification is "this row carries nothing the survivor does
+        # not", so check every field that claim rests on, not just the transcript.
+        # A stub that has since acquired a publisher, a date or a mirrored file
+        # has unique data, and deleting it would hide that data rather than tidy
+        # a duplicate — which is exactly the outcome this command exists to avoid.
+        if _text(material):
+            raise Skip("no longer a stub — it now has a transcript")
+        for field in STUB_MUST_LACK:
+            if material.data.get(field):
+                raise Skip(f"no longer a stub — it now has {field}")
+        survivor = _survivor(survivor_ident)
+        if not _text(survivor):
+            raise Skip(f"survivor {survivor_ident} has no transcript either")
+
+        also_save: tuple[Material, ...] = ()
+        promoted = ""
+        mine = material.data.get("name")
+        theirs = survivor.data.get("name")
+        if isinstance(mine, dict) and isinstance(theirs, dict):
+            nepali = mine.get("ne")
+            if isinstance(nepali, str) and nepali.strip() and not theirs.get("ne"):
+                theirs["ne"] = nepali
+                also_save = (survivor,)
+                promoted = f"; Nepali title moved to {survivor_ident}"
+
+        material.is_deleted = True
+        return Result(
+            material.ident,
+            "soft-delete stub",
+            "live (no transcript)",
+            f"deleted (stub of {survivor_ident}){promoted}",
+            also_save=also_save,
+        )
 
     return action
 
@@ -193,7 +269,7 @@ def move_source(new_source: str, *, publisher: dict[str, Any]) -> Callable[[Mate
         moved = Material.from_jsonld(data, material_type=material.material_type)
         moved.full_clean()
         material.is_deleted = True
-        return Result(material.ident, "move source", material.iri, new_iri, pending=(moved,))
+        return Result(material.ident, "move source", material.iri, new_iri, also_save=(moved,))
 
     return action
 
@@ -251,16 +327,21 @@ CORRECTIONS: list[tuple[str, str, Callable[[Material], Result]]] = [
     ("oag-11143", "ingested four times across two buckets", soft_delete_duplicate("oag-11141")),
     ("oag-11147", "ingested four times across two buckets", soft_delete_duplicate("oag-11141")),
     ("oag-11148", "ingested four times across two buckets", soft_delete_duplicate("oag-11141")),
-    (
-        "oag-11657",
-        "duplicate of the canonical-URL copy of the 62nd Annual Report Summary",
-        soft_delete_duplicate("oag-11716"),
-    ),
+    # DELIBERATELY ABSENT: oag-11657 / oag-11716, the two copies of the 62nd
+    # Annual Report Summary. The plan lists them as duplicates and they are the
+    # same document, but the transcripts are not the same text — they are two
+    # extraction passes over it, differing across 74 hunks in line-wrapping
+    # (`# दूरदृष्टि\n(VISION)` vs `# दूरदृष्टि (VISION)`) and in OCR of the
+    # Nepali ordinal itself (बासट्ठिौं vs बासट्रिऔं). Choosing between them is a
+    # judgement about which transcription is better, not the mechanical removal
+    # of a redundant copy, and the plan's own rule for near-duplicates — stated
+    # there for the two RTI pairs — is to refer them to a human rather than
+    # auto-delete. Same rule, same answer.
     (
         "20260321.a19b89d0",
-        "hand-added row duplicating the Madhesh 5th province report; no publisher, date, "
-        "transcript or R2 mirror",
-        soft_delete_duplicate("oag-11537"),
+        "a content-free stub of the Madhesh 5th province report: no publisher, date, "
+        "transcript or R2 mirror, only a link to old.oag.gov.np",
+        soft_delete_stub("oag-11537"),
     ),
     *[
         (ident, "province name repeated by the ingest", collapse_repeated_suffix())
@@ -342,10 +423,10 @@ class Command(BaseCommand):
                 self.stdout.write(f"      before: {result.before}")
                 self.stdout.write(f"      after:  {result.after}")
                 if apply:
-                    # The INSERTs first: move_source's new row must exist before
-                    # the old one is flagged deleted, so the document is never
-                    # absent from the read plane, even momentarily.
-                    for row in result.pending:
+                    # The companions first: move_source's new row must exist
+                    # before the old one is flagged deleted, so the document is
+                    # never absent from the read plane, even momentarily.
+                    for row in result.also_save:
                         row.save()
                     material.save()
 
