@@ -159,6 +159,58 @@ class ReindexEntitiesCaseCountTests(TestCase):
         assert sent[cited.iri] == 1
         assert sent[f"{IRI_BASE}/organization/beta-traders"] == 0
 
+    def test_catchup_re_reads_the_count_of_an_entity_cited_mid_rebuild(self):
+        """The catchup detecting a mid-build citation is only half the job.
+
+        ``build`` closes over the counts map loaded BEFORE the build started, so
+        re-yielding the entity without re-reading its count rewrites it into the
+        new generation still carrying 0 — hidden until the next reconcile, which
+        is the exact outcome catchup source 2 exists to prevent.
+        """
+        from cases.models import (
+            Case,
+            CaseEntityRelationship,
+            CaseState,
+            CaseType,
+            RelationshipType,
+        )
+
+        cited = _seed("alpha-holdings")
+        sent: dict[str, int] = {}
+        calls = {"n": 0}
+
+        def fake_stream_bulk(client, index, docs):
+            docs = list(docs)
+            for doc in docs:
+                sent[doc["iri"]] = doc["case_count"]
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # A case is published while the main pass is streaming.
+                case = Case.objects.create(
+                    title="Published mid-rebuild",
+                    offence_type=CaseType.CORRUPTION,
+                    state=CaseState.PUBLISHED,
+                )
+                CaseEntityRelationship.objects.create(
+                    case=case,
+                    nes_id=cited.iri,
+                    relationship_type=RelationshipType.ACCUSED,
+                )
+            return len(docs)
+
+        with (
+            patch("entities.search_index.index_by_iri"),
+            patch("cases.search_index.index"),
+            patch("jawafdehi_shared.search.reindex.make_client"),
+            patch("jawafdehi_shared.search.reindex.create_index"),
+            patch("jawafdehi_shared.search.reindex.stream_bulk", fake_stream_bulk),
+        ):
+            call_command("reindex_entities", rebuild=True)
+
+        # The main pass wrote 0, correctly — the bind did not exist yet. The
+        # catchup must overwrite it with 1, or the entity stays invisible.
+        assert sent[cited.iri] == 1
+
     def test_a_cases_db_failure_aborts_rather_than_archiving_everything(self):
         from entities.search_visibility import ReferenceLookupError
 

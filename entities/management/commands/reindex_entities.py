@@ -29,7 +29,7 @@ from jawafdehi_shared.search.opensearch import ENTITY_INDEX
 from jawafdehi_shared.search.reindex import reindex, summary
 from entities import search_index
 from entities.models import StoredEntity
-from entities.search_visibility import case_counts
+from entities.search_visibility import case_counts, entity_case_count
 
 
 class Command(BaseCommand):
@@ -85,6 +85,16 @@ class Command(BaseCommand):
                the visibility of every entity it binds in either direction.
                ``Case.updated_at`` is ``auto_now``, so any save is caught.
 
+            Each catchup IRI has its count RE-READ before it is yielded, into the
+            same ``counts`` map ``build`` closes over. Without that, sources 2 and
+            3 accomplish nothing they exist for: the entity would be re-written
+            into the new generation carrying the count loaded before the build
+            began — still 0 for an entity cited mid-build — and would stay hidden
+            until the reconcile, which is the outcome the catchup is meant to
+            prevent. Source 1 re-reads too; its count has not moved, and one query
+            per changed entity over a small catchup set is not worth branching to
+            avoid.
+
             Residual gap, closed by ``reconcile_entity_visibility`` rather than
             here: a bind DELETED mid-build on a case that is not itself saved.
             ``CaseEntityRelationship`` has no ``updated_at`` and a deleted row
@@ -97,12 +107,14 @@ class Command(BaseCommand):
             seen: set[str] = set()
             for e in StoredEntity.objects.filter(updated_at__gte=since).iterator():
                 seen.add(e.iri)
+                _refresh_count(counts, e.iri)
                 yield e.iri, (None if e.is_deleted else e)
 
             for iri in _iris_touched_since(since):
                 if iri in seen:
                     continue
                 seen.add(iri)
+                _refresh_count(counts, iri)
                 entity = StoredEntity.objects.filter(iri=iri).first()
                 yield iri, (None if (entity is None or entity.is_deleted) else entity)
 
@@ -114,6 +126,19 @@ class Command(BaseCommand):
             catchup=changed,
         )
         self.stdout.write(self.style.SUCCESS(summary("nes-entities", result)))
+
+
+def _refresh_count(counts: dict[str, int], iri: str) -> None:
+    """Re-read one entity's citation count into the bulk map, for the catchup.
+
+    ``entity_case_count`` is the LIVE path: it logs and returns 0 on a cases-DB
+    failure rather than raising. That posture is right here too — the catchup is
+    a best-effort narrowing of an already-complete pass, and
+    ``reconcile_entity_visibility`` repairs what it gets wrong. The bulk load in
+    ``handle`` keeps the opposite posture, because an empty map THERE would
+    archive the whole corpus in one swap.
+    """
+    counts[iri] = entity_case_count(iri)
 
 
 def _iris_touched_since(since) -> set[str]:
