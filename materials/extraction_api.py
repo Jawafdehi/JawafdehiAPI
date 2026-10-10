@@ -20,8 +20,121 @@ in its own right, so it carries no ``@context``.
 from __future__ import annotations
 
 from django.db.models import Prefetch
+from rest_framework import serializers
 
 from .models import DocumentExtraction, ExtractedFigure, ExtractedTable
+
+# ---------------------------------------------------------------------------
+# Response shapes — SCHEMA ONLY.
+#
+# Nothing below serializes anything: the payload builders in this module return
+# plain dicts and the views return those straight through. These classes exist
+# so drf-spectacular can describe the two extraction endpoints in the schema
+# published at ``/api/schema/``; without them it logs "unable to guess
+# serializer" and the paths appear with no response body at all, which is
+# useless to anyone generating a client.
+#
+# They live HERE, beside the builders they mirror, rather than in ``views.py``,
+# because this is where drift would originate: a key added to ``_table_stub``
+# or ``_figure_payload`` and not to its serializer is the failure mode, and it
+# is far likelier to be noticed with the two a dozen lines apart.
+# ---------------------------------------------------------------------------
+
+
+class ExtractionPointSerializer(serializers.Serializer):
+    point_index = serializers.IntegerField()
+    label = serializers.CharField(allow_blank=True)
+    series = serializers.CharField(allow_blank=True)
+    value = serializers.FloatField(allow_null=True)  # FloatField(null=True)
+    estimated = serializers.BooleanField(
+        help_text="True when the value was read off the image rather than "
+        "printed. Carried per POINT, not per figure: one chart routinely mixes "
+        "both kinds."
+    )
+
+
+class ExtractionFigureSerializer(serializers.Serializer):
+    ordinal = serializers.IntegerField()
+    key = serializers.CharField()
+    uid = serializers.CharField()
+    page_no = serializers.IntegerField()
+    index_on_page = serializers.IntegerField()
+    title = serializers.CharField(allow_blank=True)
+    chart_type = serializers.CharField(allow_blank=True)
+    unit = serializers.CharField(allow_blank=True)
+    x_axis = serializers.CharField(allow_blank=True)
+    y_axis = serializers.CharField(allow_blank=True)
+    notes = serializers.CharField(allow_blank=True)
+    verify_note = serializers.CharField(allow_blank=True)
+    verified = serializers.BooleanField(
+        allow_null=True,
+        help_text="Null means NOT CHECKED, which is distinct from false. The "
+        "model is BooleanField(null=True) and the distinction is meaningful.",
+    )
+    points = ExtractionPointSerializer(many=True)
+
+
+class ExtractionTableStubSerializer(serializers.Serializer):
+    """A table WITHOUT its markdown, as carried in the manifest."""
+
+    ordinal = serializers.IntegerField(
+        help_text="Presentation order. Recomputed on every ingest — address a "
+        "table by 'key', never by this."
+    )
+    key = serializers.CharField(
+        help_text="Stable address, e.g. 'p0018-t1' (page 18, first table on it)."
+    )
+    uid = serializers.CharField()
+    page_no = serializers.IntegerField()
+    index_on_page = serializers.IntegerField()
+    caption = serializers.CharField(allow_blank=True)
+    header = serializers.ListField(
+        help_text="Header cells. The model is JSONField(default=list), so this "
+        "is an ARRAY, not a string. The element type is deliberately "
+        "unconstrained: the ingest validates only that the JSON is a list, and "
+        "all 145 production tables currently return [], so declaring "
+        "array<string> would be a guess rather than an observation.",
+    )
+    n_rows = serializers.IntegerField()
+    n_cols = serializers.IntegerField()
+    fidelity = serializers.CharField(allow_blank=True)
+
+
+class ExtractionTableSerializer(ExtractionTableStubSerializer):
+    """One table in full — the stub plus the markdown a client renders."""
+
+    markdown = serializers.CharField()
+
+
+class ExtractionProvenanceSerializer(serializers.Serializer):
+    dataset = serializers.CharField(allow_blank=True)
+    dataset_revision = serializers.CharField(allow_blank=True)
+    doc_id = serializers.CharField(allow_blank=True)
+    page_count = serializers.IntegerField()
+    text_source = serializers.CharField(allow_blank=True)
+    transcript_verdict = serializers.CharField(allow_blank=True)
+    figures_verdict = serializers.CharField(allow_blank=True)
+    ingested_at = serializers.DateTimeField()
+
+
+class ExtractionCountsSerializer(serializers.Serializer):
+    tables = serializers.IntegerField()
+    figures = serializers.IntegerField()
+    points = serializers.IntegerField()
+
+
+class ExtractionManifestSerializer(serializers.Serializer):
+    material = serializers.CharField(help_text="The material's @id IRI.")
+    provenance = ExtractionProvenanceSerializer()
+    counts = ExtractionCountsSerializer()
+    tables = ExtractionTableStubSerializer(
+        many=True, help_text="Stubs only. Fetch markdown per table by 'key'."
+    )
+    figures = ExtractionFigureSerializer(many=True)
+
+
+class ExtractionErrorSerializer(serializers.Serializer):
+    detail = serializers.CharField()
 
 
 def _table_stub(table: ExtractedTable) -> dict:

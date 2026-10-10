@@ -23,6 +23,7 @@ import jsonpatch
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils.cache import patch_vary_headers
+from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.decorators import (
     api_view,
@@ -46,6 +47,9 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 from . import jsonld
 from . import provenance
 from .extraction_api import (
+    ExtractionErrorSerializer,
+    ExtractionManifestSerializer,
+    ExtractionTableSerializer,
     load_extraction,
     manifest_payload,
     table_payload,
@@ -1037,6 +1041,37 @@ def _resolve_for_extraction(request, source: str, ident: str):
     return iri, None
 
 
+# @extend_schema MUST sit ABOVE @api_view. Verified both ways: moved below, ty
+# is happy and the generated schema loses the response types entirely (0 refs
+# instead of 6) — drf-spectacular reads the annotation off the function before
+# api_view wraps it in a view class. The suppression is therefore a
+# djangorestframework-stubs limitation (api_view's AsView return type does not
+# satisfy extend_schema's Callable[..., Any] bound), not a real type error.
+@extend_schema(  # ty: ignore[invalid-argument-type]
+    summary="Document extraction manifest",
+    description=(
+        "Provenance, every chart with its full series, and a STUB per ruled "
+        "table (ordinal, page, caption, dimensions — no markdown). Fetch a "
+        "table's markdown separately by its 'key'.\n\n"
+        "404 is the common case, not an error: most materials are a single "
+        "scraped page rather than a transcribed report. A client uses the 404 "
+        "to decide not to offer the tab at all.\n\n"
+        "Responses carry 'Vary: Authorization' because WHETHER this URL exists "
+        "depends on the caller — a non-public material 404s for anonymous "
+        "readers and resolves for a caseworker."
+    ),
+    responses={
+        200: ExtractionManifestSerializer,
+        # Reachable, and previously undeclared: the URL's ident pattern
+        # ([^/]+) is wider than MATERIAL_IRI_RE, so _resolve_for_extraction
+        # rejects e.g. an uppercase ident with 400 before any lookup happens.
+        400: ExtractionErrorSerializer,
+        404: ExtractionErrorSerializer,
+        # Same global anon throttle as every other public read.
+        429: ExtractionErrorSerializer,
+    },
+    tags=["materials"],
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def material_extraction(request, source: str, ident: str):
@@ -1074,6 +1109,30 @@ def material_extraction(request, source: str, ident: str):
     return resp
 
 
+# @extend_schema MUST sit ABOVE @api_view. Verified both ways: moved below, ty
+# is happy and the generated schema loses the response types entirely (0 refs
+# instead of 6) — drf-spectacular reads the annotation off the function before
+# api_view wraps it in a view class. The suppression is therefore a
+# djangorestframework-stubs limitation (api_view's AsView return type does not
+# satisfy extend_schema's Callable[..., Any] bound), not a real type error.
+@extend_schema(  # ty: ignore[invalid-argument-type]
+    summary="One extracted table, markdown included",
+    description=(
+        "'key' is the manifest's 'key' ('p0018-t1' — page 18, first table on "
+        "it), NOT its 'ordinal'. Ordinals are presentation order and are "
+        "recomputed on every ingest, so addressing by one would make a saved "
+        "link quietly resolve to a DIFFERENT table as soon as an earlier table "
+        "was recovered upstream."
+    ),
+    responses={
+        200: ExtractionTableSerializer,
+        400: ExtractionErrorSerializer,
+        404: ExtractionErrorSerializer,
+        # Same global anon throttle as every other public read.
+        429: ExtractionErrorSerializer,
+    },
+    tags=["materials"],
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def material_extraction_table(request, source: str, ident: str, key: str):

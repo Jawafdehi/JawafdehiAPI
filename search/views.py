@@ -17,7 +17,7 @@ import uuid
 
 import sentry_sdk
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import serializers, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -277,6 +277,107 @@ class SearchQuerySerializer(serializers.Serializer):
     # Opaque deep-paging cursor (the ``next_cursor`` from a prior response). When
     # given, ``page`` is ignored and results resume after that point (search_after).
     cursor = serializers.CharField(required=False, allow_blank=False)
+
+
+# ---------------------------------------------------------------------------
+# Response shapes — SCHEMA ONLY.
+#
+# These are never used to serialize: the envelope is built as a plain dict in
+# ``SearchService.search`` and returned straight through. They exist so
+# drf-spectacular can describe ``GET /api/search/``, which is published at
+# ``/api/schema/`` and consumed by anyone generating a client.
+#
+# Without them spectacular logs "unable to guess serializer … Ignoring view for
+# now" and publishes the path with **no response body**. The route is NOT
+# dropped — an earlier version of this comment said it was, and that was wrong:
+# ``main``'s schema does list ``/api/search/``, annotated "No response body".
+# That is the worse outcome of the two, because a client generator emits a call
+# that compiles and returns nothing it can deserialize.
+#
+# Keep them in step with the dict literal at the end of ``SearchService.search``
+# and with ``search/service.py::_serialize_hit``; a drifted schema is worse than
+# none, because a generated client fails at runtime instead of at generation.
+# ---------------------------------------------------------------------------
+class SearchResultTitleSerializer(serializers.Serializer):
+    ne = serializers.CharField(allow_null=True)
+    en = serializers.CharField(allow_null=True)
+
+
+class SearchResultSerializer(serializers.Serializer):
+    type = serializers.CharField(
+        allow_null=True,
+        help_text=(
+            "Usually one of: " + ", ".join(sorted(ALL_TYPES)) + ". NOT a closed "
+            "enum, and nullable. _serialize_hit falls back to "
+            "`source.get(\"source_app\", \"unknown\")` when the index name does "
+            "not map to a known type — which yields null for a document whose "
+            "source_app is indexed as null, the same field this schema declares "
+            "nullable one line below.\n\n"
+            "KNOWN INCONSISTENCY: POST /api/search/click validates its "
+            "result_type against the closed set, so a fallback value round-"
+            "tripped from here is rejected and the beacon is dropped (the view "
+            "returns 204 regardless, so the client cannot tell). Tightening the "
+            "fallback or widening the beacon is a behaviour change and belongs "
+            "in its own PR; this schema reports what is actually emitted."
+        ),
+    )
+    id = serializers.CharField(help_text="The document's canonical @id IRI.")
+    source_app = serializers.CharField(allow_null=True)
+    title = SearchResultTitleSerializer()
+    snippet = serializers.DictField(
+        child=serializers.CharField(),
+        help_text="Highlighted excerpt keyed by language ('ne' / 'en'). May be empty.",
+    )
+    score = serializers.FloatField(allow_null=True)
+    url = serializers.CharField(allow_null=True, help_text="Frontend URL for the hit.")
+    api_url = serializers.CharField(allow_null=True, help_text="API URL for the hit.")
+    matched_fields = serializers.ListField(child=serializers.CharField())
+    extra = serializers.DictField(
+        help_text="Per-type extras. Case hits may add status, case_track and "
+        "proceeding dates; keys are omitted rather than null when unset.",
+    )
+    card = serializers.DictField(
+        required=False,
+        help_text="Denormalized render payload. Case hits only; omitted otherwise.",
+    )
+
+
+class SearchResponseSerializer(serializers.Serializer):
+    query = serializers.CharField()
+    normalized_query = serializers.CharField()
+    lang = serializers.CharField()
+    sort = serializers.CharField()
+    page = serializers.IntegerField()
+    page_size = serializers.IntegerField()
+    count = serializers.IntegerField(help_text="Total matches across all types.")
+    counts = serializers.DictField(
+        child=serializers.IntegerField(), help_text="Match count per result type."
+    )
+    facets = serializers.DictField(help_text="Term buckets, keyed by facet field.")
+    extents = serializers.DictField(
+        help_text="Corpus extent for the range filters. Empty unless the search "
+        "is case-only — distinct from 'facets', which are term buckets.",
+    )
+    results = SearchResultSerializer(many=True)
+    next_cursor = serializers.CharField(
+        allow_null=True, help_text="Opaque deep-paging cursor; null on the last page."
+    )
+    search_id = serializers.CharField(
+        help_text="Opaque id for this query. REQUIRED by POST /api/search/click "
+        "as the join key, so a client that drops it can never send the beacon.",
+    )
+    did_you_mean = serializers.CharField(
+        allow_null=True,
+        help_text="A single suggested spelling, or null. Always present. Offered "
+        "only when the result set is empty or wholly fuzzy, and never applied "
+        "automatically.",
+    )
+
+
+class SearchErrorSerializer(serializers.Serializer):
+    """The ``{"detail": ...}`` shape, used for 503 and for service-raised 400s."""
+
+    detail = serializers.CharField()
 
 
 @extend_schema(
@@ -573,6 +674,32 @@ class SearchQuerySerializer(serializers.Serializer):
             ),
         ),
     ],
+    responses={
+        200: SearchResponseSerializer,
+        # 400 has TWO shapes and declaring either one alone is a lie. A rejected
+        # query parameter is raised by SearchQuerySerializer.is_valid(
+        # raise_exception=True) and comes back keyed by field name
+        # ({"page_size": ["..."]}); a SearchError from the service comes back as
+        # {"detail": "..."}. A client has to handle both, so the schema says
+        # "object" and the description says which is which.
+        400: OpenApiResponse(
+            response=OpenApiTypes.OBJECT,
+            description=(
+                "Either a DRF field-error map — `{\"page_size\": [\"...\"]}` — "
+                "for a rejected query parameter, or `{\"detail\": \"...\"}` for a "
+                "SearchError raised while executing the query."
+            ),
+        ),
+        # OpenSearch is a hard dependency with no in-process fallback — see the
+        # module docstring. A client must treat 503 as retryable, not as "no
+        # results", so it belongs in the published contract.
+        # Anonymous callers share a global hourly throttle, so 429 is a
+        # routine outcome of a crawl or a chatty client — not an edge case, and
+        # it is the same argument that puts 503 in this list: a client has to
+        # know the call is retryable rather than terminally failed.
+        429: SearchErrorSerializer,
+        503: SearchErrorSerializer,
+    },
     tags=["search"],
 )
 class UnifiedSearchView(APIView):
