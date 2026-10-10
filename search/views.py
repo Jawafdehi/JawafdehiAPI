@@ -288,12 +288,15 @@ class SearchQuerySerializer(serializers.Serializer):
 # ``/api/schema/`` and consumed by anyone generating a client.
 #
 # Without them spectacular logs "unable to guess serializer … Ignoring view for
-# now" and DROPS the path from the schema entirely — the endpoint silently did
-# not exist in our published contract.
+# now" and publishes the path with **no response body**. The route is NOT
+# dropped — an earlier version of this comment said it was, and that was wrong:
+# ``main``'s schema does list ``/api/search/``, annotated "No response body".
+# That is the worse outcome of the two, because a client generator emits a call
+# that compiles and returns nothing it can deserialize.
 #
 # Keep them in step with the dict literal at the end of ``SearchService.search``
-# and with ``search/service.py::_serialize_hit``; a drifted schema is worse than none, because a
-# generated client fails at runtime instead of at generation.
+# and with ``search/service.py::_serialize_hit``; a drifted schema is worse than
+# none, because a generated client fails at runtime instead of at generation.
 # ---------------------------------------------------------------------------
 class SearchResultTitleSerializer(serializers.Serializer):
     ne = serializers.CharField(allow_null=True)
@@ -302,12 +305,21 @@ class SearchResultTitleSerializer(serializers.Serializer):
 
 class SearchResultSerializer(serializers.Serializer):
     type = serializers.CharField(
+        allow_null=True,
         help_text=(
             "Usually one of: " + ", ".join(sorted(ALL_TYPES)) + ". NOT a closed "
-            "enum — _serialize_hit falls back to the document's source_app (or "
-            "the literal 'unknown') when the index name does not map to a known "
-            "type, so a client must tolerate other values."
-        )
+            "enum, and nullable. _serialize_hit falls back to "
+            "`source.get(\"source_app\", \"unknown\")` when the index name does "
+            "not map to a known type — which yields null for a document whose "
+            "source_app is indexed as null, the same field this schema declares "
+            "nullable one line below.\n\n"
+            "KNOWN INCONSISTENCY: POST /api/search/click validates its "
+            "result_type against the closed set, so a fallback value round-"
+            "tripped from here is rejected and the beacon is dropped (the view "
+            "returns 204 regardless, so the client cannot tell). Tightening the "
+            "fallback or widening the beacon is a behaviour change and belongs "
+            "in its own PR; this schema reports what is actually emitted."
+        ),
     )
     id = serializers.CharField(help_text="The document's canonical @id IRI.")
     source_app = serializers.CharField(allow_null=True)
@@ -681,6 +693,11 @@ class SearchErrorSerializer(serializers.Serializer):
         # OpenSearch is a hard dependency with no in-process fallback — see the
         # module docstring. A client must treat 503 as retryable, not as "no
         # results", so it belongs in the published contract.
+        # Anonymous callers share a global hourly throttle, so 429 is a
+        # routine outcome of a crawl or a chatty client — not an edge case, and
+        # it is the same argument that puts 503 in this list: a client has to
+        # know the call is retryable rather than terminally failed.
+        429: SearchErrorSerializer,
         503: SearchErrorSerializer,
     },
     tags=["search"],

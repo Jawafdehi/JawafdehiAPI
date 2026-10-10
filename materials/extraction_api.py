@@ -43,9 +43,9 @@ from .models import DocumentExtraction, ExtractedFigure, ExtractedTable
 
 class ExtractionPointSerializer(serializers.Serializer):
     point_index = serializers.IntegerField()
-    label = serializers.CharField(allow_null=True)
-    series = serializers.CharField(allow_null=True)
-    value = serializers.FloatField(allow_null=True)
+    label = serializers.CharField(allow_blank=True)
+    series = serializers.CharField(allow_blank=True)
+    value = serializers.FloatField(allow_null=True)  # FloatField(null=True)
     estimated = serializers.BooleanField(
         help_text="True when the value was read off the image rather than "
         "printed. Carried per POINT, not per figure: one chart routinely mixes "
@@ -59,13 +59,13 @@ class ExtractionFigureSerializer(serializers.Serializer):
     uid = serializers.CharField()
     page_no = serializers.IntegerField()
     index_on_page = serializers.IntegerField()
-    title = serializers.CharField(allow_null=True)
-    chart_type = serializers.CharField(allow_null=True)
-    unit = serializers.CharField(allow_null=True)
-    x_axis = serializers.CharField(allow_null=True)
-    y_axis = serializers.CharField(allow_null=True)
-    notes = serializers.CharField(allow_null=True)
-    verify_note = serializers.CharField(allow_null=True)
+    title = serializers.CharField(allow_blank=True)
+    chart_type = serializers.CharField(allow_blank=True)
+    unit = serializers.CharField(allow_blank=True)
+    x_axis = serializers.CharField(allow_blank=True)
+    y_axis = serializers.CharField(allow_blank=True)
+    notes = serializers.CharField(allow_blank=True)
+    verify_note = serializers.CharField(allow_blank=True)
     verified = serializers.BooleanField(
         allow_null=True,
         help_text="Null means NOT CHECKED, which is distinct from false. The "
@@ -87,16 +87,17 @@ class ExtractionTableStubSerializer(serializers.Serializer):
     uid = serializers.CharField()
     page_no = serializers.IntegerField()
     index_on_page = serializers.IntegerField()
-    caption = serializers.CharField(allow_null=True)
+    caption = serializers.CharField(allow_blank=True)
     header = serializers.ListField(
-        child=serializers.CharField(),
         help_text="Header cells. The model is JSONField(default=list), so this "
-        "is an ARRAY, not a string — declaring it as a string made every "
-        "generated client fail to deserialize a manifest.",
+        "is an ARRAY, not a string. The element type is deliberately "
+        "unconstrained: the ingest validates only that the JSON is a list, and "
+        "all 145 production tables currently return [], so declaring "
+        "array<string> would be a guess rather than an observation.",
     )
     n_rows = serializers.IntegerField()
     n_cols = serializers.IntegerField()
-    fidelity = serializers.CharField(allow_null=True)
+    fidelity = serializers.CharField(allow_blank=True)
 
 
 class ExtractionTableSerializer(ExtractionTableStubSerializer):
@@ -106,13 +107,13 @@ class ExtractionTableSerializer(ExtractionTableStubSerializer):
 
 
 class ExtractionProvenanceSerializer(serializers.Serializer):
-    dataset = serializers.CharField(allow_null=True)
-    dataset_revision = serializers.CharField(allow_null=True)
-    doc_id = serializers.CharField(allow_null=True)
-    page_count = serializers.IntegerField(allow_null=True)
-    text_source = serializers.CharField(allow_null=True)
-    transcript_verdict = serializers.CharField(allow_null=True)
-    figures_verdict = serializers.CharField(allow_null=True)
+    dataset = serializers.CharField(allow_blank=True)
+    dataset_revision = serializers.CharField(allow_blank=True)
+    doc_id = serializers.CharField(allow_blank=True)
+    page_count = serializers.IntegerField()
+    text_source = serializers.CharField(allow_blank=True)
+    transcript_verdict = serializers.CharField(allow_blank=True)
+    figures_verdict = serializers.CharField(allow_blank=True)
     ingested_at = serializers.DateTimeField()
 
 

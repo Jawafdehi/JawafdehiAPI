@@ -36,21 +36,6 @@ def _json_200(schema, path, method="get"):
         "/api/materials/{source}/{ident}/extraction/tables/{key}/",
     ],
 )
-def test_endpoint_is_present_in_the_schema(schema, path):
-    assert path in schema["paths"], (
-        f"{path} is missing from the published schema entirely. "
-        f"Known paths: {sorted(schema['paths'])[:5]}…"
-    )
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/api/search/",
-        "/api/materials/{source}/{ident}/extraction/",
-        "/api/materials/{source}/{ident}/extraction/tables/{key}/",
-    ],
-)
 def test_endpoint_describes_its_200_body(schema, path):
     body = _json_200(schema, path)
 
@@ -173,3 +158,57 @@ def test_search_400_is_not_declared_as_a_detail_only_object(schema):
         "parameter comes back as a DRF field-error map, not {detail}."
     )
     assert four_hundred.get("description")
+
+
+def test_only_genuinely_nullable_fields_are_declared_nullable(schema):
+    """The mirror of the `verified` defect, and it shipped in the same commit.
+
+    Declaring a non-nullable field nullable is just as wrong as the reverse: it
+    forces every consumer into an Optional they can never actually receive. In
+    these models only two fields are `null=True` — ExtractedFigure.verified and
+    ExtractedFigurePoint.value. Everything else is `blank=True`, which means
+    empty string or empty list, NOT null. The live manifest agrees: zero nulls
+    across 145 tables / 46 figures / 580 points, with 89 captions as "".
+    """
+    components = schema["components"]["schemas"]
+    nullable = {
+        f"{name}.{field}"
+        for name, body in components.items()
+        if name.startswith(("Extraction", "ExtractedFigure", "ExtractionTable"))
+        for field, spec in (body.get("properties") or {}).items()
+        if spec.get("nullable")
+    }
+
+    assert nullable == {"ExtractionFigure.verified", "ExtractionPoint.value"}, (
+        "The set of nullable extraction fields drifted from the models. Only "
+        "ExtractedFigure.verified and ExtractedFigurePoint.value are null=True; "
+        f"the schema declares {sorted(nullable)}."
+    )
+
+
+def test_extraction_header_does_not_guess_an_element_type(schema):
+    """The ingest validates only that header is a list.
+
+    Every production table returns `[]`, so there is no observation behind any
+    element type — and this file exists because an unobserved guess is exactly
+    what goes wrong.
+    """
+    header = schema["components"]["schemas"]["ExtractionTableStub"]["properties"][
+        "header"
+    ]
+
+    assert header["type"] == "array"
+    assert "items" not in header or not header["items"].get("type")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/search/",
+        "/api/materials/{source}/{ident}/extraction/",
+        "/api/materials/{source}/{ident}/extraction/tables/{key}/",
+    ],
+)
+def test_throttled_responses_are_declared(schema, path):
+    """429 is routine under the 1000/hour anon throttle, not an edge case."""
+    assert "429" in schema["paths"][path]["get"]["responses"]

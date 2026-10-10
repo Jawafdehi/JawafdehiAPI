@@ -1067,6 +1067,8 @@ def _resolve_for_extraction(request, source: str, ident: str):
         # rejects e.g. an uppercase ident with 400 before any lookup happens.
         400: ExtractionErrorSerializer,
         404: ExtractionErrorSerializer,
+        # Same global anon throttle as every other public read.
+        429: ExtractionErrorSerializer,
     },
     tags=["materials"],
 )
@@ -1126,6 +1128,8 @@ def material_extraction(request, source: str, ident: str):
         200: ExtractionTableSerializer,
         400: ExtractionErrorSerializer,
         404: ExtractionErrorSerializer,
+        # Same global anon throttle as every other public read.
+        429: ExtractionErrorSerializer,
     },
     tags=["materials"],
 )
