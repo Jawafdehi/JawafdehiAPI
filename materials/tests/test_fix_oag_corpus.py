@@ -301,6 +301,29 @@ class StubSoftDeleteTests(TestCase):
         self.assertFalse(stub.is_deleted)
         self.assertIn("no longer a stub", output)
 
+    def test_refuses_once_the_stub_has_gained_any_content_field(self):
+        # "No transcript" is not the whole claim — the justification is that the
+        # row carries nothing the survivor does not. A stub that has since been
+        # enriched with a publisher, a date, a page count or a mirrored file
+        # holds unique data, and deleting it would hide that data.
+        for field, value in (
+            ("publisher", {"name": {"en": "Office of the Auditor General"}}),
+            ("datePublished", "2023-07-16"),
+            ("numberOfPages", 412),
+            ("encoding", {"@type": "MediaObject", "contentUrl": "https://s3/x.pdf"}),
+        ):
+            with self.subTest(field=field):
+                Material.objects.all().delete()
+                stub, _ = self.seed_pair()
+                stub.data[field] = value
+                stub.save()
+
+                output = run(apply=True)
+
+                stub.refresh_from_db()
+                self.assertFalse(stub.is_deleted)
+                self.assertIn(f"it now has {field}", output)
+
     def test_refuses_when_the_survivor_has_no_transcript_either(self):
         stub = seed(self.STUB, "", text="")
         seed("oag-11537", "Fifth Annual Report", text="")

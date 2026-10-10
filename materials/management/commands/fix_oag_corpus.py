@@ -180,6 +180,14 @@ def soft_delete_duplicate(survivor_ident: str) -> Callable[[Material], Result]:
     return action
 
 
+#: The fields whose ABSENCE makes a row a stub. Named rather than inferred,
+#: because "has no content" is a claim about this specific row as inspected on
+#: 2026-10-09 — it carries a name, a description and an ``associatedMedia`` link
+#: to ``old.oag.gov.np``, and nothing else. ``text`` is checked separately, it
+#: being the one whose presence on the SURVIVOR is also required.
+STUB_MUST_LACK = ("encoding", "publisher", "datePublished", "numberOfPages")
+
+
 def soft_delete_stub(survivor_ident: str) -> Callable[[Material], Result]:
     """Flag a CONTENT-FREE row deleted, keeping any Nepali title it carries.
 
@@ -200,10 +208,16 @@ def soft_delete_stub(survivor_ident: str) -> Callable[[Material], Result]:
     def action(material: Material) -> Result:
         if material.is_deleted:
             raise Skip("already deleted")
+        # The whole justification is "this row carries nothing the survivor does
+        # not", so check every field that claim rests on, not just the transcript.
+        # A stub that has since acquired a publisher, a date or a mirrored file
+        # has unique data, and deleting it would hide that data rather than tidy
+        # a duplicate — which is exactly the outcome this command exists to avoid.
         if _text(material):
-            # It has gained a transcript since this was written, so it is no
-            # longer the empty stub this correction was reasoned about.
             raise Skip("no longer a stub — it now has a transcript")
+        for field in STUB_MUST_LACK:
+            if material.data.get(field):
+                raise Skip(f"no longer a stub — it now has {field}")
         survivor = _survivor(survivor_ident)
         if not _text(survivor):
             raise Skip(f"survivor {survivor_ident} has no transcript either")
