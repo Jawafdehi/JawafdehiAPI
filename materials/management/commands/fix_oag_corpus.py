@@ -53,6 +53,12 @@ class Result:
     what: str
     before: str
     after: str
+    #: Rows the action needs INSERTED, as unsaved instances. An action never
+    #: writes: it edits the material it was handed in memory and hands anything
+    #: new back here, so ``handle`` remains the single place that touches the
+    #: database and a dry run provably cannot write. Only ``move_source`` uses
+    #: it — everything else edits in place.
+    pending: tuple[Material, ...] = ()
 
 
 def _name(material: Material) -> dict[str, Any]:
@@ -186,9 +192,8 @@ def move_source(new_source: str, *, publisher: dict[str, Any]) -> Callable[[Mate
         data["publisher"] = publisher
         moved = Material.from_jsonld(data, material_type=material.material_type)
         moved.full_clean()
-        moved.save()
         material.is_deleted = True
-        return Result(material.ident, "move source", material.iri, new_iri)
+        return Result(material.ident, "move source", material.iri, new_iri, pending=(moved,))
 
     return action
 
@@ -337,11 +342,18 @@ class Command(BaseCommand):
                 self.stdout.write(f"      before: {result.before}")
                 self.stdout.write(f"      after:  {result.after}")
                 if apply:
+                    # The INSERTs first: move_source's new row must exist before
+                    # the old one is flagged deleted, so the document is never
+                    # absent from the read plane, even momentarily.
+                    for row in result.pending:
+                        row.save()
                     material.save()
 
             if not apply:
-                # Nothing was written, but the actions mutated in-memory copies and
-                # move_source() really did INSERT. Unwind it all.
+                # Belt and braces. No action writes — they edit in memory and
+                # hand INSERTs back as Result.pending — so there should be
+                # nothing to unwind. This keeps that true if a future action
+                # forgets the rule.
                 transaction.set_rollback(True, using="ngm")
 
         verb = "applied" if apply else "would apply"

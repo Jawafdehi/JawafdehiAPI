@@ -14,6 +14,7 @@ Run under the platform settings (DB-less: sqlite fallback) from the repo root::
 from __future__ import annotations
 
 from io import StringIO
+from unittest import mock
 
 from django.core.management import call_command
 from django.test import TestCase
@@ -293,8 +294,8 @@ class MoveSourceTests(TestCase):
         self.assertIn("already exists", output)
 
     def test_dry_run_leaves_no_row_behind(self):
-        # move_source() INSERTs, so unlike every other action a dry run has
-        # something real to unwind.
+        # move_source is the one action that produces a NEW row, so it is where
+        # a dry run is most likely to leak one.
         self.seed_aml()
 
         run()
@@ -304,6 +305,19 @@ class MoveSourceTests(TestCase):
                 iri="https://jawafdehi.org/material/document/oag-11353"
             ).exists()
         )
+
+    def test_dry_run_does_not_save_at_all(self):
+        # Stronger than "no row survives": a dry run must not call save() even
+        # once. A save inside a rolled-back transaction still schedules an
+        # on_commit search index write, and a reviewer should not have to trace
+        # Django's commit semantics to be sure a phantom document cannot be
+        # indexed. Not writing at all removes the question.
+        self.seed_aml()
+
+        with mock.patch.object(Material, "save", autospec=True) as save:
+            run()
+
+        save.assert_not_called()
 
 
 class MissingIdentTests(TestCase):
