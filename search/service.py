@@ -24,7 +24,6 @@ import json
 import logging
 from typing import Any
 
-from django.conf import settings
 
 from jawafdehi_shared.search.aliases import generation_ordinal
 from jawafdehi_shared.search.opensearch import (
@@ -588,16 +587,20 @@ def _visibility_clauses(include_unreferenced: bool) -> list[dict[str, Any]]:
     caseworker asking for the whole registry — see ``search.views``), so the
     caller's clause list is byte-identical to the pre-gate DSL in that case.
 
-    Also returns an empty list while ``settings.ENTITY_VISIBILITY_GATE_ENABLED``
-    is false, which is the DEFAULT and is what makes this safe to merge. The
-    clause below filters on ``case_count``, a field this release adds to the
-    mapping: until ``reindex_entities`` has actually written it, no live
-    document carries it, the ``range`` arm matches nothing, and an entity
-    therefore satisfies NEITHER arm. Enabled on an un-reindexed index this does
-    not gate public entity search, it empties it — and since code deploys
-    automatically on merge while the reindex is a manual off-peak job, the
-    window between the two is real. Flip the setting after the reindex, not
-    before. See ``config.settings.ENTITY_VISIBILITY_GATE_ENABLED``.
+    The gate is UNCONDITIONAL — there is no feature flag. It used to sit behind
+    ``ENTITY_VISIBILITY_GATE_ENABLED`` because ``case_count`` is a field this
+    release adds: code deploys automatically on merge while ``reindex_entities``
+    is a manual off-peak job, so between the two no live document carries the
+    field. A bare two-arm clause would then match NEITHER arm for every entity
+    and empty public entity search rather than gating it.
+
+    The third ``should`` arm below closes that window instead of a flag, and is
+    self-healing rather than permanent: ``entities.search_index.build_doc``
+    always writes ``case_count`` — 0 for an entity no published case cites — so
+    once the reindex has run, no entity document is missing the field and the
+    arm can never match again. Before the reindex it holds the pre-gate
+    behaviour; after it, the gate is exact. Nothing has to be flipped, and
+    nothing has to be remembered.
 
     NOT a bare ``range`` on ``case_count``. Only entity documents carry that
     field, and a ``range`` clause EXCLUDES a document that is missing the field
@@ -611,7 +614,7 @@ def _visibility_clauses(include_unreferenced: bool) -> list[dict[str, Any]]:
     which is the right direction: an unlabelled document is not an entity, and
     failing open for non-entities beats blanking the tab.
     """
-    if include_unreferenced or not settings.ENTITY_VISIBILITY_GATE_ENABLED:
+    if include_unreferenced:
         return []
     return [
         {
@@ -625,6 +628,13 @@ def _visibility_clauses(include_unreferenced: bool) -> list[dict[str, Any]]:
                         }
                     },
                     {"range": {"case_count": {"gte": 1}}},
+                    # The deploy→reindex window, and only that: inert the moment
+                    # every entity document carries ``case_count``.
+                    {
+                        "bool": {
+                            "must_not": {"exists": {"field": "case_count"}}
+                        }
+                    },
                 ],
                 "minimum_should_match": 1,
             }

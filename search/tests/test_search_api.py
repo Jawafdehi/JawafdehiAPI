@@ -10,24 +10,21 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from django.test import override_settings
 from rest_framework.test import APIClient
 
 
 def _narrowing(client):
     """Filter clauses from the last query, minus the entity visibility gate.
 
-    ``build_query`` ANDs an entity-visibility clause into every filter list when
-    the gate is enabled (see ``search.service._visibility_clauses``), so a bare
-    equality assertion on ``filter`` would test that clause as much as the
-    caller's own narrowing. Stripping it keeps each assertion below about the
-    thing it names. The clause itself is imported from the implementation, never
-    restated.
+    ``build_query`` ANDs an entity-visibility clause into every filter list
+    (see ``search.service._visibility_clauses``), so a bare equality assertion
+    on ``filter`` would test that clause as much as the caller's own narrowing.
+    Stripping it keeps each assertion below about the thing it names. The clause
+    itself is imported from the implementation, never restated.
 
-    Subtracts a LIST rather than indexing ``[0]``, because the gate is off by
-    default (``ENTITY_VISIBILITY_GATE_ENABLED``) and ``_visibility_clauses``
-    then returns nothing to strip. That keeps this helper correct on both sides
-    of the rollout flip instead of raising IndexError on one of them.
+    Subtracts a LIST rather than indexing ``[0]``, so the helper still works for
+    the one caller that lifts the gate (``include_unreferenced``), where
+    ``_visibility_clauses`` returns nothing to strip.
     """
     from search.service import _visibility_clauses
 
@@ -859,13 +856,11 @@ def test_search_click_beacon_swallows_invalid_payload():
 def _visibility_clause():
     from search.service import _visibility_clauses
 
-    with override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True):
-        return _visibility_clauses(False)[0]
+    return _visibility_clauses(False)[0]
 
 
 @pytest.mark.django_db
-@override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True)
-def test_search_api_gates_unreferenced_entities_once_enabled():
+def test_search_api_gates_unreferenced_entities():
     client = MagicMock()
     client.search.return_value = _canned()
     with patch("search.service.make_client", return_value=client):
@@ -876,70 +871,25 @@ def test_search_api_gates_unreferenced_entities_once_enabled():
 
 
 @pytest.mark.django_db
-@override_settings(ENTITY_VISIBILITY_GATE_ENABLED=False)
-def test_search_api_does_not_gate_until_the_setting_is_flipped():
-    """The merge-safety property, and the reason the gate is a setting.
+def test_search_api_gate_spares_entities_not_yet_reindexed():
+    """The merge-safety property, and what replaced the feature flag.
 
     ``case_count`` does not exist on any document in the live generation until
     ``reindex_entities`` writes it, and a ``range`` clause does not match a
-    document missing the field — so a gate enabled on an un-reindexed index
-    returns ZERO entities, not the cited ~1.5k. Code deploys automatically on
-    merge and the reindex is a separate manual job, so shipping this enabled
-    would black out public entity search for the length of that gap. Merging it
-    disabled must therefore be a no-op for every caller.
+    document missing the field — so a two-arm gate on an un-reindexed index
+    returns ZERO entities, not the cited ~17.6k. Code deploys automatically on
+    merge and the reindex is a separate manual job, so that gap is real.
+
+    The third arm holds the pre-gate behaviour across it. It is self-healing
+    rather than permanent: ``build_doc`` always writes ``case_count`` (0 for an
+    uncited entity), so after the reindex no entity document is missing the
+    field and this arm can never match again.
     """
-    client = MagicMock()
-    client.search.return_value = _canned()
-    with patch("search.service.make_client", return_value=client):
-        resp = APIClient().get("/api/search/", {"q": "x"})
-    assert resp.status_code == 200
-    clauses = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
-    assert not any("should" in c.get("bool", {}) for c in clauses)
-    assert _visibility_clause() not in clauses
+    shoulds = _visibility_clause()["bool"]["should"]
+    assert {"bool": {"must_not": {"exists": {"field": "case_count"}}}} in shoulds
 
 
 @pytest.mark.django_db
-@override_settings(ENTITY_VISIBILITY_GATE_ENABLED=False)
-def test_search_api_gate_disabled_ignores_the_opt_out_for_everyone():
-    """With the gate off, ``include_unreferenced`` changes nothing for anyone —
-    authorized or not. Pinned so the flag cannot start meaning something on the
-    disabled path, where the whole contract is "identical to the pre-gate DSL".
-
-    The CASEWORKER leg is the one that carries the weight. An anonymous caller
-    has the flag forced to False by the role check in ``search.views``, so two
-    anonymous requests would compare equal whatever this code did — an identity
-    comparison dressed up as a test. Only an authorized caller actually reaches
-    ``_visibility_clauses(True)``, and the point here is that on the disabled
-    path that produces the same DSL as ``_visibility_clauses(False)``.
-    """
-    from django.contrib.auth import get_user_model
-    from django.contrib.auth.models import Group
-
-    caseworker = get_user_model().objects.create_user(
-        username="gate-disabled-caseworker", password="x"
-    )
-    group, _ = Group.objects.get_or_create(name="Caseworker")
-    caseworker.groups.add(group)
-
-    def filters(params, *, user=None):
-        client = MagicMock()
-        client.search.return_value = _canned()
-        api = APIClient()
-        if user is not None:
-            api.force_authenticate(user=user)
-        with patch("search.service.make_client", return_value=client):
-            resp = api.get("/api/search/", params)
-        assert resp.status_code == 200
-        return client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
-
-    baseline = filters({"q": "x"})
-    assert filters({"q": "x", "include_unreferenced": "true"}) == baseline
-    assert filters({"q": "x", "include_unreferenced": "true"}, user=caseworker) == baseline
-    assert filters({"q": "x"}, user=caseworker) == baseline
-
-
-@pytest.mark.django_db
-@override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True)
 def test_search_api_gate_spares_non_entity_documents():
     """The clause must read "not an entity OR a cited entity", never a bare range
     on ``case_count``. Only entity docs carry that field, and a bare range
@@ -953,7 +903,6 @@ def test_search_api_gate_spares_non_entity_documents():
 
 
 @pytest.mark.django_db
-@override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True)
 def test_search_api_gate_applies_to_every_type_selection():
     """Including the default (no ``type``) tab: an archived entity must not
     reappear just because the caller did not narrow to entities."""
@@ -968,7 +917,6 @@ def test_search_api_gate_applies_to_every_type_selection():
 
 
 @pytest.mark.django_db
-@override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True)
 def test_search_api_ignores_the_opt_out_for_an_anonymous_caller():
     """Ignored, not rejected: /api/search/ is AllowAny and its contract is "one
     query over public documents", so an anonymous caller passing the flag gets
@@ -986,7 +934,6 @@ def test_search_api_ignores_the_opt_out_for_an_anonymous_caller():
 
 
 @pytest.mark.django_db
-@override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True)
 def test_search_api_honours_the_opt_out_for_a_caseworker():
     from django.contrib.auth import get_user_model
     from django.contrib.auth.models import Group
@@ -1009,7 +956,6 @@ def test_search_api_honours_the_opt_out_for_a_caseworker():
 
 
 @pytest.mark.django_db
-@override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True)
 def test_search_api_gates_a_caseworker_who_does_not_ask():
     """The role lifts the gate only on request, so a caseworker browsing the
     public search sees the same corpus a reader does."""

@@ -13,7 +13,6 @@ import string
 from unittest.mock import MagicMock, patch
 
 import pytest
-from django.test import override_settings
 
 from search import service as svc
 from search.service import (
@@ -35,14 +34,11 @@ def _visibility_clause():
     when the gate is enabled (see ``search.service._visibility_clauses``).
 
     Imported from the implementation rather than restated, so a change to the
-    clause shape does not silently make these assertions test nothing. Built
-    under a forced-on override because the gate ships DISABLED
-    (``ENTITY_VISIBILITY_GATE_ENABLED``) — this is the clause's shape, not an
-    assertion that it is currently applied. A function rather than a module
-    constant so nothing touches settings at import time.
+    clause shape does not silently make these assertions test nothing. A
+    function rather than a module constant so nothing is evaluated at import
+    time.
     """
-    with override_settings(ENTITY_VISIBILITY_GATE_ENABLED=True):
-        return _visibility_clauses(False)[0]
+    return _visibility_clauses(False)[0]
 
 
 def _narrowing(body):
@@ -855,7 +851,7 @@ def test_material_source_is_not_a_facet():
     assert "material_source" not in svc.FACET_FIELDS
     body = build_query(q="x", filters={"material_source": ["ciaa_press_release"]})
     assert "material_source" not in body["aggs"]
-    clauses = body["query"]["bool"]["filter"]
+    clauses = _narrowing(body)
     assert not any("material_source" in str(clause) for clause in clauses)
 
 
@@ -1037,7 +1033,7 @@ def test_facet_does_not_narrow_by_its_own_filter():
         {"terms": {"material_type": ["official_report"]}}
     ]
     # ...and the hits are still narrowed, which is what keeps ``count`` honest.
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 def test_facet_does_not_narrow_by_its_own_multi_valued_filter():
@@ -1387,7 +1383,7 @@ def test_build_query_range_composes_with_terms_filters():
     terms = body["post_filter"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in terms
     assert {"terms": {"case_status": ["ongoing"]}} in terms
-    assert body["query"]["bool"]["filter"] == [
+    assert _narrowing(body) == [
         {"range": {"bigo": {"gte": 10_000_000}}}
     ]
 
@@ -2392,7 +2388,7 @@ def test_repeated_scope_values_union():
 def test_absent_scope_emits_no_clause():
     for scopes in (None, {}, {"source": []}):
         body = svc.build_query(q="x", scopes=scopes)
-        assert body["query"]["bool"]["filter"] == []
+        assert _narrowing(body) == []
 
 
 def test_dataset_bucket_scope_lands_in_the_filter():
@@ -2417,7 +2413,7 @@ def test_source_and_dataset_bucket_scopes_and_together():
             "dataset_bucket": ["report_annual-report"],
         },
     )
-    filters = body["query"]["bool"]["filter"]
+    filters = _narrowing(body)
 
     assert {"terms": {"source": ["official_report"]}} in filters
     assert {"terms": {"dataset_bucket": ["report_annual-report"]}} in filters
@@ -2447,7 +2443,7 @@ def test_repeated_exclude_values_union_into_one_must_not():
         "publication_audit-bulletin",
     ]
     body = svc.build_query(q="", scopes={"dataset_bucket_exclude": kinds})
-    filters = body["query"]["bool"]["filter"]
+    filters = _narrowing(body)
 
     assert len([c for c in filters if "bool" in c]) == 1
     assert {"bool": {"must_not": {"terms": {"dataset_bucket": kinds}}}} in filters
@@ -2461,7 +2457,7 @@ def test_positive_and_negative_scopes_on_one_field_coexist():
         q="",
         scopes={"dataset_bucket": ["a"], "dataset_bucket_exclude": ["b"]},
     )
-    filters = body["query"]["bool"]["filter"]
+    filters = _narrowing(body)
 
     assert {"terms": {"dataset_bucket": ["a"]}} in filters
     assert {"bool": {"must_not": {"terms": {"dataset_bucket": ["b"]}}}} in filters
@@ -2482,7 +2478,7 @@ def test_unknown_scope_params_are_ignored():
     inject a clause on an arbitrary field."""
     body = svc.build_query(q="x", scopes={"nonsense": ["boom"]})
 
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 def test_every_scope_field_is_declared_on_the_query_serializer():
