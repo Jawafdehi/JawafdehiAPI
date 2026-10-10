@@ -1062,6 +1062,10 @@ def _resolve_for_extraction(request, source: str, ident: str):
     ),
     responses={
         200: ExtractionManifestSerializer,
+        # Reachable, and previously undeclared: the URL's ident pattern
+        # ([^/]+) is wider than MATERIAL_IRI_RE, so _resolve_for_extraction
+        # rejects e.g. an uppercase ident with 400 before any lookup happens.
+        400: ExtractionErrorSerializer,
         404: ExtractionErrorSerializer,
     },
     tags=["materials"],
@@ -1120,6 +1124,7 @@ def material_extraction(request, source: str, ident: str):
     ),
     responses={
         200: ExtractionTableSerializer,
+        400: ExtractionErrorSerializer,
         404: ExtractionErrorSerializer,
     },
     tags=["materials"],

@@ -17,7 +17,7 @@ import uuid
 
 import sentry_sdk
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import serializers, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -292,7 +292,7 @@ class SearchQuerySerializer(serializers.Serializer):
 # not exist in our published contract.
 #
 # Keep them in step with the dict literal at the end of ``SearchService.search``
-# and with ``_result_envelope``; a drifted schema is worse than none, because a
+# and with ``search/service.py::_serialize_hit``; a drifted schema is worse than none, because a
 # generated client fails at runtime instead of at generation.
 # ---------------------------------------------------------------------------
 class SearchResultTitleSerializer(serializers.Serializer):
@@ -301,7 +301,14 @@ class SearchResultTitleSerializer(serializers.Serializer):
 
 
 class SearchResultSerializer(serializers.Serializer):
-    type = serializers.ChoiceField(choices=sorted(ALL_TYPES))
+    type = serializers.CharField(
+        help_text=(
+            "Usually one of: " + ", ".join(sorted(ALL_TYPES)) + ". NOT a closed "
+            "enum — _serialize_hit falls back to the document's source_app (or "
+            "the literal 'unknown') when the index name does not map to a known "
+            "type, so a client must tolerate other values."
+        )
+    )
     id = serializers.CharField(help_text="The document's canonical @id IRI.")
     source_app = serializers.CharField(allow_null=True)
     title = SearchResultTitleSerializer()
@@ -343,6 +350,10 @@ class SearchResponseSerializer(serializers.Serializer):
     next_cursor = serializers.CharField(
         allow_null=True, help_text="Opaque deep-paging cursor; null on the last page."
     )
+    search_id = serializers.CharField(
+        help_text="Opaque id for this query. REQUIRED by POST /api/search/click "
+        "as the join key, so a client that drops it can never send the beacon.",
+    )
     did_you_mean = serializers.CharField(
         allow_null=True,
         help_text="A single suggested spelling, or null. Always present. Offered "
@@ -352,6 +363,8 @@ class SearchResponseSerializer(serializers.Serializer):
 
 
 class SearchErrorSerializer(serializers.Serializer):
+    """The ``{"detail": ...}`` shape, used for 503 and for service-raised 400s."""
+
     detail = serializers.CharField()
 
 
@@ -651,7 +664,20 @@ class SearchErrorSerializer(serializers.Serializer):
     ],
     responses={
         200: SearchResponseSerializer,
-        400: SearchErrorSerializer,
+        # 400 has TWO shapes and declaring either one alone is a lie. A rejected
+        # query parameter is raised by SearchQuerySerializer.is_valid(
+        # raise_exception=True) and comes back keyed by field name
+        # ({"page_size": ["..."]}); a SearchError from the service comes back as
+        # {"detail": "..."}. A client has to handle both, so the schema says
+        # "object" and the description says which is which.
+        400: OpenApiResponse(
+            response=OpenApiTypes.OBJECT,
+            description=(
+                "Either a DRF field-error map — `{\"page_size\": [\"...\"]}` — "
+                "for a rejected query parameter, or `{\"detail\": \"...\"}` for a "
+                "SearchError raised while executing the query."
+            ),
+        ),
         # OpenSearch is a hard dependency with no in-process fallback — see the
         # module docstring. A client must treat 503 as retryable, not as "no
         # results", so it belongs in the published contract.

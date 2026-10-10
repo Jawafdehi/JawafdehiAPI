@@ -66,7 +66,11 @@ class ExtractionFigureSerializer(serializers.Serializer):
     y_axis = serializers.CharField(allow_null=True)
     notes = serializers.CharField(allow_null=True)
     verify_note = serializers.CharField(allow_null=True)
-    verified = serializers.BooleanField()
+    verified = serializers.BooleanField(
+        allow_null=True,
+        help_text="Null means NOT CHECKED, which is distinct from false. The "
+        "model is BooleanField(null=True) and the distinction is meaningful.",
+    )
     points = ExtractionPointSerializer(many=True)
 
 
@@ -84,7 +88,12 @@ class ExtractionTableStubSerializer(serializers.Serializer):
     page_no = serializers.IntegerField()
     index_on_page = serializers.IntegerField()
     caption = serializers.CharField(allow_null=True)
-    header = serializers.CharField(allow_null=True)
+    header = serializers.ListField(
+        child=serializers.CharField(),
+        help_text="Header cells. The model is JSONField(default=list), so this "
+        "is an ARRAY, not a string — declaring it as a string made every "
+        "generated client fail to deserialize a manifest.",
+    )
     n_rows = serializers.IntegerField()
     n_cols = serializers.IntegerField()
     fidelity = serializers.CharField(allow_null=True)

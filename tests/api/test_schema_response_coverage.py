@@ -90,3 +90,86 @@ def test_extracted_table_schema_includes_the_markdown(schema):
     # The whole reason the table endpoint is split out from the manifest.
     assert "markdown" in props
     assert "key" in props
+
+
+# ---------------------------------------------------------------------------
+# Type assertions.
+#
+# The first version of this file asserted property NAMES only. That is how four
+# real drifts shipped green: `header` declared a string while the model is a
+# JSONField(default=list), `verified` declared non-nullable while the model is
+# null=True, `search_id` missing entirely, and `type` pinned to a closed enum the
+# service does not honour. A name-only check cannot see any of those, and a
+# wrong schema is worse than an absent one — a generated client compiles and
+# then fails at runtime.
+# ---------------------------------------------------------------------------
+
+
+def _component(schema, path, method="get"):
+    ref = _json_200(schema, path, method)["$ref"].rsplit("/", 1)[-1]
+    return schema["components"]["schemas"][ref]
+
+
+def test_extracted_table_header_is_an_array(schema):
+    """ExtractedTable.header is JSONField(default=list), not a string."""
+    stub = schema["components"]["schemas"]["ExtractionTableStub"]
+
+    assert stub["properties"]["header"]["type"] == "array"
+
+
+def test_extracted_figure_verified_is_nullable(schema):
+    """BooleanField(null=True) — null means 'not checked', not 'false'."""
+    verified = schema["components"]["schemas"]["ExtractionFigure"]["properties"][
+        "verified"
+    ]
+
+    assert verified["type"] == "boolean"
+    assert verified.get("nullable") is True
+
+
+def test_search_response_carries_search_id(schema):
+    """POST /api/search/click requires it as the join key."""
+    props = _component(schema, "/api/search/")["properties"]
+
+    assert "search_id" in props, (
+        "search_id is set on every search response and is REQUIRED by the click "
+        "beacon; omitting it from the schema makes the beacon unreachable from a "
+        "generated client."
+    )
+
+
+def test_search_result_type_is_not_a_closed_enum(schema):
+    """_serialize_hit falls back to source_app / 'unknown' off the known set."""
+    result_type = schema["components"]["schemas"]["SearchResult"]["properties"]["type"]
+
+    assert "enum" not in result_type, (
+        "SearchResult.type is declared as a closed enum, but _serialize_hit "
+        "emits the document's source_app (or 'unknown') when the index name does "
+        "not map to a known type. A strict client would reject valid responses."
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/materials/{source}/{ident}/extraction/",
+        "/api/materials/{source}/{ident}/extraction/tables/{key}/",
+    ],
+)
+def test_extraction_endpoints_declare_their_400(schema, path):
+    """Reachable: the URL ident pattern is wider than MATERIAL_IRI_RE."""
+    responses = schema["paths"][path]["get"]["responses"]
+
+    assert "400" in responses
+
+
+def test_search_400_is_not_declared_as_a_detail_only_object(schema):
+    """400 has two shapes; pinning it to {detail} would misdescribe the common one."""
+    four_hundred = schema["paths"]["/api/search/"]["get"]["responses"]["400"]
+    body = four_hundred["content"]["application/json"]["schema"]
+
+    assert "$ref" not in body, (
+        "The 400 is declared as a concrete serializer, but a rejected query "
+        "parameter comes back as a DRF field-error map, not {detail}."
+    )
+    assert four_hundred.get("description")
