@@ -223,6 +223,14 @@ class DuplicateSoftDeleteTests(TestCase):
         self.assertFalse(duplicate.is_deleted)
         self.assertIn("not a duplicate", output)
 
+    def test_leaves_the_62nd_summary_pair_alone(self):
+        # oag-11657/11716 are the same report from two extraction passes, not
+        # two copies of one text. Picking a winner is a human judgement, so the
+        # table must not contain it at all.
+        self.assertNotIn(
+            "oag-11657", [ident for ident, _why, _action in fix_oag_corpus.CORRECTIONS]
+        )
+
     def test_refuses_when_the_survivor_is_itself_deleted(self):
         survivor = seed("oag-11141", "Special Audit Report on Management of COVID-19, 2021")
         survivor.is_deleted = True
@@ -234,6 +242,74 @@ class DuplicateSoftDeleteTests(TestCase):
         duplicate.refresh_from_db()
         self.assertFalse(duplicate.is_deleted)
         self.assertIn("itself deleted", output)
+
+
+class StubSoftDeleteTests(TestCase):
+    databases = "__all__"
+
+    STUB = "20260321.a19b89d0"
+    NEPALI = "महालेखा परीक्षकको पाँचौं वार्षिक प्रतिवेदन, २०७९, मधेश प्रदेश"
+
+    def seed_pair(self, *, survivor_ne: str | None = None):
+        stub = seed(self.STUB, "", text="")
+        stub.data["name"] = {"ne": self.NEPALI}
+        stub.save()
+        survivor = seed("oag-11537", "Fifth Annual Report of the Auditor General, 2023"
+                        " - Madhesh Province", text="a real transcript")
+        if survivor_ne:
+            survivor.data["name"]["ne"] = survivor_ne
+            survivor.save()
+        return stub, survivor
+
+    def test_deletes_a_stub_that_has_no_transcript(self):
+        # The transcript-equality proof cannot fire here — the stub has no
+        # transcript — so without its own action this row would skip forever.
+        stub, _ = self.seed_pair()
+
+        run(apply=True)
+
+        stub.refresh_from_db()
+        self.assertTrue(stub.is_deleted)
+
+    def test_moves_the_stub_s_nepali_title_to_the_survivor(self):
+        # Only 18 of the 228 rows have a Nepali name. Deleting one to tidy up a
+        # duplicate would destroy the scarcer thing to keep the commoner one.
+        _, survivor = self.seed_pair()
+
+        run(apply=True)
+
+        survivor.refresh_from_db()
+        self.assertEqual(survivor.data["name"]["ne"], self.NEPALI)
+
+    def test_does_not_overwrite_a_nepali_title_the_survivor_already_has(self):
+        _, survivor = self.seed_pair(survivor_ne="महालेखापरीक्षकको प्रतिवेदन")
+
+        run(apply=True)
+
+        survivor.refresh_from_db()
+        self.assertEqual(survivor.data["name"]["ne"], "महालेखापरीक्षकको प्रतिवेदन")
+
+    def test_refuses_once_the_stub_has_gained_a_transcript(self):
+        # Then it is no longer the empty row this correction was reasoned about.
+        stub, _ = self.seed_pair()
+        stub.data["text"] = "it has content now"
+        stub.save()
+
+        output = run(apply=True)
+
+        stub.refresh_from_db()
+        self.assertFalse(stub.is_deleted)
+        self.assertIn("no longer a stub", output)
+
+    def test_refuses_when_the_survivor_has_no_transcript_either(self):
+        stub = seed(self.STUB, "", text="")
+        seed("oag-11537", "Fifth Annual Report", text="")
+
+        output = run(apply=True)
+
+        stub.refresh_from_db()
+        self.assertFalse(stub.is_deleted)
+        self.assertIn("no transcript either", output)
 
 
 class MoveSourceTests(TestCase):
