@@ -279,6 +279,82 @@ class SearchQuerySerializer(serializers.Serializer):
     cursor = serializers.CharField(required=False, allow_blank=False)
 
 
+# ---------------------------------------------------------------------------
+# Response shapes — SCHEMA ONLY.
+#
+# These are never used to serialize: the envelope is built as a plain dict in
+# ``SearchService.search`` and returned straight through. They exist so
+# drf-spectacular can describe ``GET /api/search/``, which is published at
+# ``/api/schema/`` and consumed by anyone generating a client.
+#
+# Without them spectacular logs "unable to guess serializer … Ignoring view for
+# now" and DROPS the path from the schema entirely — the endpoint silently did
+# not exist in our published contract.
+#
+# Keep them in step with the dict literal at the end of ``SearchService.search``
+# and with ``_result_envelope``; a drifted schema is worse than none, because a
+# generated client fails at runtime instead of at generation.
+# ---------------------------------------------------------------------------
+class SearchResultTitleSerializer(serializers.Serializer):
+    ne = serializers.CharField(allow_null=True)
+    en = serializers.CharField(allow_null=True)
+
+
+class SearchResultSerializer(serializers.Serializer):
+    type = serializers.ChoiceField(choices=sorted(ALL_TYPES))
+    id = serializers.CharField(help_text="The document's canonical @id IRI.")
+    source_app = serializers.CharField(allow_null=True)
+    title = SearchResultTitleSerializer()
+    snippet = serializers.DictField(
+        child=serializers.CharField(),
+        help_text="Highlighted excerpt keyed by language ('ne' / 'en'). May be empty.",
+    )
+    score = serializers.FloatField(allow_null=True)
+    url = serializers.CharField(allow_null=True, help_text="Frontend URL for the hit.")
+    api_url = serializers.CharField(allow_null=True, help_text="API URL for the hit.")
+    matched_fields = serializers.ListField(child=serializers.CharField())
+    extra = serializers.DictField(
+        help_text="Per-type extras. Case hits may add status, case_track and "
+        "proceeding dates; keys are omitted rather than null when unset.",
+    )
+    card = serializers.DictField(
+        required=False,
+        help_text="Denormalized render payload. Case hits only; omitted otherwise.",
+    )
+
+
+class SearchResponseSerializer(serializers.Serializer):
+    query = serializers.CharField()
+    normalized_query = serializers.CharField()
+    lang = serializers.CharField()
+    sort = serializers.CharField()
+    page = serializers.IntegerField()
+    page_size = serializers.IntegerField()
+    count = serializers.IntegerField(help_text="Total matches across all types.")
+    counts = serializers.DictField(
+        child=serializers.IntegerField(), help_text="Match count per result type."
+    )
+    facets = serializers.DictField(help_text="Term buckets, keyed by facet field.")
+    extents = serializers.DictField(
+        help_text="Corpus extent for the range filters. Empty unless the search "
+        "is case-only — distinct from 'facets', which are term buckets.",
+    )
+    results = SearchResultSerializer(many=True)
+    next_cursor = serializers.CharField(
+        allow_null=True, help_text="Opaque deep-paging cursor; null on the last page."
+    )
+    did_you_mean = serializers.CharField(
+        allow_null=True,
+        help_text="A single suggested spelling, or null. Always present. Offered "
+        "only when the result set is empty or wholly fuzzy, and never applied "
+        "automatically.",
+    )
+
+
+class SearchErrorSerializer(serializers.Serializer):
+    detail = serializers.CharField()
+
+
 @extend_schema(
     summary="Unified platform search",
     description=(
@@ -573,6 +649,14 @@ class SearchQuerySerializer(serializers.Serializer):
             ),
         ),
     ],
+    responses={
+        200: SearchResponseSerializer,
+        400: SearchErrorSerializer,
+        # OpenSearch is a hard dependency with no in-process fallback — see the
+        # module docstring. A client must treat 503 as retryable, not as "no
+        # results", so it belongs in the published contract.
+        503: SearchErrorSerializer,
+    },
     tags=["search"],
 )
 class UnifiedSearchView(APIView):
