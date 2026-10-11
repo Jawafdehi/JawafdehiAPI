@@ -23,9 +23,9 @@ form), so it must stay inside Django's autoescaping. Do not add |safe.
 </td>
 </tr>
 
-{% if deferred %}
+{% if outcome == "rejected" %}
 {% comment %}
-The loud case. SendPulse rejected the contact, so this address exists in this
+The loud case. SendPulse answered and refused, so this address exists in this
 email and nowhere else — if this mail is ignored the signup is lost, because the
 subscriber was told they succeeded and has no reason to try again.
 {% endcomment %}
@@ -33,6 +33,19 @@ subscriber was told they succeeded and has no reason to try again.
 <td style="padding:4px 20px 8px 20px;">
 <div style="background-color:#fdf3f3; border-left:3px solid #b5242c; padding:10px 12px; font-size:14px; line-height:1.5;">
 <strong>Not saved to SendPulse.</strong> The address book rejected this signup, so this email is the only record of it. Add them by hand. They were shown a success message and will not sign up again.
+</div>
+</td>
+</tr>
+{% elif outcome == "unknown" %}
+{% comment %}
+The request never completed, which is not the same as being refused: a timeout
+can land after SendPulse has already accepted the contact. So this asks the
+reader to look rather than telling them something we do not know.
+{% endcomment %}
+<tr>
+<td style="padding:4px 20px 8px 20px;">
+<div style="background-color:#fdf7ec; border-left:3px solid #c8871a; padding:10px 12px; font-size:14px; line-height:1.5;">
+<strong>May not have been saved.</strong> The request to SendPulse never completed, so this contact may or may not have reached the address book. Check it before adding them by hand — and if they are missing, this email is the only record of them.
 </div>
 </td>
 </tr>

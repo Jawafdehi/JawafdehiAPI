@@ -350,10 +350,10 @@ def test_open_house_alert_names_its_source_in_the_subject(client, settings):
 
 
 def test_alert_still_sent_when_sendpulse_rejected_the_contact(client, settings):
-    """The case the alert exists for: nothing was stored, so this mail is the
-    only record of the signup and has to say so."""
+    """The case the alert exists for: SendPulse answered and refused, so nothing
+    was stored and this mail is the only record of the signup."""
     fake = _alerting_client(settings)
-    fake.add_subscriber.side_effect = SendPulseError("timeout", status=None)
+    fake.add_subscriber.side_effect = SendPulseError("server error", status=500)
     with mock.patch("newsletter.views.get_client", return_value=fake):
         resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
     assert resp.status_code == 202
@@ -361,6 +361,35 @@ def test_alert_still_sent_when_sendpulse_rejected_the_contact(client, settings):
     assert subject.startswith("[not saved] ")
     assert "reader@example.org" in html
     assert "Not saved to SendPulse" in html
+
+
+def test_alert_does_not_claim_a_timeout_means_not_saved(client, settings):
+    """A transport error carries no status because the request never completed,
+    and a timeout can land *after* SendPulse accepted the contact. Saying "not
+    saved" there would be a guess printed as fact, and would send someone to
+    re-add a contact that is already on the list."""
+    fake = _alerting_client(settings)
+    fake.add_subscriber.side_effect = SendPulseError("timeout", status=None)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 202
+    subject, html = fake.send_email.call_args.args[1], fake.send_email.call_args.args[2]
+    assert subject.startswith("[check] ")
+    assert "reader@example.org" in html
+    assert "May not have been saved" in html
+    assert "Not saved to SendPulse" not in html
+
+
+def test_saved_signup_alert_carries_no_warning(client, settings):
+    """The ordinary case asks nothing of the reader, so it says nothing."""
+    fake = _alerting_client(settings)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
+    subject, html = fake.send_email.call_args.args[1], fake.send_email.call_args.args[2]
+    assert not subject.startswith("[")
+    assert "Not saved to SendPulse" not in html
+    assert "May not have been saved" not in html
 
 
 def test_no_alert_when_the_address_was_already_on_the_list(client, settings):

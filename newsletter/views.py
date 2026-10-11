@@ -50,6 +50,19 @@ _SENDPULSE_CONFLICT_STATUS = 409
 # newsletter subscriber would answer a question they did not ask.
 _OPEN_HOUSE_CONSENT_PREFIX = "openhouse"
 
+# What the signup alert is able to say about where the contact ended up. See
+# ``_notify_signup`` for why a failed add is not one state but two.
+_OUTCOME_SAVED = "saved"
+_OUTCOME_REJECTED = "rejected"
+_OUTCOME_UNKNOWN = "unknown"
+
+# The prefix carries the only part a reader must act on, so it leads the subject
+# rather than trailing it — mobile notifications truncate from the right.
+_SUBJECT_PREFIXES = {
+    _OUTCOME_REJECTED: "[not saved] ",
+    _OUTCOME_UNKNOWN: "[check] ",
+}
+
 
 def _welcome_for(consent_source: str) -> tuple[str, str]:
     """Pick the welcome template and subject for a signup's origin."""
@@ -87,17 +100,25 @@ def _send_welcome_email(
         logger.warning("Newsletter welcome email failed (subscribe still succeeded): %s", exc)
 
 
-def _notify_signup(client: SendPulseClient, data: dict, *, deferred: bool) -> None:
+def _notify_signup(client: SendPulseClient, data: dict, *, outcome: str) -> None:
     """Best-effort alert to the Jawafdehi inbox that someone signed up.
 
     This app keeps no rows, so SendPulse is the only record a signup ever leaves
     and the only way to notice one is to go and look at the dashboard. Nobody
     does, so signups go unnoticed — this mail is what makes them visible.
 
-    ``deferred`` says the address book rejected the contact and the subscribe
-    degraded to a local 202. That is the case this is most worth having: the
-    subscriber was told they succeeded, nothing was stored anywhere, and this
-    email is the sole surviving copy of their details.
+    ``outcome`` is what the reader has to act on, and it is deliberately three
+    values rather than "worked / didn't":
+
+    - ``_OUTCOME_SAVED`` — the contact is in the address book, nothing to do.
+    - ``_OUTCOME_REJECTED`` — SendPulse answered and refused, so the contact is
+      definitely not stored. This mail is the sole surviving copy of their
+      details, and the subscriber was told they succeeded, so they will not try
+      again. Add them by hand.
+    - ``_OUTCOME_UNKNOWN`` — the request never completed (timeout, connection
+      error). A timeout can land *after* SendPulse accepted the contact, so this
+      says nothing about whether it was stored. Telling a reader "not saved"
+      here would be a guess presented as fact; they have to look first.
 
     Unlike the case-report alert (``cases.api_views._notify_case_report``) this
     one carries the submission in full. The two are different in kind: a
@@ -145,7 +166,7 @@ def _notify_signup(client: SendPulseClient, data: dict, *, deferred: bool) -> No
                 "source_label": source_label,
                 "name": name,
                 "email": data["email"],
-                "deferred": deferred,
+                "outcome": outcome,
                 "details": details,
             },
         )
@@ -154,9 +175,8 @@ def _notify_signup(client: SendPulseClient, data: dict, *, deferred: bool) -> No
         # that keeps its interior newlines through the serializer's trimming.
         subject_name = " ".join((name or data["email"]).split())
         subject = f"{source_label} signup: {subject_name}"
-        if deferred:
-            subject = f"[not saved] {subject}"
-        client.send_email(recipient, subject, html)
+        prefix = _SUBJECT_PREFIXES.get(outcome, "")
+        client.send_email(recipient, f"{prefix}{subject}", html)
     except Exception as exc:  # noqa: BLE001 — alert is best-effort, never block subscribe
         logger.warning("Signup notification failed (subscribe still succeeded): %s", exc)
 
@@ -287,7 +307,16 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
             # held nowhere. The alert is the retry, and it goes through
             # /smtp/emails — a different endpoint from the one that just failed,
             # so it has its own chance of getting through.
-            _notify_signup(client, data, deferred=True)
+            #
+            # A status means SendPulse answered and refused, so the contact is
+            # definitely not stored. No status means the request never completed
+            # — a timeout can arrive after the contact was accepted, so that
+            # case genuinely does not know, and must not claim to.
+            _notify_signup(
+                client,
+                data,
+                outcome=_OUTCOME_REJECTED if exc.status else _OUTCOME_UNKNOWN,
+            )
             return Response(
                 {
                     "email": email,
@@ -298,7 +327,7 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
             )
 
         _send_welcome_email(client, email, data["firstName"], data["consentSource"])
-        _notify_signup(client, data, deferred=False)
+        _notify_signup(client, data, outcome=_OUTCOME_SAVED)
 
         return Response(
             {
