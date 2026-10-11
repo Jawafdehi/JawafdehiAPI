@@ -30,6 +30,17 @@ urlpatterns = [
         views.material_file_upload,
         name="material-file-upload",
     ),
+    # Extracted content (pages, tables, figures). Declared BEFORE material-detail
+    # for the same reason /file is, and it is not a style point: the detail
+    # route's ``source`` is multi-segment, so it would otherwise match this URL
+    # as source=``<source>/<ident>``, ident=``content`` and answer "no such
+    # material" — a 404 that reads as a missing document rather than a missing
+    # route. The cost is that ``content`` can never be a material ident.
+    re_path(
+        r"^materials/(?P<source>[a-z0-9_]+(?:/[a-z0-9_]+){0,3})/(?P<ident>[^/]+)/content/?$",
+        views.material_content,
+        name="material-content",
+    ),
     re_path(
         r"^materials/(?P<source>[a-z0-9_]+(?:/[a-z0-9_]+){0,3})/(?P<ident>[^/]+)/?$",
         views.material_detail,

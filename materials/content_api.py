@@ -1,0 +1,223 @@
+"""Serialization for the material content read plane (``…/content?type=…``).
+
+One route, three content kinds, two shapes each — a LIST of stubs, or ONE item in
+full. The split is forced by size, not taste: one CIAA report's table markdown
+comes to 830 KiB and a single table reaches 170 KiB, and its pages hold the
+whole transcript, so a listing that inlined either would be unservable. Figures
+are the exception and carry their full series in the list, because the entire
+35-report corpus is 6,116 points.
+
+Keys are snake_case — the platform's convention for its non-JSON-LD endpoints
+(cf. ``/api/cases/``). This is a projection of a material, not a JSON-LD document
+in its own right, so it carries no ``@context``.
+
+What this replaces: API#514's ``/extraction`` manifest, which answered three
+questions in one payload (*how much is in here*, *what tables*, *what charts*).
+The counts moved to the material detail payload, where a client is already
+looking, and the two listings became their own addressable resources.
+"""
+
+from __future__ import annotations
+
+from django.db.models import Prefetch
+
+from .models import (
+    DocumentExtraction,
+    ExtractedFigure,
+    ExtractedFigurePoint,
+    ExtractedPage,
+    ExtractedTable,
+)
+
+#: The ``type`` values ``…/content`` accepts. ``page`` is addressed by ``num``
+#: (the printed folio); ``table`` and ``figure`` by ``id`` (their stable key).
+CONTENT_TYPES = ("page", "table", "figure")
+
+
+# ── pages ────────────────────────────────────────────────────────────────────
+
+
+def _page_stub(page: ExtractedPage) -> dict:
+    """A page without its text — enough to navigate, and to know what is missing.
+
+    ``coverage_state`` and ``chars`` ride on the stub deliberately. A client
+    listing 446 pages needs to see which of them we could not read BEFORE it
+    fetches one and gets an empty string back, or it will present a failed OCR
+    as a blank page.
+    """
+    return {
+        "page_no": page.page_no,
+        "uid": page.uid,
+        "coverage_state": page.coverage_state,
+        "anchor_fidelity": page.anchor_fidelity,
+        "ocr_source": page.ocr_source,
+        "landscape": page.landscape,
+        "n_table_blocks": page.n_table_blocks,
+        "chars": page.chars,
+    }
+
+
+def page_payload(page: ExtractedPage) -> dict:
+    """One page in full: the stub plus the recovered text."""
+    return {**_page_stub(page), "text": page.text}
+
+
+# ── tables ───────────────────────────────────────────────────────────────────
+
+
+def _table_stub(table: ExtractedTable) -> dict:
+    """A table without its markdown — enough to list, label and link it."""
+    return {
+        # ``ordinal`` is presentation order and is recomputed on every ingest;
+        # ``key`` is what a client must address a table by. See the model.
+        "ordinal": table.ordinal,
+        "key": table.key,
+        "uid": table.uid,
+        "page_no": table.page_no,
+        "index_on_page": table.index_on_page,
+        "caption": table.caption,
+        "header": table.header,
+        "n_rows": table.n_rows,
+        "n_cols": table.n_cols,
+        "fidelity": table.fidelity,
+    }
+
+
+def table_payload(table: ExtractedTable) -> dict:
+    """One table in full: the stub plus the markdown a client renders."""
+    return {**_table_stub(table), "markdown": table.markdown}
+
+
+# ── figures ──────────────────────────────────────────────────────────────────
+
+
+def figure_payload(figure: ExtractedFigure) -> dict:
+    """One chart and its series.
+
+    ``estimated`` rides on every point rather than being summarised at the figure
+    level: a single chart routinely mixes printed values with ones read off the
+    image, and collapsing that to one per-figure flag would misreport both kinds.
+    """
+    return {
+        "ordinal": figure.ordinal,
+        "key": figure.key,
+        "uid": figure.uid,
+        "page_no": figure.page_no,
+        "index_on_page": figure.index_on_page,
+        "title": figure.title,
+        "chart_type": figure.chart_type,
+        "unit": figure.unit,
+        "x_axis": figure.x_axis,
+        "y_axis": figure.y_axis,
+        "notes": figure.notes,
+        "verify_note": figure.verify_note,
+        "verified": figure.verified,
+        "points": [
+            {
+                "point_index": point.point_index,
+                "label": point.label,
+                "series": point.series,
+                "value": point.value,
+                "estimated": point.is_estimated,
+            }
+            # Pre-fetched by the queryset below; iterating the related manager
+            # here would be an N+1 across every figure in the listing.
+            for point in figure.points.all()
+        ],
+    }
+
+
+# ── queries ──────────────────────────────────────────────────────────────────
+
+
+def extraction_for(iri: str) -> DocumentExtraction | None:
+    """The extraction row for ``iri``, or None.
+
+    Callers MUST have resolved the material's visibility first — this applies no
+    gate of its own (see ``materials.views.material_content``).
+    """
+    return DocumentExtraction.objects.using("ngm").filter(pk=iri).first()
+
+
+def list_pages(iri: str) -> list[dict]:
+    """Every page stub. ``defer("text")`` is the point: without it this reads the
+    document's entire transcript out of Postgres to serialize none of it."""
+    rows = (
+        ExtractedPage.objects.using("ngm")
+        .filter(extraction_id=iri)
+        .defer("text")
+        .order_by("page_no")
+    )
+    return [_page_stub(p) for p in rows]
+
+
+def get_page(iri: str, page_no: int) -> ExtractedPage | None:
+    return (
+        ExtractedPage.objects.using("ngm")
+        .filter(extraction_id=iri, page_no=page_no)
+        .first()
+    )
+
+
+def list_tables(iri: str) -> list[dict]:
+    """Every table stub.
+
+    ``defer("markdown")`` is load-bearing, not a micro-optimisation: a bare query
+    would pull every table's markdown — ~830 KiB for the largest CIAA report —
+    out of the database only for the serializer to drop it again.
+    """
+    rows = (
+        ExtractedTable.objects.using("ngm")
+        .filter(extraction_id=iri)
+        .defer("markdown")
+        .order_by("ordinal")
+    )
+    return [_table_stub(t) for t in rows]
+
+
+def get_table(iri: str, key: str) -> ExtractedTable | None:
+    return (
+        ExtractedTable.objects.using("ngm")
+        .filter(extraction_id=iri, key=key)
+        .first()
+    )
+
+
+def _figures_queryset(iri: str):
+    """Figures for one document, with their points pre-fetched.
+
+    The Prefetch is explicit about the alias because a related manager does not
+    inherit ``using("ngm")`` from the parent queryset — leave it off and the
+    points are looked for in ``default``, where the table does not exist.
+    """
+    points = ExtractedFigurePoint.objects.using("ngm").order_by("point_index", "id")
+    return (
+        ExtractedFigure.objects.using("ngm")
+        .filter(extraction_id=iri)
+        .prefetch_related(Prefetch("points", queryset=points))
+        .order_by("ordinal")
+    )
+
+
+def list_figures(iri: str) -> list[dict]:
+    """Every figure with its full series inline.
+
+    Inlined because they are small — 6,116 points across the entire 35-report
+    corpus — which is why #514's manifest inlined them too. The asymmetry with
+    tables is deliberate and measured.
+    """
+    return [figure_payload(f) for f in _figures_queryset(iri)]
+
+
+def get_figure(iri: str, key: str) -> ExtractedFigure | None:
+    return _figures_queryset(iri).filter(key=key).first()
+
+
+def version_token(extraction: DocumentExtraction) -> str:
+    """A weak ETag for any content response.
+
+    ``ingested_at`` alone is sufficient: the ingest replaces an extraction
+    wholesale inside one transaction, so nothing about any of its rows can change
+    without that timestamp moving.
+    """
+    return f'W/"{extraction.ingested_at.timestamp():.6f}"'

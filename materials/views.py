@@ -45,6 +45,20 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
 from . import jsonld
 from . import provenance
+from .content_api import (
+    CONTENT_TYPES,
+    extraction_for,
+    figure_payload,
+    get_figure,
+    get_page,
+    get_table,
+    list_figures,
+    list_pages,
+    list_tables,
+    page_payload,
+    table_payload,
+    version_token,
+)
 from .models import Material, Policy
 from .patch_validation import (
     MAX_MATERIAL_DOC_BYTES,
@@ -997,3 +1011,162 @@ def material_by_iri(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     return _material_read_response(request, iri)
+
+
+# ── Content read plane ───────────────────────────────────────────────────────
+
+
+def _resolve_for_content(request, source: str, ident: str):
+    """Shared preamble for the content route.
+
+    Returns ``(iri, None)`` once the material is known to exist AND to be visible
+    to this caller, else ``(None, <error Response>)``.
+
+    The visibility gate is the whole point of routing through ``_resolve_material``
+    rather than querying ``DocumentExtraction`` directly. Extracted content is
+    derived from a material, so it inherits that material's publication tier —
+    without this, a PRIVATE (draft-case evidence) document's pages and tables
+    would be readable by anyone who guessed the sub-path, which is precisely the
+    leak the material read plane exists to prevent.
+    """
+    try:
+        iri = build_material_iri(source, ident)
+    except ValueError:
+        return None, Response(
+            {"detail": "Invalid material source/ident."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    data, _row = _resolve_material(
+        iri, include_nonpublic=_can_see_nonpublic(request), with_row=True
+    )
+    if data is None:
+        resp = Response(
+            {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+        patch_vary_headers(resp, ("Authorization",))
+        return None, resp
+    return iri, None
+
+
+def _content_response(payload, extraction, *, http_status=status.HTTP_200_OK):
+    """Every content response carries the same two headers.
+
+    ``Vary: Authorization`` goes on the errors too, not just the 200s, because
+    *whether this URL exists* depends on the caller: a non-public material 404s
+    for anon and resolves for a caseworker. Without it a shared cache could store
+    one answer and serve it to the other.
+    """
+    resp = Response(payload, status=http_status)
+    if extraction is not None:
+        resp["ETag"] = version_token(extraction)
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
+def _bad_request(detail: str):
+    resp = Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def material_content(request, source: str, ident: str):
+    """``GET /api/materials/<source>/<ident>/content?type=…`` → one kind of content.
+
+    ``?type=page`` / ``?type=table`` / ``?type=figure`` list that kind; adding
+    ``&num=`` (pages) or ``&id=`` (tables, figures) returns one item in full.
+
+    **A table and a figure are addressed by ``key``, never by ``ordinal``.** The
+    ordinal is presentation order and is recomputed on every ingest, so a saved
+    link keyed on it would quietly resolve to a *different* table as soon as the
+    upstream recovered one missed earlier in the report. A 200 with the wrong
+    content is worse than a 404. A page is addressed by its printed folio, which
+    is what makes a citation checkable against the published PDF.
+
+    404 when the material has no extracted content at all, which is the common
+    case — most materials are a single scraped page, not a transcribed report.
+    That is deliberately distinct from a 200 with an empty ``items``: *we have
+    not looked inside this document* and *we looked and there are none of these*
+    are different facts, and a client that conflates them reports the first as
+    the second.
+    """
+    iri, error = _resolve_for_content(request, source, ident)
+    if error is not None:
+        return error
+
+    kind = (request.query_params.get("type") or "").strip().lower()
+    if not kind:
+        return _bad_request(
+            "type is required; one of " + ", ".join(CONTENT_TYPES) + "."
+        )
+    if kind not in CONTENT_TYPES:
+        return _bad_request(
+            f"Unknown type {kind!r}; expected one of " + ", ".join(CONTENT_TYPES) + "."
+        )
+
+    extraction = extraction_for(iri)
+    if extraction is None:
+        return _content_response(
+            {"detail": "No extracted content for this material."},
+            None,
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if kind == "page":
+        return _page_response(request, iri, extraction)
+    return _keyed_response(request, iri, extraction, kind)
+
+
+def _page_response(request, iri: str, extraction):
+    """``type=page``: the whole page list, or one page by printed folio."""
+    if request.query_params.get("id") is not None:
+        return _bad_request("A page is addressed by num, not id.")
+    raw = request.query_params.get("num")
+    if raw is None:
+        items = list_pages(iri)
+        return _content_response(
+            {"material": iri, "type": "page", "count": len(items), "items": items},
+            extraction,
+        )
+    try:
+        page_no = int(raw)
+    except (TypeError, ValueError):
+        return _bad_request("num must be an integer page number.")
+    page = get_page(iri, page_no)
+    if page is None:
+        return _content_response(
+            {"detail": "No such page for this material."},
+            extraction,
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+    return _content_response(
+        {"material": iri, "type": "page", "item": page_payload(page)}, extraction
+    )
+
+
+def _keyed_response(request, iri: str, extraction, kind: str):
+    """``type=table`` / ``type=figure``: the listing, or one item by its key."""
+    if request.query_params.get("num") is not None:
+        return _bad_request(f"A {kind} is addressed by id, not num.")
+    key = request.query_params.get("id")
+    lister = list_tables if kind == "table" else list_figures
+    if key is None:
+        items = lister(iri)
+        return _content_response(
+            {"material": iri, "type": kind, "count": len(items), "items": items},
+            extraction,
+        )
+    if kind == "table":
+        table = get_table(iri, key)
+        item = table_payload(table) if table is not None else None
+    else:
+        figure = get_figure(iri, key)
+        item = figure_payload(figure) if figure is not None else None
+    if item is None:
+        return _content_response(
+            {"detail": f"No such {kind} for this material."},
+            extraction,
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+    return _content_response({"material": iri, "type": kind, "item": item}, extraction)
