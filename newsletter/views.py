@@ -87,6 +87,80 @@ def _send_welcome_email(
         logger.warning("Newsletter welcome email failed (subscribe still succeeded): %s", exc)
 
 
+def _notify_signup(client: SendPulseClient, data: dict, *, deferred: bool) -> None:
+    """Best-effort alert to the Jawafdehi inbox that someone signed up.
+
+    This app keeps no rows, so SendPulse is the only record a signup ever leaves
+    and the only way to notice one is to go and look at the dashboard. Nobody
+    does, so signups go unnoticed — this mail is what makes them visible.
+
+    ``deferred`` says the address book rejected the contact and the subscribe
+    degraded to a local 202. That is the case this is most worth having: the
+    subscriber was told they succeeded, nothing was stored anywhere, and this
+    email is the sole surviving copy of their details.
+
+    Unlike the case-report alert (``cases.api_views._notify_case_report``) this
+    one carries the submission in full. The two are different in kind: a
+    corruption report is a third party's account that must not leave the
+    database, whereas a signup is the person's own contact details, given
+    expressly so we can contact them — and already held by SendPulse, which is
+    the service carrying this mail. There is no new exposure.
+
+    Never raises: an alert is not worth failing somebody's signup over.
+    """
+    if not getattr(settings, "NEWSLETTER_SIGNUP_NOTIFY", False):
+        return
+    recipient = str(getattr(settings, "NEWSLETTER_SIGNUP_NOTIFY_EMAIL", "") or "").strip()
+    if not recipient or not client.can_send_email:
+        return
+
+    consent_source = data["consentSource"]
+    source_label = (
+        "Open House"
+        if consent_source.strip().lower().startswith(_OPEN_HOUSE_CONSENT_PREFIX)
+        else "Newsletter"
+    )
+    name = " ".join(
+        part for part in [data["firstName"], data.get("lastName", "")] if part
+    ).strip()
+    try:
+        # Only the fields that were actually filled in, so a newsletter signup
+        # does not arrive padded with four blank Open House rows.
+        details = [
+            (label, value)
+            for label, value in (
+                ("Email", data["email"]),
+                ("Region", data.get("region", "")),
+                ("WhatsApp", data.get("whatsapp", "")),
+                ("Organisation", data.get("organisation", "")),
+                ("Language", data.get("locale", "")),
+                ("Form", consent_source),
+                ("Privacy version", data["privacyVersion"]),
+            )
+            if value
+        ]
+        html = render_to_string(
+            "newsletter/signup_notification.html",
+            {
+                "source_label": source_label,
+                "name": name,
+                "email": data["email"],
+                "deferred": deferred,
+                "details": details,
+            },
+        )
+        # Whitespace is collapsed because the subject is the one value that does
+        # not pass through template autoescaping, and `firstName` is public input
+        # that keeps its interior newlines through the serializer's trimming.
+        subject_name = " ".join((name or data["email"]).split())
+        subject = f"{source_label} signup: {subject_name}"
+        if deferred:
+            subject = f"[not saved] {subject}"
+        client.send_email(recipient, subject, html)
+    except Exception as exc:  # noqa: BLE001 — alert is best-effort, never block subscribe
+        logger.warning("Signup notification failed (subscribe still succeeded): %s", exc)
+
+
 class NewsletterRateThrottle(AnonRateThrottle):
     """Rate throttle for newsletter subscribe: 10 per hour per IP."""
 
@@ -153,6 +227,11 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
         if client is None:
             # ESP not provisioned yet — accept the request so the UX works, and
             # log it for later reconciliation. No PII beyond the fact of a signup.
+            #
+            # No signup alert is possible here: the alert sends *through*
+            # SendPulse, and this branch is "SendPulse is not configured". That
+            # is a deploy misconfiguration rather than an outage, so the log line
+            # is the right surface for it — the outage case is handled below.
             logger.warning(
                 "Newsletter subscribe accepted but SendPulse is not configured "
                 "(consentSource=%s, locale=%s).",
@@ -204,6 +283,11 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
             # Transient outage or ESP error: accept locally, defer the sync. The
             # SPA treats 2xx as success, so the user isn't blocked by ESP uptime.
             logger.error("SendPulse subscribe failed; accepting locally: %s", exc)
+            # "Deferred" overstates it: nothing retries this, and the signup is
+            # held nowhere. The alert is the retry, and it goes through
+            # /smtp/emails — a different endpoint from the one that just failed,
+            # so it has its own chance of getting through.
+            _notify_signup(client, data, deferred=True)
             return Response(
                 {
                     "email": email,
@@ -214,6 +298,7 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
             )
 
         _send_welcome_email(client, email, data["firstName"], data["consentSource"])
+        _notify_signup(client, data, deferred=False)
 
         return Response(
             {

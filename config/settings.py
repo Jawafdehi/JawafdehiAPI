@@ -996,6 +996,21 @@ SENDPULSE_MESSAGE_LANG = os.getenv("SENDPULSE_MESSAGE_LANG", "en")
 SENDPULSE_WELCOME_EMAIL = env_flag("SENDPULSE_WELCOME_EMAIL", False)
 SENDPULSE_WELCOME_SUBJECT = os.getenv("SENDPULSE_WELCOME_SUBJECT", "Welcome to Jawafdehi")
 
+# Newsletter and Open House signups land in SendPulse and nowhere else — this app
+# stores no rows — so without an alert the only way to learn that someone signed
+# up is to open the SendPulse dashboard. When on, each signup sends one mail to
+# the inbox below. Best-effort: a send failure never fails the subscribe.
+#
+# ⚠️ Defaults ON, unlike CASE_REPORT_NOTIFY. The alert is only reachable when
+# SendPulse is configured *and* has a verified sender, which is production and
+# nowhere else, so defaulting off would mean the feature does nothing until
+# someone also sets an env var — and the failure mode being fixed here is
+# precisely that nobody notices silence.
+NEWSLETTER_SIGNUP_NOTIFY = env_flag("NEWSLETTER_SIGNUP_NOTIFY", True)
+NEWSLETTER_SIGNUP_NOTIFY_EMAIL = os.getenv(
+    "NEWSLETTER_SIGNUP_NOTIFY_EMAIL", "inquiry@jawafdehi.org"
+)
+
 # Corruption case reports arrive through the public feedback endpoint and have no
 # read API, so without an alert they sit unseen until someone opens Django admin.
 # When on, each one triggers a SendPulse notification carrying only a reference
