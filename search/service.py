@@ -10,7 +10,10 @@ Hard dependency (decision #5): if OpenSearch is unreachable the service raises
 ``SearchUnavailable`` (the view maps it to 503). There is NO in-process fallback.
 
 ACL: the index is all-public (drafts/in-review cases are never indexed), so there
-is NO visibility/ACL filter — search is fully public-read.
+is NO visibility/ACL filter — search is fully public-read. The entity gate in
+``_visibility_clauses`` is not a counter-example: it narrows the DEFAULT BROWSE
+SCOPE to entities a published case cites, and the documents it hides stay
+publicly readable at /api/entities/{iri}.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import binascii
 import json
 import logging
 from typing import Any
+
 
 from jawafdehi_shared.search.aliases import generation_ordinal
 from jawafdehi_shared.search.opensearch import (
@@ -567,6 +571,77 @@ RANGE_FIELDS: dict[str, tuple[str, str]] = {
 }
 
 
+# ``source_app`` value carried by every NES entity document (entities.search_index
+# SOURCE_APP). The visibility clause below keys on this rather than on ``_index``
+# because ENTITY_INDEX is an ALIAS over numbered generations
+# (jawafdehi_shared.search.aliases): a ``term`` on ``_index`` would have to match
+# whichever concrete generation is live, which changes on every ``--rebuild``.
+# ``source_app`` is a mapped keyword on the document itself and cannot drift.
+_ENTITY_SOURCE_APP = "nes"
+
+
+def _visibility_clauses(include_unreferenced: bool) -> list[dict[str, Any]]:
+    """The entity public-visibility filter: hide entities no PUBLISHED case cites.
+
+    Returns an empty list when ``include_unreferenced`` is set (an authorized
+    caseworker asking for the whole registry — see ``search.views``), so the
+    caller's clause list is byte-identical to the pre-gate DSL in that case.
+
+    The gate is UNCONDITIONAL — there is no feature flag. It used to sit behind
+    ``ENTITY_VISIBILITY_GATE_ENABLED`` because ``case_count`` is a field this
+    release adds: code deploys automatically on merge while ``reindex_entities``
+    is a manual off-peak job, so between the two no live document carries the
+    field. A bare two-arm clause would then match NEITHER arm for every entity
+    and empty public entity search rather than gating it.
+
+    The third ``should`` arm below closes that window instead of a flag, and is
+    self-healing rather than permanent: ``entities.search_index.build_doc``
+    always writes ``case_count`` — 0 for an entity no published case cites — so
+    once the reindex has run, no entity document is missing the field and the
+    arm can never match again. Before the reindex it holds the pre-gate
+    behaviour; after it, the gate is exact. Nothing has to be flipped, and
+    nothing has to be remembered.
+
+    NOT a bare ``range`` on ``case_count``. Only entity documents carry that
+    field, and a ``range`` clause EXCLUDES a document that is missing the field
+    — the documented behaviour of the ``bigo`` bound above, which is acceptable
+    there (a बिगो filter is case-scoped by intent) and would be catastrophic
+    here: the default "All records" tab would lose every case, material and
+    court case at once. So the clause reads "not an entity, OR an entity a
+    published case cites", which leaves non-entity documents untouched.
+
+    ``must_not`` on a term is also true for a document MISSING ``source_app``,
+    which is the right direction: an unlabelled document is not an entity, and
+    failing open for non-entities beats blanking the tab.
+    """
+    if include_unreferenced:
+        return []
+    return [
+        {
+            "bool": {
+                "should": [
+                    {
+                        "bool": {
+                            "must_not": {
+                                "term": {"source_app": _ENTITY_SOURCE_APP}
+                            }
+                        }
+                    },
+                    {"range": {"case_count": {"gte": 1}}},
+                    # The deploy→reindex window, and only that: inert the moment
+                    # every entity document carries ``case_count``.
+                    {
+                        "bool": {
+                            "must_not": {"exists": {"field": "case_count"}}
+                        }
+                    },
+                ],
+                "minimum_should_match": 1,
+            }
+        }
+    ]
+
+
 def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
     """``range`` filter clauses for the given bounds (one clause per field).
 
@@ -826,6 +901,7 @@ def build_query(
     page: int = 1,
     page_size: int = 10,
     search_after: list[Any] | None = None,
+    include_unreferenced: bool = False,
 ) -> dict[str, Any]:
     """Build the OpenSearch request body for query ``q`` (bilingual, tuned).
 
@@ -868,6 +944,11 @@ def build_query(
     case-insensitive ``include`` regex to the named facet's terms agg so only
     buckets whose key contains the text come back — the query, hits, count and
     every other facet are untouched.
+
+    ``include_unreferenced`` lifts the entity visibility gate (see
+    :func:`_visibility_clauses`). Default False, so every caller that does not
+    ask is gated; ``search.views`` only honours the request from a caller
+    holding the ``Caseworker`` role.
     """
     page = max(1, page)
     page_size = max(1, min(page_size, MAX_PAGE_SIZE))
@@ -899,6 +980,27 @@ def build_query(
     # so the aggregations must see it too — a facet's bucket counts should
     # describe the scoped corpus, not the whole archive.
     scope_clauses = _scope_clauses(scopes)
+    # Entity visibility gate — ANDed alongside the caller's own narrowing, and
+    # applied at EVERY type selection (an entity must stay hidden on the default
+    # "All records" tab too, not only on ?type=entity).
+    #
+    # It rides with the RANGES, in the query's bool ``filter``, and deliberately
+    # NOT in the ``post_filter`` the facet terms moved to. Two reasons, and both
+    # are the reason the facet change and this one can coexist at all:
+    #   1. ``post_filter`` runs after the aggregations are collected, so a gate
+    #      placed there would hide archived entities from the hit list while still
+    #      COUNTING them in the ``_index`` facet — the type tab would advertise
+    #      187k entities and then page through 1.5k. Only a query-level clause
+    #      narrows counts and hits together.
+    #   2. The per-facet self-exclusion aggs rebuild the terms clauses minus the
+    #      facet's own; visibility is not a facet and no caller may drop it, so it
+    #      must never enter that droppable set.
+    visibility_clauses = _visibility_clauses(include_unreferenced)
+    filter_clauses: list[dict[str, Any]] = [
+        *range_clauses,
+        *scope_clauses,
+        *visibility_clauses,
+    ]
 
     # ``q`` is OPTIONAL. With a term, build the tuned recall+precision bool query;
     # with an empty/blank ``q`` it's a BROWSE — ``match_all`` so the facet filters,
@@ -967,9 +1069,10 @@ def build_query(
         # Recall clause: at least one of the bilingual fields must match, or
         # match_all when browsing.
         "must": must_clauses,
-        # RANGE narrowing only (empty when nothing is requested). The exact-match
-        # facet clauses moved to ``post_filter`` — see the aggs comment below.
-        "filter": range_clauses + scope_clauses,
+        # RANGE narrowing, the search scopes, and the entity visibility gate
+        # (empty when nothing is requested). The exact-match facet clauses moved
+        # to ``post_filter`` — see the aggs comment below.
+        "filter": filter_clauses,
     }
     if has_query:
         # The only thing a search term adds: an adjacent-term (phrase) title match
@@ -1701,6 +1804,7 @@ class SearchService:
         page: int = 1,
         page_size: int = 10,
         cursor: str | None = None,
+        include_unreferenced: bool = False,
     ) -> dict[str, Any]:
         """Execute the unified search and return the response envelope.
 
@@ -1747,6 +1851,7 @@ class SearchService:
             page=page,
             page_size=page_size,
             search_after=search_after,
+            include_unreferenced=include_unreferenced,
         )
         index = _index_for_types(types)
 

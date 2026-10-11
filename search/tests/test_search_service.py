@@ -19,6 +19,7 @@ from search.service import (
     SearchError,
     SearchService,
     SearchUnavailable,
+    _visibility_clauses,
     build_query,
     decode_cursor,
     encode_cursor,
@@ -26,6 +27,27 @@ from search.service import (
 
 
 # ── query DSL ──────────────────────────────────────────────────────────────────
+
+
+def _visibility_clause():
+    """The entity visibility clause ``build_query`` ANDs into every filter list
+    when the gate is enabled (see ``search.service._visibility_clauses``).
+
+    Imported from the implementation rather than restated, so a change to the
+    clause shape does not silently make these assertions test nothing. A
+    function rather than a module constant so nothing is evaluated at import
+    time.
+    """
+    return _visibility_clauses(False)[0]
+
+
+def _narrowing(body):
+    """The filter clauses a caller asked for, minus the entity visibility gate.
+
+    With the gate disabled there is nothing to strip and this is a pass-through,
+    which is exactly what the default-off tests in ``test_search_api`` assert.
+    """
+    return [c for c in body["query"]["bool"]["filter"] if c != _visibility_clause()]
 
 
 def _recall_multi_match(body):
@@ -651,7 +673,7 @@ def test_serialize_hit_omits_district_for_a_high_court_but_keeps_province():
 
 def test_build_query_no_filter_clause_by_default():
     body = build_query(q="x")
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 def test_build_query_entity_type_filter_targets_type_field():
@@ -672,7 +694,9 @@ def test_build_query_case_type_and_tags_filters():
 
 def test_build_query_ignores_unknown_filter_and_empty_values():
     body = build_query(q="x", filters={"bogus": ["v"], "tags": []})
-    assert body["query"]["bool"]["filter"] == []
+    # ``_narrowing`` rather than a bare read of the bool filter: the visibility
+    # gate also lives there, so this stays true whether or not it is enabled.
+    assert _narrowing(body) == []
     # Nothing survived, so no post_filter is emitted at all.
     assert "post_filter" not in body
 
@@ -827,7 +851,7 @@ def test_material_source_is_not_a_facet():
     assert "material_source" not in svc.FACET_FIELDS
     body = build_query(q="x", filters={"material_source": ["ciaa_press_release"]})
     assert "material_source" not in body["aggs"]
-    clauses = body["query"]["bool"]["filter"]
+    clauses = _narrowing(body)
     assert not any("material_source" in str(clause) for clause in clauses)
 
 
@@ -1009,7 +1033,7 @@ def test_facet_does_not_narrow_by_its_own_filter():
         {"terms": {"material_type": ["official_report"]}}
     ]
     # ...and the hits are still narrowed, which is what keeps ``count`` honest.
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 def test_facet_does_not_narrow_by_its_own_multi_valued_filter():
@@ -1269,23 +1293,22 @@ def test_build_query_bigo_max_emits_an_upper_bound():
 def test_build_query_merges_both_bounds_into_a_single_range_clause():
     """One bounded interval, not two clauses that read as unrelated constraints."""
     body = build_query(q="x", ranges={"bigo_min": 10_000_000, "bigo_max": 10**11})
-    clauses = body["query"]["bool"]["filter"]
-    assert clauses == [{"range": {"bigo": {"gte": 10_000_000, "lte": 10**11}}}]
+    assert _narrowing(body) == [{"range": {"bigo": {"gte": 10_000_000, "lte": 10**11}}}]
 
 
 def test_build_query_range_clause_targets_the_promoted_field_not_the_card_copy():
     """``raw`` is mapped ``enabled: false``, so a clause on ``raw.card.bigo`` would
     match nothing. The filter must name the promoted top-level field."""
     body = build_query(q="x", ranges={"bigo_min": 1})
-    (clause,) = body["query"]["bool"]["filter"]
+    (clause,) = _narrowing(body)
     assert set(clause["range"]) == {"bigo"}
 
 
 def test_build_query_no_range_clause_by_default():
     """No bound requested → no clause. An implicit ``bigo >= 0`` would drop every
     non-case result from an ordinary search."""
-    assert build_query(q="x")["query"]["bool"]["filter"] == []
-    assert build_query(q="x", ranges={})["query"]["bool"]["filter"] == []
+    assert _narrowing(build_query(q="x")) == []
+    assert _narrowing(build_query(q="x", ranges={})) == []
 
 
 def test_build_query_ignores_unknown_range_param_and_none_bounds():
@@ -1294,7 +1317,7 @@ def test_build_query_ignores_unknown_range_param_and_none_bounds():
     body = build_query(
         q="x", ranges={"bogus_min": 5, "bigo_min": None, "bigo_max": None}
     )
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 # ── range filters (date) ────────────────────────────────────────────────────────
@@ -1320,8 +1343,7 @@ def test_build_query_merges_date_bounds_into_a_single_range_clause():
     body = build_query(
         q="x", ranges={"date_from": "2020-01-01", "date_to": "2021-12-31"}
     )
-    clauses = body["query"]["bool"]["filter"]
-    assert clauses == [
+    assert _narrowing(body) == [
         {"range": {"date": {"gte": "2020-01-01", "lte": "2021-12-31"}}}
     ]
 
@@ -1331,7 +1353,7 @@ def test_build_query_date_and_bigo_ranges_are_separate_clauses():
     body = build_query(
         q="x", ranges={"bigo_min": 500, "date_from": "2020-01-01"}
     )
-    clauses = body["query"]["bool"]["filter"]
+    clauses = _narrowing(body)
     assert {"range": {"bigo": {"gte": 500}}} in clauses
     assert {"range": {"date": {"gte": "2020-01-01"}}} in clauses
     assert len(clauses) == 2
@@ -1361,7 +1383,7 @@ def test_build_query_range_composes_with_terms_filters():
     terms = body["post_filter"]["bool"]["filter"]
     assert {"terms": {"case_type": ["CORRUPTION"]}} in terms
     assert {"terms": {"case_status": ["ongoing"]}} in terms
-    assert body["query"]["bool"]["filter"] == [
+    assert _narrowing(body) == [
         {"range": {"bigo": {"gte": 10_000_000}}}
     ]
 
@@ -2366,7 +2388,7 @@ def test_repeated_scope_values_union():
 def test_absent_scope_emits_no_clause():
     for scopes in (None, {}, {"source": []}):
         body = svc.build_query(q="x", scopes=scopes)
-        assert body["query"]["bool"]["filter"] == []
+        assert _narrowing(body) == []
 
 
 def test_dataset_bucket_scope_lands_in_the_filter():
@@ -2391,7 +2413,7 @@ def test_source_and_dataset_bucket_scopes_and_together():
             "dataset_bucket": ["report_annual-report"],
         },
     )
-    filters = body["query"]["bool"]["filter"]
+    filters = _narrowing(body)
 
     assert {"terms": {"source": ["official_report"]}} in filters
     assert {"terms": {"dataset_bucket": ["report_annual-report"]}} in filters
@@ -2421,7 +2443,7 @@ def test_repeated_exclude_values_union_into_one_must_not():
         "publication_audit-bulletin",
     ]
     body = svc.build_query(q="", scopes={"dataset_bucket_exclude": kinds})
-    filters = body["query"]["bool"]["filter"]
+    filters = _narrowing(body)
 
     assert len([c for c in filters if "bool" in c]) == 1
     assert {"bool": {"must_not": {"terms": {"dataset_bucket": kinds}}}} in filters
@@ -2435,7 +2457,7 @@ def test_positive_and_negative_scopes_on_one_field_coexist():
         q="",
         scopes={"dataset_bucket": ["a"], "dataset_bucket_exclude": ["b"]},
     )
-    filters = body["query"]["bool"]["filter"]
+    filters = _narrowing(body)
 
     assert {"terms": {"dataset_bucket": ["a"]}} in filters
     assert {"bool": {"must_not": {"terms": {"dataset_bucket": ["b"]}}}} in filters
@@ -2456,7 +2478,7 @@ def test_unknown_scope_params_are_ignored():
     inject a clause on an arbitrary field."""
     body = svc.build_query(q="x", scopes={"nonsense": ["boom"]})
 
-    assert body["query"]["bool"]["filter"] == []
+    assert _narrowing(body) == []
 
 
 def test_every_scope_field_is_declared_on_the_query_serializer():

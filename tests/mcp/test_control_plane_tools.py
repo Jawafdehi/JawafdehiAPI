@@ -857,6 +857,11 @@ async def test_unified_search_maps_repeatable_filters():
             "type": ["case", "courtcase"],
             "tags": ["procurement", "appeal"],
             "page_size": 25,
+            # Supplied by the tool, not the caller: this tool's audience is a
+            # caseworker in chat who needs the whole entity registry, and the
+            # endpoint's own default is the opposite. Honoured only for the
+            # Caseworker role, so sending it unconditionally is not a bypass.
+            "include_unreferenced": True,
         },
         json_body=None,
         headers=None,
