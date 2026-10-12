@@ -699,8 +699,13 @@ def _patch_material(request, iri: str) -> Response:
         if updated_fields:
             row.save(update_fields=updated_fields + ["updated_at"])
 
+    # Same body a GET of this URL would return, content summary included: a client
+    # that adopts the PATCH response rather than refetching must not silently lose
+    # the content signal and conclude the document has nothing inside it.
     resp = Response(
-        _with_admin_visibility(row), status=status.HTTP_200_OK, content_type=LD_JSON
+        _with_content_summary(_with_admin_visibility(row), row),
+        status=status.HTTP_200_OK,
+        content_type=LD_JSON,
     )
     resp["ETag"] = _version_token(row)
     return resp
