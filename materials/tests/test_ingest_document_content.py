@@ -1,4 +1,4 @@
-"""The ``ingest_document_extraction`` management command.
+"""The ``ingest_document_content`` management command.
 
 The command's contract is "resolve everything, then write, or write nothing":
 a half-ingested corpus would put the data tab on some reports and not others
@@ -10,7 +10,7 @@ Fixtures are real parquet files written by duckdb into a tmp dir, so the test
 exercises the same read path production does.
 
     DATABASE_URL=sqlite:// NES_DB_URL=sqlite:// NGM_DATABASE_URL=sqlite:// \
-        uv run pytest materials/tests/test_ingest_document_extraction.py
+        uv run pytest materials/tests/test_ingest_document_content.py
 """
 
 from __future__ import annotations
@@ -26,14 +26,14 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
-from materials.management.commands import ingest_document_extraction as mod
+from materials.management.commands import ingest_document_content as mod
 from materials.jsonld import MATERIAL_CONTEXT
 from materials.models import (
-    DocumentExtraction,
-    ExtractedFigure,
-    ExtractedFigurePoint,
-    ExtractedPage,
-    ExtractedTable,
+    DocumentContent,
+    DocumentFigure,
+    DocumentFigurePoint,
+    DocumentPage,
+    DocumentTable,
     Material,
 )
 
@@ -271,7 +271,7 @@ class IngestCommandTests(TestCase):
     def _run(self, **kwargs):
         out = StringIO()
         call_command(
-            "ingest_document_extraction",
+            "ingest_document_content",
             map=str(self.map_path),
             parquet_dir=str(self.dir),
             revision="abc1234",
@@ -284,19 +284,19 @@ class IngestCommandTests(TestCase):
 
     def test_ingests_tables_figures_and_points(self):
         self._run()
-        extraction = DocumentExtraction.objects.get(pk=self.iri)
-        self.assertEqual(extraction.doc_id, DOC_ID)
-        self.assertEqual(extraction.dataset_revision, "abc1234")
-        self.assertEqual(extraction.page_count, 255)
-        self.assertEqual(extraction.tables.count(), 2)
-        self.assertEqual(extraction.figures.count(), 1)
-        self.assertEqual(ExtractedFigurePoint.objects.count(), 2)
+        content = DocumentContent.objects.get(pk=self.iri)
+        self.assertEqual(content.doc_id, DOC_ID)
+        self.assertEqual(content.dataset_revision, "abc1234")
+        self.assertEqual(content.page_count, 255)
+        self.assertEqual(content.tables.count(), 2)
+        self.assertEqual(content.figures.count(), 1)
+        self.assertEqual(DocumentFigurePoint.objects.count(), 2)
 
     def test_ingests_pages_with_their_text(self):
         self._run()
-        extraction = DocumentExtraction.objects.get(pk=self.iri)
-        self.assertEqual(extraction.pages.count(), 2)
-        page = extraction.pages.get(page_no=18)
+        content = DocumentContent.objects.get(pk=self.iri)
+        self.assertEqual(content.pages.count(), 2)
+        page = content.pages.get(page_no=18)
         self.assertIn("१९४८८", page.text)
         self.assertEqual(page.coverage_state, "anchored")
         self.assertEqual(page.ocr_source, "pdf_text_layer")
@@ -307,7 +307,7 @@ class IngestCommandTests(TestCase):
         # API can recover it, and the absence of OCR gets read as an absence of
         # findings.
         self._run()
-        page = ExtractedPage.objects.get(page_no=19)
+        page = DocumentPage.objects.get(page_no=19)
         self.assertEqual(page.text, "")
         self.assertEqual(page.coverage_state, "ocr_unread")
 
@@ -315,7 +315,7 @@ class IngestCommandTests(TestCase):
         # Not by insertion order: the fixture writes page 19 before page 18.
         self._run()
         self.assertEqual(
-            list(ExtractedPage.objects.values_list("page_no", flat=True)), [18, 19]
+            list(DocumentPage.objects.values_list("page_no", flat=True)), [18, 19]
         )
 
     def test_counts_come_from_the_upstream_not_from_our_own_rows(self):
@@ -332,25 +332,25 @@ class IngestCommandTests(TestCase):
             [(DOC_ID, 255, "likhit", "clean", "trustworthy", 99, 98, 97, 96)],
         )
         self._run()
-        extraction = DocumentExtraction.objects.get(pk=self.iri)
-        self.assertEqual(extraction.n_tables, 99)
-        self.assertEqual(extraction.n_figures, 98)
-        self.assertEqual(extraction.n_points, 97)
-        self.assertEqual(extraction.pages_with_text, 96)
+        content = DocumentContent.objects.get(pk=self.iri)
+        self.assertEqual(content.n_tables, 99)
+        self.assertEqual(content.n_figures, 98)
+        self.assertEqual(content.n_points, 97)
+        self.assertEqual(content.pages_with_text, 96)
         # ...while the rows we actually wrote are unchanged.
-        self.assertEqual(extraction.tables.count(), 2)
+        self.assertEqual(content.tables.count(), 2)
 
     def test_ordinals_follow_document_order_not_file_order(self):
         self._run()
         ordered = list(
-            ExtractedTable.objects.order_by("ordinal").values_list("ordinal", "page_no")
+            DocumentTable.objects.order_by("ordinal").values_list("ordinal", "page_no")
         )
         self.assertEqual(ordered, [(1, 18), (2, 19)])
 
     def test_points_keep_their_estimated_flag_and_order(self):
         self._run()
         points = list(
-            ExtractedFigurePoint.objects.order_by("point_index").values_list(
+            DocumentFigurePoint.objects.order_by("point_index").values_list(
                 "point_index", "value", "is_estimated"
             )
         )
@@ -358,13 +358,13 @@ class IngestCommandTests(TestCase):
 
     def test_malformed_header_json_degrades_to_empty_not_an_error(self):
         self._run()
-        by_page = {t.page_no: t for t in ExtractedTable.objects.all()}
+        by_page = {t.page_no: t for t in DocumentTable.objects.all()}
         self.assertEqual(by_page[19].header, ["क", "ख"])
         self.assertEqual(by_page[18].header, [])
 
     def test_null_caption_becomes_empty_string(self):
         self._run()
-        self.assertEqual(ExtractedTable.objects.get(page_no=18).caption, "")
+        self.assertEqual(DocumentTable.objects.get(page_no=18).caption, "")
 
     def test_nan_chart_value_becomes_null_not_a_nan_float(self):
         # A NaN survives float(), stores in a FloatField, and then renders as a
@@ -377,7 +377,7 @@ class IngestCommandTests(TestCase):
             [(f"{DOC_ID}#p0018#f1", 1, "x", "s", float("nan"), False)],
         )
         self._run()
-        point = ExtractedFigurePoint.objects.get()
+        point = DocumentFigurePoint.objects.get()
         self.assertIsNone(point.value)
         self.assertIn('"value": null', json.dumps({"value": point.value}))
 
@@ -392,7 +392,7 @@ class IngestCommandTests(TestCase):
             [(f"{DOC_ID}#p0018#f1", 1, "x", "s", 1.0, None)],
         )
         self._run()
-        self.assertFalse(ExtractedFigurePoint.objects.get().is_estimated)
+        self.assertFalse(DocumentFigurePoint.objects.get().is_estimated)
 
     def test_null_verified_flag_stays_null(self):
         # "not checked" and "checked and found wanting" are different claims.
@@ -403,7 +403,7 @@ class IngestCommandTests(TestCase):
             [(f"{DOC_ID}#p0018#f1", DOC_ID, 18, 1, "t", "bar", "", "", "", "", "", None)],
         )
         self._run()
-        self.assertIsNone(ExtractedFigure.objects.get().verified)
+        self.assertIsNone(DocumentFigure.objects.get().verified)
 
     def test_a_failure_mid_corpus_leaves_no_partial_ingest(self):
         # The whole write phase is one transaction; a document that blows up must
@@ -433,7 +433,7 @@ class IngestCommandTests(TestCase):
                 }
             )
         )
-        from materials.management.commands import ingest_document_extraction as mod
+        from materials.management.commands import ingest_document_content as mod
 
         original = mod.Command._ingest_one
         calls = {"n": 0}
@@ -449,30 +449,30 @@ class IngestCommandTests(TestCase):
 
         with self.assertRaises(RuntimeError):
             self._run()
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
-        self.assertEqual(ExtractedTable.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
+        self.assertEqual(DocumentTable.objects.count(), 0)
 
     # ── idempotency ───────────────────────────────────────────────────────────
 
     def test_reingest_replaces_rather_than_duplicates(self):
         self._run()
-        first = DocumentExtraction.objects.get(pk=self.iri).ingested_at
+        first = DocumentContent.objects.get(pk=self.iri).ingested_at
         self._run()
-        self.assertEqual(DocumentExtraction.objects.count(), 1)
-        self.assertEqual(ExtractedTable.objects.count(), 2)
-        self.assertEqual(ExtractedFigurePoint.objects.count(), 2)
+        self.assertEqual(DocumentContent.objects.count(), 1)
+        self.assertEqual(DocumentTable.objects.count(), 2)
+        self.assertEqual(DocumentFigurePoint.objects.count(), 2)
         self.assertGreaterEqual(
-            DocumentExtraction.objects.get(pk=self.iri).ingested_at, first
+            DocumentContent.objects.get(pk=self.iri).ingested_at, first
         )
 
     def test_reingest_of_unchanged_input_is_byte_stable(self):
         self._run()
         before = list(
-            ExtractedTable.objects.order_by("ordinal").values_list("key", "uid")
+            DocumentTable.objects.order_by("ordinal").values_list("key", "uid")
         )
         self._run()
         after = list(
-            ExtractedTable.objects.order_by("ordinal").values_list("key", "uid")
+            DocumentTable.objects.order_by("ordinal").values_list("key", "uid")
         )
         self.assertEqual(before, after)
 
@@ -483,9 +483,9 @@ class IngestCommandTests(TestCase):
         # would quietly start resolving to a DIFFERENT table — a 200 with the
         # wrong content, which is worse than a 404.
         self._run()
-        original = dict(ExtractedTable.objects.values_list("key", "uid"))
-        key_of_page_19 = ExtractedTable.objects.get(page_no=19).key
-        ordinal_of_page_19 = ExtractedTable.objects.get(page_no=19).ordinal
+        original = dict(DocumentTable.objects.values_list("key", "uid"))
+        key_of_page_19 = DocumentTable.objects.get(page_no=19).key
+        ordinal_of_page_19 = DocumentTable.objects.get(page_no=19).ordinal
 
         rows = [
             (f"{DOC_ID}#p0018#t1", DOC_ID, 18, 1, "", "[]", 9, 4, "tight", "| a |"),
@@ -496,20 +496,20 @@ class IngestCommandTests(TestCase):
         _write_parquet(self.dir, "tables", TABLE_COLUMNS, rows)
         self._run()
 
-        moved = ExtractedTable.objects.get(page_no=19)
+        moved = DocumentTable.objects.get(page_no=19)
         self.assertNotEqual(moved.ordinal, ordinal_of_page_19)  # ordinal shifted
         self.assertEqual(moved.key, key_of_page_19)  # key did not
         # Every pre-existing key still points at the table it always did.
         for key, uid in original.items():
-            self.assertEqual(ExtractedTable.objects.get(key=key).uid, uid)
+            self.assertEqual(DocumentTable.objects.get(key=key).uid, uid)
 
     def test_keys_encode_page_and_index(self):
         self._run()
         self.assertEqual(
-            sorted(ExtractedTable.objects.values_list("key", flat=True)),
+            sorted(DocumentTable.objects.values_list("key", flat=True)),
             ["p0018-t1", "p0019-t1"],
         )
-        self.assertEqual(ExtractedFigure.objects.get().key, "p0018-f1")
+        self.assertEqual(DocumentFigure.objects.get().key, "p0018-f1")
 
     def test_reingest_drops_rows_the_upstream_removed(self):
         self._run()
@@ -520,7 +520,7 @@ class IngestCommandTests(TestCase):
             [(f"{DOC_ID}#p0018#t1", DOC_ID, 18, 1, "", "[]", 9, 4, "tight", "| x |")],
         )
         self._run()
-        self.assertEqual(ExtractedTable.objects.count(), 1)
+        self.assertEqual(DocumentTable.objects.count(), 1)
 
     # ── refuse-to-write cases ────────────────────────────────────────────────
 
@@ -529,7 +529,7 @@ class IngestCommandTests(TestCase):
         with self.assertRaises(CommandError) as ctx:
             self._run()
         self.assertIn("no material at", str(ctx.exception))
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
 
     def test_soft_deleted_material_is_skipped_not_fatal(self):
         # A takedown is a deliberate editorial act. It must not block the rest of
@@ -537,7 +537,7 @@ class IngestCommandTests(TestCase):
         Material.objects.filter(pk=self.iri).update(is_deleted=True)
         output = self._run()
         self.assertIn("soft-deleted", output)
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
 
     def test_a_takedown_does_not_stop_the_other_reports(self):
         second_ident = "second_report"
@@ -567,7 +567,7 @@ class IngestCommandTests(TestCase):
         Material.objects.filter(pk=self.iri).update(is_deleted=True)
         self._run()
         self.assertEqual(
-            list(DocumentExtraction.objects.values_list("pk", flat=True)), [second_iri]
+            list(DocumentContent.objects.values_list("pk", flat=True)), [second_iri]
         )
 
     def test_a_map_entry_with_no_material_at_all_still_aborts(self):
@@ -584,7 +584,7 @@ class IngestCommandTests(TestCase):
         with self.assertRaises(CommandError) as ctx:
             self._run()
         self.assertIn("absent from the map", str(ctx.exception))
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
 
     def test_map_pointing_two_doc_ids_at_one_material_aborts(self):
         self.map_path.write_text(
@@ -609,7 +609,7 @@ class IngestCommandTests(TestCase):
     def test_dry_run_writes_nothing(self):
         output = self._run(dry_run=True)
         self.assertIn("dry run OK", output)
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
 
     def test_dry_run_still_reports_an_unresolvable_map(self):
         Material.objects.filter(pk=self.iri).delete()
@@ -768,7 +768,7 @@ class IngestFromDatasetTests(TestCase):
         out = StringIO()
         with patch.object(mod.urllib.request, "urlopen", self._fake_urlopen(**kwargs.pop("fake", {}))):
             call_command(
-                "ingest_document_extraction",
+                "ingest_document_content",
                 map=str(self.map_path),
                 download=True,
                 stdout=out,
@@ -778,14 +778,14 @@ class IngestFromDatasetTests(TestCase):
 
     def test_downloads_and_ingests(self):
         self._run()
-        self.assertEqual(DocumentExtraction.objects.count(), 1)
-        self.assertEqual(ExtractedTable.objects.count(), 1)
+        self.assertEqual(DocumentContent.objects.count(), 1)
+        self.assertEqual(DocumentTable.objects.count(), 1)
 
     def test_records_the_datasets_own_revision(self):
         # The whole point of --download: provenance without the operator having to
         # look a sha up and paste it correctly.
         self._run()
-        self.assertEqual(DocumentExtraction.objects.get().dataset_revision, "abc123sha")
+        self.assertEqual(DocumentContent.objects.get().dataset_revision, "abc123sha")
 
     def test_a_missing_revision_sha_aborts_rather_than_recording_a_blank(self):
         # --download exists so provenance comes from the bytes actually fetched.
@@ -795,7 +795,7 @@ class IngestFromDatasetTests(TestCase):
         with self.assertRaises(CommandError) as ctx:
             self._run(fake={"sha": ""})
         self.assertIn("no revision sha", str(ctx.exception))
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
 
     def test_a_republish_during_the_download_aborts(self):
         # The shard listing and file URLs are not pinned to a revision, so a
@@ -808,7 +808,7 @@ class IngestFromDatasetTests(TestCase):
             with self.assertRaises(CommandError) as ctx:
                 self._run()
         self.assertIn("republished during the download", str(ctx.exception))
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
 
     def _moving_sha(self, shas):
         """``_get_json`` that reports a different sha on each revision call."""
@@ -842,24 +842,24 @@ class IngestFromDatasetTests(TestCase):
         with self.assertRaises(CommandError) as ctx:
             self._run(fake={"fail_on": "hf.test/tables/"})
         self.assertIn("could not download dataset", str(ctx.exception))
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
 
     def test_the_downloaded_parquet_is_not_left_behind(self):
         # A long-lived pod must not accumulate a few MB per run.
         import tempfile
 
-        before = set(Path(tempfile.gettempdir()).glob("extraction-*"))
+        before = set(Path(tempfile.gettempdir()).glob("content-*"))
         self._run()
-        self.assertEqual(set(Path(tempfile.gettempdir()).glob("extraction-*")), before)
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("content-*")), before)
 
     def test_temp_dir_is_cleaned_up_even_when_the_ingest_fails(self):
         import tempfile
 
         Material.objects.filter(pk=self.iri).delete()
-        before = set(Path(tempfile.gettempdir()).glob("extraction-*"))
+        before = set(Path(tempfile.gettempdir()).glob("content-*"))
         with self.assertRaises(CommandError):
             self._run()
-        self.assertEqual(set(Path(tempfile.gettempdir()).glob("extraction-*")), before)
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("content-*")), before)
 
     def test_downloads_the_dataset_the_map_names(self):
         # The map's id is what lands in every row's `dataset` provenance field.
@@ -880,7 +880,7 @@ class IngestFromDatasetTests(TestCase):
             f"asked a dataset the map does not name: {api_calls}",
         )
         self.assertEqual(
-            DocumentExtraction.objects.get().dataset, "damo-da/ciaa-annual-reports"
+            DocumentContent.objects.get().dataset, "damo-da/ciaa-annual-reports"
         )
 
     def test_revision_comes_from_the_parquet_branch_not_the_default_branch(self):
@@ -901,7 +901,7 @@ class IngestFromDatasetTests(TestCase):
     def test_dry_run_downloads_but_writes_nothing(self):
         output = self._run(dry_run=True)
         self.assertIn("dry run OK", output)
-        self.assertEqual(DocumentExtraction.objects.count(), 0)
+        self.assertEqual(DocumentContent.objects.count(), 0)
 
 
 class IngestSourceArgumentTests(TestCase):
@@ -909,14 +909,14 @@ class IngestSourceArgumentTests(TestCase):
 
     def test_neither_source_is_rejected(self):
         with self.assertRaises(CommandError):
-            call_command("ingest_document_extraction", map="/nope.json")
+            call_command("ingest_document_content", map="/nope.json")
 
     def test_both_sources_at_once_are_rejected(self):
         # Ambiguous: which one wins should not be a question anyone has to answer
         # by reading the implementation.
         with self.assertRaises(CommandError):
             call_command(
-                "ingest_document_extraction",
+                "ingest_document_content",
                 map="/nope.json",
                 download=True,
                 parquet_dir="/tmp",
@@ -932,7 +932,7 @@ class IngestRevisionArgumentTests(TestCase):
         # exists to close.
         with self.assertRaises(CommandError) as ctx:
             call_command(
-                "ingest_document_extraction",
+                "ingest_document_content",
                 map="/nope.json",
                 download=True,
                 revision="deadbeef",

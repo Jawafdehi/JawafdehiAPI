@@ -30,7 +30,7 @@ urlpatterns = [
         views.material_file_upload,
         name="material-file-upload",
     ),
-    # Extracted content (pages, tables, figures). Declared BEFORE material-detail
+    # Document content (pages, tables, figures). Declared BEFORE material-detail
     # for the same reason /file is, and it is not a style point: the detail
     # route's ``source`` is multi-segment, so it would otherwise match this URL
     # as source=``<source>/<ident>``, ident=``content`` and answer "no such

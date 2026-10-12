@@ -14,9 +14,9 @@ in its own right, so it carries no ``@context``.
 What this replaces: API#514's ``/extraction`` manifest, which answered three
 questions in one payload (*how much is in here*, *what tables*, *what charts*).
 The two listings became their own addressable resources here; the counts are
-denormalised onto ``DocumentExtraction`` ready for the material detail payload,
+denormalised onto ``DocumentContent`` ready for the material detail payload,
 which is a FOLLOW-UP and not yet wired. Until it lands a client still has to
-probe this route to learn whether a document has any extracted content, which
+probe this route to learn whether a document has any content, which
 is the one thing the split has not yet bought back.
 
 **No query here pins its database alias.** The router sends ``materials`` to
@@ -32,11 +32,11 @@ from __future__ import annotations
 from django.db.models import Prefetch
 
 from .models import (
-    DocumentExtraction,
-    ExtractedFigure,
-    ExtractedFigurePoint,
-    ExtractedPage,
-    ExtractedTable,
+    DocumentContent,
+    DocumentFigure,
+    DocumentFigurePoint,
+    DocumentPage,
+    DocumentTable,
 )
 
 #: The ``type`` values ``…/content`` accepts. ``page`` is addressed by ``num``
@@ -61,7 +61,7 @@ MAX_PAGE_SPAN = 50
 # ── pages ────────────────────────────────────────────────────────────────────
 
 
-def _page_stub(page: ExtractedPage) -> dict:
+def _page_stub(page: DocumentPage) -> dict:
     """A page without its text — enough to navigate, and to know what is missing.
 
     ``coverage_state`` and ``chars`` ride on the stub deliberately. A client
@@ -81,7 +81,7 @@ def _page_stub(page: ExtractedPage) -> dict:
     }
 
 
-def page_payload(page: ExtractedPage) -> dict:
+def page_payload(page: DocumentPage) -> dict:
     """One page in full: the stub plus the recovered text."""
     return {**_page_stub(page), "text": page.text}
 
@@ -89,7 +89,7 @@ def page_payload(page: ExtractedPage) -> dict:
 # ── tables ───────────────────────────────────────────────────────────────────
 
 
-def _table_stub(table: ExtractedTable) -> dict:
+def _table_stub(table: DocumentTable) -> dict:
     """A table without its markdown — enough to list, label and link it."""
     return {
         # ``ordinal`` is presentation order and is recomputed on every ingest;
@@ -107,7 +107,7 @@ def _table_stub(table: ExtractedTable) -> dict:
     }
 
 
-def table_payload(table: ExtractedTable) -> dict:
+def table_payload(table: DocumentTable) -> dict:
     """One table in full: the stub plus the markdown a client renders."""
     return {**_table_stub(table), "markdown": table.markdown}
 
@@ -115,7 +115,7 @@ def table_payload(table: ExtractedTable) -> dict:
 # ── figures ──────────────────────────────────────────────────────────────────
 
 
-def figure_payload(figure: ExtractedFigure) -> dict:
+def figure_payload(figure: DocumentFigure) -> dict:
     """One chart and its series.
 
     ``estimated`` rides on every point rather than being summarised at the figure
@@ -154,24 +154,24 @@ def figure_payload(figure: ExtractedFigure) -> dict:
 # ── queries ──────────────────────────────────────────────────────────────────
 
 
-def extraction_for(iri: str) -> DocumentExtraction | None:
-    """The extraction row for ``iri``, or None.
+def content_for(iri: str) -> DocumentContent | None:
+    """The content row for ``iri``, or None.
 
     Callers MUST have resolved the material's visibility first — this applies no
     gate of its own (see ``materials.views.material_content``).
     """
-    return DocumentExtraction.objects.filter(pk=iri).first()
+    return DocumentContent.objects.filter(pk=iri).first()
 
 
 def list_pages(iri: str) -> list[dict]:
     """Every page stub. ``defer("text")`` is the point: without it this reads the
     document's entire transcript out of Postgres to serialize none of it."""
-    rows = ExtractedPage.objects.filter(extraction_id=iri).defer("text")
+    rows = DocumentPage.objects.filter(content_id=iri).defer("text")
     return [_page_stub(p) for p in rows.order_by("page_no")]
 
 
-def get_page(iri: str, page_no: int) -> ExtractedPage | None:
-    return ExtractedPage.objects.filter(extraction_id=iri, page_no=page_no).first()
+def get_page(iri: str, page_no: int) -> DocumentPage | None:
+    return DocumentPage.objects.filter(content_id=iri, page_no=page_no).first()
 
 
 def get_page_range(iri: str, first: int, last: int) -> list[dict]:
@@ -181,8 +181,8 @@ def get_page_range(iri: str, first: int, last: int) -> list[dict]:
     pages, and a reader asking for one page as ``from=30&to=30`` should get it.
     The caller is responsible for bounding the span — see ``MAX_PAGE_SPAN``.
     """
-    rows = ExtractedPage.objects.filter(
-        extraction_id=iri, page_no__gte=first, page_no__lte=last
+    rows = DocumentPage.objects.filter(
+        content_id=iri, page_no__gte=first, page_no__lte=last
     )
     return [page_payload(p) for p in rows.order_by("page_no")]
 
@@ -194,12 +194,12 @@ def list_tables(iri: str) -> list[dict]:
     would pull every table's markdown — ~830 KiB for the largest CIAA report —
     out of the database only for the serializer to drop it again.
     """
-    rows = ExtractedTable.objects.filter(extraction_id=iri).defer("markdown")
+    rows = DocumentTable.objects.filter(content_id=iri).defer("markdown")
     return [_table_stub(t) for t in rows.order_by("ordinal")]
 
 
-def get_table(iri: str, key: str) -> ExtractedTable | None:
-    return ExtractedTable.objects.filter(extraction_id=iri, key=key).first()
+def get_table(iri: str, key: str) -> DocumentTable | None:
+    return DocumentTable.objects.filter(content_id=iri, key=key).first()
 
 
 def _figures_queryset(iri: str):
@@ -209,9 +209,9 @@ def _figures_queryset(iri: str):
     rendered in series order and a bare prefetch would leave that to the
     database. Routing is the router's job — see the module docstring.
     """
-    points = ExtractedFigurePoint.objects.order_by("point_index", "id")
+    points = DocumentFigurePoint.objects.order_by("point_index", "id")
     return (
-        ExtractedFigure.objects.filter(extraction_id=iri)
+        DocumentFigure.objects.filter(content_id=iri)
         .prefetch_related(Prefetch("points", queryset=points))
         .order_by("ordinal")
     )
@@ -227,15 +227,15 @@ def list_figures(iri: str) -> list[dict]:
     return [figure_payload(f) for f in _figures_queryset(iri)]
 
 
-def get_figure(iri: str, key: str) -> ExtractedFigure | None:
+def get_figure(iri: str, key: str) -> DocumentFigure | None:
     return _figures_queryset(iri).filter(key=key).first()
 
 
-def version_token(extraction: DocumentExtraction) -> str:
+def version_token(content: DocumentContent) -> str:
     """A weak ETag for any content response.
 
-    ``ingested_at`` alone is sufficient: the ingest replaces an extraction
+    ``ingested_at`` alone is sufficient: the ingest replaces a document's content
     wholesale inside one transaction, so nothing about any of its rows can change
     without that timestamp moving.
     """
-    return f'W/"{extraction.ingested_at.timestamp():.6f}"'
+    return f'W/"{content.ingested_at.timestamp():.6f}"'

@@ -1,15 +1,15 @@
-"""Load extracted tables and charts for a corpus of already-ingested materials.
+"""Load a corpus of document content (pages, tables, charts) for known materials.
 
 Two ways in. In production, let the command fetch the dataset itself — one
 command, nothing to stage, and the revision is captured automatically:
 
-    uv run python manage.py ingest_document_extraction \
+    uv run python manage.py ingest_document_content \
         --map materials/data/ciaa_annual_report_docmap.json \
         --download
 
 Or point it at parquet already on disk, for offline work and the tests:
 
-    uv run python manage.py ingest_document_extraction \
+    uv run python manage.py ingest_document_content \
         --map materials/data/ciaa_annual_report_docmap.json \
         --parquet-dir /path/to/dataset \
         --revision <upstream commit sha>
@@ -27,7 +27,7 @@ the two disagree — and on this platform a provenance field that can lie is wor
 than no field at all.
 
 The command is the ONLY CIAA-aware piece of this feature; the schema it writes
-into is generic (see materials.models.DocumentExtraction). To onboard a second
+into is generic (see materials.models.DocumentContent). To onboard a second
 corpus, write a second map file — no migration, no code change here.
 
 **Why a map file rather than a parser.** The upstream dataset keys documents on
@@ -57,11 +57,11 @@ from django.db import transaction
 from jawafdehi_shared.entities.ids import build_material_iri
 
 from ...models import (
-    DocumentExtraction,
-    ExtractedFigure,
-    ExtractedFigurePoint,
-    ExtractedPage,
-    ExtractedTable,
+    DocumentContent,
+    DocumentFigure,
+    DocumentFigurePoint,
+    DocumentPage,
+    DocumentTable,
     Material,
 )
 
@@ -307,7 +307,7 @@ def _header(value: Any) -> list:
 
 
 class Command(BaseCommand):
-    help = "Ingest extracted tables/figures for materials named in a map file."
+    help = "Ingest document content for the materials named in a map file."
 
     def add_arguments(self, parser) -> None:
         parser.add_argument("--map", required=True, help="Path to the docmap JSON.")
@@ -356,7 +356,7 @@ class Command(BaseCommand):
             # The temp dir is torn down on the way out, including when the ingest
             # raises: a failed run must not leave a few MB of parquet behind in a
             # long-lived pod.
-            with tempfile.TemporaryDirectory(prefix="extraction-") as tmp:
+            with tempfile.TemporaryDirectory(prefix="content-") as tmp:
                 self._run(options, Path(tmp))
         else:
             self._run(options, Path(options["parquet_dir"]))
@@ -525,16 +525,16 @@ class Command(BaseCommand):
         figures: list[dict],
         points_by_figure: dict[str, list[dict]],
     ) -> dict[str, int]:
-        """Replace one material's extraction wholesale. Runs inside the caller's
+        """Replace one material's content wholesale. Runs inside the caller's
         transaction.
 
         Delete-then-insert rather than update-in-place: the upstream can drop a
         table between revisions, and an upsert keyed on ``uid`` would leave the
-        dropped row behind forever. The cascade from DocumentExtraction takes the
+        dropped row behind forever. The cascade from DocumentContent takes the
         tables, figures and points with it.
         """
-        DocumentExtraction.objects.using("ngm").filter(pk=iri).delete()
-        extraction = DocumentExtraction.objects.using("ngm").create(
+        DocumentContent.objects.using("ngm").filter(pk=iri).delete()
+        content = DocumentContent.objects.using("ngm").create(
             material_id=iri,
             doc_id=doc_id,
             dataset=dataset,
@@ -554,10 +554,10 @@ class Command(BaseCommand):
             pages_with_text=_int(doc.get("pages_with_text")),
         )
 
-        ExtractedPage.objects.using("ngm").bulk_create(
+        DocumentPage.objects.using("ngm").bulk_create(
             [
-                ExtractedPage(
-                    extraction=extraction,
+                DocumentPage(
+                    content=content,
                     page_no=_int(row.get("page_no")),
                     uid=_text(row.get("page_uid"))[:160],
                     text=_text(row.get("text")),
@@ -577,10 +577,10 @@ class Command(BaseCommand):
             batch_size=POINT_BATCH,
         )
 
-        ExtractedTable.objects.using("ngm").bulk_create(
+        DocumentTable.objects.using("ngm").bulk_create(
             [
-                ExtractedTable(
-                    extraction=extraction,
+                DocumentTable(
+                    content=content,
                     ordinal=ordinal,
                     key=_key(
                         _int(row.get("page_no")),
@@ -602,8 +602,8 @@ class Command(BaseCommand):
         )
 
         figure_rows = [
-            ExtractedFigure(
-                extraction=extraction,
+            DocumentFigure(
+                content=content,
                 ordinal=ordinal,
                 key=_key(
                     _int(row.get("page_no")),
@@ -624,13 +624,13 @@ class Command(BaseCommand):
             )
             for ordinal, row in enumerate(figures, start=1)
         ]
-        ExtractedFigure.objects.using("ngm").bulk_create(figure_rows)
+        DocumentFigure.objects.using("ngm").bulk_create(figure_rows)
 
         # bulk_create does not populate PKs on every backend, so re-read the ids
         # by uid rather than trusting the in-memory objects.
         figure_ids = dict(
-            ExtractedFigure.objects.using("ngm")
-            .filter(extraction=extraction)
+            DocumentFigure.objects.using("ngm")
+            .filter(content=content)
             .values_list("uid", "id")
         )
         # Pair each stored row back to the source row it came from. Points are
@@ -638,7 +638,7 @@ class Command(BaseCommand):
         # the stored (possibly truncated) one, so looking both up off the same
         # string would silently drop every point of an over-long uid.
         points = [
-            ExtractedFigurePoint(
+            DocumentFigurePoint(
                 figure_id=figure_ids[stored.uid],
                 point_index=_int(p.get("point_index")),
                 label=_text(p.get("label"))[:300],
@@ -649,7 +649,7 @@ class Command(BaseCommand):
             for stored, source_row in zip(figure_rows, figures)
             for p in points_by_figure.get(_text(source_row.get("figure_uid")), [])
         ]
-        ExtractedFigurePoint.objects.using("ngm").bulk_create(
+        DocumentFigurePoint.objects.using("ngm").bulk_create(
             points, batch_size=POINT_BATCH
         )
 

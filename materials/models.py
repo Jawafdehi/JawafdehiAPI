@@ -205,7 +205,7 @@ class Material(models.Model):
         )
 
 
-# ── Extracted document data ──────────────────────────────────────────────────
+# ── Document content ─────────────────────────────────────────────────────────
 #
 # A ``Material`` is the *published document*: its JSON-LD metadata plus, where we
 # have it, a flat transcript. These five models carry the STRUCTURE recovered
@@ -226,8 +226,8 @@ class Material(models.Model):
 # config.db_router), so the FKs below never cross a database.
 
 
-class DocumentExtraction(models.Model):
-    """One extraction pass over one material's source document.
+class DocumentContent(models.Model):
+    """One pass of reading one material's source document.
 
     Exists to hang provenance off: *which* upstream dataset produced these rows,
     at which revision, and what that dataset says about its own quality. The
@@ -235,13 +235,13 @@ class DocumentExtraction(models.Model):
     row plus a fresh insert — there is no partial-update path to get wrong.
     """
 
-    # PK *is* the material: one extraction per document, and the join key is the
+    # PK *is* the material: one content per document, and the join key is the
     # IRI the rest of the platform already uses.
     material = models.OneToOneField(
         "materials.Material",
         on_delete=models.CASCADE,
         primary_key=True,
-        related_name="extraction",
+        related_name="content",
         db_column="material_iri",
     )
     # The upstream dataset's own id for this document (e.g. ``ciaa-2074-75``).
@@ -261,9 +261,9 @@ class DocumentExtraction(models.Model):
     # Denormalised counts, taken from the upstream document row rather than
     # computed from ours. They exist so the material detail payload can report
     # "what is inside this document" from ONE row: that endpoint is the hottest
-    # read in the archive and almost no material has an extraction, so a COUNT
+    # read in the archive and almost no material has any, so a COUNT
     # over three joined tables on every read would be paid 346k times to answer
-    # "nothing" 346k times. A re-ingest replaces the extraction wholesale inside
+    # "nothing" 346k times. A re-ingest replaces the content wholesale inside
     # one transaction, so these cannot drift from the rows they describe.
     #
     # There is no ``n_pages`` here on purpose: ``page_count`` above already holds
@@ -280,13 +280,13 @@ class DocumentExtraction(models.Model):
     ingested_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "material_document_extractions"
+        db_table = "material_document_content"
 
     def __str__(self) -> str:
         return f"{self.doc_id} ({self.material_id})"
 
 
-class ExtractedPage(models.Model):
+class DocumentPage(models.Model):
     """One page of the document, with the text that was recovered from it.
 
     Addressed by ``page_no`` — the printed folio as the upstream reports it, not
@@ -301,8 +301,8 @@ class ExtractedPage(models.Model):
     of transcription gets reported as an absence of findings.
     """
 
-    extraction = models.ForeignKey(
-        DocumentExtraction, on_delete=models.CASCADE, related_name="pages"
+    content = models.ForeignKey(
+        DocumentContent, on_delete=models.CASCADE, related_name="pages"
     )
     # The printed folio. Unique within the document, and the address a client uses.
     page_no = models.PositiveIntegerField()
@@ -326,14 +326,14 @@ class ExtractedPage(models.Model):
     chars = models.PositiveIntegerField(default=0)
 
     class Meta:
-        db_table = "material_extracted_pages"
+        db_table = "material_document_pages"
         ordering = ("page_no",)
         constraints = [
             models.UniqueConstraint(
-                fields=["extraction", "page_no"], name="uniq_extracted_page_no"
+                fields=["content", "page_no"], name="uniq_document_page_no"
             ),
             models.UniqueConstraint(
-                fields=["extraction", "uid"], name="uniq_extracted_page_uid"
+                fields=["content", "uid"], name="uniq_document_page_uid"
             ),
         ]
 
@@ -341,17 +341,17 @@ class ExtractedPage(models.Model):
         return self.uid
 
 
-class ExtractedTable(models.Model):
+class DocumentTable(models.Model):
     """One ruled table lifted out of the document, kept as markdown.
 
     Markdown rather than cells: the published artefact is a *rendered* table, and
     a cell grid would be a second representation to keep in sync for no reader
     benefit. The largest single table in the CIAA corpus is ~170 KiB, which is
-    why the manifest endpoint omits this column and a table is fetched on demand.
+    why the listing omits this column and a table is fetched one at a time.
     """
 
-    extraction = models.ForeignKey(
-        DocumentExtraction, on_delete=models.CASCADE, related_name="tables"
+    content = models.ForeignKey(
+        DocumentContent, on_delete=models.CASCADE, related_name="tables"
     )
     # 1-based position within the document — presentation order ONLY. It is
     # recomputed on every ingest, so a revision that recovers a table missed in
@@ -382,17 +382,17 @@ class ExtractedTable(models.Model):
     markdown = models.TextField()
 
     class Meta:
-        db_table = "material_extracted_tables"
+        db_table = "material_document_tables"
         ordering = ("ordinal",)
         constraints = [
             models.UniqueConstraint(
-                fields=["extraction", "ordinal"], name="uniq_extracted_table_ordinal"
+                fields=["content", "ordinal"], name="uniq_document_table_ordinal"
             ),
             models.UniqueConstraint(
-                fields=["extraction", "key"], name="uniq_extracted_table_key"
+                fields=["content", "key"], name="uniq_document_table_key"
             ),
             models.UniqueConstraint(
-                fields=["extraction", "uid"], name="uniq_extracted_table_uid"
+                fields=["content", "uid"], name="uniq_document_table_uid"
             ),
         ]
 
@@ -400,17 +400,18 @@ class ExtractedTable(models.Model):
         return self.uid
 
 
-class ExtractedFigure(models.Model):
+class DocumentFigure(models.Model):
     """One chart found in the document, with its series in ``points``."""
 
-    extraction = models.ForeignKey(
-        DocumentExtraction, on_delete=models.CASCADE, related_name="figures"
+    content = models.ForeignKey(
+        DocumentContent, on_delete=models.CASCADE, related_name="figures"
     )
-    # Presentation order only — see the note on ExtractedTable.ordinal.
+    # Presentation order only — see the note on DocumentTable.ordinal.
     ordinal = models.PositiveIntegerField()
-    # Stable handle, ``p0018-f1``. Figures ride inline in the manifest rather
-    # than having a route of their own, but a client still needs something
-    # durable to anchor or deep-link a chart to.
+    # Stable handle, ``p0018-f1``. Figures ride inline in their listing rather
+    # than being fetched one at a time like tables, but they are still
+    # addressable (``?type=figure&id=``) and a client needs something durable to
+    # anchor or deep-link a chart to.
     key = models.CharField(max_length=40)
     uid = models.CharField(max_length=160)
     page_no = models.PositiveIntegerField()
@@ -433,17 +434,17 @@ class ExtractedFigure(models.Model):
     verified = models.BooleanField(null=True, blank=True)
 
     class Meta:
-        db_table = "material_extracted_figures"
+        db_table = "material_document_figures"
         ordering = ("ordinal",)
         constraints = [
             models.UniqueConstraint(
-                fields=["extraction", "ordinal"], name="uniq_extracted_figure_ordinal"
+                fields=["content", "ordinal"], name="uniq_document_figure_ordinal"
             ),
             models.UniqueConstraint(
-                fields=["extraction", "key"], name="uniq_extracted_figure_key"
+                fields=["content", "key"], name="uniq_document_figure_key"
             ),
             models.UniqueConstraint(
-                fields=["extraction", "uid"], name="uniq_extracted_figure_uid"
+                fields=["content", "uid"], name="uniq_document_figure_uid"
             ),
         ]
 
@@ -451,7 +452,7 @@ class ExtractedFigure(models.Model):
         return self.uid
 
 
-class ExtractedFigurePoint(models.Model):
+class DocumentFigurePoint(models.Model):
     """One datum of one chart: a value, its label, and which series it belongs to.
 
     ``is_estimated`` is the load-bearing field. A point read off a chart image is
@@ -461,7 +462,7 @@ class ExtractedFigurePoint(models.Model):
     """
 
     figure = models.ForeignKey(
-        ExtractedFigure, on_delete=models.CASCADE, related_name="points"
+        DocumentFigure, on_delete=models.CASCADE, related_name="points"
     )
     point_index = models.PositiveIntegerField()
     label = models.CharField(max_length=300, blank=True)
@@ -471,7 +472,7 @@ class ExtractedFigurePoint(models.Model):
     is_estimated = models.BooleanField(default=False)
 
     class Meta:
-        db_table = "material_extracted_figure_points"
+        db_table = "material_document_figure_points"
         ordering = ("point_index", "id")
         constraints = [
             models.UniqueConstraint(

@@ -48,7 +48,7 @@ from . import provenance
 from .content_api import (
     CONTENT_TYPES,
     MAX_PAGE_SPAN,
-    extraction_for,
+    content_for,
     figure_payload,
     get_figure,
     get_page,
@@ -1025,7 +1025,7 @@ def _resolve_for_content(request, source: str, ident: str):
     to this caller, else ``(None, <error Response>)``.
 
     The visibility gate is the whole point of routing through ``_resolve_material``
-    rather than querying ``DocumentExtraction`` directly. Extracted content is
+    rather than querying ``DocumentContent`` directly. Content is
     derived from a material, so it inherits that material's publication tier —
     without this, a PRIVATE (draft-case evidence) document's pages and tables
     would be readable by anyone who guessed the sub-path, which is precisely the
@@ -1050,7 +1050,7 @@ def _resolve_for_content(request, source: str, ident: str):
     return iri, None
 
 
-def _content_response(payload, extraction, *, http_status=status.HTTP_200_OK):
+def _content_response(payload, content, *, http_status=status.HTTP_200_OK):
     """Every content response carries the same two headers.
 
     ``Vary: Authorization`` goes on the errors too, not just the 200s, because
@@ -1059,8 +1059,8 @@ def _content_response(payload, extraction, *, http_status=status.HTTP_200_OK):
     one answer and serve it to the other.
     """
     resp = Response(payload, status=http_status)
-    if extraction is not None:
-        resp["ETag"] = version_token(extraction)
+    if content is not None:
+        resp["ETag"] = version_token(content)
     patch_vary_headers(resp, ("Authorization",))
     return resp
 
@@ -1086,7 +1086,7 @@ def material_content(request, source: str, ident: str):
     content is worse than a 404. A page is addressed by its printed folio, which
     is what makes a citation checkable against the published PDF.
 
-    404 when the material has no extracted content at all, which is the common
+    404 when the material has no stored content at all, which is the common
     case — most materials are a single scraped page, not a transcribed report.
     That is deliberately distinct from a 200 with an empty ``items``: *we have
     not looked inside this document* and *we looked and there are none of these*
@@ -1107,20 +1107,20 @@ def material_content(request, source: str, ident: str):
             f"Unknown type {kind!r}; expected one of " + ", ".join(CONTENT_TYPES) + "."
         )
 
-    extraction = extraction_for(iri)
-    if extraction is None:
+    content = content_for(iri)
+    if content is None:
         return _content_response(
-            {"detail": "No extracted content for this material."},
+            {"detail": "No content for this material."},
             None,
             http_status=status.HTTP_404_NOT_FOUND,
         )
 
     if kind == "page":
-        return _page_response(request, iri, extraction)
-    return _keyed_response(request, iri, extraction, kind)
+        return _page_response(request, iri, content)
+    return _keyed_response(request, iri, content, kind)
 
 
-def _page_response(request, iri: str, extraction):
+def _page_response(request, iri: str, content):
     """``type=page``: the page list, one page by folio, or an inclusive range.
 
     Three shapes, chosen by the arguments present:
@@ -1145,12 +1145,12 @@ def _page_response(request, iri: str, extraction):
         return _bad_request("A page range needs both from and to.")
 
     if first is not None:
-        return _page_range_response(iri, extraction, first, last)
+        return _page_range_response(iri, content, first, last)
     if num is None:
         items = list_pages(iri)
         return _content_response(
             {"material": iri, "type": "page", "count": len(items), "items": items},
-            extraction,
+            content,
         )
 
     page_no = _as_page_number(num)
@@ -1160,11 +1160,11 @@ def _page_response(request, iri: str, extraction):
     if page is None:
         return _content_response(
             {"detail": "No such page for this material."},
-            extraction,
+            content,
             http_status=status.HTTP_404_NOT_FOUND,
         )
     return _content_response(
-        {"material": iri, "type": "page", "item": page_payload(page)}, extraction
+        {"material": iri, "type": "page", "item": page_payload(page)}, content
     )
 
 
@@ -1186,7 +1186,7 @@ def _as_page_number(raw: str) -> int | None:
     return value if value >= 0 else None
 
 
-def _page_range_response(iri: str, extraction, raw_first: str, raw_last: str):
+def _page_range_response(iri: str, content, raw_first: str, raw_last: str):
     """``type=page&from=&to=``: an inclusive span of pages, each with its text."""
     first = _as_page_number(raw_first)
     last = _as_page_number(raw_last)
@@ -1210,11 +1210,11 @@ def _page_range_response(iri: str, extraction, raw_first: str, raw_last: str):
             "count": len(items),
             "items": items,
         },
-        extraction,
+        content,
     )
 
 
-def _keyed_response(request, iri: str, extraction, kind: str):
+def _keyed_response(request, iri: str, content, kind: str):
     """``type=table`` / ``type=figure``: the listing, or one item by its key."""
     # Reject the page arguments rather than ignoring them. Silently serving the
     # whole listing for ?type=table&from=1&to=10 would hand the caller everything
@@ -1231,7 +1231,7 @@ def _keyed_response(request, iri: str, extraction, kind: str):
         items = lister(iri)
         return _content_response(
             {"material": iri, "type": kind, "count": len(items), "items": items},
-            extraction,
+            content,
         )
     if kind == "table":
         table = get_table(iri, key)
@@ -1242,7 +1242,7 @@ def _keyed_response(request, iri: str, extraction, kind: str):
     if item is None:
         return _content_response(
             {"detail": f"No such {kind} for this material."},
-            extraction,
+            content,
             http_status=status.HTTP_404_NOT_FOUND,
         )
-    return _content_response({"material": iri, "type": kind, "item": item}, extraction)
+    return _content_response({"material": iri, "type": kind, "item": item}, content)

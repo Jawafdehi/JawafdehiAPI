@@ -1,13 +1,13 @@
 """The material content read plane.
 
 ``GET /api/materials/<source>/<ident>/content?type=…`` serves one kind of
-extracted content: the pages of the transcript, the ruled tables, or the charts
+stored content: the pages of the transcript, the ruled tables, or the charts
 with their series. Adding ``&num=`` (pages) or ``&id=`` (tables, figures)
 returns one item in full.
 
 The cases that matter here are the ones that bite silently: the visibility gate
-(extracted content inherits its material's publication tier), the distinction
-between *no extraction at all* and *an extraction with none of this kind*, the
+(content inherits its material's publication tier), the distinction
+between *no content at all* and *content with none of this kind*, the
 listings' refusal to carry their heavy column, and the URL split between a
 multi-segment ``source`` and a hash-style ``ident``.
 
@@ -23,11 +23,11 @@ from rest_framework.test import APITestCase
 from materials.content_api import MAX_PAGE_SPAN
 from materials.jsonld import MATERIAL_CONTEXT
 from materials.models import (
-    DocumentExtraction,
-    ExtractedFigure,
-    ExtractedFigurePoint,
-    ExtractedPage,
-    ExtractedTable,
+    DocumentContent,
+    DocumentFigure,
+    DocumentFigurePoint,
+    DocumentPage,
+    DocumentTable,
     Material,
     Policy,
     Visibility,
@@ -54,8 +54,8 @@ def _seed_material(source: str = SOURCE, ident: str = IDENT, **kwargs) -> Materi
     )
 
 
-def _seed_extraction(material: Material) -> DocumentExtraction:
-    extraction = DocumentExtraction.objects.create(
+def _seed_content(material: Material) -> DocumentContent:
+    content = DocumentContent.objects.create(
         material=material,
         doc_id="ciaa-2081-82",
         dataset="damo-da/ciaa-annual-reports",
@@ -69,8 +69,8 @@ def _seed_extraction(material: Material) -> DocumentExtraction:
         n_points=2,
         pages_with_text=1,
     )
-    ExtractedPage.objects.create(
-        extraction=extraction,
+    DocumentPage.objects.create(
+        content=content,
         page_no=30,
         uid="ciaa-2081-82#p0030",
         text="आयोगमा दर्ता भएका उजुरीको संख्या १९४८८ रहेको छ।",
@@ -82,8 +82,8 @@ def _seed_extraction(material: Material) -> DocumentExtraction:
     )
     # A page we hold but could NOT read. Its empty text is a statement about us,
     # not about the page, and the API has to keep those apart.
-    ExtractedPage.objects.create(
-        extraction=extraction,
+    DocumentPage.objects.create(
+        content=content,
         page_no=31,
         uid="ciaa-2081-82#p0031",
         text="",
@@ -91,8 +91,8 @@ def _seed_extraction(material: Material) -> DocumentExtraction:
         ocr_source="",
         chars=0,
     )
-    ExtractedTable.objects.create(
-        extraction=extraction,
+    DocumentTable.objects.create(
+        content=content,
         ordinal=1,
         key="p0030-t1",
         uid="ciaa-2081-82#p0030#t1",
@@ -104,8 +104,8 @@ def _seed_extraction(material: Material) -> DocumentExtraction:
         fidelity="tight",
         markdown="| आ.व. | संख्या |\n| --- | --- |\n| २०८१/८२ | १९४८८ |",
     )
-    ExtractedTable.objects.create(
-        extraction=extraction,
+    DocumentTable.objects.create(
+        content=content,
         ordinal=2,
         key="p0031-t1",
         uid="ciaa-2081-82#p0031#t1",
@@ -114,8 +114,8 @@ def _seed_extraction(material: Material) -> DocumentExtraction:
         n_cols=5,
         markdown="| a |\n| --- |\n| b |",
     )
-    figure = ExtractedFigure.objects.create(
-        extraction=extraction,
+    figure = DocumentFigure.objects.create(
+        content=content,
         ordinal=1,
         key="p0030-f1",
         uid="ciaa-2081-82#p0030#f1",
@@ -125,17 +125,17 @@ def _seed_extraction(material: Material) -> DocumentExtraction:
         unit="संख्या",
         verified=True,
     )
-    ExtractedFigurePoint.objects.create(
+    DocumentFigurePoint.objects.create(
         figure=figure, point_index=1, label="२०८०/८१", value=19580.0
     )
-    ExtractedFigurePoint.objects.create(
+    DocumentFigurePoint.objects.create(
         figure=figure,
         point_index=2,
         label="२०८१/८२",
         value=19488.0,
         is_estimated=True,
     )
-    return extraction
+    return content
 
 
 class ContentListingTests(APITestCase):
@@ -143,7 +143,7 @@ class ContentListingTests(APITestCase):
 
     def setUp(self):
         self.material = _seed_material()
-        _seed_extraction(self.material)
+        _seed_content(self.material)
         self.url = f"/api/materials/{SOURCE}/{IDENT}/content"
 
     def test_table_listing(self):
@@ -202,7 +202,7 @@ class ContentItemTests(APITestCase):
 
     def setUp(self):
         self.material = _seed_material()
-        _seed_extraction(self.material)
+        _seed_content(self.material)
         self.url = f"/api/materials/{SOURCE}/{IDENT}/content"
 
     def test_one_table_by_key(self):
@@ -247,7 +247,7 @@ class PageRangeTests(APITestCase):
 
     def setUp(self):
         self.material = _seed_material()
-        self.extraction = _seed_extraction(self.material)
+        self.content = _seed_content(self.material)
         self.url = f"/api/materials/{SOURCE}/{IDENT}/content"
 
     def test_range_returns_the_span_inclusive_and_in_page_order(self):
@@ -270,7 +270,7 @@ class PageRangeTests(APITestCase):
         self.assertEqual(body["items"][0]["page_no"], 31)
 
     def test_a_range_over_pages_we_do_not_have_is_an_empty_list(self):
-        # Not a 404: the document exists and has an extraction, we simply hold no
+        # Not a 404: the document exists and has content, we simply hold no
         # pages in that span. "We looked and there are none" is a 200.
         body = self.client.get(
             self.url, {"type": "page", "from": 900, "to": 905}
@@ -327,8 +327,8 @@ class PageRangeTests(APITestCase):
         # page_no of 0 can exist and IS listed. Refusing num=0 would mean a page a
         # client can see and can never read; the listing and the fetch have to
         # agree about what exists.
-        ExtractedPage.objects.create(
-            extraction=self.extraction,
+        DocumentPage.objects.create(
+            content=self.content,
             page_no=0,
             uid="ciaa-2081-82#p0000",
             text="folio unknown",
@@ -359,7 +359,7 @@ class ContentArgumentTests(APITestCase):
 
     def setUp(self):
         self.material = _seed_material()
-        self.extraction = _seed_extraction(self.material)
+        self.content = _seed_content(self.material)
         self.url = f"/api/materials/{SOURCE}/{IDENT}/content"
 
     def test_missing_type_is_400_not_404(self):
@@ -392,25 +392,25 @@ class ContentArgumentTests(APITestCase):
 class ContentAbsenceTests(APITestCase):
     databases = "__all__"
 
-    def test_no_extraction_at_all_is_404(self):
-        _seed_material(ident="not-extracted")
+    def test_no_content_at_all_is_404(self):
+        _seed_material(ident="no-content")
         resp = self.client.get(
-            f"/api/materials/{SOURCE}/not-extracted/content", {"type": "table"}
+            f"/api/materials/{SOURCE}/no-content/content", {"type": "table"}
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn("Authorization", resp["Vary"])
 
-    def test_extraction_with_no_tables_is_an_empty_list_not_404(self):
+    def test_content_with_no_tables_is_an_empty_list_not_404(self):
         # The distinction the whole design turns on: "we have not looked inside
         # this document" and "we looked and there are none" are different facts.
-        material = _seed_material(ident="empty-extraction")
-        DocumentExtraction.objects.create(
+        material = _seed_material(ident="empty-content")
+        DocumentContent.objects.create(
             material=material,
             doc_id="ciaa-0000-00",
             dataset="damo-da/ciaa-annual-reports",
         )
         resp = self.client.get(
-            f"/api/materials/{SOURCE}/empty-extraction/content", {"type": "table"}
+            f"/api/materials/{SOURCE}/empty-content/content", {"type": "table"}
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.json()["count"], 0)
@@ -430,7 +430,7 @@ class ContentVisibilityTests(APITestCase):
         self.material = _seed_material(
             visibility=Visibility.PRIVATE, visibility_policy=Policy.PRIVATE
         )
-        _seed_extraction(self.material)
+        _seed_content(self.material)
         self.url = f"/api/materials/{SOURCE}/{IDENT}/content"
 
     def test_private_material_hides_its_content_from_anon(self):
@@ -456,7 +456,7 @@ class ContentRoutingTests(APITestCase):
         # in urls.py this URL would match it as source=<source>/<ident>,
         # ident="content" and 404 as a missing material.
         material = _seed_material()
-        _seed_extraction(material)
+        _seed_content(material)
         resp = self.client.get(
             f"/api/materials/{SOURCE}/{IDENT}/content", {"type": "figure"}
         )
@@ -465,7 +465,7 @@ class ContentRoutingTests(APITestCase):
 
     def test_multi_segment_source_still_resolves(self):
         material = _seed_material(source="province/koshi", ident="fy2083-84-21000011")
-        _seed_extraction(material)
+        _seed_content(material)
         resp = self.client.get(
             "/api/materials/province/koshi/fy2083-84-21000011/content",
             {"type": "table"},
