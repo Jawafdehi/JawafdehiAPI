@@ -265,7 +265,10 @@ class DocumentExtraction(models.Model):
     # over three joined tables on every read would be paid 346k times to answer
     # "nothing" 346k times. A re-ingest replaces the extraction wholesale inside
     # one transaction, so these cannot drift from the rows they describe.
-    n_pages = models.PositiveIntegerField(default=0)
+    #
+    # There is no ``n_pages`` here on purpose: ``page_count`` above already holds
+    # the upstream's ``n_pages`` and a second column for the same number would
+    # only create somewhere for the two to disagree.
     n_tables = models.PositiveIntegerField(default=0)
     n_figures = models.PositiveIntegerField(default=0)
     n_points = models.PositiveIntegerField(default=0)

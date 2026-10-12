@@ -787,6 +787,16 @@ class IngestFromDatasetTests(TestCase):
         self._run()
         self.assertEqual(DocumentExtraction.objects.get().dataset_revision, "abc123sha")
 
+    def test_a_missing_revision_sha_aborts_rather_than_recording_a_blank(self):
+        # --download exists so provenance comes from the bytes actually fetched.
+        # Proceeding with an empty revision would quietly replace a previously
+        # recorded good sha with nothing, and "ingested from an unknown revision"
+        # is indistinguishable afterwards from "ingested before we recorded them".
+        with self.assertRaises(CommandError) as ctx:
+            self._run(fake={"sha": ""})
+        self.assertIn("no revision sha", str(ctx.exception))
+        self.assertEqual(DocumentExtraction.objects.count(), 0)
+
     def test_a_sharded_config_is_loaded_whole(self):
         # Hugging Face splits a large config across several parquet files. A
         # hardcoded 0.parquet would load a prefix and silently drop the rest.

@@ -127,7 +127,16 @@ def _fetch_dataset(dataset: str, dest: Path, log) -> str:
     """
     meta = _get_json(f"{HF_API}/{dataset}/revision/{PARQUET_REF}")
     revision = (meta or {}).get("sha") or "" if isinstance(meta, dict) else ""
-    log(f"  dataset {dataset} @ {revision or 'unknown revision'} (parquet branch)")
+    if not revision:
+        # Abort rather than stamp every row with a blank revision. --download
+        # exists so provenance comes from the bytes actually fetched; proceeding
+        # here would quietly REPLACE a previously recorded good sha with nothing,
+        # and "ingested from an unknown revision" is indistinguishable afterwards
+        # from "ingested before we recorded revisions at all".
+        raise OSError(
+            f"dataset {dataset!r} published no revision sha for {PARQUET_REF}"
+        )
+    log(f"  dataset {dataset} @ {revision} (parquet branch)")
 
     shards = _get_json(f"{HF_API}/{dataset}/parquet")
     if not isinstance(shards, dict):
@@ -519,7 +528,6 @@ class Command(BaseCommand):
             # matters when they stop: a mismatch means we failed to ingest part of
             # what the dataset says exists, and a count derived from our own rows
             # would report the shortfall as the truth and hide it.
-            n_pages=_int(doc.get("n_pages")),
             n_tables=_int(doc.get("n_tables")),
             n_figures=_int(doc.get("n_figures")),
             n_points=_int(doc.get("n_figure_data_points")),
@@ -536,7 +544,7 @@ class Command(BaseCommand):
                     coverage_state=_text(row.get("coverage_state"))[:40],
                     anchor_fidelity=_text(row.get("anchor_fidelity"))[:40],
                     ocr_source=_text(row.get("ocr_source"))[:40],
-                    landscape=bool(row.get("landscape")),
+                    landscape=_bool(row.get("landscape")),
                     n_table_blocks=_int(row.get("n_table_blocks")),
                     chars=_int(row.get("chars")),
                 )

@@ -20,6 +20,7 @@ from __future__ import annotations
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from materials.content_api import MAX_PAGE_SPAN
 from materials.jsonld import MATERIAL_CONTEXT
 from materials.models import (
     DocumentExtraction,
@@ -63,7 +64,6 @@ def _seed_extraction(material: Material) -> DocumentExtraction:
         text_source="likhit",
         transcript_verdict="clean",
         figures_verdict="trustworthy",
-        n_pages=446,
         n_tables=2,
         n_figures=1,
         n_points=2,
@@ -240,6 +240,89 @@ class ContentItemTests(APITestCase):
         resp = self.client.get(self.url, {"type": "page", "num": 9999})
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn("Authorization", resp["Vary"])
+
+
+class PageRangeTests(APITestCase):
+    databases = "__all__"
+
+    def setUp(self):
+        self.material = _seed_material()
+        self.extraction = _seed_extraction(self.material)
+        self.url = f"/api/materials/{SOURCE}/{IDENT}/content"
+
+    def test_range_returns_the_span_inclusive_and_in_page_order(self):
+        resp = self.client.get(self.url, {"type": "page", "from": 30, "to": 31})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertEqual(body["from"], 30)
+        self.assertEqual(body["to"], 31)
+        self.assertEqual(body["count"], 2)
+        self.assertEqual([p["page_no"] for p in body["items"]], [30, 31])
+
+    def test_range_items_carry_their_text(self):
+        # Unlike the bare listing, a range is a READ: the text is the payload.
+        body = self.client.get(self.url, {"type": "page", "from": 30, "to": 30}).json()
+        self.assertIn("१९४८८", body["items"][0]["text"])
+
+    def test_a_single_page_range_is_allowed(self):
+        body = self.client.get(self.url, {"type": "page", "from": 31, "to": 31}).json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["items"][0]["page_no"], 31)
+
+    def test_a_range_over_pages_we_do_not_have_is_an_empty_list(self):
+        # Not a 404: the document exists and has an extraction, we simply hold no
+        # pages in that span. "We looked and there are none" is a 200.
+        body = self.client.get(
+            self.url, {"type": "page", "from": 900, "to": 905}
+        ).json()
+        self.assertEqual(body["count"], 0)
+        self.assertEqual(body["items"], [])
+
+    def test_an_oversized_range_is_refused_not_truncated(self):
+        # Silent truncation is the failure that matters here: a caller that asked
+        # for 200 pages and received 50 without being told has no way to know its
+        # answer is missing three quarters of the evidence.
+        resp = self.client.get(
+            self.url, {"type": "page", "from": 1, "to": MAX_PAGE_SPAN + 1}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(str(MAX_PAGE_SPAN), resp.json()["detail"])
+
+    def test_the_largest_allowed_range_is_accepted(self):
+        resp = self.client.get(
+            self.url, {"type": "page", "from": 1, "to": MAX_PAGE_SPAN}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_half_a_range_is_refused(self):
+        for params in ({"from": 30}, {"to": 40}):
+            with self.subTest(params=params):
+                resp = self.client.get(self.url, {"type": "page", **params})
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_num_and_range_together_are_refused(self):
+        resp = self.client.get(
+            self.url, {"type": "page", "num": 30, "from": 30, "to": 31}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_reversed_range_is_refused(self):
+        resp = self.client.get(self.url, {"type": "page", "from": 40, "to": 30})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_non_positive_and_non_integer_bounds_are_refused(self):
+        for params in (
+            {"from": 0, "to": 10},
+            {"from": -5, "to": 10},
+            {"from": "a", "to": "b"},
+        ):
+            with self.subTest(params=params):
+                resp = self.client.get(self.url, {"type": "page", **params})
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_page_zero_is_refused_rather_than_matching_nothing(self):
+        resp = self.client.get(self.url, {"type": "page", "num": 0})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class ContentArgumentTests(APITestCase):

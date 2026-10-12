@@ -47,10 +47,12 @@ from . import jsonld
 from . import provenance
 from .content_api import (
     CONTENT_TYPES,
+    MAX_PAGE_SPAN,
     extraction_for,
     figure_payload,
     get_figure,
     get_page,
+    get_page_range,
     get_table,
     list_figures,
     list_pages,
@@ -1119,20 +1121,41 @@ def material_content(request, source: str, ident: str):
 
 
 def _page_response(request, iri: str, extraction):
-    """``type=page``: the whole page list, or one page by printed folio."""
+    """``type=page``: the page list, one page by folio, or an inclusive range.
+
+    Three shapes, chosen by the arguments present:
+
+    * nothing     → every page STUB, no text (the navigation view)
+    * ``num``     → that one page, with its text
+    * ``from``/``to`` → those pages inclusive, each with its text
+    """
     if request.query_params.get("id") is not None:
-        return _bad_request("A page is addressed by num, not id.")
-    raw = request.query_params.get("num")
-    if raw is None:
+        return _bad_request("A page is addressed by num or from/to, not id.")
+
+    num = request.query_params.get("num")
+    first = request.query_params.get("from")
+    last = request.query_params.get("to")
+
+    if num is not None and (first is not None or last is not None):
+        return _bad_request("Use either num or from/to, not both.")
+    if (first is None) != (last is None):
+        # Half a range is ambiguous — "from 30" could mean to the cap or to the
+        # end of the document, and guessing either way returns a different set of
+        # pages than the caller meant without saying so.
+        return _bad_request("A page range needs both from and to.")
+
+    if first is not None:
+        return _page_range_response(iri, extraction, first, last)
+    if num is None:
         items = list_pages(iri)
         return _content_response(
             {"material": iri, "type": "page", "count": len(items), "items": items},
             extraction,
         )
-    try:
-        page_no = int(raw)
-    except (TypeError, ValueError):
-        return _bad_request("num must be an integer page number.")
+
+    page_no = _as_page_number(num)
+    if page_no is None:
+        return _bad_request("num must be a positive integer page number.")
     page = get_page(iri, page_no)
     if page is None:
         return _content_response(
@@ -1142,6 +1165,47 @@ def _page_response(request, iri: str, extraction):
         )
     return _content_response(
         {"material": iri, "type": "page", "item": page_payload(page)}, extraction
+    )
+
+
+def _as_page_number(raw: str) -> int | None:
+    """``raw`` as a positive page number, or None if it is not one.
+
+    Rejects zero and negatives rather than letting them through to a query that
+    would match nothing and report an empty range as a true answer.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 1 else None
+
+
+def _page_range_response(iri: str, extraction, raw_first: str, raw_last: str):
+    """``type=page&from=&to=``: an inclusive span of pages, each with its text."""
+    first = _as_page_number(raw_first)
+    last = _as_page_number(raw_last)
+    if first is None or last is None:
+        return _bad_request("from and to must be positive integer page numbers.")
+    if last < first:
+        return _bad_request("from must not be greater than to.")
+    span = last - first + 1
+    if span > MAX_PAGE_SPAN:
+        return _bad_request(
+            f"A page range may cover at most {MAX_PAGE_SPAN} pages; "
+            f"{first}-{last} is {span}."
+        )
+    items = get_page_range(iri, first, last)
+    return _content_response(
+        {
+            "material": iri,
+            "type": "page",
+            "from": first,
+            "to": last,
+            "count": len(items),
+            "items": items,
+        },
+        extraction,
     )
 
 

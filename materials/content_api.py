@@ -13,8 +13,18 @@ in its own right, so it carries no ``@context``.
 
 What this replaces: API#514's ``/extraction`` manifest, which answered three
 questions in one payload (*how much is in here*, *what tables*, *what charts*).
-The counts moved to the material detail payload, where a client is already
-looking, and the two listings became their own addressable resources.
+The two listings became their own addressable resources here; the counts are
+denormalised onto ``DocumentExtraction`` ready for the material detail payload,
+which is a FOLLOW-UP and not yet wired. Until it lands a client still has to
+probe this route to learn whether a document has any extracted content, which
+is the one thing the split has not yet bought back.
+
+**No query here pins its database alias.** The router sends ``materials`` to
+``ngm`` already, and — unlike an explicit ``using()`` — it also honours the
+read-replica flag that ``ReadReplicaRoutingMiddleware`` sets for anonymous
+reads. These are the heaviest public payloads in the archive, so they are
+exactly the reads that should be eligible for a replica rather than exempt
+from it.
 """
 
 from __future__ import annotations
@@ -30,8 +40,22 @@ from .models import (
 )
 
 #: The ``type`` values ``…/content`` accepts. ``page`` is addressed by ``num``
-#: (the printed folio); ``table`` and ``figure`` by ``id`` (their stable key).
+#: (the printed folio) or by a ``from``/``to`` range; ``table`` and ``figure`` by
+#: ``id`` (their stable key).
 CONTENT_TYPES = ("page", "table", "figure")
+
+#: How many pages one ``from``/``to`` request may return.
+#:
+#: A page range is the only call on this plane that can grow without bound: the
+#: CIAA corpus averages ~1.3 KB of text per page (13 MB over 10,015 pages), so 50
+#: pages is ~65 KB — the same order as the 129 KiB worst case the old manifest
+#: already served — while the whole 446-page report would be ~580 KB.
+#:
+#: Over the cap the response is a 400 that names it, NOT a silent truncation. A
+#: caller that asked for pages 30-200 and received 30-79 without being told has no
+#: way to know its answer is missing three quarters of the evidence, and anything
+#: summarising that result will report the gap as an absence of findings.
+MAX_PAGE_SPAN = 50
 
 
 # ── pages ────────────────────────────────────────────────────────────────────
@@ -136,27 +160,31 @@ def extraction_for(iri: str) -> DocumentExtraction | None:
     Callers MUST have resolved the material's visibility first — this applies no
     gate of its own (see ``materials.views.material_content``).
     """
-    return DocumentExtraction.objects.using("ngm").filter(pk=iri).first()
+    return DocumentExtraction.objects.filter(pk=iri).first()
 
 
 def list_pages(iri: str) -> list[dict]:
     """Every page stub. ``defer("text")`` is the point: without it this reads the
     document's entire transcript out of Postgres to serialize none of it."""
-    rows = (
-        ExtractedPage.objects.using("ngm")
-        .filter(extraction_id=iri)
-        .defer("text")
-        .order_by("page_no")
-    )
-    return [_page_stub(p) for p in rows]
+    rows = ExtractedPage.objects.filter(extraction_id=iri).defer("text")
+    return [_page_stub(p) for p in rows.order_by("page_no")]
 
 
 def get_page(iri: str, page_no: int) -> ExtractedPage | None:
-    return (
-        ExtractedPage.objects.using("ngm")
-        .filter(extraction_id=iri, page_no=page_no)
-        .first()
+    return ExtractedPage.objects.filter(extraction_id=iri, page_no=page_no).first()
+
+
+def get_page_range(iri: str, first: int, last: int) -> list[dict]:
+    """Pages ``first``..``last`` inclusive, each with its text.
+
+    Inclusive because a page range in a citation is: "pages 30–32" is three
+    pages, and a reader asking for one page as ``from=30&to=30`` should get it.
+    The caller is responsible for bounding the span — see ``MAX_PAGE_SPAN``.
+    """
+    rows = ExtractedPage.objects.filter(
+        extraction_id=iri, page_no__gte=first, page_no__lte=last
     )
+    return [page_payload(p) for p in rows.order_by("page_no")]
 
 
 def list_tables(iri: str) -> list[dict]:
@@ -166,34 +194,24 @@ def list_tables(iri: str) -> list[dict]:
     would pull every table's markdown — ~830 KiB for the largest CIAA report —
     out of the database only for the serializer to drop it again.
     """
-    rows = (
-        ExtractedTable.objects.using("ngm")
-        .filter(extraction_id=iri)
-        .defer("markdown")
-        .order_by("ordinal")
-    )
-    return [_table_stub(t) for t in rows]
+    rows = ExtractedTable.objects.filter(extraction_id=iri).defer("markdown")
+    return [_table_stub(t) for t in rows.order_by("ordinal")]
 
 
 def get_table(iri: str, key: str) -> ExtractedTable | None:
-    return (
-        ExtractedTable.objects.using("ngm")
-        .filter(extraction_id=iri, key=key)
-        .first()
-    )
+    return ExtractedTable.objects.filter(extraction_id=iri, key=key).first()
 
 
 def _figures_queryset(iri: str):
     """Figures for one document, with their points pre-fetched.
 
-    The Prefetch is explicit about the alias because a related manager does not
-    inherit ``using("ngm")`` from the parent queryset — leave it off and the
-    points are looked for in ``default``, where the table does not exist.
+    The Prefetch names an explicitly ORDERED queryset, not an alias: points are
+    rendered in series order and a bare prefetch would leave that to the
+    database. Routing is the router's job — see the module docstring.
     """
-    points = ExtractedFigurePoint.objects.using("ngm").order_by("point_index", "id")
+    points = ExtractedFigurePoint.objects.order_by("point_index", "id")
     return (
-        ExtractedFigure.objects.using("ngm")
-        .filter(extraction_id=iri)
+        ExtractedFigure.objects.filter(extraction_id=iri)
         .prefetch_related(Prefetch("points", queryset=points))
         .order_by("ordinal")
     )
