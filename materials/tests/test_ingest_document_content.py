@@ -374,6 +374,24 @@ class IngestCommandTests(TestCase):
         out = self._run()
         self.assertNotIn("disagree", out)
 
+    def test_the_material_is_touched_so_its_etag_moves(self):
+        # The detail payload carries the content summary and its ETag — which is
+        # also the If-Match token for a conditional PATCH — comes from the
+        # material's updated_at. An extraction write does not touch that by
+        # itself, so without this bump a re-ingest would change the body and not
+        # the validator, and caches would serve the old counts indefinitely.
+        before = Material.objects.get(pk=self.iri).updated_at
+        self._run()
+        self.assertGreater(Material.objects.get(pk=self.iri).updated_at, before)
+
+    def test_touching_the_material_does_not_reindex_it(self):
+        # .update(), not .save(): nothing in the search document comes from the
+        # extraction, so firing the post_save indexer per document would be pure
+        # cost on a path that already has a long transaction.
+        with patch("materials.signals._index_material") as indexer:
+            self._run()
+        indexer.assert_not_called()
+
     def test_ordinals_follow_document_order_not_file_order(self):
         self._run()
         ordered = list(

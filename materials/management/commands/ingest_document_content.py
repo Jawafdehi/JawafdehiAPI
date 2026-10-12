@@ -67,6 +67,7 @@ from typing import Any
 import duckdb
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.utils import timezone
 
 from jawafdehi_shared.entities.ids import build_material_iri
 
@@ -730,6 +731,18 @@ class Command(BaseCommand):
         DocumentFigurePoint.objects.using("ngm").bulk_create(
             points, batch_size=BULK_BATCH
         )
+
+        # Touch the material's own updated_at. Its detail payload now carries the
+        # content summary, and its ETag — which is ALSO the If-Match token for a
+        # conditional PATCH — is derived from updated_at alone. Without this a
+        # re-ingest changes the body and not the validator, and every cache on the
+        # path serves the old counts indefinitely.
+        #
+        # .update(), not .save(): a save would fire the post_save search indexer
+        # for every document, and nothing in the search doc comes from the
+        # extraction, so that work would be pure cost. auto_now does not fire on
+        # .update(), hence the explicit timestamp.
+        Material.objects.using("ngm").filter(pk=iri).update(updated_at=timezone.now())
 
         return {
             "pages": len(pages),

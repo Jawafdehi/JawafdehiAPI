@@ -50,6 +50,7 @@ from .content_api import (
     CONTENT_TYPES,
     MAX_PAGE_SPAN,
     content_for,
+    content_summary,
     figure_payload,
     get_figure,
     get_page,
@@ -83,7 +84,7 @@ _UPLOAD_ROLES = frozenset(
 )
 
 #: Upload roles that carry an original document worth OCR-ing into full text.
-#: Excludes MARKDOWN (our own extraction output) + SOURCE_PAGE (HTML, not a scan).
+#: Excludes MARKDOWN (our own content output) + SOURCE_PAGE (HTML, not a scan).
 _CONVERTIBLE_ROLES = frozenset({"RAW", "ALTERNATE", "PERMALINK"})
 
 logger = logging.getLogger("materials.views")
@@ -324,7 +325,14 @@ def _resolve_material(
         return (doc, row) if with_row else doc
 
     try:
-        row = Material.objects.get(pk=iri, is_deleted=False)
+        # select_related on the reverse one-to-one: the content summary rides on
+        # every detail read, so it is a LEFT JOIN rather than a second SELECT.
+        # For the ~346k materials with no content the join adds a NULL row and
+        # nothing else — which is why the counters are denormalised onto
+        # DocumentContent instead of being COUNTed here.
+        row = Material.objects.select_related("content").get(
+            pk=iri, is_deleted=False
+        )
     except Material.DoesNotExist:
         # No stored row: fall back to the on-the-fly court-case derivation
         # (court cases are a public read plane in their own right). There is no
@@ -334,14 +342,48 @@ def _resolve_material(
     if include_nonpublic:
         # Authed caseworker/readonly: surface the cached visibility + policy so the
         # FE editor can render + drive the control.
-        return _out(_with_admin_visibility(row), row)
+        return _out(_with_content_summary(_with_admin_visibility(row), row), row)
     if row.visibility in PUBLIC_VISIBILITIES:
-        return _out(row.data, row)
+        return _out(_with_content_summary(row.data, row), row)
     # A PRIVATE (draft-only) stored row is treated as ABSENT for the public.
     # We must NOT fall through to _derive_court_case_jsonld here: doing so would
     # ignore the material's own visibility gate and hand an anon caller the
     # derived court-case document for an IRI the stored row marks non-public.
     return _out(None, None)
+
+
+def _with_content_summary(data: dict, row: Material) -> dict:
+    """``data`` plus ``jawafdehi:content`` when the material has stored content.
+
+    **Omitted entirely when there is none**, rather than reported as zeros. Only
+    a few dozen of 346k materials have any, and zeros would assert "we looked
+    inside this document and found no tables" — which is false, we have not
+    looked. Absence of the key is the honest signal, and it is also what a client
+    keys "is there a content tab?" off, replacing the 404-probe the withdrawn
+    ``/extraction`` route forced.
+
+    **That contract only holds if every endpoint serving a material applies
+    this.** It is why the listing calls it too: a list row without the key, on a
+    plane where absence means "nothing inside", would report all 346k materials
+    as empty — including the few dozen that are not. A key that means one thing
+    on the detail route and nothing on the listing is worse than no key.
+
+    Returns a NEW dict: ``row.data`` is the stored document and must not grow a
+    derived key in memory, where a later save would persist it.
+    """
+    # getattr-with-default is correct here and not a shrug: Django's
+    # RelatedObjectDoesNotExist subclasses AttributeError, so a material with no
+    # content returns None rather than raising.
+    #
+    # Whether that costs a query depends on the caller, so callers that serve
+    # more than one row MUST select_related("content") — _resolve_material and
+    # the listing queryset both do. _patch_material does not: it holds a row
+    # fetched under select_for_update, and one extra SELECT on a write path that
+    # already takes a row lock is not worth widening the locked query for.
+    content = getattr(row, "content", None)
+    if content is None:
+        return data
+    return {**data, "jawafdehi:content": content_summary(content)}
 
 
 def _derive_court_case_jsonld(iri: str) -> dict | None:
@@ -890,7 +932,10 @@ def _list_materials(request) -> Response:
     from .models import Visibility
 
     can_see_nonpublic = _can_see_nonpublic(request)
-    qs = Material.objects.filter(is_deleted=False)
+    # select_related for the SAME reason the detail read does it: every row is
+    # rendered through _with_content_summary, and without the join that is one
+    # extra SELECT per row across the whole page.
+    qs = Material.objects.select_related("content").filter(is_deleted=False)
     if not can_see_nonpublic:
         qs = qs.filter(visibility=Visibility.LISTED)
     params = request.query_params
@@ -906,10 +951,20 @@ def _list_materials(request) -> Response:
     # table). Both branches are abridged — see `_abridged`. The anon branch must
     # copy first: `row.data` is the live model attribute, and popping from it
     # would mutate the instance rather than the response.
+    #
+    # `jawafdehi:content` rides here as well as on the detail read, and that is
+    # load-bearing rather than tidiness: on this plane the key's ABSENCE means
+    # "nothing inside this document", so a listing that never carried it would
+    # tell a client every material in the archive is empty. See
+    # _with_content_summary. `_abridged` drops the heavy `text`, not this — the
+    # summary is a dozen integers and is the cheapest thing in the row.
     def _render(rows):
         return [
             _abridged(
-                _with_admin_visibility(row) if can_see_nonpublic else dict(row.data)
+                _with_content_summary(
+                    _with_admin_visibility(row) if can_see_nonpublic else dict(row.data),
+                    row,
+                )
             )
             for row in rows
         ]
