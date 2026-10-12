@@ -75,6 +75,8 @@ def test_common_mappings_has_expected_fields():
         "court_type",
         "court_district",
         "court_province",
+        "district",
+        "province",
         "raw",
     }
     assert expected <= set(props)
@@ -97,6 +99,16 @@ def test_court_facet_fields_are_keywords():
     props = common_mappings()["properties"]
     for field in ("court", "court_type", "court_district", "court_province"):
         assert props[field]["type"] == "keyword", field
+
+
+def test_subject_geography_fields_are_keywords():
+    """``district``/``province`` are what the facets aggregate on across every
+    record type, and they are multi-valued — a keyword mapping takes an array
+    with no further declaration, an analyzed text one would tokenize
+    "Sudurpashchim" and break the exact term."""
+    props = common_mappings()["properties"]
+    assert props["district"]["type"] == "keyword"
+    assert props["province"]["type"] == "keyword"
 
 
 def test_title_fields_have_sortable_keyword_subfield():
