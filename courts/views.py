@@ -6,6 +6,29 @@ Ports the FastAPI NGM API plane to DRF:
   hearings / entities / documents, an entity-resolution search, and blacklisted
   firms. Paginated endpoints use DRF page-number pagination and return
   ``{count, next, previous, results}``.
+
+  ⚠️ **Court cases are NOT uniformly public.** ``court_case_public_visible``
+  (courts/search_visibility.py) admits ~1.2% of the ~2.3M-row docket to public
+  surfaces; the remainder includes legally protected matters and court-anonymised
+  complainants. That gate was originally wired ONLY into the search-indexing
+  paths, so this REST plane served the entire docket to anonymous callers —
+  including rows unified search deliberately withholds. It is now applied here
+  too:
+
+  * ``GET /courtcases/`` (bulk list) requires ``HasFullDocketAccess``. The gate is
+    a Python predicate (folded-Devanagari offence matching, a 130k-key code map,
+    a cross-DB published-reference set), so it CANNOT be expressed as a queryset
+    filter — there is no way to serve a gated list without a materialized column,
+    hence auth rather than filtering.
+  * Case detail + sub-resources stay public but resolve through
+    ``_get_case_or_404``, which applies the predicate per object (cheap: it reads
+    columns the row already carries) and 404s a hidden case for anonymous callers.
+  * ``GET /courtcase-entities/`` (cross-docket party search) requires
+    ``HasFullDocketAccess`` — same reason as the bulk list.
+
+  ``HasFullDocketAccess`` is NARROWER than ``HasNgmQueryAccess``: it excludes the
+  org-wide ReadOnly role, because reading protected court matters is a distinct
+  authorization decision from running a SELECT. See courts/permissions.py.
 - Gated SQL plane (``POST /query``): OIDC + NGM-role gated; the query_guard
   policy (SELECT-only, allowlist, scraped_dates blocked, row cap, statement
   timeout) is enforced in the view.
@@ -38,7 +61,14 @@ from rest_framework.views import APIView
 from . import query_guard, search_index
 from .models import BlacklistedFirm, CaseEntity, Court, CourtCase, CourtCaseHearing
 from .normalize import best_effort_normalize
-from .permissions import HasNgmQueryAccess, HasNgmRole, has_ngm_query_role
+from .permissions import (
+    HasFullDocketAccess,
+    HasNgmQueryAccess,
+    HasNgmRole,
+    can_read_full_docket,
+    has_ngm_query_role,
+)
+from .search_visibility import court_case_public_visible
 from .serializers import (
     BlacklistedFirmSerializer,
     BlacklistedFirmWriteSerializer,
@@ -112,6 +142,25 @@ class CourtCaseViewSet(
 
     serializer_class = CourtCaseSerializer
 
+    def get_permissions(self):
+        """Writes need an NGM role; the BULK LIST needs query access; detail is public.
+
+        The list endpoint is the docket-enumeration surface — it is what let an
+        anonymous caller page the whole 2.3M-row table, sensitive rows included.
+        It cannot be gated by filtering (see the module docstring: the visibility
+        rule is not queryset-expressible), so it is gated by auth instead.
+
+        Detail and sub-resources stay ``AllowAny`` and are gated per object in
+        ``_get_case_or_404`` — that keeps the ~27.9k genuinely public court cases
+        browsable without a login, which the public /courtcase/<court>/<num> pages
+        and the published-case reference panels depend on.
+        """
+        if self.request.method in _WRITE_METHODS:
+            return [HasNgmRole()]
+        if self.action == "list":
+            return [HasFullDocketAccess()]
+        return [AllowAny()]
+
     def get_serializer_class(self):
         # Writes use the dedicated write serializer (FK/PK handling); reads use
         # the read serializer (derived material_id / courtcase_iri fields).
@@ -136,15 +185,33 @@ class CourtCaseViewSet(
         return qs
 
     def _get_case_or_404(self, court: str, case_number: str) -> CourtCase:
+        """Resolve the composite key, applying the public visibility gate.
+
+        The single chokepoint for EVERY composite-key path — retrieve, the three
+        sub-resources, and the two write paths — so gating here covers all of
+        them at once.
+
+        A caller without full-docket access gets 404 (not 403) for a hidden case:
+        403 would confirm the case exists, which for a protected complainant or a
+        sexual-offence docket is itself the disclosure. Writers reach every row
+        because ``can_read_full_docket`` admits the roles the write gate requires.
+        """
         from django.shortcuts import get_object_or_404
 
         # Soft-deleted cases are not addressable on the read plane (404).
-        return get_object_or_404(
+        case = get_object_or_404(
             CourtCase,
             court_id=court,
             case_number=best_effort_normalize(case_number),
             is_deleted=False,
         )
+        if not court_case_public_visible(case) and not can_read_full_docket(
+            self.request
+        ):
+            from django.http import Http404
+
+            raise Http404
+        return case
 
     # --- detail + sub-resources, keyed on (court, case_number) ----------------
     # Routed explicitly in urls.py rather than via the router's pk lookup, so the
@@ -234,10 +301,23 @@ class CourtCaseViewSet(
 
 
 class CaseEntityViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
-    """Party-resolution surface across cases (``/entities``), filter by nes_id or name."""
+    """Party-resolution surface across cases (``/courtcase-entities``).
+
+    ⚠️ Gated on ``HasNgmQueryAccess``, not public. This lists ~6.5M party rows
+    spanning the WHOLE docket with a ``?name=`` substring filter, so anonymously
+    it was a name-to-court-case lookup over every case the visibility gate hides —
+    the court's own anonymisation of a protected complainant included. Unlike the
+    case detail route there is no per-object seam to gate on: a party row carries
+    no visibility of its own, and resolving each one's case would mean a predicate
+    call per row on a 6.5M-row list.
+
+    The per-case party list (``/courtcases/{court}/{case_number}/entities``) stays
+    public and is gated by its parent case, so public court cases keep their
+    parties visible.
+    """
 
     serializer_class = CaseEntitySerializer
-    permission_classes = [AllowAny]
+    permission_classes = [HasFullDocketAccess]
 
     def get_queryset(self):
         qs = CaseEntity.objects.all().order_by("id")
