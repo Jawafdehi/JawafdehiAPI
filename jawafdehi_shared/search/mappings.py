@@ -274,6 +274,33 @@ def common_mappings() -> dict[str, Any]:
                 # caveat as ``court_type``/``weight``.
                 "court_district": {"type": "keyword"},
                 "court_province": {"type": "keyword"},
+                # SUBJECT geography — which districts/provinces a record is
+                # ABOUT. This is what the ``district``/``province`` facets filter
+                # and aggregate on (``search.service.FACET_FIELDS``); the
+                # ``court_*`` pair above stays court-only and display-only.
+                #
+                # Multi-valued, and deliberately so: an entity cited by cases in
+                # three districts carries three values, because "which districts
+                # is this person implicated in" has more than one answer. A
+                # keyword field takes an array with no mapping change.
+                #
+                # Written by THREE doc types, from three sources that agree on
+                # one vocabulary (``courts.geography.DISTRICT_PROVINCE``, the
+                # 77-district / 7-province federal structure):
+                #
+                # * court cases — the same value as ``court_district`` /
+                #   ``court_province``, mirrored here so one facet covers every
+                #   type rather than the court tab owning the only geography;
+                # * Jawafdehi cases — resolved from the case's own ``location``
+                #   entity binds (``entities.search_geography``);
+                # * NES entities — the union over the PUBLISHED cases citing the
+                #   entity, because the entity's own address is absent for 96% of
+                #   what public search can see.
+                #
+                # Materials carry neither and are excluded by a ``district``
+                # filter, exactly as they are today.
+                "district": {"type": "keyword"},
+                "province": {"type": "keyword"},
                 # What KIND of record an NGM material is — the closed
                 # ``MaterialType`` vocabulary, promoted from the column of the
                 # same name. Materials-only; other doc types leave it absent.
