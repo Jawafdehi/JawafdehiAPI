@@ -299,6 +299,15 @@ def _sort_spec(sort: str) -> list[dict[str, Any]]:
 # case lifecycle, backed by the dedicated ``case_status`` field (NOT the generic
 # ``status``, which holds NGM's scraper enrichment flag). These are exact-match
 # (``terms``) facets, distinct from the per-type ``counts`` (from the ``_index`` agg).
+#
+# ``district``/``province`` filter the SUBJECT geography — which district a
+# record is ABOUT — and so are backed by the neutral ``district``/``province``
+# fields that court cases, Jawafdehi cases and NES entities all write, NOT by
+# the court-only ``court_district``/``court_province`` they used to point at.
+# Court documents carry the same value in both: ``court_*`` remains the court's
+# OWN seat for display, and the neutral field is the facet. The two can only be
+# compared on a REBUILT index — the neutral fields are new, and a ``terms``
+# clause matches nothing on documents that predate them.
 FACET_FIELDS: dict[str, str] = {
     "entity_type": "type",
     "case_type": "case_type",
@@ -306,8 +315,8 @@ FACET_FIELDS: dict[str, str] = {
     "status": "case_status",
     "court": "court",
     "court_type": "court_type",
-    "district": "court_district",
-    "province": "court_province",
+    "district": "district",
+    "province": "province",
     "material_type": "material_type",
 }
 
@@ -405,9 +414,14 @@ FACET_AGG_SIZES: dict[str, int] = {
     # would be missing from the facet with their counts silently zeroed — and this
     # is the facet a court picker is built from, so the gap would be user-visible.
     "court": 150,
-    # 77 districts + headroom (no sentinel: only district courts carry one).
+    # 77 districts + headroom. Still 77 now that cases and entities carry the
+    # field too: they resolve into the SAME federal vocabulary
+    # (``courts.geography.DISTRICT_PROVINCE``), which is the point of keying
+    # ``entities.search_geography.PCODE_DISTRICT`` on the p-code. No sentinel —
+    # a district is a district, and the national-jurisdiction courts carry one
+    # only in ``province``.
     "district": 100,
-    # 7 provinces + NATIONAL.
+    # 7 provinces + NATIONAL (court-only; nothing else produces the sentinel).
     "province": 10,
     # No entry for ``material_type``: 12 tokens against a default of 50, the
     # same reason ``court_type``'s four tiers have none.
@@ -1452,6 +1466,13 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
         "court_type",
         "court_district",
         "court_province",
+        # Subject geography, so a card can render "Rupandehi" without a second
+        # request. ALWAYS a list — court cases write theirs as a one-element one
+        # precisely so a client need not branch on which index the hit came
+        # from. Absent entirely on a document with no resolved geography, and on
+        # anything indexed before the fields existed.
+        "district",
+        "province",
     ):
         if source.get(key) is not None:
             extra[key] = source[key]

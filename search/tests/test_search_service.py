@@ -803,16 +803,22 @@ def test_build_query_court_filter_selects_an_arbitrary_set_of_courts():
     ]["bool"]["filter"]
 
 
-def test_build_query_district_and_province_filters_target_court_fields():
-    """The reader-facing params map to the promoted ``court_*`` keywords."""
-    assert svc.FACET_FIELDS["district"] == "court_district"
-    assert svc.FACET_FIELDS["province"] == "court_province"
+def test_build_query_district_and_province_filters_target_subject_fields():
+    """The reader-facing params map to the NEUTRAL subject-geography keywords.
+
+    They used to point at ``court_district``/``court_province``, which made the
+    filter answer "which court heard it" and left it empty for every other
+    record type. The neutral fields are written by court cases, Jawafdehi cases
+    and NES entities alike, so one param means one thing across the tabs; the
+    ``court_*`` pair survives on the court doc as its own seat, for display."""
+    assert svc.FACET_FIELDS["district"] == "district"
+    assert svc.FACET_FIELDS["province"] == "province"
     body = build_query(
         q="x", filters={"district": ["Kathmandu"], "province": ["Bagmati"]}
     )
     clauses = body["post_filter"]["bool"]["filter"]
-    assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
-    assert {"terms": {"court_province": ["Bagmati"]}} in clauses
+    assert {"terms": {"district": ["Kathmandu"]}} in clauses
+    assert {"terms": {"province": ["Bagmati"]}} in clauses
 
 
 def test_build_query_material_type_aggregates_and_filters():
@@ -1061,7 +1067,7 @@ def test_a_filtered_facet_still_applies_every_OTHER_filter():
         filters={"court_type": ["high"], "district": ["Kathmandu"]},
     )
     court_type_clause = {"terms": {"court_type": ["high"]}}
-    district_clause = {"terms": {"court_district": ["Kathmandu"]}}
+    district_clause = {"terms": {"district": ["Kathmandu"]}}
 
     # court_type drops its own, keeps district.
     assert body["aggs"]["court_type"]["filter"]["bool"]["filter"] == [district_clause]

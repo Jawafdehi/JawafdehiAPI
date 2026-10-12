@@ -583,7 +583,8 @@ def test_search_api_rejects_material_source_as_an_unknown_param():
 
 @pytest.mark.django_db
 def test_search_api_threads_district_and_province_through():
-    """?district/?province reach the DSL as terms filters on the court_* fields."""
+    """?district/?province reach the DSL as terms filters on the subject-geography
+    fields — the neutral pair every record type writes, not the court-only one."""
     client = MagicMock()
     client.search.return_value = _canned()
     with patch("search.service.make_client", return_value=client):
@@ -598,8 +599,8 @@ def test_search_api_threads_district_and_province_through():
         )
     assert resp.status_code == 200
     clauses = _facet_clauses(client)
-    assert {"terms": {"court_district": ["Kathmandu"]}} in clauses
-    assert {"terms": {"court_province": ["Bagmati"]}} in clauses
+    assert {"terms": {"district": ["Kathmandu"]}} in clauses
+    assert {"terms": {"province": ["Bagmati"]}} in clauses
 
 
 @pytest.mark.django_db

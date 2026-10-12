@@ -11,6 +11,9 @@ IRI) into the common index doc (see ``jawafdehi_shared.search.mappings``):
 * ``body``           ← ``description`` / ``alternateName`` (bilingual-friendly),
 * ``keywords``       ← schema.org ``keywords``,
 * ``identifiers``    ← the IRI + alternate identifiers,
+* ``district``/``province`` ← the subject geography of the PUBLISHED cases
+  citing this entity (``entities.search_geography``), multi-valued and absent
+  when nothing resolves,
 * ``case_count``     ← PUBLISHED Jawafdehi cases citing this entity (the public
   visibility gate — see ``entities.search_visibility``; 0 means anonymous
   callers do not see it, but the doc is still indexed so the caseworker entity
@@ -39,7 +42,12 @@ from jawafdehi_shared.search.opensearch import ENTITY_INDEX, make_client
 SOURCE_APP = "nes"
 
 
-def build_doc(obj: Any, *, case_count: int | None = None) -> dict[str, Any]:
+def build_doc(
+    obj: Any,
+    *,
+    case_count: int | None = None,
+    locations: tuple[list[str], list[str]] | None = None,
+) -> dict[str, Any]:
     """Map a ``StoredEntity`` (or any object with ``.iri``/``.data``) to the
     common index doc. No OpenSearch calls.
 
@@ -52,6 +60,14 @@ def build_doc(obj: Any, *, case_count: int | None = None) -> dict[str, Any]:
 
     It must always be resolved, never defaulted to 0: writing 0 for an entity
     that IS cited would archive it from public search until the next reconcile.
+
+    ``locations`` is the ``(districts, provinces)`` the citing published cases
+    place this entity in (``entities.search_geography``), passed the same way
+    and for the same reason. It differs from ``case_count`` in its default: an
+    unresolvable geography is genuinely "no districts", which is what an
+    uncited entity and an entity whose cases name only an ad-hoc free-text
+    location both have, so empty is a correct answer rather than a dangerous
+    one. Nothing is hidden by it.
     """
     data: dict[str, Any] = getattr(obj, "data", None) or {}
     iri = getattr(obj, "iri", None) or data.get("@id")
@@ -61,6 +77,13 @@ def build_doc(obj: Any, *, case_count: int | None = None) -> dict[str, Any]:
         from entities.search_visibility import entity_case_count
 
         case_count = entity_case_count(iri)
+    if locations is None:
+        # Lazy for the same reason: search_geography reads the cases app and the
+        # place rows, neither of which a pure-shaping test has.
+        from entities.search_geography import entity_locations
+
+        locations = entity_locations(iri)
+    districts, provinces = locations
 
     title_ne, title_en = name_to_titles(data.get("name"))
 
@@ -89,6 +112,14 @@ def build_doc(obj: Any, *, case_count: int | None = None) -> dict[str, Any]:
         "case_count": case_count,
         "raw": data,
     }
+    # Subject geography. Omitted entirely when empty rather than written as [],
+    # matching every other optional field here: a ``terms`` filter treats the
+    # two identically, and an absent field keeps an uncited entity's document
+    # byte-identical to what it was before this release.
+    if districts:
+        doc["district"] = districts
+    if provinces:
+        doc["province"] = provinces
     created = getattr(obj, "created_at", None)
     updated = getattr(obj, "updated_at", None)
     if created is not None:
@@ -99,20 +130,34 @@ def build_doc(obj: Any, *, case_count: int | None = None) -> dict[str, Any]:
 
 
 @best_effort("index entity")
-def index(obj: Any, *, client=None, case_count: int | None = None) -> None:
+def index(
+    obj: Any,
+    *,
+    client=None,
+    case_count: int | None = None,
+    locations: tuple[list[str], list[str]] | None = None,
+) -> None:
     """Upsert the entity's doc into ``nes-entities`` (best-effort).
 
-    ``case_count`` is forwarded to :func:`build_doc`; callers that already know
-    it (``cases.signals`` after a bind write, the reconcile command) pass it to
-    skip the per-document lookup.
+    ``case_count`` and ``locations`` are forwarded to :func:`build_doc`; callers
+    that already know them (``cases.signals`` after a bind write, the reconcile
+    command) pass them to skip the per-document lookups.
     """
     upsert_doc(
-        client or make_client(), ENTITY_INDEX, build_doc(obj, case_count=case_count)
+        client or make_client(),
+        ENTITY_INDEX,
+        build_doc(obj, case_count=case_count, locations=locations),
     )
 
 
 @best_effort("index entity by iri")
-def index_by_iri(iri: str, *, client=None, case_count: int | None = None) -> None:
+def index_by_iri(
+    iri: str,
+    *,
+    client=None,
+    case_count: int | None = None,
+    locations: tuple[list[str], list[str]] | None = None,
+) -> None:
     """Re-index the entity ``iri`` from the store (best-effort, no-op if absent).
 
     The entry point for CROSS-APP triggers: a case bind write changes an
@@ -130,7 +175,11 @@ def index_by_iri(iri: str, *, client=None, case_count: int | None = None) -> Non
     if entity is None or entity.is_deleted:
         delete_doc(resolved, ENTITY_INDEX, iri)
         return
-    upsert_doc(resolved, ENTITY_INDEX, build_doc(entity, case_count=case_count))
+    upsert_doc(
+        resolved,
+        ENTITY_INDEX,
+        build_doc(entity, case_count=case_count, locations=locations),
+    )
 
 
 @best_effort("delete entity")

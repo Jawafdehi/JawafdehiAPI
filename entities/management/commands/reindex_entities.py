@@ -19,6 +19,11 @@ rows) before streaming: resolving it per document would issue one query per
 entity across ~187k rows. A cases-DB failure raises out of ``case_counts()``
 rather than yielding an empty map, because an empty map indexes the whole corpus
 as uncited and archives all of it in one pass.
+
+SUBJECT GEOGRAPHY is promoted the same way and in the same pass: ``district``
+and ``province``, resolved from the ``location`` binds of the published cases
+citing each entity (``entities.search_geography``). One grouped load, the same
+raise-don't-degrade posture, and the same catchup re-read.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from jawafdehi_shared.search.opensearch import ENTITY_INDEX
 from jawafdehi_shared.search.reindex import reindex, summary
 from entities import search_index
 from entities.models import StoredEntity
+from entities.search_geography import case_locations, entity_locations
 from entities.search_visibility import case_counts, entity_case_count
 
 
@@ -50,16 +56,27 @@ class Command(BaseCommand):
         # empty generation — a gate that mis-answered would still pass it.
         counts = case_counts()
         self.stdout.write(f"loaded case counts for {len(counts)} cited entities")
+        # Same bulk-once shape as the counts, and the same failure posture: this
+        # RAISES rather than yielding an empty map, because an empty map would
+        # strip the district/province facet off every document in one swap.
+        locations = case_locations()
+        self.stdout.write(
+            f"loaded subject geography for {len(locations)} cited entities"
+        )
 
         def build(entity):
-            """``build_doc`` with the citation count supplied from the bulk map.
+            """``build_doc`` with the citation count and geography supplied from
+            the bulk maps.
 
-            ``.get(iri, 0)`` is correct rather than fail-closed guesswork: the map
-            holds an entry for every entity a published case cites, so an absent
-            IRI genuinely has no published citation.
+            ``.get(iri, default)`` is correct rather than fail-closed guesswork:
+            both maps hold an entry for every entity a published case cites, so
+            an absent IRI genuinely has no published citation and therefore no
+            subject geography either.
             """
             return search_index.build_doc(
-                entity, case_count=counts.get(entity.iri, 0)
+                entity,
+                case_count=counts.get(entity.iri, 0),
+                locations=locations.get(entity.iri, ([], [])),
             )
 
         # Mirror the live indexer's gate (entities.signals): index ONLY the rows
@@ -107,14 +124,14 @@ class Command(BaseCommand):
             seen: set[str] = set()
             for e in StoredEntity.objects.filter(updated_at__gte=since).iterator():
                 seen.add(e.iri)
-                _refresh_count(counts, e.iri)
+                _refresh_derived(counts, locations, e.iri)
                 yield e.iri, (None if e.is_deleted else e)
 
             for iri in _iris_touched_since(since):
                 if iri in seen:
                     continue
                 seen.add(iri)
-                _refresh_count(counts, iri)
+                _refresh_derived(counts, locations, iri)
                 entity = StoredEntity.objects.filter(iri=iri).first()
                 yield iri, (None if (entity is None or entity.is_deleted) else entity)
 
@@ -128,17 +145,27 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(summary("nes-entities", result)))
 
 
-def _refresh_count(counts: dict[str, int], iri: str) -> None:
-    """Re-read one entity's citation count into the bulk map, for the catchup.
+def _refresh_derived(
+    counts: dict[str, int],
+    locations: dict[str, tuple[list[str], list[str]]],
+    iri: str,
+) -> None:
+    """Re-read one entity's citation count AND geography into the bulk maps.
 
-    ``entity_case_count`` is the LIVE path: it logs and returns 0 on a cases-DB
-    failure rather than raising. That posture is right here too — the catchup is
-    a best-effort narrowing of an already-complete pass, and
-    ``reconcile_entity_visibility`` repairs what it gets wrong. The bulk load in
-    ``handle`` keeps the opposite posture, because an empty map THERE would
-    archive the whole corpus in one swap.
+    Both maps are closed over by ``build``, which the driver calls after the
+    catchup yields — so a value left stale here is a value written into the new
+    generation. That is what made catchup sources 2 and 3 inert for the count
+    before, and the geography has exactly the same exposure: a case published
+    mid-build both cites an entity and places it.
+
+    ``entity_case_count``/``entity_locations`` are the LIVE paths: they log and
+    degrade rather than raising. That posture is right here too — the catchup is
+    a best-effort narrowing of an already-complete pass. The bulk loads in
+    ``handle`` keep the opposite posture, because an empty map THERE would
+    archive the whole corpus (counts) or blank the facet (geography) in one swap.
     """
     counts[iri] = entity_case_count(iri)
+    locations[iri] = entity_locations(iri)
 
 
 def _iris_touched_since(since) -> set[str]:
@@ -149,17 +176,33 @@ def _iris_touched_since(since) -> set[str]:
     reads into the default DB, so a failure is swallowed — the catchup is a
     best-effort narrowing of an already-complete full pass, and the reconcile
     command is the backstop.
+
+    A LOCATION bind created in the window also drags in its case's SIBLING
+    binds, because a location says where the case happened and so moves the
+    ``district`` of every entity that case cites — not just its own. The live
+    fan-out in ``cases.signals`` writes those siblings too, but during a
+    ``--rebuild`` it writes them into the OLD generation, which the alias swap
+    then discards. Without this arm the siblings keep the district they had when
+    the build started, and nothing repairs it until the next reindex. The
+    sibling set is only reached through a location bind, so an ordinary accused
+    bind still costs exactly what it did.
     """
     try:
-        from cases.models import Case, CaseEntityRelationship
+        from cases.models import Case, CaseEntityRelationship, RelationshipType
 
         fresh_binds = CaseEntityRelationship.objects.filter(created_at__gte=since)
         touched_cases = Case.objects.filter(updated_at__gte=since)
         binds_on_touched = CaseEntityRelationship.objects.filter(
             case__in=touched_cases
         )
-        return set(
-            fresh_binds.values_list("nes_id", flat=True)
-        ) | set(binds_on_touched.values_list("nes_id", flat=True))
+        located_cases = fresh_binds.filter(
+            relationship_type=RelationshipType.LOCATION
+        ).values_list("case_id", flat=True)
+        siblings = CaseEntityRelationship.objects.filter(case_id__in=located_cases)
+        return (
+            set(fresh_binds.values_list("nes_id", flat=True))
+            | set(binds_on_touched.values_list("nes_id", flat=True))
+            | set(siblings.values_list("nes_id", flat=True))
+        )
     except Exception:  # noqa: BLE001 — best-effort narrowing; reconcile backstops.
         return set()
