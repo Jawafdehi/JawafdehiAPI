@@ -1,5 +1,5 @@
 {
-  "_readme": "Maps an upstream dataset document (doc_id) to the material ident that holds the same PDF. Hand-written and reviewed, NOT derived: the archive's titles cannot be parsed into fiscal years reliably. See notes below and docs/document-extraction.md. ingest_document_extraction rejects this file if it is not total and 1:1, and aborts if a dataset document is missing from it.",
+  "_readme": "Maps an upstream dataset document (doc_id) to the material ident that holds the same PDF. Hand-written and reviewed, NOT derived: the archive's titles cannot be parsed into fiscal years reliably. See the notes below, and the module docstring of the command. ingest_document_content rejects this file if it is not total and 1:1, and aborts if a dataset document is missing from it.",
   "dataset": "damo-da/ciaa-annual-reports",
   "source": "ciaa_annual_report",
   "documents": {

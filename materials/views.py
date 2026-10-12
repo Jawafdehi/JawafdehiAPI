@@ -22,6 +22,7 @@ import mimetypes
 import jsonpatch
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.http import HttpResponseNotModified
 from django.utils.cache import patch_vary_headers
 from rest_framework import status
 from rest_framework.decorators import (
@@ -1038,9 +1039,9 @@ def _resolve_for_content(request, source: str, ident: str):
             {"detail": "Invalid material source/ident."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    data, _row = _resolve_material(
-        iri, include_nonpublic=_can_see_nonpublic(request), with_row=True
-    )
+    # No ``with_row``: this route's ETag comes from the content's ``ingested_at``,
+    # not the material's ``updated_at``, so the row itself is of no use here.
+    data = _resolve_material(iri, include_nonpublic=_can_see_nonpublic(request))
     if data is None:
         resp = Response(
             {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
@@ -1069,6 +1070,40 @@ def _bad_request(detail: str):
     resp = Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
     patch_vary_headers(resp, ("Authorization",))
     return resp
+
+
+def _not_modified(request, content):
+    """A 304 when the caller already holds this content, else None.
+
+    This route sets an ``ETag`` on every response, and nothing else in the stack
+    acts on it: ``ConditionalGetMiddleware`` is deliberately absent from
+    ``MIDDLEWARE`` (it would add an ETag to every response in the project), and
+    the material read plane's own ETag is for ``If-Match`` on PATCH, which this
+    read-only route has no equivalent of. So the header was advisory until here.
+
+    It is worth honouring precisely on this route: a 50-page range is the
+    largest payload the public read plane serves, and it is also the most
+    re-fetched — a reader paging through a report asks for overlapping spans.
+    Checked BEFORE the page/table/figure queries run, so a 304 costs one SELECT
+    for the content row and nothing else.
+
+    Weak comparison, per RFC 9110 §13.1.2: our tag is weak (``W/"…"``), and weak
+    tags never match under the strong comparison ``If-Match`` would use. A
+    client echoing the tag verbatim is the normal case; ``*`` matches any
+    existing content.
+    """
+    header = request.headers.get("If-None-Match")
+    if not header or content is None:
+        return None
+    current = version_token(content).removeprefix("W/")
+    for candidate in header.split(","):
+        tag = candidate.strip()
+        if tag == "*" or tag.removeprefix("W/") == current:
+            resp = HttpResponseNotModified()
+            resp["ETag"] = version_token(content)
+            patch_vary_headers(resp, ("Authorization",))
+            return resp
+    return None
 
 
 @api_view(["GET"])
@@ -1114,6 +1149,11 @@ def material_content(request, source: str, ident: str):
             None,
             http_status=status.HTTP_404_NOT_FOUND,
         )
+
+    # After the 400s above, so a malformed request is still told it is malformed
+    # rather than handed a 304 for a question we never looked at.
+    if (cached := _not_modified(request, content)) is not None:
+        return cached
 
     if kind == "page":
         return _page_response(request, iri, content)

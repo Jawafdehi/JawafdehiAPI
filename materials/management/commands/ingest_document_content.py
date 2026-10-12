@@ -30,6 +30,20 @@ The command is the ONLY CIAA-aware piece of this feature; the schema it writes
 into is generic (see materials.models.DocumentContent). To onboard a second
 corpus, write a second map file — no migration, no code change here.
 
+**It holds the whole corpus in memory, inside one transaction.** Every config is
+read into Python dicts up front so that nothing is written until everything
+resolves, and the write is one atomic block. For the CIAA corpus that is ~8k rows
+and 13 MB of page text, which is nothing. A corpus an order of magnitude larger
+wants this restructured into a per-document read before it wants a bigger pod —
+so measure before pointing the second map file at something much bigger.
+
+**A dataset that gains a document fails this command until the map gains it too.**
+That is the 1:1 check below doing its job, not a bug: an unmapped ``doc_id`` is
+refused rather than skipped, because a report silently absent from the archive is
+the failure this whole mapping exists to prevent. The practical consequence is
+that the annual re-run after the CIAA publishes will abort on first attempt, and
+the fix is to add the new fiscal year to the map file — not to loosen the check.
+
 **Why a map file rather than a parser.** The upstream dataset keys documents on
 fiscal year (``ciaa-2074-75``); our materials are keyed on a hash of the original
 PDF filename. Deriving one from the other looks easy and is not: one archived
@@ -70,10 +84,15 @@ from ...models import (
 #: ``figure_uid`` (figure_data).
 REQUIRED_TABLES = ("documents", "pages", "tables", "figures", "figure_data")
 
-#: Chunk size for the point bulk_create. Points are the only table that can run
-#: to tens of thousands of rows per corpus, and sqlite (the test gate) caps the
-#: number of bound parameters per statement.
-POINT_BATCH = 500
+#: Chunk size for the two bulk_creates that can get large: pages (one row carries
+#: a whole page of transcript, ~370 KB per report unbatched) and points (tens of
+#: thousands of rows per corpus).
+#:
+#: For MEMORY, not for sqlite's bound-parameter cap — Django already clamps
+#: ``batch_size`` down to whatever the backend admits via ``bulk_batch_size()``,
+#: so the cap is handled whether this is set or not. What Django does not do is
+#: keep one statement from being enormous on Postgres.
+BULK_BATCH = 500
 
 HF_API = "https://huggingface.co/api/datasets"
 
@@ -293,6 +312,43 @@ def _tristate(value: Any) -> bool | None:
     return bool(value)
 
 
+#: Which stored counter each of our own row counts should match.
+#:
+#: **Pages are deliberately absent.** ``n_pages`` is the PDF's page count, not a
+#: count of rows the dataset publishes in its ``pages`` config — a 255-page
+#: report can legitimately publish fewer page rows than that, and
+#: ``pages_with_text`` is a sub-count of the text we recovered rather than of the
+#: rows either. Comparing either against our row count would fire on every run,
+#: and a warning that always fires is one nobody reads on the day it means
+#: something. The three below each count the same set we do.
+_COUNTER_COLUMNS = (
+    ("tables", "n_tables"),
+    ("figures", "n_figures"),
+    ("points", "n_figure_data_points"),
+)
+
+
+def _shortfalls(doc_id: str, doc: dict, counts: dict[str, int]) -> list[str]:
+    """Where the upstream's counters and the rows we wrote disagree.
+
+    Only a SHORTFALL is reported — upstream claiming more than we stored, which
+    means we failed to ingest part of what the dataset says exists. The opposite
+    (we hold more than upstream counted) is upstream's own bookkeeping being
+    behind its data, which costs a reader nothing: every row we hold is still
+    fetchable, the counter just undersells it.
+    """
+    notes = []
+    for ours, column in _COUNTER_COLUMNS:
+        expected = _int(doc.get(column))
+        actual = counts[ours]
+        if expected > actual:
+            notes.append(
+                f"{doc_id}: upstream says {expected} {ours}, we stored {actual} "
+                f"({expected - actual} missing)"
+            )
+    return notes
+
+
 def _header(value: Any) -> list:
     """``header_json`` is a JSON *string* in the source. Never fail ingest on it —
     a malformed header costs a column caption, not the table."""
@@ -463,6 +519,7 @@ class Command(BaseCommand):
             return
 
         totals = {"docs": 0, "pages": 0, "tables": 0, "figures": 0, "points": 0}
+        shortfalls: list[str] = []
         # ONE transaction for the whole corpus, not one per document. A crash
         # partway through a per-document loop would leave the data tab present on
         # some reports and absent on others, with nothing in the response to say
@@ -484,18 +541,41 @@ class Command(BaseCommand):
                 totals["docs"] += 1
                 for key in ("pages", "tables", "figures", "points"):
                     totals[key] += counts[key]
+                shortfalls.extend(_shortfalls(doc_id, doc, counts))
                 self.stdout.write(
                     f"  {doc_id}: {counts['pages']} pages, {counts['tables']} tables, "
                     f"{counts['figures']} figures, {counts['points']} points"
                 )
 
+        summary = (
+            f"ingested {totals['docs']} document(s): {totals['pages']} pages, "
+            f"{totals['tables']} tables, "
+            f"{totals['figures']} figures, {totals['points']} points"
+        )
+        if not shortfalls:
+            self.stdout.write(self.style.SUCCESS(summary))
+            return
+
+        # The stored counters are the UPSTREAM's, by design — see _ingest_one. The
+        # point of that choice is that a shortfall in our ingest cannot redefine
+        # itself as the truth; it is NOT that the shortfall is acceptable. So say
+        # so here, or the API goes on advertising rows a client cannot fetch and
+        # the only record of the gap is a log line nobody re-reads.
+        #
+        # A warning rather than an abort, for the same reason a soft-deleted
+        # material is skipped rather than fatal: these counters are another
+        # project's bookkeeping, and letting their arithmetic error block the
+        # whole corpus would be handing them a veto over our ingest.
+        self.stdout.write(self.style.WARNING(summary))
         self.stdout.write(
-            self.style.SUCCESS(
-                f"ingested {totals['docs']} document(s): {totals['pages']} pages, "
-                f"{totals['tables']} tables, "
-                f"{totals['figures']} figures, {totals['points']} points"
+            self.style.WARNING(
+                f"  {len(shortfalls)} counter(s) disagree with the rows we wrote. "
+                "The API will report the upstream figure, so a client may see "
+                "items it cannot fetch:"
             )
         )
+        for note in shortfalls:
+            self.stdout.write(self.style.WARNING(f"    {note}"))
 
     def _load_map(self, path: Path) -> dict:
         if not path.is_file():
@@ -571,10 +651,8 @@ class Command(BaseCommand):
                 for row in pages
             ],
             # Pages carry the document's whole transcript, so one report is ~370 KB
-            # in one statement if this is unbatched. Chunked for the same reason
-            # points are: sqlite caps bound parameters per statement, and the test
-            # gate runs on sqlite.
-            batch_size=POINT_BATCH,
+            # in a single statement if this is unbatched. See BULK_BATCH.
+            batch_size=BULK_BATCH,
         )
 
         DocumentTable.objects.using("ngm").bulk_create(
@@ -650,7 +728,7 @@ class Command(BaseCommand):
             for p in points_by_figure.get(_text(source_row.get("figure_uid")), [])
         ]
         DocumentFigurePoint.objects.using("ngm").bulk_create(
-            points, batch_size=POINT_BATCH
+            points, batch_size=BULK_BATCH
         )
 
         return {

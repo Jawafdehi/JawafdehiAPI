@@ -17,6 +17,8 @@ multi-segment ``source`` and a hash-style ``ident``.
 
 from __future__ import annotations
 
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -446,6 +448,68 @@ class ContentVisibilityTests(APITestCase):
                 resp = self.client.get(self.url, params)
                 self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
                 self.assertIn("Authorization", resp["Vary"])
+
+    def test_a_caseworker_can_read_what_anon_cannot(self):
+        # The other direction, and it is not symmetry for its own sake: if the
+        # gate were simply inverted — or _can_see_nonpublic always False — every
+        # assertion above would still pass while the route 404'd for EVERYONE.
+        # A gate that denies the authorised caller is indistinguishable from a
+        # working one unless something fetches through it.
+        user = get_user_model().objects.create_user("cw-visibility", password="x")
+        user.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
+        self.client.force_authenticate(user)
+        resp = self.client.get(self.url, {"type": "table"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()["count"], 2)
+
+
+class ContentCachingTests(APITestCase):
+    databases = "__all__"
+
+    def setUp(self):
+        self.material = _seed_material()
+        self.content = _seed_content(self.material)
+        self.url = f"/api/materials/{SOURCE}/{IDENT}/content"
+
+    def test_the_etag_comes_back_as_a_304(self):
+        first = self.client.get(self.url, {"type": "page"})
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        again = self.client.get(
+            self.url, {"type": "page"}, HTTP_IF_NONE_MATCH=first["ETag"]
+        )
+        self.assertEqual(again.status_code, status.HTTP_304_NOT_MODIFIED)
+        self.assertEqual(again["ETag"], first["ETag"])
+        self.assertIn("Authorization", again["Vary"])
+
+    def test_a_stale_etag_still_gets_the_body(self):
+        resp = self.client.get(
+            self.url, {"type": "page"}, HTTP_IF_NONE_MATCH='W/"0.000000"'
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("items", resp.json())
+
+    def test_a_reingest_invalidates_the_tag(self):
+        first = self.client.get(self.url, {"type": "page"})
+        # auto_now: any re-ingest moves ingested_at, and with it the tag.
+        self.content.save()
+        again = self.client.get(
+            self.url, {"type": "page"}, HTTP_IF_NONE_MATCH=first["ETag"]
+        )
+        self.assertEqual(again.status_code, status.HTTP_200_OK)
+        self.assertNotEqual(again["ETag"], first["ETag"])
+
+    def test_a_malformed_request_is_still_400_not_304(self):
+        # The 304 check runs after validation: handing back "unchanged" for a
+        # question we never looked at would let a client cache its own typo.
+        first = self.client.get(self.url, {"type": "page"})
+        resp = self.client.get(
+            self.url, {"type": "banana"}, HTTP_IF_NONE_MATCH=first["ETag"]
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_star_matches_any_stored_content(self):
+        resp = self.client.get(self.url, {"type": "table"}, HTTP_IF_NONE_MATCH="*")
+        self.assertEqual(resp.status_code, status.HTTP_304_NOT_MODIFIED)
 
 
 class ContentRoutingTests(APITestCase):

@@ -340,6 +340,40 @@ class IngestCommandTests(TestCase):
         # ...while the rows we actually wrote are unchanged.
         self.assertEqual(content.tables.count(), 2)
 
+    def test_a_shortfall_against_the_upstream_is_reported(self):
+        # Storing the upstream's counter keeps our shortfall from redefining
+        # itself as the truth. It does not make the shortfall acceptable — if
+        # nobody is told, the API advertises 99 tables a client cannot fetch and
+        # the only trace is a log line nobody re-reads.
+        _write_parquet(
+            self.dir,
+            "documents",
+            DOC_COLUMNS,
+            [(DOC_ID, 255, "likhit", "clean", "trustworthy", 99, 98, 97, 96)],
+        )
+        out = self._run()
+        self.assertIn("disagree with the rows we wrote", out)
+        self.assertIn("upstream says 99 tables, we stored 2", out)
+        self.assertIn("97 missing", out)
+
+    def test_the_happy_path_says_nothing_about_counters(self):
+        # The fixture agrees with itself, so a clean run must stay quiet — a
+        # warning that fires every time is one nobody reads when it matters.
+        out = self._run()
+        self.assertNotIn("disagree", out)
+
+    def test_holding_more_than_upstream_counted_is_not_a_shortfall(self):
+        # Upstream undercounting its own data costs a reader nothing: every row
+        # we hold is still fetchable. Only the other direction hides something.
+        _write_parquet(
+            self.dir,
+            "documents",
+            DOC_COLUMNS,
+            [(DOC_ID, 255, "likhit", "clean", "trustworthy", 1, 0, 0, 96)],
+        )
+        out = self._run()
+        self.assertNotIn("disagree", out)
+
     def test_ordinals_follow_document_order_not_file_order(self):
         self._run()
         ordered = list(
