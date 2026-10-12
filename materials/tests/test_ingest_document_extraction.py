@@ -797,6 +797,30 @@ class IngestFromDatasetTests(TestCase):
         self.assertIn("no revision sha", str(ctx.exception))
         self.assertEqual(DocumentExtraction.objects.count(), 0)
 
+    def test_a_republish_during_the_download_aborts(self):
+        # The shard listing and file URLs are not pinned to a revision, so a
+        # dataset republished mid-run leaves bytes from one commit stamped with
+        # the sha of another. Re-running is cheap; a wrong revision on 35
+        # documents is not detectable after the fact.
+        shas = iter(["sha-before", "sha-after"])
+
+        with patch.object(mod, "_get_json", side_effect=self._moving_sha(shas)):
+            with self.assertRaises(CommandError) as ctx:
+                self._run()
+        self.assertIn("republished during the download", str(ctx.exception))
+        self.assertEqual(DocumentExtraction.objects.count(), 0)
+
+    def _moving_sha(self, shas):
+        """``_get_json`` that reports a different sha on each revision call."""
+        real = mod._get_json
+
+        def fake(url):
+            if "/revision/" in url:
+                return {"sha": next(shas)}
+            return real(url)
+
+        return fake
+
     def test_a_sharded_config_is_loaded_whole(self):
         # Hugging Face splits a large config across several parquet files. A
         # hardcoded 0.parquet would load a prefix and silently drop the rest.
@@ -844,9 +868,13 @@ class IngestFromDatasetTests(TestCase):
         # which is the one thing that field must not be able to do.
         self._run()
         # The file URLs come from HF's own shard listing; what must be pinned to
-        # the map is which DATASET we asked, i.e. the two api.huggingface calls.
+        # the map is which DATASET we asked. Three api.huggingface calls: the
+        # revision, the shard listing, and the revision again afterwards to prove
+        # the branch did not move under the download.
         api_calls = [u for u in self.requested if u.startswith(mod.HF_API)]
-        self.assertEqual(len(api_calls), 2, f"expected revision + listing: {api_calls}")
+        self.assertEqual(
+            len(api_calls), 3, f"expected revision + listing + recheck: {api_calls}"
+        )
         self.assertTrue(
             all("damo-da/ciaa-annual-reports" in u for u in api_calls),
             f"asked a dataset the map does not name: {api_calls}",

@@ -310,19 +310,48 @@ class PageRangeTests(APITestCase):
         resp = self.client.get(self.url, {"type": "page", "from": 40, "to": 30})
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_non_positive_and_non_integer_bounds_are_refused(self):
+    def test_negative_and_non_integer_bounds_are_refused(self):
+        # from=0 is deliberately NOT here: a page_no of 0 can exist (an absent
+        # upstream folio) and is listed, so it must be fetchable.
         for params in (
-            {"from": 0, "to": 10},
             {"from": -5, "to": 10},
+            {"from": 1, "to": -1},
             {"from": "a", "to": "b"},
         ):
             with self.subTest(params=params):
                 resp = self.client.get(self.url, {"type": "page", **params})
                 self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_page_zero_is_refused_rather_than_matching_nothing(self):
+    def test_a_page_the_listing_shows_can_always_be_fetched(self):
+        # The ingest coerces an absent or unparseable upstream folio to 0, so a
+        # page_no of 0 can exist and IS listed. Refusing num=0 would mean a page a
+        # client can see and can never read; the listing and the fetch have to
+        # agree about what exists.
+        ExtractedPage.objects.create(
+            extraction=self.extraction,
+            page_no=0,
+            uid="ciaa-2081-82#p0000",
+            text="folio unknown",
+            coverage_state="anchored",
+        )
+        listed = self.client.get(self.url, {"type": "page"}).json()
+        self.assertIn(0, [p["page_no"] for p in listed["items"]])
         resp = self.client.get(self.url, {"type": "page", "num": 0})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()["item"]["text"], "folio unknown")
+
+    def test_a_negative_page_is_still_refused(self):
+        resp = self.client.get(self.url, {"type": "page", "num": -1})
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_keyed_type_refuses_page_arguments_rather_than_ignoring_them(self):
+        # Serving the whole listing for ?type=table&from=1&to=10 would hand the
+        # caller everything while it believes it asked for a slice.
+        for kind in ("table", "figure"):
+            for params in ({"num": 1}, {"from": 1, "to": 10}, {"to": 10}):
+                with self.subTest(kind=kind, params=params):
+                    resp = self.client.get(self.url, {"type": kind, **params})
+                    self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class ContentArgumentTests(APITestCase):
@@ -330,7 +359,7 @@ class ContentArgumentTests(APITestCase):
 
     def setUp(self):
         self.material = _seed_material()
-        _seed_extraction(self.material)
+        self.extraction = _seed_extraction(self.material)
         self.url = f"/api/materials/{SOURCE}/{IDENT}/content"
 
     def test_missing_type_is_400_not_404(self):

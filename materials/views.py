@@ -1169,16 +1169,21 @@ def _page_response(request, iri: str, extraction):
 
 
 def _as_page_number(raw: str) -> int | None:
-    """``raw`` as a positive page number, or None if it is not one.
+    """``raw`` as a page number, or None if it is not one.
 
-    Rejects zero and negatives rather than letting them through to a query that
-    would match nothing and report an empty range as a true answer.
+    Negatives are refused rather than passed to a query that would match nothing
+    and report an empty result as a true answer. **Zero is accepted**, even
+    though no document prints a folio 0: the ingest coerces an absent or
+    unparseable upstream folio to 0, so such a page can exist, and it is listed
+    by ``?type=page``. Refusing it here would mean a page a client can see in the
+    listing and can never fetch — the listing and the fetch have to agree about
+    what exists.
     """
     try:
         value = int(raw)
     except (TypeError, ValueError):
         return None
-    return value if value >= 1 else None
+    return value if value >= 0 else None
 
 
 def _page_range_response(iri: str, extraction, raw_first: str, raw_last: str):
@@ -1211,8 +1216,15 @@ def _page_range_response(iri: str, extraction, raw_first: str, raw_last: str):
 
 def _keyed_response(request, iri: str, extraction, kind: str):
     """``type=table`` / ``type=figure``: the listing, or one item by its key."""
-    if request.query_params.get("num") is not None:
-        return _bad_request(f"A {kind} is addressed by id, not num.")
+    # Reject the page arguments rather than ignoring them. Silently serving the
+    # whole listing for ?type=table&from=1&to=10 would hand the caller everything
+    # while it believes it asked for a slice — the same class of lie as a
+    # truncated range, in the opposite direction.
+    for unsupported in ("num", "from", "to"):
+        if request.query_params.get(unsupported) is not None:
+            return _bad_request(
+                f"A {kind} is addressed by id; {unsupported} applies to pages."
+            )
     key = request.query_params.get("id")
     lister = list_tables if kind == "table" else list_figures
     if key is None:

@@ -156,6 +156,22 @@ def _fetch_dataset(dataset: str, dest: Path, log) -> str:
             total += len(body)
         shard_note = "" if len(urls) == 1 else f" in {len(urls)} shards"
         log(f"  {name}  {total / 1024:.0f} KiB{shard_note}")
+
+    # Re-read the branch sha and refuse if it moved while we were downloading.
+    # The shard listing and the file URLs are NOT pinned to a revision — Hugging
+    # Face's parquet endpoints serve whatever the branch points at now — so a
+    # dataset republished mid-run would leave us with bytes from one commit
+    # stamped with the sha of another. That is precisely the provenance-can-lie
+    # failure PARQUET_REF exists to prevent, so it is an abort and not a warning:
+    # re-running is cheap, and a wrong revision on 35 documents is not detectable
+    # after the fact.
+    after = _get_json(f"{HF_API}/{dataset}/revision/{PARQUET_REF}")
+    moved = (after or {}).get("sha") if isinstance(after, dict) else None
+    if moved != revision:
+        raise OSError(
+            f"dataset {dataset!r} was republished during the download "
+            f"({revision} → {moved or 'unknown'}); re-run to get a consistent set"
+        )
     return revision
 
 
@@ -211,7 +227,11 @@ def _int(value: Any, default: int = 0) -> int:
     Postgres (and silently stored on sqlite) rather than a visible data problem."""
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError for a non-finite float: int(float("inf")) raises, and an
+        # uncaught one here aborts the whole corpus transaction with a traceback.
+        # Parquet's int64 columns cannot hold one, so this is insurance against
+        # the next corpus rather than an observed failure — but it is one word.
         return default
     return max(parsed, 0)
 
