@@ -31,6 +31,18 @@ def client():
     return APIClient()
 
 
+@pytest.fixture(autouse=True)
+def _no_signup_alert(settings):
+    """Switch the signup alert off for every test that does not ask for it.
+
+    It defaults ON in settings and shares ``send_email`` with the welcome, so
+    left alone it would land a second call in every welcome assertion here and
+    make ``call_args`` mean whichever mail happened to go last. The alert's own
+    tests turn it back on explicitly.
+    """
+    settings.NEWSLETTER_SIGNUP_NOTIFY = False
+
+
 def _mock_client():
     """A stand-in SendPulse client whose methods are inspectable mocks."""
     c = mock.Mock()
@@ -294,3 +306,162 @@ def test_newsletter_signup_still_gets_the_newsletter_welcome(client, settings):
     html = fake.send_email.call_args.args[2]
     assert "You're subscribed to the Jawafdehi newsletter" in html
     assert "Open House" not in html
+
+
+# -- signup alert to the Jawafdehi inbox --------------------------------------
+
+
+def _alerting_client(settings):
+    """A client set up so a subscribe produces exactly one mail: the alert."""
+    settings.NEWSLETTER_SIGNUP_NOTIFY = True
+    settings.NEWSLETTER_SIGNUP_NOTIFY_EMAIL = "inquiry@jawafdehi.org"
+    # The welcome shares send_email; off, so call_args is unambiguously the alert.
+    settings.SENDPULSE_WELCOME_EMAIL = False
+    fake = _mock_client()
+    fake.can_send_email = True
+    return fake
+
+
+def test_signup_alert_goes_to_the_configured_inbox(client, settings):
+    fake = _alerting_client(settings)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
+    recipient, subject, html = fake.send_email.call_args.args
+    assert recipient == "inquiry@jawafdehi.org"
+    assert subject == "Newsletter signup: राम बहादुर"
+    assert "reader@example.org" in html
+
+
+def test_open_house_alert_names_its_source_in_the_subject(client, settings):
+    """One inbox for both, so the subject is what makes them filterable."""
+    fake = _alerting_client(settings)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(
+            reverse("newsletter:subscribe"), OPEN_HOUSE_PAYLOAD, format="json"
+        )
+    assert resp.status_code == 201
+    subject, html = fake.send_email.call_args.args[1], fake.send_email.call_args.args[2]
+    assert subject == "Open House signup: Sita"
+    # The fields that make a region-targeted invite possible are in the mail.
+    assert "gulf-middle-east" in html
+    assert "+97455123456" in html
+    assert "Nepali Forum Qatar" in html
+
+
+def test_alert_still_sent_when_sendpulse_rejected_the_contact(client, settings):
+    """The case the alert exists for: SendPulse answered and refused, so nothing
+    was stored and this mail is the only record of the signup."""
+    fake = _alerting_client(settings)
+    fake.add_subscriber.side_effect = SendPulseError("server error", status=500)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 202
+    subject, html = fake.send_email.call_args.args[1], fake.send_email.call_args.args[2]
+    assert subject.startswith("[not saved] ")
+    assert "reader@example.org" in html
+    assert "Not saved to SendPulse" in html
+
+
+def test_alert_does_not_claim_a_timeout_means_not_saved(client, settings):
+    """A transport error carries no status because the request never completed,
+    and a timeout can land *after* SendPulse accepted the contact. Saying "not
+    saved" there would be a guess printed as fact, and would send someone to
+    re-add a contact that is already on the list."""
+    fake = _alerting_client(settings)
+    fake.add_subscriber.side_effect = SendPulseError("timeout", status=None)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 202
+    subject, html = fake.send_email.call_args.args[1], fake.send_email.call_args.args[2]
+    assert subject.startswith("[check] ")
+    assert "reader@example.org" in html
+    assert "May not have been saved" in html
+    assert "Not saved to SendPulse" not in html
+
+
+def test_saved_signup_alert_carries_no_warning(client, settings):
+    """The ordinary case asks nothing of the reader, so it says nothing."""
+    fake = _alerting_client(settings)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
+    subject, html = fake.send_email.call_args.args[1], fake.send_email.call_args.args[2]
+    assert not subject.startswith("[")
+    assert "Not saved to SendPulse" not in html
+    assert "May not have been saved" not in html
+
+
+def test_no_alert_when_the_address_was_already_on_the_list(client, settings):
+    """A 409 is not a new signup — there is nothing to be told about."""
+    fake = _alerting_client(settings)
+    fake.add_subscriber.side_effect = SendPulseError("exists", status=409)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 409
+    fake.send_email.assert_not_called()
+
+
+def test_alert_can_be_switched_off(client, settings):
+    fake = _alerting_client(settings)
+    settings.NEWSLETTER_SIGNUP_NOTIFY = False
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
+    fake.send_email.assert_not_called()
+
+
+def test_alert_is_skipped_when_the_recipient_is_blank(client, settings):
+    """A ConfigMap key rendered as "" must not mail an empty address."""
+    fake = _alerting_client(settings)
+    settings.NEWSLETTER_SIGNUP_NOTIFY_EMAIL = "   "
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
+    fake.send_email.assert_not_called()
+
+
+def test_alert_failure_does_not_break_the_subscribe(client, settings):
+    fake = _alerting_client(settings)
+    fake.send_email.side_effect = SendPulseError("smtp down")
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
+    assert resp.data["status"] == "subscribed"
+
+
+def test_alert_escapes_what_was_typed_into_the_form(client, settings):
+    """Every field is public input, so the alert must not render it as markup."""
+    fake = _alerting_client(settings)
+    payload = {**VALID_PAYLOAD, "firstName": "<script>x</script>", "lastName": ""}
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), payload, format="json")
+    assert resp.status_code == 201
+    html = fake.send_email.call_args.args[2]
+    assert "<script>x</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_alert_subject_survives_a_newline_in_the_name(client, settings):
+    """The subject is the one value no template escapes, and a bare newline in
+    it is a header-injection shape — the serializer's trimming does not touch
+    interior whitespace."""
+    fake = _alerting_client(settings)
+    payload = {**VALID_PAYLOAD, "firstName": "Ram\nBcc: someone@example.org", "lastName": ""}
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), payload, format="json")
+    assert resp.status_code == 201
+    subject = fake.send_email.call_args.args[1]
+    assert "\n" not in subject
+    assert subject == "Newsletter signup: Ram Bcc: someone@example.org"
+
+
+def test_alert_omits_fields_the_signup_did_not_fill_in(client, settings):
+    """A newsletter signup should not arrive padded with blank Open House rows."""
+    fake = _alerting_client(settings)
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    html = fake.send_email.call_args.args[2]
+    assert "WhatsApp" not in html
+    assert "Organisation" not in html
+    assert "Region" not in html

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+{% comment %}
+Internal alert, not a reader-facing email — so it is deliberately plain. No
+header art, no footer, no unsubscribe: it goes to one Jawafdehi inbox and the
+only thing it has to do is be readable at a glance on a phone.
+
+Every value here is attacker-controlled (it is whatever was typed into a public
+form), so it must stay inside Django's autoescaping. Do not add |safe.
+{% endcomment %}
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ source_label }} signup</title>
+</head>
+<body style="margin:0; padding:16px; background-color:#f6f5f3; font-family:Helvetica,Arial,'Noto Sans Devanagari',sans-serif; color:#0e1f3b;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px; margin:0 auto; background-color:#ffffff; border-radius:10px;">
+<tr>
+<td style="padding:20px 20px 8px 20px;">
+<div style="font-size:12px; font-weight:600; letter-spacing:1.2px; text-transform:uppercase; color:#b5242c;">{{ source_label }} signup</div>
+<div style="font-size:18px; font-weight:700; padding-top:6px;">{{ name|default:"(no name given)" }}</div>
+<div style="font-size:14px; padding-top:2px;"><a href="mailto:{{ email }}" style="color:#0e1f3b;">{{ email }}</a></div>
+</td>
+</tr>
+
+{% if outcome == "rejected" %}
+{% comment %}
+The loud case. SendPulse answered and refused, so this address exists in this
+email and nowhere else — if this mail is ignored the signup is lost, because the
+subscriber was told they succeeded and has no reason to try again.
+{% endcomment %}
+<tr>
+<td style="padding:4px 20px 8px 20px;">
+<div style="background-color:#fdf3f3; border-left:3px solid #b5242c; padding:10px 12px; font-size:14px; line-height:1.5;">
+<strong>Not saved to SendPulse.</strong> The address book rejected this signup, so this email is the only record of it. Add them by hand. They were shown a success message and will not sign up again.
+</div>
+</td>
+</tr>
+{% elif outcome == "unknown" %}
+{% comment %}
+The request never completed, which is not the same as being refused: a timeout
+can land after SendPulse has already accepted the contact. So this asks the
+reader to look rather than telling them something we do not know.
+{% endcomment %}
+<tr>
+<td style="padding:4px 20px 8px 20px;">
+<div style="background-color:#fdf7ec; border-left:3px solid #c8871a; padding:10px 12px; font-size:14px; line-height:1.5;">
+<strong>May not have been saved.</strong> The request to SendPulse never completed, so this contact may or may not have reached the address book. Check it before adding them by hand — and if they are missing, this email is the only record of them.
+</div>
+</td>
+</tr>
+{% endif %}
+
+<tr>
+<td style="padding:4px 20px 20px 20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px; line-height:1.6;">
+{% for label, value in details %}
+<tr>
+<td style="padding:3px 12px 3px 0; color:#5b6472; white-space:nowrap; vertical-align:top;">{{ label }}</td>
+<td style="padding:3px 0; vertical-align:top;">{{ value }}</td>
+</tr>
+{% endfor %}
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>
