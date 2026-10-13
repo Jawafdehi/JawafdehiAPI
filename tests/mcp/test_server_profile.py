@@ -263,10 +263,6 @@ class TestIsToolAllowed:
 
 class TestPublicToolSetIntegrity:
     EXPECTED_ALL_TOOL_NAMES = {
-        "list_document_sources",
-        "get_document_overview",
-        "list_document_contents",
-        "read_document_part",
         "get_current_user",
         "search_control_plane",
         "ngm_query_judicial",
@@ -323,17 +319,10 @@ class TestPublicToolSetIntegrity:
 
     def test_all_tool_names_count(self):
         assert ALL_TOOL_NAMES == self.EXPECTED_ALL_TOOL_NAMES
-        assert len(ALL_TOOL_NAMES) == 30
+        assert len(ALL_TOOL_NAMES) == 26
 
     def test_authentication_required_tool_set(self):
         assert ALL_TOOL_NAMES - ANONYMOUS_TOOL_NAMES == {
-            # Document reading is authenticated-only: a signed-out caller
-            # could otherwise walk every page of every document, and there
-            # is no per-caller quota yet.
-            "list_document_sources",
-            "get_document_overview",
-            "list_document_contents",
-            "read_document_part",
             "ngm_extract_case_data",
             "create_jawafdehi_case",
             "patch_jawafdehi_case",
