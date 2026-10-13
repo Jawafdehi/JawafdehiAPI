@@ -13,13 +13,26 @@ from __future__ import annotations
 from jawafdehi_shared.jsonpatch_ops import blocked_path_predicate
 
 #: Envelope/annotation keys that must NEVER be persisted into a Material's stored
-#: JSON-LD ``data``: the write-envelope control field ``visibility_policy`` and
-#: the authed-read annotations ``jawafdehi:visibility``/``jawafdehi:visibilityPolicy``.
+#: JSON-LD ``data``: the write-envelope control field ``visibility_policy``, the
+#: authed-read annotations ``jawafdehi:visibility``/``jawafdehi:visibilityPolicy``,
+#: and the derived ``jawafdehi:content`` summary.
 #: ``PUT`` strips them at the write chokepoint (``_upsert_material``); ``PATCH``
 #: rejects them outright, because a patch has no "strip" semantics — silently
 #: dropping the op would report success for a write that did not happen.
+#:
+#: ``jawafdehi:content`` is read-derived from ``DocumentContent`` on every GET.
+#: Left out of this set it would survive a plain read-modify-write — a client
+#: GETs a document and PUTs it back — and freeze that moment's counts into
+#: ``data``, where the list endpoint serves them verbatim and the search indexer
+#: copies them into ``raw``. The stored copy would then outlive the content
+#: itself, advertising a content tab whose ``/content`` route 404s.
 RESERVED_WRITE_KEYS = frozenset(
-    {"visibility_policy", "jawafdehi:visibility", "jawafdehi:visibilityPolicy"}
+    {
+        "visibility_policy",
+        "jawafdehi:visibility",
+        "jawafdehi:visibilityPolicy",
+        "jawafdehi:content",
+    }
 )
 
 #: JSON Pointer prefixes a material PATCH may never target.

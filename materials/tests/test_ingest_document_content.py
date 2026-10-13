@@ -24,6 +24,7 @@ from pathlib import Path
 import duckdb
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db.models.signals import post_save
 from django.test import TestCase
 
 from materials.management.commands import ingest_document_content as mod
@@ -373,6 +374,41 @@ class IngestCommandTests(TestCase):
         )
         out = self._run()
         self.assertNotIn("disagree", out)
+
+    def test_the_material_is_touched_so_its_etag_moves(self):
+        # The detail payload carries the content summary and its ETag — which is
+        # also the If-Match token for a conditional PATCH — comes from the
+        # material's updated_at. An extraction write does not touch that by
+        # itself, so without this bump a re-ingest would change the body and not
+        # the validator, and caches would serve the old counts indefinitely.
+        before = Material.objects.get(pk=self.iri).updated_at
+        self._run()
+        self.assertGreater(Material.objects.get(pk=self.iri).updated_at, before)
+
+    def test_touching_the_material_does_not_reindex_it(self):
+        # .update(), not .save(): nothing in the search document comes from the
+        # extraction, so firing the post_save indexer per document would be pure
+        # cost on a path that already has a long transaction.
+        #
+        # Spy on post_save itself rather than patching materials.signals._index_material:
+        # the dispatcher holds the receiver FUNCTION OBJECT from @receiver, so
+        # patching the module attribute leaves the registered receiver untouched
+        # and the assertion can never fail. The real indexer is also wrapped in
+        # transaction.on_commit, which never fires under TestCase. Both of those
+        # would make this test vacuous.
+        fired = []
+        post_save.connect(
+            lambda **kw: fired.append(kw["instance"].pk),
+            sender=Material,
+            dispatch_uid="test_ingest_no_material_save",
+        )
+        self.addCleanup(
+            post_save.disconnect,
+            sender=Material,
+            dispatch_uid="test_ingest_no_material_save",
+        )
+        self._run()
+        self.assertEqual(fired, [], "the ingest saved a Material instead of .update()")
 
     def test_ordinals_follow_document_order_not_file_order(self):
         self._run()

@@ -239,3 +239,35 @@ def version_token(content: DocumentContent) -> str:
     without that timestamp moving.
     """
     return f'W/"{content.ingested_at.timestamp():.6f}"'
+
+
+def content_summary(content: DocumentContent) -> dict:
+    """What is inside this document, for the material detail payload.
+
+    Reports the DENORMALISED counters, which come from the upstream document row
+    rather than from ``COUNT`` over ours — see ``DocumentContent``. That is what
+    keeps this cheap enough to sit on the hottest read in the archive: one LEFT
+    JOIN, no aggregate, and nothing extra at all for the ~346k materials that
+    have no stored content.
+
+    ``pages_read`` is not ``pages``. A page we hold but could not transcribe is
+    still a page of the document, and a reader comparing the two sees how much of
+    the document is actually quotable. Collapsing them would present an
+    untranscribed report as an empty one.
+    """
+    return {
+        "pages": content.page_count,
+        "pages_read": content.pages_with_text,
+        "tables": content.n_tables,
+        "figures": content.n_figures,
+        "points": content.n_points,
+        "provenance": {
+            "doc_id": content.doc_id,
+            "dataset": content.dataset,
+            "dataset_revision": content.dataset_revision,
+            "text_source": content.text_source,
+            "transcript_verdict": content.transcript_verdict,
+            "figures_verdict": content.figures_verdict,
+            "ingested_at": content.ingested_at.isoformat(),
+        },
+    }
