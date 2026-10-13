@@ -84,7 +84,7 @@ _UPLOAD_ROLES = frozenset(
 )
 
 #: Upload roles that carry an original document worth OCR-ing into full text.
-#: Excludes MARKDOWN (our own content output) + SOURCE_PAGE (HTML, not a scan).
+#: Excludes MARKDOWN (our own extraction output) + SOURCE_PAGE (HTML, not a scan).
 _CONVERTIBLE_ROLES = frozenset({"RAW", "ALTERNATE", "PERMALINK"})
 
 logger = logging.getLogger("materials.views")

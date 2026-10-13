@@ -47,7 +47,7 @@
     "ciaa-2080-81": "Devanagari title: चौतिसौँ (34th), २०८०/८१.",
     "ciaa-2081-82": "Devanagari title: पैँतिसौँ (35th), २०८१/८२."
   },
-  "excluded_readme": "Materials deliberately given NO extraction. Each is an executive summary that shares a fiscal year with a mapped report but is a different, shorter PDF — attaching the full report's tables to it would claim it contains tables it does not.",
+  "excluded_readme": "Materials deliberately left without document content. Each is an executive summary that shares a fiscal year with a mapped report but is a different, shorter PDF — attaching the full report's tables to it would claim it contains tables it does not.",
   "excluded": {
     "12._26th_ciaa_report_summary_2073_148671038326thexecutivesummary_for_web1_13cbae15": "executive summary of the 26th report",
     "14._25th_annual_report_fiscal_year_2071_72_summary_nepali_1454578127akh_executive_summary72nepaliinnerfinal_1722b373": "summary of the 25th (ne)",
