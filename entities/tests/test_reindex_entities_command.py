@@ -221,3 +221,200 @@ class ReindexEntitiesCaseCountTests(TestCase):
         ):
             with pytest.raises(ReferenceLookupError):
                 self._run()
+
+
+class ReindexEntitiesGeographyTests(TestCase):
+    """``district``/``province`` ride the same bulk-map machinery as the count.
+
+    Same three obligations, for the same reasons: one grouped load rather than a
+    query per document, a catchup that RE-READS rather than re-writing the
+    pre-build answer, and an abort rather than a silent empty map — which here
+    would strip the facet off every document in one alias swap instead of
+    archiving them.
+    """
+
+    databases = "__all__"
+
+    def setUp(self):
+        for target in ("entities.search_index.index", "entities.search_index.delete"):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        from django.core.cache import cache
+
+        from entities.search_geography import clear_cache
+
+        cache.clear()
+        clear_cache()
+        self.district = StoredEntity.objects.create(
+            iri=f"{IRI_BASE}/location/district/kathmandu-np0327",
+            entity_type="AdministrativeArea",
+            prefix="location/district",
+            slug="kathmandu-np0327",
+            data={
+                "@id": f"{IRI_BASE}/location/district/kathmandu-np0327",
+                "@type": "AdministrativeArea",
+                "identifier": [{"propertyID": "ocha-pcode", "value": "NP0327"}],
+            },
+        )
+        clear_cache()
+
+    def _run(self, **kwargs):
+        """Run the command; return ``{iri: (district, province)}`` per doc."""
+        sent: dict[str, tuple] = {}
+
+        def fake_stream_bulk(client, index, docs):
+            docs = list(docs)
+            for doc in docs:
+                sent[doc["iri"]] = (doc.get("district"), doc.get("province"))
+            return len(docs)
+
+        with (
+            patch("jawafdehi_shared.search.reindex.make_client"),
+            patch("jawafdehi_shared.search.reindex.create_index"),
+            patch("jawafdehi_shared.search.reindex.stream_bulk", fake_stream_bulk),
+        ):
+            call_command("reindex_entities", **kwargs)
+        return sent
+
+    def _publish(self, *, entity_iri):
+        from cases.models import (
+            Case,
+            CaseEntityRelationship,
+            CaseState,
+            CaseType,
+            RelationshipType,
+        )
+
+        case = Case.objects.create(
+            title="Reindex geography test",
+            offence_type=CaseType.CORRUPTION,
+            state=CaseState.PUBLISHED,
+        )
+        CaseEntityRelationship.objects.create(
+            case=case, nes_id=entity_iri, relationship_type=RelationshipType.ACCUSED
+        )
+        CaseEntityRelationship.objects.create(
+            case=case,
+            nes_id=self.district.iri,
+            relationship_type=RelationshipType.LOCATION,
+        )
+        return case
+
+    def test_every_doc_carries_the_geography_of_its_citing_cases(self):
+        cited = _seed("alpha-holdings")
+        _seed("beta-traders")
+        with patch("cases.search_index.index"), patch(
+            "entities.search_index.index_by_iri"
+        ):
+            self._publish(entity_iri=cited.iri)
+
+        sent = self._run()
+        assert sent[cited.iri] == (["Kathmandu"], ["Bagmati"])
+        # An uncited entity carries NO field, not an empty list.
+        assert sent[f"{IRI_BASE}/organization/beta-traders"] == (None, None)
+
+    def test_catchup_re_reads_the_geography_of_a_case_published_mid_rebuild(self):
+        """The same closure trap the citation count fell into.
+
+        ``build`` closes over the geography map loaded BEFORE the build started,
+        so re-yielding a mid-build entity without re-reading writes it into the
+        new generation with no district — and the facet would be wrong until the
+        next reindex, which is precisely what the catchup exists to prevent.
+        """
+        cited = _seed("alpha-holdings")
+        sent: dict[str, tuple] = {}
+        calls = {"n": 0}
+
+        def fake_stream_bulk(client, index, docs):
+            docs = list(docs)
+            for doc in docs:
+                sent[doc["iri"]] = (doc.get("district"), doc.get("province"))
+            calls["n"] += 1
+            if calls["n"] == 1:
+                self._publish(entity_iri=cited.iri)
+            return len(docs)
+
+        with (
+            patch("entities.search_index.index_by_iri"),
+            patch("cases.search_index.index"),
+            patch("jawafdehi_shared.search.reindex.make_client"),
+            patch("jawafdehi_shared.search.reindex.create_index"),
+            patch("jawafdehi_shared.search.reindex.stream_bulk", fake_stream_bulk),
+        ):
+            call_command("reindex_entities", rebuild=True)
+
+        assert sent[cited.iri] == (["Kathmandu"], ["Bagmati"])
+
+    def test_a_geography_failure_aborts_rather_than_blanking_the_facet(self):
+        from entities.search_geography import GeographyLookupError
+
+        _seed("alpha-holdings")
+        with patch(
+            "entities.management.commands.reindex_entities.case_locations",
+            side_effect=GeographyLookupError("places unreachable"),
+        ):
+            with pytest.raises(GeographyLookupError):
+                self._run()
+
+    def test_catchup_covers_the_siblings_of_a_location_bound_mid_rebuild(self):
+        """A location bind moves the district of EVERY entity its case cites.
+
+        The live fan-out in ``cases.signals`` writes those siblings too, but
+        during a ``--rebuild`` it writes them into the OLD generation, which the
+        alias swap discards. Without the sibling arm in the catchup, an entity
+        bound before the build keeps the district it had when the build started
+        and nothing repairs it until the next reindex.
+        """
+        from cases.models import (
+            Case,
+            CaseEntityRelationship,
+            CaseState,
+            CaseType,
+            RelationshipType,
+        )
+
+        sibling = _seed("alpha-holdings")
+        with patch("cases.search_index.index"), patch(
+            "entities.search_index.index_by_iri"
+        ):
+            case = Case.objects.create(
+                title="Located mid-rebuild",
+                offence_type=CaseType.CORRUPTION,
+                state=CaseState.PUBLISHED,
+            )
+            CaseEntityRelationship.objects.create(
+                case=case,
+                nes_id=sibling.iri,
+                relationship_type=RelationshipType.ACCUSED,
+            )
+
+        sent: dict[str, tuple] = {}
+        calls = {"n": 0}
+
+        def fake_stream_bulk(client, index, docs):
+            docs = list(docs)
+            for doc in docs:
+                sent[doc["iri"]] = (doc.get("district"), doc.get("province"))
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Only the LOCATION bind is added — the sibling's own row is
+                # untouched and its case is not saved, so sources 1 and 3 are
+                # both blind to it.
+                CaseEntityRelationship.objects.create(
+                    case=case,
+                    nes_id=self.district.iri,
+                    relationship_type=RelationshipType.LOCATION,
+                )
+            return len(docs)
+
+        with (
+            patch("entities.search_index.index_by_iri"),
+            patch("cases.search_index.index"),
+            patch("jawafdehi_shared.search.reindex.make_client"),
+            patch("jawafdehi_shared.search.reindex.create_index"),
+            patch("jawafdehi_shared.search.reindex.stream_bulk", fake_stream_bulk),
+        ):
+            call_command("reindex_entities", rebuild=True)
+
+        assert sent[sibling.iri] == (["Kathmandu"], ["Bagmati"])

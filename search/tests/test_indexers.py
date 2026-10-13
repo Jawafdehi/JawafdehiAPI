@@ -61,6 +61,23 @@ def test_entity_build_doc_shape():
     assert doc["title_translit"]
 
 
+def test_entity_geography_is_injected_and_omitted_when_empty():
+    """``locations`` is passed in by the bulk reindex and the bind signals, the
+    same way ``case_count`` is. Empty writes NO field rather than an empty list:
+    a ``terms`` filter treats the two identically, and absent keeps an uncited
+    entity's document byte-identical to what it was before this release."""
+    iri = "https://jawafdehi.org/entity/person/located"
+    obj = SimpleNamespace(iri=iri, data={"@id": iri, "@type": "Person", "name": "X"})
+    bare = entity_index.build_doc(obj, case_count=0, locations=([], []))
+    assert "district" not in bare
+    assert "province" not in bare
+    located = entity_index.build_doc(
+        obj, case_count=2, locations=(["Kathmandu", "Rupandehi"], ["Bagmati"])
+    )
+    assert located["district"] == ["Kathmandu", "Rupandehi"]
+    assert located["province"] == ["Bagmati"]
+
+
 def test_entity_list_type_joined():
     iri = "https://jawafdehi.org/entity/location/kathmandu"
     obj = SimpleNamespace(
@@ -444,6 +461,32 @@ def test_courtcase_unknown_court_indexes_no_location():
     doc = courtcase_index.build_doc(obj)
     assert "court_district" not in doc
     assert "court_province" not in doc
+    assert "district" not in doc
+    assert "province" not in doc
+
+
+def test_courtcase_mirrors_its_geography_into_the_neutral_facet_fields():
+    """``district``/``province`` are what the facet filters on across every
+    record type, so a court case has to write them too or the court tab loses a
+    filter it has today. Same values as ``court_*``, as a LIST — the field is
+    multi-valued on entity and case documents, and a client reading
+    ``extra.district`` should not have to branch on which index a hit came
+    from."""
+    obj = _courtcase_obj()
+    obj.court_id = "achhamdc"
+    doc = courtcase_index.build_doc(obj)
+    assert doc["district"] == ["Achham"]
+    assert doc["province"] == ["Sudurpashchim"]
+
+
+def test_courtcase_without_a_district_still_mirrors_its_province():
+    """A high court has a province and no district; the neutral pair has to
+    follow that asymmetry rather than invent an empty district bucket."""
+    obj = _courtcase_obj()
+    obj.court_id = "patanhc"
+    doc = courtcase_index.build_doc(obj)
+    assert "district" not in doc
+    assert doc["province"] == ["Bagmati"]
 
 
 # ── case ───────────────────────────────────────────────────────────────────────
@@ -465,6 +508,18 @@ def _published_case():
         created_at=None,
         updated_at=None,
     )
+
+
+def test_case_geography_is_injected_and_omitted_when_empty():
+    """The case is where the location actually lives — it binds the place — so
+    its own document carries the subject geography and the citing entities
+    inherit it. Injected rather than resolved inside ``build_doc`` because that
+    function is pure by contract; ``build_indexed_doc`` supplies it."""
+    case = _published_case()
+    assert "district" not in case_index.build_doc(case)
+    doc = case_index.build_doc(case, locations=(["Rupandehi"], ["Lumbini"]))
+    assert doc["district"] == ["Rupandehi"]
+    assert doc["province"] == ["Lumbini"]
 
 
 def test_case_build_doc_shape_published():

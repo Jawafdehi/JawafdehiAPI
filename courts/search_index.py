@@ -268,6 +268,21 @@ def build_doc(obj: Any) -> dict[str, Any]:
         if district is not None:
             doc["court_district"] = district
         doc["court_province"] = province
+        # Mirror into the NEUTRAL subject-geography fields, which is what the
+        # ``district``/``province`` facets filter on across every record type
+        # (jawafdehi_shared.search.mappings). Court cases are the one type where
+        # the two are the same answer; cases and entities resolve theirs from
+        # the Jawafdehi location binds instead.
+        #
+        # A LIST even though a court has exactly one district, because the facet
+        # field is multi-valued on the other two types and a client reading
+        # ``extra.district`` should not have to branch on which index a hit came
+        # from. The empty case writes no field at all rather than an empty list:
+        # a ``terms`` clause ignores both, and absent is what every other
+        # single-type field here does.
+        if district is not None:
+            doc["district"] = [district]
+        doc["province"] = [province]
 
     reg_ad = getattr(obj, "registration_date_ad", None)
     if reg_ad is not None:

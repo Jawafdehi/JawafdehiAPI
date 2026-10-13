@@ -31,6 +31,7 @@ from .models import (
     CaseCourtCaseReference,
     CaseEntityRelationship,
     CaseMaterialReference,
+    RelationshipType,
 )
 
 # Attribute we stash the pre-delete material-IRI snapshot on. Set in pre_delete
@@ -160,20 +161,61 @@ def _refresh_entity_on_bind_change(sender, instance, **kwargs):
     row. That is redundant by design: the upsert is idempotent, a PATCH is a
     human-scale event, and de-duplicating across a transaction would need
     bookkeeping that could itself drop an IRI.
+
+    A LOCATION bind fans out to the case's OTHER entities as well. Every other
+    role changes one entity's own derived values; a location changes where the
+    case HAPPENED, which is the ``district``/``province`` of every entity the
+    case cites (``entities.search_geography``). Without the fan-out, moving a
+    case from Kathmandu to Rupandehi would re-index the two place entities and
+    leave the accused filed under the old district until the weekly reindex.
     """
     iri = getattr(instance, "nes_id", None)
     if not iri:
         return
-    transaction.on_commit(lambda: _refresh_bound_entities([iri]))
+    is_location = (
+        getattr(instance, "relationship_type", None) == RelationshipType.LOCATION
+    )
+    case_id = getattr(instance, "case_id", None)
+    if not (is_location and case_id):
+        transaction.on_commit(lambda: _refresh_bound_entities([iri]))
+        return
+    # Resolve the siblings INSIDE the callback: on a whole-list rewrite this
+    # fires mid-transaction, and the bind set is only final after commit.
+    transaction.on_commit(
+        lambda: _refresh_bound_entities([iri, *_sibling_bind_iris(case_id)])
+    )
+
+
+def _sibling_bind_iris(case_id) -> list[str]:
+    """Every NES entity IRI the case currently binds (best-effort, post-commit).
+
+    Empty when the case itself is gone — a hard delete takes its binds with it,
+    and the per-row ``post_delete`` already covers each entity individually.
+    """
+    try:
+        return [
+            iri
+            for iri in CaseEntityRelationship.objects.filter(
+                case_id=case_id
+            ).values_list("nes_id", flat=True)
+            if iri
+        ]
+    except Exception:  # noqa: BLE001 — best-effort; the weekly reindex backstops.
+        return []
 
 
 def _refresh_bound_entities(iris) -> None:
-    """Re-index the given NES entities so their ``case_count`` matches the binds.
+    """Re-index the given NES entities so their derived fields match the binds.
 
     ``case_count`` is the public visibility gate (``entities.search_visibility``):
     it is derived from the binds, so nothing in the ``StoredEntity`` row changes
     when a case is published or bound and no entity signal fires. This is the
     only path that tells the entity index a citation appeared or vanished.
+
+    ``district``/``province`` (``entities.search_geography``) ride the same path
+    for the same reason — they too are derived from the binds, not from the
+    entity row — and are resolved in ONE batch for the whole list rather than
+    left to ``build_doc``'s per-entity fallback.
 
     Cross-app / cross-DB (entities → ``nes``) and best-effort, mirroring
     ``_refresh_referenced_courtcases``: a failure must not break the case write,
@@ -186,16 +228,30 @@ def _refresh_bound_entities(iris) -> None:
     logger = logging.getLogger(__name__)
     try:
         from entities import search_index as entities_search_index
+        from entities.search_geography import locations_for_iris
         from entities.search_visibility import clear_cache, entity_case_count
     except Exception:  # noqa: BLE001 — entities/opensearch stack optional in some contexts
         return
     # The published-bind set just changed → drop the cached copy so the recomputed
     # counts read the new state (and so do other processes, via Redis).
+    #
+    # The PLACE graph is deliberately NOT invalidated here: a bind write changes
+    # which place a case points at, never what a place resolves to. Only a write
+    # to a location entity can do that, and ``entities.signals`` owns it.
     clear_cache()
-    for iri in dict.fromkeys(iris):
+    targets = list(dict.fromkeys(iris))
+    # ONE resolution for the whole list, not one per entity. The LOCATION
+    # fan-out below can hand this 26 IRIs (the prod maximum for a single case),
+    # and a per-entity lookup would issue two queries each from inside a commit
+    # hook. An IRI absent from the map has no published citation, hence no
+    # geography — the ``([], [])`` default is the answer, not a fallback.
+    geography = locations_for_iris(targets)
+    for iri in targets:
         try:
             entities_search_index.index_by_iri(
-                iri, case_count=entity_case_count(iri)
+                iri,
+                case_count=entity_case_count(iri),
+                locations=geography.get(iri, ([], [])),
             )
         except Exception:  # noqa: BLE001 — best-effort; the reconcile backstops
             logger.exception("entity visibility reindex failed for %s", iri)

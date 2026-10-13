@@ -443,14 +443,25 @@ def _build_card(
     }
 
 
-def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def build_doc(
+    case: Any,
+    *,
+    entities: list[dict[str, Any]] | None = None,
+    locations: tuple[list[str], list[str]] | None = None,
+) -> dict[str, Any]:
     """Map a published ``Case`` to the common index doc. Pure: no OpenSearch.
 
     The caller is responsible for the published gate; this shapes whatever it is
     given (used directly by tests for the doc shape). ``entities`` is the resolved
     entity-bind list for the ``card`` payload — ``index()`` resolves it via
     :func:`_safe_resolve_entities`; passing ``None`` (the default) omits names so
-    the doc-shape tests stay pure/DB-free."""
+    the doc-shape tests stay pure/DB-free.
+
+    ``locations`` is the ``(districts, provinces)`` this case is about, resolved
+    from its own ``location`` entity binds, and is injected for exactly the same
+    reason: resolving it needs both the bind rows and the place records, which a
+    shape test has neither of. :func:`build_indexed_doc` supplies it on every
+    real path."""
     iri = _case_iri(case)
     title = getattr(case, "title", "") or ""
     title_ne, title_en = name_to_titles(title)
@@ -500,6 +511,20 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
         # can migrate before the facet is renamed in a later release.
         doc["case_type"] = offence_type.upper()
         doc["offence_type"] = offence_type.upper()
+
+    # Subject geography — where the case SAYS it happened, from its ``location``
+    # entity binds. Omitted when empty (a case with no location bind, or one
+    # whose only location is an ad-hoc free-text place that resolves to no
+    # district), matching the other optional fields here.
+    #
+    # Note this is NOT the deciding court's district: a Special Court case heard
+    # in Kathmandu about procurement in Rupandehi is Rupandehi's case, and the
+    # court's own seat stays on the court-case doc as ``court_district``.
+    districts, provinces = locations or ([], [])
+    if districts:
+        doc["district"] = districts
+    if provinces:
+        doc["province"] = provinces
 
     # ``getattr`` with a default because build_doc is pure — it shapes whatever it
     # is given, including objects (and fixtures) predating the field.
@@ -566,8 +591,18 @@ def build_indexed_doc(case: Any) -> dict[str, Any]:
     bulk ``reindex_cases`` driver call, so a rebuild REFRESHES the denormalized
     entity names rather than blanking them (the driver calls ``build_doc``
     positionally with no ``entities`` kwarg — see ``jawafdehi_shared/search/
-    reindex.py``)."""
-    return build_doc(case, entities=_safe_resolve_entities(case))
+    reindex.py``).
+
+    The subject geography is resolved here for the same reason and on the same
+    terms: ``case_geography`` is best-effort, so a place lookup that fails costs
+    the document its district, never the document."""
+    from entities.search_geography import case_geography
+
+    return build_doc(
+        case,
+        entities=_safe_resolve_entities(case),
+        locations=case_geography(case),
+    )
 
 
 def index_now(case: Any, *, client=None) -> None:
