@@ -20,6 +20,10 @@ from . import views
 app_name = "ngm-materials"
 
 urlpatterns = [
+    # The source catalogue. Not under ``materials/`` because it is not a
+    # material — it describes the shelves, and nesting it there would put it in
+    # the path space the liberal ``<source>/<ident>`` pattern below claims.
+    path("document-sources/", views.document_sources, name="document-sources"),
     path("materials/", views.material_by_iri, name="material-by-iri"),
     # File upload on the composite source/ident. Declared BEFORE material-detail
     # so the trailing ``/file`` subpath is not consumed by the liberal detail

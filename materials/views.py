@@ -46,6 +46,7 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
 from . import jsonld
 from . import provenance
+from .sources import build_catalogue
 from .content_api import (
     CONTENT_TYPES,
     MAX_PAGE_SPAN,
@@ -1346,3 +1347,61 @@ def _keyed_response(request, iri: str, content, kind: str):
             http_status=status.HTTP_404_NOT_FOUND,
         )
     return _content_response({"material": iri, "type": kind, "item": item}, content)
+
+
+# ── Document-source catalogue ────────────────────────────────────────────────
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def document_sources(request):
+    """``GET /api/document-sources/`` → what the archive holds, by source.
+
+    One row per ``source`` token: its count, how many of its documents we have
+    actually READ, the series inside it, and a human label where we have a
+    reviewed one.
+
+    This exists because ``by_source`` alone is not usable by anything that has
+    to *choose* a source. ``ag`` is the Attorney General and ``official_report``
+    is the Auditor General; a caller picking by token spelling gets charge
+    sheets when it wanted audit reports. See ``materials.sources``.
+
+    Served from the same precomputed ``StatisticsSnapshot`` row as
+    ``/api/statistics/`` — a single primary-key lookup. The aggregation behind
+    it runs over 346k rows and belongs in the scheduled refresh, not here.
+
+    **Not knowing is reported as not knowing.** Before the first refresh there is
+    no snapshot, and the refresh runs hourly, so that window is real rather than
+    theoretical. Returning ``200 {"sources": []}`` there would be
+    indistinguishable from an archive that holds nothing — the same unknown-vs-
+    zero conflation this payload is careful to avoid for ``readable``. A
+    bootstrap or placeholder snapshot answers ``503`` with ``ready: false``, so a
+    caller retries instead of concluding the archive is empty.
+
+    ``max-age`` is deliberate and ``s-maxage`` deliberately absent: the
+    Cloudflare ruleset caches a named list of paths and bypasses by default, so
+    an edge directive here would describe caching that does not happen.
+    """
+    from cases.api_views import STATISTICS_SNAPSHOT_KEY
+    from cases.models import StatisticsSnapshot
+
+    snapshot = StatisticsSnapshot.objects.filter(pk=STATISTICS_SNAPSHOT_KEY).first()
+    if snapshot is None or snapshot.is_placeholder:
+        # Deliberately NOT computing one here: this endpoint is a reader, and the
+        # bootstrap claim belongs to the statistics view that owns the row.
+        resp = Response(
+            {
+                "ready": False,
+                "detail": "The source catalogue has not been computed yet.",
+                "sources": [],
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+        resp["Cache-Control"] = "no-store"
+        resp["Retry-After"] = "300"
+        return resp
+
+    materials = (snapshot.data or {}).get("materials") or {}
+    resp = Response({"ready": True, "sources": build_catalogue(materials)})
+    resp["Cache-Control"] = "public, max-age=60"
+    return resp

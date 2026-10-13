@@ -23,7 +23,7 @@ import json
 from collections import defaultdict
 
 from django.db import connections
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, JSONField, Q, Sum, Value
 from django.db.models.fields.json import KeyTextTransform
 from django.db.models.functions import Substr, Trim
 from django.utils import timezone
@@ -134,6 +134,7 @@ def bootstrap_placeholder() -> dict:
             "by_source": [],
             "by_source_type": [],
             "by_dataset_bucket": [],
+            "by_readability": [],
             "counts": {
                 "with_description": 0,
                 "with_url": 0,
@@ -531,12 +532,48 @@ def _materials_metrics():
     else:
         with_description = with_url = with_date = 0
 
+    # How much of each source we have actually READ, as opposed to hold. The
+    # distinction is the whole point: 100% of the 99,750 charge sheets are in the
+    # archive and none of them is transcribed, and a consumer that cannot see
+    # that will read our silence about them as the documents' silence.
+    #
+    # Readability has TWO homes and both must count. Most corpora carry their
+    # transcript inline at ``data["text"]``; documents ingested with per-page
+    # content carry theirs as ``DocumentPage`` rows instead, summarised on
+    # ``DocumentContent.pages_with_text``. Counting only the first would report
+    # the CIAA annual reports — the one corpus with page-level text — as 0%
+    # readable.
+    #
+    # Unlike the completeness counts below this is NOT gated on Postgres: it is
+    # a grouped query rather than three full-table counts, and the test gate
+    # needs it to return real numbers to be worth asserting on.
+    # ``has_key`` alone is not "has text": the key is present and empty on
+    # materials whose conversion produced nothing, and ``""``, ``{}`` and JSON
+    # ``null`` would all count as READ — the exact overcount this figure exists
+    # to prevent. Excluded explicitly, the way ``by_dataset_bucket`` above
+    # excludes its blanks. ``text`` is bilingual on some corpora, so ``{}`` is a
+    # real empty value here and not a type error.
+    empty_text = (
+        Q(data__text="")
+        | Q(data__text={})
+        | Q(data__text=[])
+        | Q(data__text=Value(None, JSONField()))
+    )
+    has_text = Q(data__has_key="text") & ~empty_text
+    by_readability = list(
+        live.filter(has_text | Q(content__pages_with_text__gt=0))
+        .values("source")
+        .annotate(count=Count("iri"))
+        .order_by("-count", "source")
+    )
+
     return {
         "total": total,
         "by_type": by_type,
         "by_source": by_source,
         "by_source_type": by_source_type,
         "by_dataset_bucket": by_dataset_bucket,
+        "by_readability": by_readability,
         "counts": {
             "with_description": with_description,
             "with_url": with_url,
