@@ -23,7 +23,7 @@ import json
 from collections import defaultdict
 
 from django.db import connections
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, JSONField, Q, Sum, Value
 from django.db.models.fields.json import KeyTextTransform
 from django.db.models.functions import Substr, Trim
 from django.utils import timezone
@@ -547,8 +547,21 @@ def _materials_metrics():
     # Unlike the completeness counts below this is NOT gated on Postgres: it is
     # a grouped query rather than three full-table counts, and the test gate
     # needs it to return real numbers to be worth asserting on.
+    # ``has_key`` alone is not "has text": the key is present and empty on
+    # materials whose conversion produced nothing, and ``""``, ``{}`` and JSON
+    # ``null`` would all count as READ — the exact overcount this figure exists
+    # to prevent. Excluded explicitly, the way ``by_dataset_bucket`` above
+    # excludes its blanks. ``text`` is bilingual on some corpora, so ``{}`` is a
+    # real empty value here and not a type error.
+    empty_text = (
+        Q(data__text="")
+        | Q(data__text={})
+        | Q(data__text=[])
+        | Q(data__text=Value(None, JSONField()))
+    )
+    has_text = Q(data__has_key="text") & ~empty_text
     by_readability = list(
-        live.filter(Q(data__has_key="text") | Q(content__pages_with_text__gt=0))
+        live.filter(has_text | Q(content__pages_with_text__gt=0))
         .values("source")
         .annotate(count=Count("iri"))
         .order_by("-count", "source")

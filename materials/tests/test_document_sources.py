@@ -66,8 +66,30 @@ class CatalogueShapeTests(APITestCase):
         # General and `official_report` is the AUDITOR General. A caller picking
         # by token spelling gets charge sheets when it wanted audit reports.
         rows = {r["source"]: r for r in self.client.get(URL).json()["sources"]}
-        self.assertIn("Attorney General", rows["ag"]["publisher"])
-        self.assertIn("Auditor General", rows["official_report"]["publisher"])
+        self.assertIn("Attorney General", rows["ag"]["publisher"]["en"])
+        self.assertIn("Auditor General", rows["official_report"]["publisher"]["en"])
+
+    def test_every_publisher_claim_is_sourced_or_absent(self):
+        # The failure this guards against is an INVENTED office. A publisher
+        # here must come from the materials' own publisher field or from the
+        # reviewed series registry; sources with neither carry none, because a
+        # reader cannot tell an invented attribution from a checked one.
+        from materials.sources import SOURCE_LABELS
+
+        unsourced = {"kanun_patrika", "court_order"}
+        for token in unsourced:
+            self.assertNotIn(
+                "publisher", SOURCE_LABELS[token], f"{token} has no citable publisher"
+            )
+        for token in ("ag", "official_report", "nkp", "ppmo", "bolpatra"):
+            self.assertIsInstance(SOURCE_LABELS[token]["publisher"], dict)
+
+    def test_nkp_is_attributed_to_the_court_not_the_journal(self):
+        # The materials' own publisher field says सर्वोच्च अदालत. The journal
+        # publishes these precedents; the Supreme Court issues them.
+        from materials.sources import SOURCE_LABELS
+
+        self.assertIn("Supreme Court", SOURCE_LABELS["nkp"]["publisher"]["en"])
 
     def test_series_are_nested_under_their_source(self):
         rows = {r["source"]: r for r in self.client.get(URL).json()["sources"]}
@@ -126,24 +148,38 @@ class HonestyTests(APITestCase):
         self.assertFalse(series[0]["labelled"])
 
 
-class CachingTests(APITestCase):
+class NotReadyTests(APITestCase):
+    """Before the first refresh the answer is "I do not know yet", not "empty".
+
+    The refresh runs hourly, so this window is real. A 200 with an empty list
+    would be indistinguishable from an archive that holds nothing — the same
+    unknown-vs-zero conflation the payload avoids for ``readable``.
+    """
+
     databases = "__all__"
 
-    def test_a_real_snapshot_is_publicly_cacheable(self):
-        _snapshot(MATERIALS)
-        self.assertIn("s-maxage", self.client.get(URL)["Cache-Control"])
-
-    def test_a_placeholder_snapshot_is_never_cached(self):
-        # Its zeroed blocks would otherwise be pinned at the edge for a full TTL
-        # and the archive would advertise itself as empty worldwide.
-        _snapshot({"by_source": []}, placeholder=True)
-        self.assertEqual(self.client.get(URL)["Cache-Control"], "no-store")
-
-    def test_no_snapshot_yet_is_empty_and_uncached(self):
+    def test_no_snapshot_yet_is_503_not_an_empty_archive(self):
         resp = self.client.get(URL)
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.json()["sources"], [])
+        self.assertEqual(resp.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertFalse(resp.json()["ready"])
         self.assertEqual(resp["Cache-Control"], "no-store")
+        self.assertEqual(resp["Retry-After"], "300")
+
+    def test_a_placeholder_snapshot_is_also_not_ready(self):
+        # A placeholder's zeroed blocks are not an answer either.
+        _snapshot({"by_source": []}, placeholder=True)
+        resp = self.client.get(URL)
+        self.assertEqual(resp.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertFalse(resp.json()["ready"])
+
+    def test_a_real_snapshot_is_ready_and_briefly_cacheable(self):
+        _snapshot(MATERIALS)
+        resp = self.client.get(URL)
+        self.assertTrue(resp.json()["ready"])
+        self.assertIn("max-age=60", resp["Cache-Control"])
+        # No s-maxage: the Cloudflare ruleset bypasses this path by default, so
+        # an edge directive would describe caching that does not happen.
+        self.assertNotIn("s-maxage", resp["Cache-Control"])
 
 
 class BuilderUnitTests(APITestCase):
@@ -151,3 +187,71 @@ class BuilderUnitTests(APITestCase):
 
     def test_empty_materials_block_is_an_empty_catalogue(self):
         self.assertEqual(build_catalogue({}), [])
+
+
+class ReadabilityAggregateTests(APITestCase):
+    """``by_readability`` counts documents we have READ, not ones with the key.
+
+    ``data__has_key("text")`` is true for ``""``, ``{}`` and JSON ``null`` — all
+    of which are materials whose conversion produced nothing. Counting them
+    would overstate how much of the archive is quotable, which is the one number
+    this aggregate exists to report honestly.
+    """
+
+    databases = "__all__"
+
+    def _material(self, ident, data_extra):
+        from materials.jsonld import MATERIAL_CONTEXT
+        from materials.models import Material
+
+        iri = f"https://jawafdehi.org/material/probe/{ident}"
+        return Material.objects.create(
+            iri=iri,
+            material_type="document",
+            source="probe",
+            ident=ident,
+            data={
+                "@context": MATERIAL_CONTEXT,
+                "@type": "DigitalDocument",
+                "@id": iri,
+                "name": {"ne": "परीक्षण"},
+                **data_extra,
+            },
+        )
+
+    def test_only_real_text_counts_as_read(self):
+        from cases.services.statistics import _materials_metrics
+
+        self._material("with-text", {"text": "वास्तविक पाठ"})
+        self._material("bilingual", {"text": {"ne": "पाठ"}})
+        self._material("empty-string", {"text": ""})
+        self._material("empty-object", {"text": {}})
+        self._material("json-null", {"text": None})
+        self._material("no-key", {})
+
+        readable = {
+            row["source"]: row["count"]
+            for row in _materials_metrics()["by_readability"]
+        }
+        self.assertEqual(readable.get("probe"), 2, "only the two real transcripts")
+
+    def test_page_level_content_counts_even_with_no_inline_text(self):
+        # The CIAA annual reports keep their transcript as DocumentPage rows and
+        # carry no data["text"] at all. Counting only the inline field would
+        # report the one corpus with page-level text as 0% readable.
+        from cases.services.statistics import _materials_metrics
+        from materials.models import DocumentContent
+
+        material = self._material("paged", {})
+        DocumentContent.objects.create(
+            material=material,
+            doc_id="probe-1",
+            dataset="probe",
+            page_count=10,
+            pages_with_text=9,
+        )
+        readable = {
+            row["source"]: row["count"]
+            for row in _materials_metrics()["by_readability"]
+        }
+        self.assertEqual(readable.get("probe"), 1)

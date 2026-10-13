@@ -38,15 +38,21 @@ from typing import Any
 SOURCE_LABELS: dict[str, dict[str, Any]] = {
     "ag": {
         "name": {"en": "Charge sheets", "ne": "अभियोगपत्रहरू"},
-        "publisher": "Office of the Attorney General",
+        "publisher": {"en": "Office of the Attorney General"},
         "description": (
             "Charge sheets filed at the Special Court in corruption cases, "
             "from the Office of the Attorney General."
         ),
     },
     "official_report": {
-        "name": {"en": "Auditor General reports and publications"},
-        "publisher": "Office of the Auditor General",
+        "name": {
+            "en": "Auditor General reports and publications",
+            "ne": "महालेखापरीक्षकको प्रतिवेदन तथा प्रकाशन",
+        },
+        "publisher": {
+            "en": "Office of the Auditor General",
+            "ne": "महालेखापरीक्षकको कार्यालय",
+        },
         "description": (
             "Audit reports and periodicals of the Office of the Auditor "
             "General. One token, several distinct series — see `series`."
@@ -54,12 +60,18 @@ SOURCE_LABELS: dict[str, dict[str, Any]] = {
     },
     "ciaa_annual_report": {
         "name": {"en": "CIAA annual reports", "ne": "अख्तियारका वार्षिक प्रतिवेदन"},
-        "publisher": "Commission for the Investigation of Abuse of Authority",
+        "publisher": {
+            "en": "Commission for the Investigation of Abuse of Authority",
+            "ne": "अख्तियार दुरुपयोग अनुसन्धान आयोग",
+        },
         "description": "Annual reports of the CIAA, from fiscal year 2047/48 BS onward.",
     },
     "ciaa_press_release": {
         "name": {"en": "CIAA press releases", "ne": "अख्तियारका प्रेस विज्ञप्ति"},
-        "publisher": "Commission for the Investigation of Abuse of Authority",
+        "publisher": {
+            "en": "Commission for the Investigation of Abuse of Authority",
+            "ne": "अख्तियार दुरुपयोग अनुसन्धान आयोग",
+        },
         "description": (
             "Press releases issued by the Commission for the Investigation of "
             "Abuse of Authority."
@@ -67,12 +79,16 @@ SOURCE_LABELS: dict[str, dict[str, Any]] = {
     },
     "kanun_patrika": {
         "name": {"en": "Kanun Patrika", "ne": "कानुन पत्रिका"},
-        "publisher": "Nepal Law Commission",
+        # No publisher. These materials carry none of their own and the series
+        # registry names none, so there is nothing to cite. An office invented
+        # here would be indistinguishable from a reviewed one.
         "description": "Full issues of the Nepal Kanun Patrika law journal.",
     },
     "nkp": {
-        "name": {"en": "Supreme Court precedents"},
-        "publisher": "Nepal Kanun Patrika",
+        "name": {"en": "Supreme Court precedents", "ne": "सर्वोच्च अदालतका नजिर"},
+        # From the materials' own publisher field, not from the journal's name:
+        # the journal publishes them, the Supreme Court issues them.
+        "publisher": {"en": "Supreme Court of Nepal", "ne": "सर्वोच्च अदालत"},
         "description": (
             "Individual precedents from the Nepal Law Journal. Distinct from "
             "`kanun_patrika`, which holds the journal's full issues."
@@ -80,18 +96,25 @@ SOURCE_LABELS: dict[str, dict[str, Any]] = {
     },
     "bolpatra": {
         "name": {"en": "e-GP tender notices"},
-        "publisher": "Public Procurement Monitoring Office",
+        "publisher": {
+            "en": "Public Procurement Monitoring Office",
+            "ne": "सार्वजनिक खरिद अनुगमन कार्यालय",
+        },
         "description": "Tender notices published on the PPMO e-GP portal (bolpatra.gov.np).",
     },
     "ppmo": {
         "name": {"en": "PPMO publications"},
-        "publisher": "Public Procurement Monitoring Office",
+        "publisher": {
+            "en": "Public Procurement Monitoring Office",
+            "ne": "सार्वजनिक खरिद अनुगमन कार्यालय",
+        },
         "description": "Procurement bulletins and annual reports published by the PPMO.",
     },
     "court_order": {
         "name": {"en": "Court orders"},
-        "publisher": "Nepal court system",
-        "description": "Orders and verdicts scraped from the court portals.",
+        # No publisher: these carry none, and "the court system" is a category
+        # rather than an issuing office. The issuing court is on each document.
+        "description": "Orders and verdicts scraped from the Nepal court portals.",
     },
 }
 

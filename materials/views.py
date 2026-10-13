@@ -1370,26 +1370,38 @@ def document_sources(request):
     ``/api/statistics/`` — a single primary-key lookup. The aggregation behind
     it runs over 346k rows and belongs in the scheduled refresh, not here.
 
-    A placeholder snapshot (bootstrap, before the first refresh) is served
-    ``no-store``: its zeroed blocks would otherwise be pinned at the edge for a
-    full TTL and the archive would advertise itself as empty.
+    **Not knowing is reported as not knowing.** Before the first refresh there is
+    no snapshot, and the refresh runs hourly, so that window is real rather than
+    theoretical. Returning ``200 {"sources": []}`` there would be
+    indistinguishable from an archive that holds nothing — the same unknown-vs-
+    zero conflation this payload is careful to avoid for ``readable``. A
+    bootstrap or placeholder snapshot answers ``503`` with ``ready: false``, so a
+    caller retries instead of concluding the archive is empty.
+
+    ``max-age`` is deliberate and ``s-maxage`` deliberately absent: the
+    Cloudflare ruleset caches a named list of paths and bypasses by default, so
+    an edge directive here would describe caching that does not happen.
     """
     from cases.api_views import STATISTICS_SNAPSHOT_KEY
     from cases.models import StatisticsSnapshot
 
     snapshot = StatisticsSnapshot.objects.filter(pk=STATISTICS_SNAPSHOT_KEY).first()
-    if snapshot is None:
-        # No snapshot yet. Deliberately NOT computing one here: this endpoint is
-        # a reader, and the bootstrap claim belongs to the statistics view that
-        # owns the row. An empty catalogue with no-store says "ask again" rather
-        # than asserting the archive is empty.
-        resp = Response({"sources": []})
+    if snapshot is None or snapshot.is_placeholder:
+        # Deliberately NOT computing one here: this endpoint is a reader, and the
+        # bootstrap claim belongs to the statistics view that owns the row.
+        resp = Response(
+            {
+                "ready": False,
+                "detail": "The source catalogue has not been computed yet.",
+                "sources": [],
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
         resp["Cache-Control"] = "no-store"
+        resp["Retry-After"] = "300"
         return resp
 
     materials = (snapshot.data or {}).get("materials") or {}
-    resp = Response({"sources": build_catalogue(materials)})
-    resp["Cache-Control"] = (
-        "no-store" if snapshot.is_placeholder else "public, max-age=60, s-maxage=300"
-    )
+    resp = Response({"ready": True, "sources": build_catalogue(materials)})
+    resp["Cache-Control"] = "public, max-age=60"
     return resp
