@@ -1,6 +1,12 @@
 """Tool implementations for Jawafdehi MCP server."""
 
 from .base import BaseTool, ToolExecutionResult, error_text
+from .documents import (
+    GetDocumentOverviewTool,
+    ListDocumentContentsTool,
+    ListDocumentSourcesTool,
+    ReadDocumentPartTool,
+)
 from .control_plane import (
     BrowseCourtDataTool,
     BrowseMaterialsTool,
@@ -42,6 +48,10 @@ __all__ = [
     "GetNESEntityVersionsTool",
     "DeleteNESEntityTool",
     "BrowseMaterialsTool",
+    "GetDocumentOverviewTool",
+    "ListDocumentContentsTool",
+    "ListDocumentSourcesTool",
+    "ReadDocumentPartTool",
     "ManageMaterialTool",
     "BrowseCourtDataTool",
     "ManageCourtDataTool",
