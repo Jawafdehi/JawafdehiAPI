@@ -59,6 +59,22 @@ docker build -t jawafdehi .                  # single image, context = repo root
 For the local dev stack (Postgres ×3, OpenSearch, MinIO) see `docker-compose.yml`.
 For MCP architecture and configuration see [`docs/mcp/README.md`](./docs/mcp/README.md).
 
+## Agent skills
+
+`skills/` holds agent skills for working with this API. They teach an agent how to use the
+MCP tools correctly — which is not obvious: the archive holds 346k documents and the largest
+would fill a context window on its own.
+
+```
+/plugin install jawafdehi-document-reader --marketplace Jawafdehi/JawafdehiAPI
+```
+
+Requires Claude Code 2.1.275 or later. On earlier versions, add the marketplace first with
+`/plugin marketplace add Jawafdehi/JawafdehiAPI`.
+
+Skills live beside the tools they document so the two version together. The MCP tools
+themselves are in `jawafdehi_mcp/tools/`.
+
 ## Working model
 Trunk is **`main`**. `origin` = the org (`Jawafdehi/JawafdehiAPI`), `fork` = the
 `damodaha` personal fork; PRs are filed on the org from the fork. New work goes on a
