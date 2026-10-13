@@ -23,6 +23,12 @@ ANONYMOUS_TOOL_CATALOG = {
     "convert_date",
 }
 FULL_TOOL_CATALOG = {
+    # Document reading — authenticated only, so these are deliberately absent
+    # from ANONYMOUS_TOOL_CATALOG above.
+    "list_document_sources",
+    "get_document_overview",
+    "list_document_contents",
+    "read_document_part",
     "get_current_user",
     "search_control_plane",
     "ngm_query_judicial",
