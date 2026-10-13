@@ -14,6 +14,8 @@ from jsonschema import Draft202012Validator
 
 from jawafdehi_mcp.identity import ANONYMOUS_TOOL_NAMES
 from jawafdehi_mcp.server import TOOL_MAP
+import httpx
+
 from jawafdehi_mcp.tools.documents import (
     MAX_TEXT_CHARS,
     GetDocumentOverviewTool,
@@ -52,8 +54,13 @@ def test_document_tools_require_a_verified_identity(tool):
 
 class TestIriParsing:
     def test_parses_a_multi_segment_source(self):
+        # encode_material_parts quotes the source whole, so the separator in a
+        # multi-segment source comes out percent-encoded. Verified against
+        # production that both spellings resolve 200 — Django matches on the
+        # decoded path and the edge passes %2F through — so the shared encoder
+        # is used as-is rather than re-implemented per segment here.
         path = _material_path("https://jawafdehi.org/material/province/koshi/fy2083-21")
-        assert path == "/api/materials/province/koshi/fy2083-21"
+        assert path == "/api/materials/province%2Fkoshi/fy2083-21"
 
     def test_appends_the_suffix(self):
         assert _material_path(IRI, "/content").endswith("/ee0b4f80b24b8665/content")
@@ -102,7 +109,7 @@ class TestOverview:
         doc = {"@id": IRI, "name": {"ne": "…"}, "associatedMedia": []}
         with patch(
             "jawafdehi_mcp.tools.documents.request_control_plane",
-            new=AsyncMock(return_value={"data": doc}),
+            new=AsyncMock(return_value={"success": True, "data": doc}),
         ):
             body = _payload(await GetDocumentOverviewTool().execute({"iri": IRI}))
         assert body["readable"] is False
@@ -119,7 +126,7 @@ class TestOverview:
         }
         with patch(
             "jawafdehi_mcp.tools.documents.request_control_plane",
-            new=AsyncMock(return_value={"data": doc}),
+            new=AsyncMock(return_value={"success": True, "data": doc}),
         ):
             body = _payload(await GetDocumentOverviewTool().execute({"iri": IRI}))
         assert body["readable"] is True
@@ -136,7 +143,7 @@ class TestOverview:
         }
         with patch(
             "jawafdehi_mcp.tools.documents.request_control_plane",
-            new=AsyncMock(return_value={"data": doc}),
+            new=AsyncMock(return_value={"success": True, "data": doc}),
         ):
             body = _payload(await GetDocumentOverviewTool().execute({"iri": IRI}))
         assert body["source_links"][0]["url"] == "https://ciaa.gov.np/x"
@@ -188,7 +195,7 @@ class TestReadPart:
         big = "x" * (MAX_TEXT_CHARS + 500)
         with patch(
             "jawafdehi_mcp.tools.documents.request_control_plane",
-            new=AsyncMock(return_value={"data": {"item": {"markdown": big}}}),
+            new=AsyncMock(return_value={"success": True, "data": {"item": {"markdown": big}}}),
         ):
             body = _payload(
                 await ReadDocumentPartTool().execute({"iri": IRI, "table": "p0030-t1"})
@@ -202,31 +209,42 @@ class TestReadPart:
     async def test_text_within_the_cap_is_untouched(self):
         with patch(
             "jawafdehi_mcp.tools.documents.request_control_plane",
-            new=AsyncMock(return_value={"data": {"item": {"text": "short"}}}),
+            new=AsyncMock(return_value={"success": True, "data": {"item": {"text": "short"}}}),
         ):
             body = _payload(await ReadDocumentPartTool().execute({"iri": IRI, "page": 1}))
         assert body["data"]["item"]["text"] == "short"
         assert "truncated" not in body["data"]["item"]
 
     @pytest.mark.asyncio
-    async def test_a_range_caps_every_page_it_returns(self):
-        big = "y" * (MAX_TEXT_CHARS + 1)
+    async def test_the_cap_is_per_call_not_per_item(self):
+        # A 50-page range is fifty text fields. A per-item ceiling would be a
+        # fifty-fold one — ~1M characters, the context bomb this surface exists
+        # to prevent.
+        each = "y" * (MAX_TEXT_CHARS // 2 + 100)
         with patch(
             "jawafdehi_mcp.tools.documents.request_control_plane",
-            new=AsyncMock(return_value={"data": {"items": [{"text": big}, {"text": big}]}}),
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "data": {"items": [{"text": each}, {"text": each}, {"text": each}]}
+                }
+            ),
         ):
             body = _payload(
                 await ReadDocumentPartTool().execute(
-                    {"iri": IRI, "from_page": 1, "to_page": 2}
+                    {"iri": IRI, "from_page": 1, "to_page": 3}
                 )
             )
-        assert all(i["truncated"] for i in body["data"]["items"])
+        items = body["data"]["items"]
+        assert sum(len(i["text"]) for i in items) <= MAX_TEXT_CHARS
+        assert any(i.get("truncated") for i in items)
+        assert "warning" in body["data"]["citation"]
 
     @pytest.mark.asyncio
     async def test_every_read_carries_a_citation(self):
         with patch(
             "jawafdehi_mcp.tools.documents.request_control_plane",
-            new=AsyncMock(return_value={"data": {"item": {"text": "x"}}}),
+            new=AsyncMock(return_value={"success": True, "data": {"material": IRI, "item": {"text": "x"}}}),
         ):
             body = _payload(await ReadDocumentPartTool().execute({"iri": IRI, "page": 1}))
         assert body["data"]["citation"]["document"] == IRI
@@ -262,3 +280,144 @@ class TestDescriptions:
 
     def test_read_tool_explains_the_estimated_flag(self):
         assert "estimated" in ReadDocumentPartTool().description
+
+
+class TestFailuresReachTheModelAsFailures:
+    """Every failure must arrive as a tool error, not as data or a crash.
+
+    A model cannot tell an error body from a payload unless the protocol says
+    so, and an exception crossing the MCP boundary is reported as a transport
+    fault rather than "the archive said no".
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_404_is_not_reshaped_into_an_overview(self):
+        # The worst version of this: a 403 on a non-public document becoming
+        # "this document has NOT been parsed, cite it as a holding" — confident,
+        # wrong, and leaking that the document exists.
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(
+                return_value={
+                    "success": False,
+                    "status_code": 404,
+                    "data": {"detail": "Material not found."},
+                }
+            ),
+        ):
+            result = await GetDocumentOverviewTool().execute({"iri": IRI})
+        assert result.is_error
+        assert "readable" not in _payload(result)
+
+    @pytest.mark.asyncio
+    async def test_a_400_from_the_api_is_an_error_not_a_result(self):
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(
+                return_value={
+                    "success": False,
+                    "status_code": 400,
+                    "data": {"detail": "A page range may cover at most 50 pages."},
+                }
+            ),
+        ):
+            result = await ReadDocumentPartTool().execute(
+                {"iri": IRI, "from_page": 1, "to_page": 60}
+            )
+        assert result.is_error
+
+    @pytest.mark.asyncio
+    async def test_a_503_catalogue_is_an_error(self):
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(return_value={"success": False, "status_code": 503, "data": {}}),
+        ):
+            assert (await ListDocumentSourcesTool().execute({})).is_error
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_is_a_tool_error_not_a_raise(self):
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(side_effect=httpx.TimeoutException("slow")),
+        ):
+            result = await ListDocumentSourcesTool().execute({})
+        assert result.is_error
+        assert "did not respond in time" in _payload(result)["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_transport_error_is_a_tool_error_not_a_raise(self):
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(side_effect=httpx.ConnectError("no route")),
+        ):
+            assert (await ListDocumentSourcesTool().execute({})).is_error
+
+    @pytest.mark.asyncio
+    async def test_a_path_rejected_downstream_is_a_tool_error(self):
+        # _validate_api_path raises on a path that only resolves to a traversal
+        # after repeated unquoting — it must not escape as a transport fault.
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(side_effect=ValueError("traversal segment")),
+        ):
+            assert (await ListDocumentSourcesTool().execute({})).is_error
+
+
+class TestToleratesRealWorldShapes:
+    @pytest.mark.asyncio
+    async def test_a_single_associated_media_dict_keeps_its_citation(self):
+        # associatedMedia is "a single dict or a list" across the corpus; a list
+        # assumption drops the citation chain of every one-link document.
+        doc = {
+            "@id": IRI,
+            "jawafdehi:content": {"pages": 1, "pages_read": 1},
+            "associatedMedia": {"jawafdehi:linkRole": "RAW", "contentUrl": "https://x/y.pdf"},
+        }
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(return_value={"success": True, "data": doc}),
+        ):
+            body = _payload(await GetDocumentOverviewTool().execute({"iri": IRI}))
+        assert body["source_links"][0]["url"] == "https://x/y.pdf"
+
+    @pytest.mark.asyncio
+    async def test_a_string_publisher_does_not_crash_the_tool(self):
+        # The stored JSON-LD is free-form past @type/@id/name.
+        doc = {"@id": IRI, "publisher": "Some Office", "associatedMedia": []}
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(return_value={"success": True, "data": doc}),
+        ):
+            body = _payload(await GetDocumentOverviewTool().execute({"iri": IRI}))
+        assert body["publisher"] == "Some Office"
+
+    @pytest.mark.asyncio
+    async def test_the_citation_records_the_canonical_iri_not_the_argument(self):
+        # The argument is whatever host the caller typed; attributing our text
+        # to that host would be a false citation.
+        with patch(
+            "jawafdehi_mcp.tools.documents.request_control_plane",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "data": {"material": IRI, "item": {"text": "x"}},
+                }
+            ),
+        ):
+            body = _payload(
+                await ReadDocumentPartTool().execute(
+                    {"iri": "https://evil.example/material/ag/1", "page": 1}
+                )
+            )
+        assert body["data"]["citation"]["document"] == IRI
+
+
+class TestDescriptionsAreAccurate:
+    def test_ocr_vision_pages_are_not_described_as_unreadable(self):
+        # They ARE transcribed, by a vision model. Describing anything but
+        # 'anchored' as empty makes a model skip readable pages.
+        d = ListDocumentContentsTool().description
+        assert "ocr_vision" in d and "both have text" in d
+
+    def test_null_readable_is_explained_as_unknown(self):
+        assert "does NOT mean zero" in ListDocumentSourcesTool().description

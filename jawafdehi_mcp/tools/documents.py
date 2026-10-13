@@ -30,11 +30,18 @@ from typing import Any
 
 from mcp.types import TextContent
 
+import httpx
+import structlog
+from jawafdehi_shared.entities.ids import parse_material_iri
+
 from ..control_plane import request_control_plane
-from ..path_safety import encode_path_segment
+from ..path_safety import encode_material_parts
 from .base import BaseTool, ToolExecutionResult
 
-#: Hard ceiling on the characters of document text one call may return.
+logger = structlog.get_logger()
+
+#: Hard ceiling on the characters of document text ONE CALL may return, summed
+#: across every item in the response.
 #:
 #: Not configurable by the caller: a cap a caller can raise is a cap that gets
 #: raised, and the whole point of this surface is that the model cannot ask for
@@ -54,30 +61,57 @@ def _error(message: str) -> ToolExecutionResult:
     return ToolExecutionResult(_text({"success": False, "error": message}), is_error=True)
 
 
-def _material_path(iri: str, suffix: str = "") -> str | None:
+def _material_path(iri: Any, suffix: str = "") -> str | None:
     """``/api/materials/<source>/<ident>`` for a material IRI, or None.
 
-    Parsed rather than string-sliced so a caller cannot smuggle a path through
-    the IRI — the segments are re-encoded individually.
+    Delegates the grammar to ``parse_material_iri`` and the encoding to
+    ``encode_material_parts`` rather than slicing the string: those two are the
+    canonical definition of what a material IRI is, and a second hand-rolled
+    parser here would drift from them silently.
+
+    Both RAISE on anything malformed — including a double-encoded traversal,
+    which survives a naive segment check and is only caught once the path is
+    repeatedly unquoted. Everything is funnelled into ``None`` so a hostile or
+    malformed IRI reaches the model as a tool error it can act on, rather than
+    an exception crossing the MCP boundary as a transport failure.
     """
-    marker = "/material/"
-    if not isinstance(iri, str) or marker not in iri:
+    if not isinstance(iri, str):
         return None
-    tail = iri.split(marker, 1)[1].strip("/")
-    if not tail or "/" not in tail:
-        return None
-    source, _, ident = tail.rpartition("/")
     try:
-        segments = [encode_path_segment(s) for s in source.split("/")] + [
-            encode_path_segment(ident)
-        ]
+        parsed = parse_material_iri(iri)
+        source, ident = encode_material_parts(parsed.source, parsed.ident)
     except ValueError:
-        # encode_path_segment RAISES on a traversal or separator rather than
-        # escaping it. Caught here so a hostile or malformed IRI comes back as a
-        # tool error the model can act on, instead of an exception crossing the
-        # MCP boundary as a transport failure.
         return None
-    return "/api/materials/" + "/".join(segments) + suffix
+    return f"/api/materials/{source}/{ident}{suffix}"
+
+
+async def _call(tool: str, path: str, **kwargs: Any) -> dict[str, Any] | ToolExecutionResult:
+    """Call the control plane, turning every failure into a tool error.
+
+    Three things the raw helper does not do, each of which otherwise reaches the
+    model as something other than what it is:
+
+    * a transport failure (timeout, DNS, TLS) raises out of the tool and is
+      reported as an MCP protocol fault rather than "the archive is unreachable";
+    * ``_validate_api_path`` raises ``ValueError`` on a path that only resolves
+      to a traversal after repeated unquoting — same problem;
+    * a non-2xx response comes back as a perfectly ordinary envelope, so a 503
+      catalogue or a 400 "range too wide" is delivered as a SUCCESSFUL tool call
+      and the model treats the error body as data.
+    """
+    try:
+        result = await request_control_plane("GET", path, **kwargs)
+    except httpx.TimeoutException:
+        logger.warning("document_tool_timeout", tool_name=tool, path=path)
+        return _error("The Jawafdehi API did not respond in time. Try again.")
+    except httpx.HTTPError as exc:
+        logger.error("document_tool_http_error", tool_name=tool, path=path, error=str(exc))
+        return _error(f"Could not reach the Jawafdehi API: {exc}")
+    except ValueError as exc:
+        return _error(f"Refusing to request that path: {exc}")
+    if not result.get("success", True):
+        return ToolExecutionResult(_text(result), is_error=True)
+    return result
 
 
 def _truncate(value: str, budget: int) -> tuple[str, bool]:
@@ -104,7 +138,8 @@ class ListDocumentSourcesTool(BaseTool):
             "has no reviewed description; do not guess what it is from the "
             "token's spelling. A high count with readable=0 means we hold those "
             "documents but have not transcribed any of them — nothing in them "
-            "can be quoted."
+            "can be quoted. readable=null means the figure has not been computed "
+            "yet; it does NOT mean zero."
         )
 
     @property
@@ -120,7 +155,8 @@ class ListDocumentSourcesTool(BaseTool):
         }
 
     async def execute(self, arguments: dict[str, Any]) -> list[TextContent]:
-        return _text(await request_control_plane("GET", "/api/document-sources/"))
+        result = await _call(self.name, "/api/document-sources/")
+        return result if isinstance(result, ToolExecutionResult) else _text(result)
 
 
 class GetDocumentOverviewTool(BaseTool):
@@ -159,24 +195,39 @@ class GetDocumentOverviewTool(BaseTool):
         path = _material_path(arguments.get("iri", ""))
         if path is None:
             return _error("iri must be a material @id IRI (…/material/<source>/<ident>).")
-        result = await request_control_plane("GET", path)
-        doc = (result or {}).get("data")
+        result = await _call(self.name, path)
+        if isinstance(result, ToolExecutionResult):
+            # A 404/403 body is {"detail": …} and IS a dict, so reshaping it
+            # below would produce a confident overview of a document we cannot
+            # see — telling the model it exists but is unparsed.
+            return result
+        doc = result.get("data")
         if not isinstance(doc, dict):
             return _text(result)
 
         content = doc.get("jawafdehi:content")
+        # associatedMedia is "a single dict or a list" across the corpus (see
+        # materials.provenance._media_list); assuming a list drops the citation
+        # chain of every single-link document.
         media = doc.get("associatedMedia")
+        media = [media] if isinstance(media, dict) else media
+        media = media if isinstance(media, list) else []
+        # The stored JSON-LD is free-form past @type/@id/name, so publisher is
+        # not guaranteed to be an object.
+        publisher = doc.get("publisher")
+        publisher_name = publisher.get("name") if isinstance(publisher, dict) else publisher
         overview: dict[str, Any] = {
             "iri": doc.get("@id"),
             "name": doc.get("name"),
-            "publisher": (doc.get("publisher") or {}).get("name"),
+            "publisher": publisher_name,
             "date_published": doc.get("datePublished"),
             "fiscal_year_bs": doc.get("jawafdehi:fiscalYearBS"),
             # The citation chain. A reader has to be able to get back to the
             # publisher's own copy, or nothing quoted from here is checkable.
             "source_links": [
                 {"role": m.get("jawafdehi:linkRole"), "url": m.get("contentUrl")}
-                for m in (media if isinstance(media, list) else [])
+                for m in media
+                if isinstance(m, dict)
             ],
             "content": content,
         }
@@ -214,9 +265,12 @@ class ListDocumentContentsTool(BaseTool):
             "markdown, so it is cheap to call on a large document. Use it to "
             "pick what to read: find the table whose caption matches your "
             "question, then fetch that one table with read_document_part. For "
-            "pages, coverage_state tells you which pages are readable before you "
-            "spend a call on them ('anchored' is read; anything else means the "
-            "text will be empty or partial)."
+            "pages, coverage_state tells you what happened to each page before "
+            "you spend a call on it: 'anchored' was read from the PDF's own text "
+            "layer and 'ocr_vision' was read by a vision model — both have text, "
+            "but a vision read is the weaker claim. 'blank', 'gap', 'folded' and "
+            "'ocr_unread' have little or no text, and an empty page there is a "
+            "statement about our OCR, not about the page."
         )
 
     @property
@@ -242,7 +296,8 @@ class ListDocumentContentsTool(BaseTool):
         path = _material_path(arguments.get("iri", ""), "/content")
         if path is None:
             return _error("iri must be a material @id IRI (…/material/<source>/<ident>).")
-        return _text(await request_control_plane("GET", path, params={"type": kind}))
+        result = await _call(self.name, path, params={"type": kind})
+        return result if isinstance(result, ToolExecutionResult) else _text(result)
 
 
 class ReadDocumentPartTool(BaseTool):
@@ -262,7 +317,8 @@ class ReadDocumentPartTool(BaseTool):
             "is re-parsed, so the same ordinal can later mean a different table. "
             "A page whose text is empty was held but not successfully "
             "transcribed — check coverage_state before concluding the page is "
-            "blank. On a figure, every data point carries 'estimated': a true "
+            "blank, and treat 'ocr_vision' text as less reliable than "
+            "'anchored'. On a figure, every data point carries 'estimated': a true "
             "value was read off the chart image rather than a printed number and "
             "must not be presented as equally reliable."
         )
@@ -312,39 +368,59 @@ class ReadDocumentPartTool(BaseTool):
                 return _error("A page range needs both from_page and to_page.")
             params = {"type": "page", "from": first, "to": last}
 
-        result = await request_control_plane("GET", path, params=params)
-        return _text(self._bounded(result, arguments.get("iri")))
+        result = await _call(self.name, path, params=params)
+        if isinstance(result, ToolExecutionResult):
+            return result
+        return _text(self._bounded(result))
 
-    def _bounded(self, result: Any, iri: Any) -> Any:
-        """Apply the text ceiling, and say so in the payload when it bites.
+    def _bounded(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Apply the text ceiling ACROSS the call, and say so when it bites.
+
+        Per-call, not per item. A 50-page range is fifty text fields, so a
+        per-item ceiling would be a fifty-fold one — up to ~1M characters, which
+        is the context bomb this whole surface exists to prevent.
 
         Truncation is announced, never silent. A model handed a clipped table
         with no marker summarises it as the whole table, and the reader has no
         way to know a figure is missing.
         """
-        if not isinstance(result, dict):
-            return result
         data = result.get("data")
         if not isinstance(data, dict):
             return result
 
-        for holder in ([data["item"]] if isinstance(data.get("item"), dict) else []) + [
-            i for i in (data.get("items") or []) if isinstance(i, dict)
-        ]:
+        holders = [data["item"]] if isinstance(data.get("item"), dict) else []
+        holders += [i for i in (data.get("items") or []) if isinstance(i, dict)]
+
+        budget = MAX_TEXT_CHARS
+        clipped_any = False
+        for holder in holders:
             for field in ("text", "markdown"):
                 value = holder.get(field)
-                if isinstance(value, str):
-                    clipped, did = _truncate(value, MAX_TEXT_CHARS)
-                    if did:
-                        holder[field] = clipped
-                        holder["truncated"] = True
-                        holder["full_length_chars"] = len(value)
+                if not isinstance(value, str) or not value:
+                    continue
+                if len(value) <= budget:
+                    budget -= len(value)
+                    continue
+                holder[field] = value[:budget]
+                holder["truncated"] = True
+                holder["full_length_chars"] = len(value)
+                budget = 0
+                clipped_any = True
+
+        # The canonical IRI from the response, not the caller's argument: the
+        # argument is whatever host the caller typed, and a citation that
+        # records it would attribute our text to that host.
         data["citation"] = {
-            "document": iri,
-            "retrieved_from": "jawafdehi.org",
+            "document": data.get("material"),
             "note": (
                 "Quote with the document IRI and the page or key. Page numbers "
                 "are the printed folios, checkable against the original PDF."
             ),
         }
+        if clipped_any:
+            data["citation"]["warning"] = (
+                f"Output was capped at {MAX_TEXT_CHARS} characters for this call. "
+                "Fields marked truncated are incomplete — narrow the range or "
+                "fetch one item at a time rather than summarising what is here."
+            )
         return result
