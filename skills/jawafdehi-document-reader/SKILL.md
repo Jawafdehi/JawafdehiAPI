@@ -13,6 +13,7 @@ description: Reads documents in the Jawafdehi archive — CIAA and Auditor Gener
 - Choosing a source
 - Finding a document
 - Held vs read
+- Caps
 - If the tools are missing
 
 ## Call order and workflow
@@ -24,7 +25,7 @@ Four tools, in this order. Everything before the last step is cheap; only
 |---|---|
 | `jawafdehi:list_document_sources` | every source, its size, and how much has been read |
 | `jawafdehi:get_document_overview` | one document: counts, readability, provenance, PDF links |
-| `jawafdehi:list_document_contents` | its page map, table captions or figure titles — no text |
+| `jawafdehi:list_document_contents` | its page map or table captions — no page text, no table markdown |
 | `jawafdehi:read_document_part` | one slice: a page range, one table, or one figure |
 
 **Never request a whole document.** The largest are a few hundred pages of Devanagari —
@@ -49,20 +50,30 @@ captions at step 4 rather than reading pages.
 
 **Question:** "How many complaints did the CIAA register in 2081/82, and how did they arrive?"
 
-**Step 1** — `jawafdehi:list_document_sources` → the shelf is `ciaa_annual_report`, 41
-documents.
+**Step 1** — `jawafdehi:list_document_sources` → the shelf is `ciaa_annual_report`,
+41 documents.
 
-**Step 3** — `jawafdehi:get_document_overview` on the 2081/82 report:
+**Step 2** — `jawafdehi:search_control_plane` with `source=ciaa_annual_report` → the
+2081/82 report's IRI. **Every later call needs it:**
+
+```
+iri = https://jawafdehi.org/material/ciaa_annual_report/ee0b4f80b24b8665
+```
+
+**Step 3** — `jawafdehi:get_document_overview(iri=iri)`:
 
 ```json
-{"pages": 446, "pages_read": 433, "tables": 145, "figures": 46,
- "provenance": {"doc_id": "ciaa-2081-82", "transcript_verdict": "clean"},
- "source_links": [{"role": "SOURCE_PAGE", "url": "https://ciaa.gov.np/singlePublications/219"}]}
+{"iri": "https://jawafdehi.org/material/ciaa_annual_report/ee0b4f80b24b8665",
+ "readable": true,
+ "source_links": [{"role": "RAW", "url": "https://ngm-store.jawafdehi.org/…pdf"},
+                  {"role": "SOURCE_PAGE", "url": "https://ciaa.gov.np/singlePublications/219"}],
+ "content": {"pages": 446, "pages_read": 433, "tables": 145, "figures": 46,
+             "provenance": {"doc_id": "ciaa-2081-82", "transcript_verdict": "clean"}}}
 ```
 
 446 pages, 13 of them unreadable. 145 tables — far too many to read.
 
-**Step 4** — `jawafdehi:list_document_contents(kind="table")` → scan captions:
+**Step 4** — `jawafdehi:list_document_contents(iri=iri, kind="table")` → scan captions:
 
 ```json
 {"key": "p0030-t1", "page_no": 30, "n_rows": 9, "n_cols": 8,
@@ -71,7 +82,7 @@ documents.
 
 That caption is "complaints by means of receipt" — the one.
 
-**Step 5** — `jawafdehi:read_document_part(table="p0030-t1")`:
+**Step 5** — `jawafdehi:read_document_part(iri=iri, table="p0030-t1")`:
 
 ```
 | क्र.सं. | उजुरीको माध्यम | उजुरी सङ्ख्या | प्रतिशत |
@@ -79,8 +90,9 @@ That caption is "complaints by means of receipt" — the one.
 |  | 2. लिखित निवेदन   | 10,180 27.49 |
 ```
 
-**Step 6** — note `10,245 27.67` is two values merged into one cell. Open the
-`SOURCE_PAGE` link and confirm against the published PDF before stating either number.
+**Step 6** — note `10,245 27.67` is two values merged into one cell. Open the `RAW` link
+(the archived PDF) or `SOURCE_PAGE` (the publisher's own page) and confirm page 30 before
+stating either number.
 
 Five calls, under 20 KB, one citable table.
 
@@ -97,7 +109,7 @@ mean opposite things.
 
 **Verify every figure against the source PDF before publishing it.** This corpus contains
 OCR artefacts that nothing in the response flags, on pages marked `anchored` with
-`fidelity: tight` — digits mixed across scripts (`3७,026`), and adjacent values merged into
+`anchor_fidelity: tight` — digits mixed across scripts (`3७,026`), and adjacent values merged into
 one cell (`10,245 27.67`). The quality fields describe whether we *read* the page, not
 whether the digits are right.
 
@@ -126,6 +138,12 @@ than guessing from the token.
 One source can hold several series. `official_report` is 223 documents across 15 of them:
 annual reports (18), province audit reports (56), audit bulletins (29), the audit journal
 (21), and more. "The Auditor General's annual report" is one series, not the whole token.
+
+**Narrow to a series with `dataset_bucket`.** `jawafdehi:list_document_sources` returns each
+series with its bucket token and count; pass that token to
+`jawafdehi:search_control_plane` alongside the source. Searching `official_report` alone
+returns province audits and journal issues next to the annual reports, and nothing in the
+results distinguishes them.
 
 ## Finding a document
 
@@ -159,10 +177,10 @@ cut.
 
 ## If the tools are missing
 
-The MCP serves unauthenticated callers a 12-tool anonymous catalogue and never prompts for
+The MCP serves unauthenticated callers a small read-only catalogue and never prompts for
 login, so these four will simply be absent. Call `jawafdehi:get_current_user`: "No
 authenticated user; public read-only access" means you are anonymous. Reconnecting does not
-fix it — see `docs/api-token.md`.
+fix it — see `docs/mcp/README.md`.
 
 An authenticated caseworker or admin can read `PRIVATE` documents, including draft-case
 evidence. What you can read is not necessarily what a reader could, and it must not be

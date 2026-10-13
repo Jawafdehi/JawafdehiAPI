@@ -7,6 +7,12 @@
     "url": "https://jawafdehi.org"
   },
   "homepage": "https://github.com/Jawafdehi/JawafdehiAPI",
-  "license": "Hippocratic-3.0",
-  "keywords": ["jawafdehi", "nepal", "accountability", "documents", "mcp"]
+  "license": "LicenseRef-Hippocratic-3.0",
+  "keywords": [
+    "jawafdehi",
+    "nepal",
+    "accountability",
+    "documents",
+    "mcp"
+  ]
 }
