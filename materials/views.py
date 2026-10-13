@@ -22,6 +22,7 @@ import mimetypes
 import jsonpatch
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.http import HttpResponseNotModified
 from django.utils.cache import patch_vary_headers
 from rest_framework import status
 from rest_framework.decorators import (
@@ -45,6 +46,22 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
 from . import jsonld
 from . import provenance
+from .content_api import (
+    CONTENT_TYPES,
+    MAX_PAGE_SPAN,
+    content_for,
+    figure_payload,
+    get_figure,
+    get_page,
+    get_page_range,
+    get_table,
+    list_figures,
+    list_pages,
+    list_tables,
+    page_payload,
+    table_payload,
+    version_token,
+)
 from .models import Material, Policy
 from .patch_validation import (
     MAX_MATERIAL_DOC_BYTES,
@@ -997,3 +1014,275 @@ def material_by_iri(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     return _material_read_response(request, iri)
+
+
+# ── Content read plane ───────────────────────────────────────────────────────
+
+
+def _resolve_for_content(request, source: str, ident: str):
+    """Shared preamble for the content route.
+
+    Returns ``(iri, None)`` once the material is known to exist AND to be visible
+    to this caller, else ``(None, <error Response>)``.
+
+    The visibility gate is the whole point of routing through ``_resolve_material``
+    rather than querying ``DocumentContent`` directly. Content is
+    derived from a material, so it inherits that material's publication tier —
+    without this, a PRIVATE (draft-case evidence) document's pages and tables
+    would be readable by anyone who guessed the sub-path, which is precisely the
+    leak the material read plane exists to prevent.
+    """
+    try:
+        iri = build_material_iri(source, ident)
+    except ValueError:
+        return None, Response(
+            {"detail": "Invalid material source/ident."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    # No ``with_row``: this route's ETag comes from the content's ``ingested_at``,
+    # not the material's ``updated_at``, so the row itself is of no use here.
+    data = _resolve_material(iri, include_nonpublic=_can_see_nonpublic(request))
+    if data is None:
+        resp = Response(
+            {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+        patch_vary_headers(resp, ("Authorization",))
+        return None, resp
+    return iri, None
+
+
+def _content_response(payload, content, *, http_status=status.HTTP_200_OK):
+    """Every content response carries the same two headers.
+
+    ``Vary: Authorization`` goes on the errors too, not just the 200s, because
+    *whether this URL exists* depends on the caller: a non-public material 404s
+    for anon and resolves for a caseworker. Without it a shared cache could store
+    one answer and serve it to the other.
+    """
+    resp = Response(payload, status=http_status)
+    if content is not None:
+        resp["ETag"] = version_token(content)
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
+def _bad_request(detail: str):
+    resp = Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
+def _not_modified(request, content):
+    """A 304 when the caller already holds this content, else None.
+
+    This route sets an ``ETag`` on every response, and nothing else in the stack
+    acts on it: ``ConditionalGetMiddleware`` is deliberately absent from
+    ``MIDDLEWARE`` (it would add an ETag to every response in the project), and
+    the material read plane's own ETag is for ``If-Match`` on PATCH, which this
+    read-only route has no equivalent of. So the header was advisory until here.
+
+    It is worth honouring precisely on this route: a 50-page range is the
+    largest payload the public read plane serves, and it is also the most
+    re-fetched — a reader paging through a report asks for overlapping spans.
+    Checked BEFORE the page/table/figure queries run, so a 304 costs one SELECT
+    for the content row and nothing else.
+
+    Weak comparison, per RFC 9110 §13.1.2: our tag is weak (``W/"…"``), and weak
+    tags never match under the strong comparison ``If-Match`` would use. A
+    client echoing the tag verbatim is the normal case; ``*`` matches any
+    existing content.
+    """
+    header = request.headers.get("If-None-Match")
+    if not header or content is None:
+        return None
+    current = version_token(content).removeprefix("W/")
+    for candidate in header.split(","):
+        tag = candidate.strip()
+        if tag == "*" or tag.removeprefix("W/") == current:
+            resp = HttpResponseNotModified()
+            resp["ETag"] = version_token(content)
+            patch_vary_headers(resp, ("Authorization",))
+            return resp
+    return None
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def material_content(request, source: str, ident: str):
+    """``GET /api/materials/<source>/<ident>/content?type=…`` → one kind of content.
+
+    ``?type=page`` / ``?type=table`` / ``?type=figure`` list that kind; adding
+    ``&num=`` (pages) or ``&id=`` (tables, figures) returns one item in full.
+
+    **A table and a figure are addressed by ``key``, never by ``ordinal``.** The
+    ordinal is presentation order and is recomputed on every ingest, so a saved
+    link keyed on it would quietly resolve to a *different* table as soon as the
+    upstream recovered one missed earlier in the report. A 200 with the wrong
+    content is worse than a 404. A page is addressed by its printed folio, which
+    is what makes a citation checkable against the published PDF.
+
+    404 when the material has no stored content at all, which is the common
+    case — most materials are a single scraped page, not a transcribed report.
+    That is deliberately distinct from a 200 with an empty ``items``: *we have
+    not looked inside this document* and *we looked and there are none of these*
+    are different facts, and a client that conflates them reports the first as
+    the second.
+    """
+    iri, error = _resolve_for_content(request, source, ident)
+    if error is not None:
+        return error
+
+    kind = (request.query_params.get("type") or "").strip().lower()
+    if not kind:
+        return _bad_request(
+            "type is required; one of " + ", ".join(CONTENT_TYPES) + "."
+        )
+    if kind not in CONTENT_TYPES:
+        return _bad_request(
+            f"Unknown type {kind!r}; expected one of " + ", ".join(CONTENT_TYPES) + "."
+        )
+
+    content = content_for(iri)
+    if content is None:
+        return _content_response(
+            {"detail": "No content for this material."},
+            None,
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # After the 400s above, so a malformed request is still told it is malformed
+    # rather than handed a 304 for a question we never looked at.
+    if (cached := _not_modified(request, content)) is not None:
+        return cached
+
+    if kind == "page":
+        return _page_response(request, iri, content)
+    return _keyed_response(request, iri, content, kind)
+
+
+def _page_response(request, iri: str, content):
+    """``type=page``: the page list, one page by folio, or an inclusive range.
+
+    Three shapes, chosen by the arguments present:
+
+    * nothing     → every page STUB, no text (the navigation view)
+    * ``num``     → that one page, with its text
+    * ``from``/``to`` → those pages inclusive, each with its text
+    """
+    if request.query_params.get("id") is not None:
+        return _bad_request("A page is addressed by num or from/to, not id.")
+
+    num = request.query_params.get("num")
+    first = request.query_params.get("from")
+    last = request.query_params.get("to")
+
+    if num is not None and (first is not None or last is not None):
+        return _bad_request("Use either num or from/to, not both.")
+    if (first is None) != (last is None):
+        # Half a range is ambiguous — "from 30" could mean to the cap or to the
+        # end of the document, and guessing either way returns a different set of
+        # pages than the caller meant without saying so.
+        return _bad_request("A page range needs both from and to.")
+
+    if first is not None:
+        return _page_range_response(iri, content, first, last)
+    if num is None:
+        items = list_pages(iri)
+        return _content_response(
+            {"material": iri, "type": "page", "count": len(items), "items": items},
+            content,
+        )
+
+    page_no = _as_page_number(num)
+    if page_no is None:
+        return _bad_request("num must be a positive integer page number.")
+    page = get_page(iri, page_no)
+    if page is None:
+        return _content_response(
+            {"detail": "No such page for this material."},
+            content,
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+    return _content_response(
+        {"material": iri, "type": "page", "item": page_payload(page)}, content
+    )
+
+
+def _as_page_number(raw: str) -> int | None:
+    """``raw`` as a page number, or None if it is not one.
+
+    Negatives are refused rather than passed to a query that would match nothing
+    and report an empty result as a true answer. **Zero is accepted**, even
+    though no document prints a folio 0: the ingest coerces an absent or
+    unparseable upstream folio to 0, so such a page can exist, and it is listed
+    by ``?type=page``. Refusing it here would mean a page a client can see in the
+    listing and can never fetch — the listing and the fetch have to agree about
+    what exists.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _page_range_response(iri: str, content, raw_first: str, raw_last: str):
+    """``type=page&from=&to=``: an inclusive span of pages, each with its text."""
+    first = _as_page_number(raw_first)
+    last = _as_page_number(raw_last)
+    if first is None or last is None:
+        return _bad_request("from and to must be positive integer page numbers.")
+    if last < first:
+        return _bad_request("from must not be greater than to.")
+    span = last - first + 1
+    if span > MAX_PAGE_SPAN:
+        return _bad_request(
+            f"A page range may cover at most {MAX_PAGE_SPAN} pages; "
+            f"{first}-{last} is {span}."
+        )
+    items = get_page_range(iri, first, last)
+    return _content_response(
+        {
+            "material": iri,
+            "type": "page",
+            "from": first,
+            "to": last,
+            "count": len(items),
+            "items": items,
+        },
+        content,
+    )
+
+
+def _keyed_response(request, iri: str, content, kind: str):
+    """``type=table`` / ``type=figure``: the listing, or one item by its key."""
+    # Reject the page arguments rather than ignoring them. Silently serving the
+    # whole listing for ?type=table&from=1&to=10 would hand the caller everything
+    # while it believes it asked for a slice — the same class of lie as a
+    # truncated range, in the opposite direction.
+    for unsupported in ("num", "from", "to"):
+        if request.query_params.get(unsupported) is not None:
+            return _bad_request(
+                f"A {kind} is addressed by id; {unsupported} applies to pages."
+            )
+    key = request.query_params.get("id")
+    lister = list_tables if kind == "table" else list_figures
+    if key is None:
+        items = lister(iri)
+        return _content_response(
+            {"material": iri, "type": kind, "count": len(items), "items": items},
+            content,
+        )
+    if kind == "table":
+        table = get_table(iri, key)
+        item = table_payload(table) if table is not None else None
+    else:
+        figure = get_figure(iri, key)
+        item = figure_payload(figure) if figure is not None else None
+    if item is None:
+        return _content_response(
+            {"detail": f"No such {kind} for this material."},
+            content,
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+    return _content_response({"material": iri, "type": kind, "item": item}, content)
