@@ -72,6 +72,12 @@ async def test_composite_asgi_serves_django_and_mcp(monkeypatch):
     monkeypatch.setenv("OIDC_RESOURCE", "https://api.example/mcp")
     monkeypatch.setenv("OIDC_ISSUER", "https://auth.example")
     monkeypatch.setenv("OIDC_API_AUDIENCE", "test-project")
+    # This test is about the composite app's ROUTING — that /mcp, /api and the
+    # metadata path each land on the right handler. It drives the protocol
+    # without a bearer, which the transport now refuses, so it opts back into
+    # the anonymous catalog rather than mocking OIDC verification end to end.
+    # The refusal itself is covered by the test below.
+    monkeypatch.setenv("MCP_ALLOW_ANONYMOUS", "1")
     monkeypatch.setattr(
         SearchService,
         "search",
@@ -210,6 +216,51 @@ async def test_composite_asgi_serves_django_and_mcp(monkeypatch):
     traversal_result = json.loads(traversal_envelope["content"][0]["text"])
     assert traversal_result["success"] is False
     assert "traversal" in traversal_result["error"]
+
+
+@pytest.mark.security
+@pytest.mark.asyncio
+async def test_mcp_protocol_requires_a_bearer_through_the_composite_app(monkeypatch):
+    """End to end, through the real ASGI stack: no bearer, no protocol.
+
+    The unit-level gate is covered in test_http_integration; what this adds is
+    that nothing in the composite app — Django's middleware, the /mcp routing
+    prefix — reaches the session manager around it.
+
+    No lifespan is started on purpose, and that is itself the point: the refusal
+    happens before the session manager is ever consulted, so it holds on a pod
+    that has not finished starting. (It also has to be this way — the manager
+    may only be run once per process, and the routing test above has already
+    done it.)
+    """
+    monkeypatch.setenv("OIDC_RESOURCE", "https://api.example/mcp")
+    monkeypatch.setenv("OIDC_ISSUER", "https://auth.example")
+    monkeypatch.delenv("MCP_ALLOW_ANONYMOUS", raising=False)
+
+    status, body = await _asgi_request(
+        "POST",
+        "/mcp",
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": LATEST_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "1.0"},
+            },
+        },
+    )
+    # The metadata document stays open: it is how the client just told to
+    # authenticate finds out where to do it.
+    meta_status, _meta_body = await _asgi_request(
+        "GET",
+        "/.well-known/oauth-protected-resource/mcp",
+    )
+
+    assert status == 401
+    assert json.loads(body)["error"] == "unauthorized"
+    assert meta_status == 200
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,10 @@
 """Per-request identity and tool-catalog helpers for jawafdehi-mcp.
 
 Identity is built from the caller's verified OIDC bearer token (see ``oidc.py``
-and ``http_server.py``) and stored in a request-scoped ContextVar. There is one
-endpoint and one catalog rule: an anonymous caller gets the read-only set below,
-and any verified bearer gets everything.
+and ``http_server.py``) and stored in a request-scoped ContextVar. Over HTTP a
+verified bearer is now required, so identity is only ``None`` on the stdio
+transport or when ``MCP_ALLOW_ANONYMOUS`` has been set to reopen the read-only
+catalog below.
 """
 
 from contextvars import ContextVar
@@ -14,8 +15,13 @@ current_user_identity: ContextVar[dict | None] = ContextVar(
 
 #: Tools an unauthenticated caller may list and call.
 #:
+#: Dormant over HTTP unless ``MCP_ALLOW_ANONYMOUS`` is set: the transport now
+#: challenges a request that carries no bearer, so nothing reaches this set
+#: without opting back in. It is kept because that opt-out needs it, and because
+#: it remains the enforced boundary for any future caller with no identity.
+#:
 #: Every entry here wraps a REST route that is already ``AllowAny``, so this set
-#: grants nothing that ``/api/`` does not serve anonymously — which is what makes
+#: grants nothing that ``/api/`` does not serve anonymously — which is what made
 #: a single door with an anonymous catalog consistent rather than lax.
 #: ``ngm_query_judicial`` belongs for the same reason: the judicial lake is public
 #: court record and its SQL plane is SELECT-gated.
