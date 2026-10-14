@@ -566,6 +566,21 @@ class CaseworkApi:
         self._entity_doc_cache[ref] = document
         return document
 
+    def resolve_court_parties(self, items, timeout=60):
+        """Set ``nes_id`` on court party rows. `POST /api/ingestion/entities/resolve/`.
+
+        Each item names its rows by ``court`` + ``case_number`` and, optionally,
+        ``side`` and the exact ``name``; every row it matches gets the item's
+        ``nes_id``. NGM-role gated, and a WRITE, so `_request`'s guard applies.
+        """
+        body = json.dumps({"items": items}, ensure_ascii=False).encode("utf-8")
+        url = self.base_url + "/ingestion/entities/resolve/"
+        with self._request("POST", url, data=body,
+                           headers=self._headers("application/json"),
+                           timeout=timeout) as r:
+            raw = r.read().decode()
+        return json.loads(raw) if raw.strip() else {}
+
     def create_material(self, doc, material_type, timeout=60):
         """Upsert one material from a JSON-LD document. `POST /api/materials/`.
 
