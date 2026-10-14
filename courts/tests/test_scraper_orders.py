@@ -47,6 +47,22 @@ DOCS_HTML = (
 NO_RECORD_HTML = (
     "<html><body><h3>फैसला / आदेश को पुर्ण पाठ</h3><p>रेकर्ड भेटिएन</p></body></html>"
 )
+# A decided case the court has indexed but whose full text is not uploaded: the
+# document cell holds an error.png whose `title` is the only signal. Note the
+# marker is an ATTRIBUTE — a fixture that put it in the cell's text would pass
+# while the real page still failed.
+_PENDING_ROW = (
+    "<tr>"
+    + "".join(f"<td>c{i}</td>" for i in range(9))
+    + '<td><img src="/images/error.png" title="फैसला अपलोड हुन बाँकी"></td>'
+    + "</tr>"
+)
+UPLOAD_PENDING_HTML = (
+    "<html><body><h3>फैसला / आदेश को पुर्ण पाठ</h3>"
+    '<table class="table table-bordered sc-table"><tbody>'
+    + _PENDING_ROW
+    + "</tbody></table></body></html>"
+)
 INVALID_CAPTCHA_HTML = (
     '<html><body><table bgcolor="#FF6600"><tr><td>Invalid CAPTCHA</td></tr>'
     "</table></body></html>"
@@ -153,6 +169,29 @@ def test_parse_valid_page_no_download_links_is_no_record():
     assert O.parse_order_results(html).status == O.NO_RECORD
 
 
+def test_parse_upload_pending_is_not_no_record():
+    # The distinction the whole fix rests on: an empty document cell carrying the
+    # court's "not uploaded yet" marker is a promise of a document, not its
+    # absence, and must not be answerable with NO_RECORD.
+    result = O.parse_order_results(UPLOAD_PENDING_HTML)
+    assert result.status == O.UPLOAD_PENDING
+    assert result.doc_urls == []
+
+
+def test_parse_prefers_available_docs_over_pending_sibling_row():
+    # A part-uploaded case: take what exists rather than deferring the lot.
+    html = (
+        "<html><body>फैसला / आदेश को पुर्ण पाठ"
+        '<table class="table"><tbody>'
+        + _PENDING_ROW
+        + _ROW.format(href="/d/1.pdf")
+        + "</tbody></table></body></html>"
+    )
+    result = O.parse_order_results(html)
+    assert result.status == O.DOCS
+    assert result.doc_urls == ["https://supremecourt.gov.np/d/1.pdf"]
+
+
 # ── pure: DocumentSource shaping ─────────────────────────────────────────────
 
 
@@ -243,7 +282,12 @@ def test_mark_transient_escalates_after_max_retries():
 
 def test_is_document_expected():
     today = date(2026, 7, 24)
-    assert O.is_document_expected(date(2024, 1, 1), today=today) is True
+    # Past the 3-year window → a genuine no-record may be given up on.
+    assert O.is_document_expected(date(2022, 1, 1), today=today) is True
+    # Inside it. This case (935 days) WAS "expected" under the old 365-day rule,
+    # and that is precisely the band where the court still publishes: ~12% of
+    # captured Special Court texts arrived more than a year after the verdict.
+    assert O.is_document_expected(date(2024, 1, 1), today=today) is False
     assert O.is_document_expected(date(2026, 7, 1), today=today) is False
     assert O.is_document_expected(None, today=today) is False
 
@@ -508,6 +552,26 @@ class OrdersCommandTests(TestCase):
         case = self._reload()
         assert case.extra_data["orders_failed"] is True
         assert case.document_sources in (None, [])
+
+    def test_upload_pending_old_case_is_deferred_not_failed(self):
+        # The regression that stranded ~8,200 decided Special Court cases: this
+        # hearing is five years old, so the elapsed-time test says "give up", but
+        # the portal is telling us the judgment is still coming. It must stay
+        # re-checkable, with no permanent-failure marker anywhere on the row.
+        CourtCaseHearing.objects.create(
+            court=self.court,
+            case_number="082-WO-0123",
+            hearing_date_bs="2078-01-01",
+            hearing_date_ad=date(2021, 4, 14),
+            scraped_at="2026-01-01T00:00:00Z",
+        )
+        client = _FakeClient(
+            homepage=(200, COOKIE, None), search=(200, UPLOAD_PENDING_HTML, None)
+        )
+        self._run(client)
+        case = self._reload()
+        assert case.extra_data["orders_too_recent"] is True
+        assert "orders_failed" not in case.extra_data
 
     def test_no_record_recent_case_marks_too_recent(self):
         CourtCaseHearing.objects.create(

@@ -301,6 +301,11 @@ class Command(BaseCommand):
             )
         if result.status == O.NOT_RESULTS_PAGE:
             return self._apply_transient(case, "not_results_page", write)
+        if result.status == O.UPLOAD_PENDING:
+            # The court has told us the document is owed but not up yet, so the
+            # give-up timer must not apply — defer unconditionally and keep
+            # re-checking for as long as it takes.
+            return self._apply_upload_pending(case, write)
         if result.status == O.NO_RECORD:
             return self._apply_no_record(case, today, write)
         # result.status == DOCS
@@ -429,6 +434,20 @@ class Command(BaseCommand):
         upsert_single_source_material(doc, material_type=MaterialType.COURT_ORDER)
 
     # ── outcome application ──────────────────────────────────────────────────
+
+    def _apply_upload_pending(self, case, write):
+        """The portal says the full text is not uploaded yet: always a soft defer.
+
+        Reuses the ``too_recent`` markers so the existing 30-day recheck window
+        and backlog queryset pick it up unchanged — the difference from
+        ``_apply_no_record`` is only that no elapsed-time test can promote this
+        into a permanent failure.
+        """
+        if not write:
+            return "too_recent", "upload pending [dry-run]"
+        case.extra_data = O.mark_too_recent(case.extra_data, now_iso=self._now_iso())
+        case.save(using="ngm", update_fields=["extra_data", "updated_at"])
+        return "too_recent", "upload pending"
 
     def _apply_no_record(self, case, today, write):
         """No document on the portal: a permanent failure for an old decided case,
