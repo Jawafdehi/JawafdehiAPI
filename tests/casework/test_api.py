@@ -8,6 +8,7 @@ import pytest
 
 from casework.common.api import (
     CaseworkApi,
+    build_mark_ai_generated_ops,
     build_replace_ops,
     build_replace_patch,
 )
@@ -250,6 +251,67 @@ def test_basic_mode_accepts_loopback_base_url():
 # and recreates from exactly what is sent, so a partial list silently
 # destroys the omitted rows.
 # ---------------------------------------------------------------------------
+
+
+def test_mark_ai_generated_ops_append_and_never_replace():
+    """An append is the union: a `replace` would drop names other writers set."""
+    assert build_mark_ai_generated_ops(["description", "timeline"]) == [
+        {"op": "add", "path": "/ai_generated_sections/-", "value": "description"},
+        {"op": "add", "path": "/ai_generated_sections/-", "value": "timeline"},
+    ]
+    assert build_mark_ai_generated_ops(()) == []
+
+
+def test_patch_field_marks_ai_sections_in_the_same_request(monkeypatch):
+    seen = {}
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
+
+    api.patch_field("some-slug", "timeline", [], ai_sections=("timeline",))
+
+    assert json.loads(seen["data"].decode()) == [
+        {"op": "replace", "path": "/timeline", "value": []},
+        {"op": "add", "path": "/ai_generated_sections/-", "value": "timeline"},
+    ]
+
+
+def test_patch_field_without_ai_sections_sends_only_the_field(monkeypatch):
+    seen = {}
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
+
+    api.patch_field("some-slug", "bigo", 500)
+
+    assert json.loads(seen["data"].decode()) == build_replace_patch("bigo", 500)
+
+
+def test_patch_fields_marks_ai_sections_under_one_if_match(monkeypatch):
+    seen = {}
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
+
+    api.patch_fields(
+        "some-slug", [("description", "विवरण"), ("missing_details", "छैन")],
+        if_match='W/"e"', ai_sections=("description",))
+
+    body = json.loads(seen["data"].decode())
+    assert [(op["op"], op["path"]) for op in body] == [
+        ("replace", "/description"),
+        ("replace", "/missing_details"),
+        ("add", "/ai_generated_sections/-"),
+    ]
+    assert seen["headers"]["If-Match"] == 'W/"e"'
+
+
+def test_patch_fields_with_only_ai_sections_sends_nothing(monkeypatch):
+    """A label without its text would claim AI wrote something it did not."""
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+
+    def boom(*a, **kw):
+        raise AssertionError("no request for an empty write")
+
+    monkeypatch.setattr(api, "_request", boom)
+    assert api.patch_fields("case-x", [], ai_sections=("description",)) == {}
 
 
 def test_replace_list_emits_single_replace_op_for_evidence(monkeypatch):

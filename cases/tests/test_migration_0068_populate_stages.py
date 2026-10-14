@@ -29,17 +29,22 @@ def _migrate(targets):
     return executor.loader.project_state(targets).apps
 
 
+def _head():
+    """Every app's latest migration: the schema the rest of the suite expects."""
+    return MigrationExecutor(connection).loader.graph.leaf_nodes()
+
+
 @pytest.fixture
 def old_apps():
     """Historical state just before 0068 — where the fixtures are written.
 
     ``transaction=True`` on every test in this module is load-bearing: sqlite
     refuses a schema editor inside an open atomic block, and the executor opens
-    one even for a data-only migration. Leaves the database back at head so a
-    later module never runs against an un-applied 0068.
+    one even for a data-only migration. Leaves the database back at head, not
+    at 0068, so a later module never runs without the migrations after it.
     """
     yield _migrate(MIGRATE_FROM)
-    _migrate(MIGRATE_TO)
+    _migrate(_head())
 
 
 def _case(apps, slug, **kwargs):
@@ -233,7 +238,8 @@ def test_a_backwards_row_is_savable_through_the_real_model(old_apps):
         case_start_date=date(2023, 5, 20),
         case_end_date=date(2022, 2, 2),
     )
-    _migrate(MIGRATE_TO)
+    # Head, not 0068: the live model carries every later column.
+    _migrate(_head())
 
     from cases.models import Case as LiveCase
 

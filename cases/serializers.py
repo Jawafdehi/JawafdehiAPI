@@ -537,6 +537,14 @@ class CaseSerializer(serializers.ModelSerializer):
         help_text="List of timeline entries with date, title, and description",
         required=False,
     )
+    ai_generated_sections = serializers.ListField(
+        child=serializers.CharField(),
+        help_text=(
+            "Sections written by AI and not yet reviewed by a person: any of "
+            "'description', 'key_allegations', 'timeline'. Empty = no label."
+        ),
+        required=False,
+    )
     evidence = serializers.SerializerMethodField(
         help_text="Evidence: material references (material_iri + additional_details)",
     )
@@ -598,6 +606,7 @@ class CaseSerializer(serializers.ModelSerializer):
             "description",
             "key_allegations",
             "timeline",
+            "ai_generated_sections",
             "evidence",
             "notes",
             "court_cases",

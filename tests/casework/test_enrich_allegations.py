@@ -610,6 +610,8 @@ class _StubApi:
         self._detail_overrides = detail_overrides or {}
         self._fail_detail_for = set(fail_detail_for)
         self.patched = []
+        # `(slug, ai_sections)` per PATCH request: what the write marked AI-generated.
+        self.ai_marked = []
 
     def iter_cases(self, params=None, timeout=60):
         yield from self._cases.values()
@@ -621,8 +623,9 @@ class _StubApi:
             return self._detail_overrides[slug]
         return self._cases[slug]
 
-    def patch_field(self, slug, field, value, timeout=60):
+    def patch_field(self, slug, field, value, timeout=60, ai_sections=()):
         self.patched.append((slug, field, value))
+        self.ai_marked.append((slug, tuple(ai_sections)))
         self._cases[slug][field] = value
         return {}
 
@@ -743,6 +746,26 @@ def test_apply_patches_key_allegations(monkeypatch, patched_fetch_markdown):
     assert report.rows[0]["status"] == "enriched"
     assert api.patched == [
         ("case-ready", "key_allegations", ["पहिलो आरोप।", "दोस्रो आरोप।"])]
+
+
+def test_apply_marks_key_allegations_ai_generated_in_the_same_write(
+    monkeypatch, patched_fetch_markdown
+):
+    response = json.dumps({"allegations": ["पहिलो आरोप।", "दोस्रो आरोप।"]})
+    api = _StubApi([PRESS_CASE_READY])
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--apply"],
+    )
+    assert api.ai_marked == [("case-ready", ("key_allegations",))]
+
+
+def test_dry_run_marks_nothing(monkeypatch, patched_fetch_markdown):
+    response = json.dumps({"allegations": ["पहिलो आरोप।"]})
+    api = _StubApi([PRESS_CASE_READY])
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--dry-run"],
+    )
+    assert api.ai_marked == []
 
 
 # An acquitted-on-all-counts case, entity binds included. Only the DETAIL

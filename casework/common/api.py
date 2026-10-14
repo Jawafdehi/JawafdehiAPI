@@ -100,6 +100,19 @@ def build_replace_ops(pairs):
     ]
 
 
+def build_mark_ai_generated_ops(sections):
+    """Ops adding each section to `ai_generated_sections`, never removing one.
+
+    An RFC-6902 append, not a replace: the server applies it to the list it
+    holds at write time and folds duplicates, so the union needs no prior read
+    and cannot drop a name another writer added.
+    """
+    return [
+        {"op": "add", "path": "/ai_generated_sections/-", "value": section}
+        for section in sections
+    ]
+
+
 class CaseworkApi:
     """Control-plane HTTP client with two mutually exclusive auth modes.
 
@@ -634,16 +647,20 @@ class CaseworkApi:
             raw = r.read().decode()
             return json.loads(raw) if raw.strip() else {}
 
-    def patch_field(self, slug, field, value, timeout=60, if_match=None):
-        return self._patch(slug, build_replace_patch(field, value), timeout, if_match=if_match)
+    def patch_field(self, slug, field, value, timeout=60, if_match=None,
+                    ai_sections=()):
+        """Replace one field; `ai_sections` are marked AI-generated in the same request."""
+        ops = build_replace_patch(field, value) + build_mark_ai_generated_ops(ai_sections)
+        return self._patch(slug, ops, timeout, if_match=if_match)
 
-    def patch_fields(self, slug, pairs, timeout=60, if_match=None):
+    def patch_fields(self, slug, pairs, timeout=60, if_match=None, ai_sections=()):
         """Write several scalar fields in ONE conditional request.
 
         Prefer this over a `patch_field` loop whenever a caller writes more than
         one field under a single ETag -- see `build_replace_ops` for why a loop
         cannot work. Returns the server's response body, or `{}` when `pairs` is
-        empty (no request is made).
+        empty (no request is made). `ai_sections` ride the same request, so the
+        text and its AI-generated label land together or not at all.
         """
         pairs = list(pairs)
         # The whole-list paths are routed to `replace_list` on purpose: they are
@@ -659,6 +676,7 @@ class CaseworkApi:
         ops = build_replace_ops(pairs)
         if not ops:
             return {}
+        ops += build_mark_ai_generated_ops(ai_sections)
         return self._patch(slug, ops, timeout, if_match=if_match)
 
     def replace_list(self, slug, path, items, timeout=60, if_match=None):

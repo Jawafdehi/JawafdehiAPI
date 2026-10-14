@@ -11,7 +11,8 @@ which this project's binding constraint restricts to loopback (`127.0.0.1:48010`
 It is the field production is emptiest on: 188 of 3,003 cases carry a description.
 
 TWO FIELDS, ONE CALL. This script writes `description` and `missing_details`,
-and nothing else. The second rides in the SAME generate call because that call
+and nothing else -- plus, when it writes `description`, adding `description` to
+`ai_generated_sections` in that same request. The second rides in the SAME generate call because that call
 has already paid to summarise the verdict -- `summarize_verdict` bills one
 premium request per 150,000-char chunk, and batch verdicts run to a 141,000-char
 median. A standalone stage would re-read the same फैसला from scratch, roughly
@@ -1159,8 +1160,10 @@ def main(argv=None):
             # above admit a described case for its EMPTY missing_details without
             # silently rewriting prose a human may have approved.
             pairs = []
+            ai_sections = ()
             if not description_done or args.force:
                 pairs.append(("description", description))
+                ai_sections = ("description",)
             if missing:
                 pairs.append(("missing_details", missing))
             if not pairs:
@@ -1169,7 +1172,7 @@ def main(argv=None):
                           detail="nothing left to write")
                 report.record(slug, "description", "already", "nothing left to write")
                 continue
-            api.patch_fields(slug, pairs, if_match=etag)
+            api.patch_fields(slug, pairs, if_match=etag, ai_sections=ai_sections)
             report.record(slug, "description", "enriched", detail_msg)
             review.add(ReviewRow(slug=slug, status="enriched", before=before,
                                  generated=description, sources=fed, note=note))

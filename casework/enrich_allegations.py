@@ -8,7 +8,8 @@ Nepali allegation sentences. Never touches the database directly -- writes go
 through `CaseworkApi.patch_field`, which this project's binding constraint
 restricts to loopback (`127.0.0.1:48010`) only.
 
-Writes exactly ONE field, `key_allegations`. `missing_details` is written by
+Writes exactly ONE field, `key_allegations`, and in the same request adds
+`key_allegations` to `ai_generated_sections`. `missing_details` is written by
 `casework/enrich_description.py`, which has the verdict in hand; this stage only
 ever reads the press release.
 
@@ -468,7 +469,8 @@ def main(argv=None):
             continue
 
         try:
-            api.patch_field(slug, "key_allegations", allegations)
+            api.patch_field(slug, "key_allegations", allegations,
+                            ai_sections=("key_allegations",))
             report.record(
                 slug, "allegations", "enriched", f"key_allegations={allegations}")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,

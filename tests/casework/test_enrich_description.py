@@ -1125,6 +1125,8 @@ class _StubApi:
         self._etag = etag
         self._fail_detail_for = set(fail_detail_for)
         self.patched = []
+        # `(slug, ai_sections)` per PATCH request: what the write marked AI-generated.
+        self.ai_marked = []
         # One entry per PATCH REQUEST, as `(slug, [field, ...], if_match)` --
         # `patched` is per-field and cannot show that both fields went in a
         # single conditional write.
@@ -1138,12 +1140,14 @@ class _StubApi:
             raise RuntimeError(f"simulated detail-fetch failure for {slug}")
         return self._cases[slug], self._etag
 
-    def patch_field(self, slug, field, value, timeout=60, if_match=None):
+    def patch_field(self, slug, field, value, timeout=60, if_match=None,
+                    ai_sections=()):
         self.patched.append((slug, field, value, if_match))
+        self.ai_marked.append((slug, tuple(ai_sections)))
         self._cases[slug][field] = value
         return {}
 
-    def patch_fields(self, slug, pairs, timeout=60, if_match=None):
+    def patch_fields(self, slug, pairs, timeout=60, if_match=None, ai_sections=()):
         """Record each pair as its own `patched` entry.
 
         Flattened deliberately: every existing assertion in this file reads
@@ -1153,6 +1157,7 @@ class _StubApi:
         """
         pairs = list(pairs)
         self.patch_calls.append((slug, [f for f, _ in pairs], if_match))
+        self.ai_marked.append((slug, tuple(ai_sections)))
         for field, value in pairs:
             self.patched.append((slug, field, value, if_match))
             self._cases[slug][field] = value
@@ -1260,6 +1265,8 @@ def test_a_described_case_with_an_empty_missing_details_is_still_processed(
     written = {f: v for _, f, v, _ in api.patched}
     assert "missing_details" in written
     assert "description" not in written, "rewrote a description without --force"
+    # A human-approved description it did not touch must not gain the label.
+    assert api.ai_marked == [("case-already", ())]
 
 
 def test_force_regenerates_an_already_described_case(monkeypatch, patched_fetch_markdown):
@@ -1271,6 +1278,7 @@ def test_force_regenerates_an_already_described_case(monkeypatch, patched_fetch_
     assert report.rows[0]["status"] == "enriched"
     written = {f: v for _, f, v, _ in api.patched}
     assert written["description"] == "नयाँ विवरण।"
+    assert api.ai_marked == [("case-already", ("description",))]
     # CASE_ALREADY carries no prior missing_details, so the floor is written
     # outright. That --force does NOT touch a populated value is pinned by
     # test_force_never_touches_an_existing_missing_details.
@@ -1298,6 +1306,8 @@ def test_apply_patches_description_with_the_etag_as_if_match(
     # not stay conditional -- the second would carry an ETag the first invalidated.
     assert api.patch_calls == [
         ("case-ready", ["description", "missing_details"], 'W/"etag-42"')]
+    # The label rides that same request: text and label land together.
+    assert api.ai_marked == [("case-ready", ("description",))]
 
 
 def test_never_writes_title(monkeypatch, patched_fetch_markdown):

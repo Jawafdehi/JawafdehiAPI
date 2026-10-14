@@ -20,6 +20,7 @@ from jawafdehi_shared.entities.ids import (
 )
 
 from .fields import (
+    AiGeneratedSectionsField,
     AuthorLinkListField,
     EditHistoryListField,
     HttpsURLField,
@@ -1161,6 +1162,16 @@ class Case(models.Model):
 
     # Structured data fields
     timeline = TimelineListField(help_text="List of timeline entries")
+    # Which of the three narrative sections an enricher wrote and no person has
+    # checked yet. Public, so the site can label them. Editing a section's text
+    # does NOT clear its name here: removing a label is always an explicit edit.
+    ai_generated_sections = AiGeneratedSectionsField(
+        help_text=(
+            "Sections written by AI and not yet reviewed: any of description, "
+            "key_allegations, timeline. Remove a name once a person has "
+            "checked that section."
+        ),
+    )
     # Evidence is no longer a denormalized JSON list on the case. It is now the
     # CaseMaterialReference join (case.material_references) keyed by material_iri
     # (ADR: cases own no documents).

@@ -312,3 +312,46 @@ class EditHistoryListField(models.JSONField):
                 )
 
 
+#: The case sections an enricher can write, and so the only names that may
+#: appear in ``Case.ai_generated_sections``. Order is the canonical stored order.
+AI_GENERATED_SECTIONS = ("description", "key_allegations", "timeline")
+
+
+def normalize_ai_generated_sections(values):
+    """Return ``values`` de-duplicated in canonical order; raise ValueError on an unknown name."""
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("Value must be a list")
+    unknown = [v for v in values if v not in AI_GENERATED_SECTIONS]
+    if unknown:
+        raise ValueError(
+            f"Unknown section(s) {unknown!r}. Must be one of: "
+            f"{', '.join(AI_GENERATED_SECTIONS)}"
+        )
+    return [name for name in AI_GENERATED_SECTIONS if name in values]
+
+
+class AiGeneratedSectionsField(models.JSONField):
+    """
+    Stores the names of the case sections written by AI and not yet reviewed.
+
+    Each name must be one of ``AI_GENERATED_SECTIONS``, at most once. The API
+    normalizes duplicates and order before saving; this layer only rejects.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs["default"] = list
+        kwargs["blank"] = True
+        super().__init__(*args, **kwargs)
+
+    def validate(self, value, model_instance):
+        """Validate that value is a duplicate-free list of known section names."""
+        super().validate(value, model_instance)
+
+        if not isinstance(value, list):
+            raise ValidationError("Value must be a list")
+        try:
+            normalize_ai_generated_sections(value)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if len(set(value)) != len(value):
+            raise ValidationError(f"Section names must not repeat: {value!r}")
