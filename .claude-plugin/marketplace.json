@@ -1,0 +1,19 @@
+{
+  "name": "jawafdehi-skills",
+  "owner": {
+    "name": "Jawafdehi Initiative",
+    "url": "https://jawafdehi.org"
+  },
+  "metadata": {
+    "description": "Agent skills for working with the Jawafdehi open accountability archive.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "jawafdehi-document-reader",
+      "source": "./skills/jawafdehi-document-reader",
+      "description": "Read documents in the Jawafdehi archive through the MCP, one page range, table or chart at a time.",
+      "category": "research"
+    }
+  ]
+}

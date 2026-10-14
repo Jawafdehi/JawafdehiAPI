@@ -1,0 +1,18 @@
+{
+  "name": "jawafdehi-document-reader",
+  "description": "Read documents in the Jawafdehi archive through the MCP, one page range, table or chart at a time.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Jawafdehi Initiative",
+    "url": "https://jawafdehi.org"
+  },
+  "homepage": "https://github.com/Jawafdehi/JawafdehiAPI",
+  "license": "LicenseRef-Hippocratic-3.0",
+  "keywords": [
+    "jawafdehi",
+    "nepal",
+    "accountability",
+    "documents",
+    "mcp"
+  ]
+}
