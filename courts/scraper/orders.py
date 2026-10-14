@@ -164,6 +164,12 @@ class OrderResult:
     status: str
     doc_urls: list[str] = field(default_factory=list)
     detail: str = ""
+    #: Set on a ``DOCS`` result when the SAME page also carries a row the court
+    #: has not uploaded yet, i.e. the capture is incomplete. Without it a
+    #: part-uploaded case is stamped captured, leaves the backlog for good, and
+    #: the outstanding judgment is never fetched — the same way a permanent
+    #: failure used to lose one.
+    upload_pending: bool = False
 
 
 def parse_order_results(html: str, *, base_url: str = HOMEPAGE_URL) -> OrderResult:
@@ -229,9 +235,10 @@ def parse_order_results(html: str, *, base_url: str = HOMEPAGE_URL) -> OrderResu
             doc_urls.append(url)
 
     if doc_urls:
-        # A partially-uploaded case still counts as a capture: take what is
-        # published rather than holding the whole case back for the rest.
-        return OrderResult(DOCS, doc_urls=doc_urls)
+        # Take what is published rather than holding the whole case back — but
+        # carry the pending flag so the caller knows the capture is partial and
+        # keeps the case on the recheck cycle.
+        return OrderResult(DOCS, doc_urls=doc_urls, upload_pending=upload_pending)
     if upload_pending:
         return OrderResult(UPLOAD_PENDING)
     return OrderResult(NO_RECORD)
@@ -408,7 +415,15 @@ def orders_backlog_queryset(
         .filter(case_status__contains="फैसला")  # decided
         .exclude(case_status__contains="चालु")  # not ongoing (text field — safe)
         .exclude(case_status__contains="चलिरहेको")
-        .filter(extra_data__court_orders__isnull=True)  # not already captured
+        # Not already captured — OR captured only in part, which is a case whose
+        # page still shows an un-uploaded row. A plain "court_orders IS NULL"
+        # retires a part-uploaded case the moment its first file lands, so the
+        # outstanding judgment is never collected. `too_recent_ready` below still
+        # bounds how often such a case comes back round.
+        .filter(
+            Q(extra_data__court_orders__isnull=True)
+            | Q(extra_data__orders_too_recent=True)
+        )
         .filter(not_failed)
         .filter(too_recent_ready)
         .annotate(capture_priority=_CAPTURE_PRIORITY)

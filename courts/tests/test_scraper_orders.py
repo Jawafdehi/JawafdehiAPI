@@ -14,7 +14,7 @@ Run (DB-less) from the repo root::
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import patch
 
 from django.core.management import call_command
@@ -179,7 +179,8 @@ def test_parse_upload_pending_is_not_no_record():
 
 
 def test_parse_prefers_available_docs_over_pending_sibling_row():
-    # A part-uploaded case: take what exists rather than deferring the lot.
+    # A part-uploaded case: take what exists rather than deferring the lot, but
+    # flag that the capture is incomplete so the case is not retired early.
     html = (
         "<html><body>फैसला / आदेश को पुर्ण पाठ"
         '<table class="table"><tbody>'
@@ -190,6 +191,13 @@ def test_parse_prefers_available_docs_over_pending_sibling_row():
     result = O.parse_order_results(html)
     assert result.status == O.DOCS
     assert result.doc_urls == ["https://supremecourt.gov.np/d/1.pdf"]
+    assert result.upload_pending is True
+
+
+def test_parse_fully_uploaded_case_is_not_flagged_pending():
+    result = O.parse_order_results(DOCS_HTML)
+    assert result.status == O.DOCS
+    assert result.upload_pending is False
 
 
 # ── pure: DocumentSource shaping ─────────────────────────────────────────────
@@ -552,6 +560,42 @@ class OrdersCommandTests(TestCase):
         case = self._reload()
         assert case.extra_data["orders_failed"] is True
         assert case.document_sources in (None, [])
+
+    def test_partial_capture_stays_in_the_backlog(self):
+        # One file published, one row still pending. The file must be captured,
+        # AND the case must remain selectable — a plain "has court_orders" retire
+        # would strand the outstanding judgment exactly the way a permanent
+        # failure used to.
+        html = (
+            "<html><body>फैसला / आदेश को पुर्ण पाठ"
+            '<table class="table"><tbody>'
+            + _PENDING_ROW
+            + _ROW.format(href="/court/media/2081/order.pdf")
+            + "</tbody></table></body></html>"
+        )
+        client = _FakeClient(
+            homepage=(200, COOKIE, None),
+            search=(200, html, None),
+            downloads={
+                "https://supremecourt.gov.np/court/media/2081/order.pdf": (
+                    200,
+                    b"%PDF-1.4 bytes",
+                )
+            },
+        )
+        self._run(client)
+
+        case = self._reload()
+        assert case.extra_data["court_orders"]  # the published file was captured
+        assert case.extra_data["orders_too_recent"] is True  # still owed the rest
+        assert "orders_failed" not in case.extra_data
+        # The decisive assertion: still reachable by a scheduled run once the
+        # recheck window has elapsed. The marker is stamped with the real clock,
+        # not _TODAY, so the horizon is measured from today rather than the
+        # command's --today anchor.
+        horizon = date.today() + timedelta(days=O.TOO_RECENT_RECHECK_DAYS + 1)
+        backlog = O.orders_backlog_queryset(courts=("supreme",), today=horizon)
+        assert case.case_number in [c.case_number for c in backlog]
 
     def test_upload_pending_old_case_is_deferred_not_failed(self):
         # The regression that stranded ~8,200 decided Special Court cases: this

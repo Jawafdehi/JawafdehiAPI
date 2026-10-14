@@ -309,7 +309,14 @@ class Command(BaseCommand):
         if result.status == O.NO_RECORD:
             return self._apply_no_record(case, today, write)
         # result.status == DOCS
-        return self._capture_docs(case, result.doc_urls, client, write, backoff)
+        return self._capture_docs(
+            case,
+            result.doc_urls,
+            client,
+            write,
+            backoff,
+            upload_pending=result.upload_pending,
+        )
 
     def _search_with_retries(self, case, client, backoff):
         """GET→CAPTCHA→POST, retrying a fresh session on a missing/invalid CAPTCHA.
@@ -345,10 +352,17 @@ class Command(BaseCommand):
             return result
         return None
 
-    def _capture_docs(self, case, doc_urls, client, write, backoff):
-        """Download each order file, store durably, and materialize."""
+    def _capture_docs(self, case, doc_urls, client, write, backoff, upload_pending=False):
+        """Download each order file, store durably, and materialize.
+
+        ``upload_pending`` means the page ALSO held a row the court has not
+        uploaded, so this capture is partial and the case must stay re-checkable.
+        """
         if not write:  # dry-run: report the found documents without downloading
-            return "docs", f"{len(doc_urls)} file(s) [dry-run]"
+            detail = f"{len(doc_urls)} file(s)"
+            if upload_pending:
+                detail += ", more pending"
+            return "docs", f"{detail} [dry-run]"
 
         # All-or-nothing: any file failing leaves the WHOLE case transient (nothing
         # stored, re-crawlable) rather than the retired pipeline's partial capture.
@@ -398,11 +412,21 @@ class Command(BaseCommand):
             links=[link["link"] for link in src["url"]],
             now_iso=self._now_iso(),
         )
+        if upload_pending:
+            # mark_success clears the too-recent markers, which is right for a
+            # complete capture and wrong for this one: the court is still showing
+            # an un-uploaded row, so re-stamp them to keep the case in the
+            # backlog. A later run re-downloads and overwrites the whole set,
+            # which is how the missing file eventually merges in.
+            case.extra_data = O.mark_too_recent(
+                case.extra_data, now_iso=self._now_iso()
+            )
         case.save(
             using="ngm",
             update_fields=["document_sources", "extra_data", "updated_at"],
         )
-        return "docs", f"{len(stored)} file(s)"
+        detail = f"{len(stored)} file(s)"
+        return "docs", f"{detail}, more pending" if upload_pending else detail
 
     def _materialize(self, case, src, stored):
         """Mint/refresh the standalone ``court_order`` Material for the case.
