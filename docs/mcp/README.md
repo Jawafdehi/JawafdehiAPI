@@ -42,13 +42,30 @@ The embedded server reads the platform's `OIDC_ISSUER`, `OIDC_AUDIENCE`, and
 derived JWKS/userinfo settings. JWKS network fetches use the shared
 `OIDC_JWKS_TIMEOUT` bound.
 
-One rule decides the catalog:
+Who you are decides the catalog:
 
 | Caller | Catalog |
 |---|---|
 | Anonymous (no bearer) | the read-only `ANONYMOUS_TOOL_NAMES` set (13 tools) |
-| Any verified bearer, **any role including none** | all 26 tools |
-| stdio with `JAWAFDEHI_API_TOKEN` | all 26 (the service token is authentication) |
+| Verified bearer **without** the content role | everything except `CASEWORKER_TOOL_NAMES` — all reads, no writes |
+| Verified bearer **with** the content role | every tool |
+| stdio with `JAWAFDEHI_API_TOKEN` | every tool (the service token is authentication) |
+
+The content role is matched on the Zitadel role **keys** `caseworker`,
+`moderator` and `contributor` — lowercase, and all three, because
+`jawafdehi_shared.auth.oidc.DEFAULT_ROLE_TO_GROUP` maps all three onto the
+Django `Caseworker` group. Matching the capitalised Group name would match
+nobody and silently strip writes from everyone; a test pins the two together.
+Note `admin` is **not** among them: it maps to no Group, so an `admin`-only
+principal cannot write through `/api/` either.
+
+Gating the catalog does not make it the authorization boundary — the tools still
+forward the caller's bearer to Django, which has the final say. What it buys is
+that a signed-in reader is no longer offered `create_jawafdehi_case` only to meet
+a 403 that reads like a broken tool. The two can legitimately disagree: a Django
+superuser holding no Zitadel content role loses the write tools from their
+catalog while the API would have allowed the call. Grant the role rather than
+widening the gate.
 
 An anonymous request is **not** challenged, because every anonymous tool wraps a
 REST route that is already `AllowAny` — `/api/entities`, `/api/search/`,

@@ -13,6 +13,7 @@ from prometheus_client import Counter, Histogram
 
 from . import __version__
 from .identity import (
+    CASEWORKER_TOOL_NAMES,
     current_user_identity,
     get_allowed_tool_names,
 )
@@ -166,13 +167,24 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent] | CallToolRe
     if not _is_tool_allowed(name):
         identity = current_user_identity.get()
         user_info = ""
+        # Name the actual remedy. "Authenticate" is useless advice to someone
+        # who already did and is merely missing the content role — that reads as
+        # a broken login and sends them to re-authenticate, which changes
+        # nothing.
+        remedy = "Authenticate with a bearer token to access it."
         if identity:
             user_info = (
                 f" (email={identity.get('email')}, roles={identity.get('roles')})"
             )
+            if name in CASEWORKER_TOOL_NAMES:
+                remedy = (
+                    "It needs the Caseworker role, which this account does not "
+                    "hold. Ask an administrator to grant it, then reconnect — "
+                    "the tool list is fetched once per session."
+                )
         raise ValueError(
             f"Tool '{name}' is not available for the current user{user_info}. "
-            "Authenticate with a bearer token to access it."
+            f"{remedy}"
         )
 
     tool = TOOL_MAP.get(name)

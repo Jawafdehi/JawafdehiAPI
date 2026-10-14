@@ -2,6 +2,7 @@
 
 from jawafdehi_mcp.identity import (
     ANONYMOUS_TOOL_NAMES,
+    CASEWORKER_TOOL_NAMES,
     get_allowed_tool_names,
 )
 
@@ -25,20 +26,21 @@ class TestGetAllowedToolNames:
         result = get_allowed_tool_names(identity, self.ALL_TOOLS)
         assert result == self.ALL_TOOLS
 
-    def test_authenticated_identity_with_empty_roles_returns_all_tools(self):
+    def test_authenticated_identity_with_empty_roles_gets_reads_only(self):
         identity = {"sub": "2", "email": "pub@x.org", "roles": []}
         result = get_allowed_tool_names(identity, self.ALL_TOOLS)
-        assert result == self.ALL_TOOLS
+        assert result == self.ALL_TOOLS - CASEWORKER_TOOL_NAMES
 
-    def test_authenticated_identity_with_unknown_role_returns_all_tools(self):
+    def test_authenticated_identity_with_unknown_role_gets_reads_only(self):
+        """An unrecognised role is not a content role. It confers nothing."""
         identity = {"sub": "2", "email": "pub@x.org", "roles": ["unknown"]}
         result = get_allowed_tool_names(identity, self.ALL_TOOLS)
-        assert result == self.ALL_TOOLS
+        assert result == self.ALL_TOOLS - CASEWORKER_TOOL_NAMES
 
-    def test_identity_with_no_roles_key(self):
+    def test_identity_with_no_roles_key_gets_reads_only(self):
         identity = {"sub": "3", "email": "x@x.org"}
         result = get_allowed_tool_names(identity, self.ALL_TOOLS)
-        assert result == self.ALL_TOOLS
+        assert result == self.ALL_TOOLS - CASEWORKER_TOOL_NAMES
 
     def test_respects_all_tool_names_boundary(self):
         limited_tools = {"search_jawafdehi_cases", "get_jawafdehi_case"}
