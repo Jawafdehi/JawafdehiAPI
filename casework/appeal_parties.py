@@ -213,7 +213,15 @@ def read_rows(path) -> list[dict]:
 
 def apply_rows(api, rows: list[dict], batch_size: int = 100) -> dict:
     """Write the rows marked ``bind`` and nothing else. Returns the tallies."""
-    marked = [r for r in rows if (r.get("decision") or "").strip().lower() == "bind"]
+    marked, seen = [], set()
+    for row in rows:
+        if (row.get("decision") or "").strip().lower() != "bind":
+            continue
+        key = (row["court"], row["case_number"], row["party_side"], row["party_name"],
+               row["accused_nes_id"])
+        if key not in seen:  # two cases citing one appeal docket
+            seen.add(key)
+            marked.append(row)
     stats: dict = {"marked": len(marked), "resolved": 0, "unmatched": 0, "failed": 0,
                    "unmatched_rows": [], "failed_rows": []}
     for start in range(0, len(marked), batch_size):
@@ -239,11 +247,33 @@ def _appeal_stages(case: dict) -> list[str]:
             if s.get("stage") == "appeal" and s.get("courtcase_iri")]
 
 
+def _mark_cross_case_conflicts(rows: list[dict]) -> None:
+    """A party row holds one nes_id. Two cases citing one appeal docket that would
+    bind the same row to DIFFERENT entities (duplicate NES records) overwrite each
+    other, so every such row becomes a conflict."""
+    ids: dict[tuple, set[str]] = {}
+    for row in rows:
+        if row["decision"] == "bind":
+            key = (row["court"], row["case_number"], row["party_side"], row["party_name"])
+            ids.setdefault(key, set()).add(row["accused_nes_id"])
+    for row in rows:
+        key = (row["court"], row["case_number"], row["party_side"], row["party_name"])
+        if row["decision"] == "bind" and len(ids[key]) > 1:
+            row["decision"] = "conflict"
+
+
 def build_review(api, slugs: list[str]) -> list[dict]:
-    """Every case's appeal dockets, paired. Read-only."""
+    """Every case's appeal dockets, paired. Read-only.
+
+    Each slug is reviewed once even when the case list returns it twice.
+    """
     cases = [api.get_case(slug) for slug in slugs] if slugs else api.iter_cases()
     rows: list[dict] = []
+    seen: set[str] = set()
     for case in cases:
+        if case.get("slug") in seen:
+            continue
+        seen.add(case.get("slug") or "")
         if not any(e.get("type") == "accused" for e in case.get("entities") or []):
             continue
         verdicts = case.get("appeal_verdicts") or {}
@@ -253,6 +283,7 @@ def build_review(api, slugs: list[str]) -> list[dict]:
                 continue
             parties = api.get_court_case_entities(ref[0], ref[1].upper())
             rows.extend(review_rows(case, iri, verdicts.get(iri), parties))
+    _mark_cross_case_conflicts(rows)
     return rows
 
 

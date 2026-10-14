@@ -12,6 +12,7 @@ from casework.appeal_parties import (
     EXACT,
     NEAR,
     apply_rows,
+    build_review,
     name_key,
     pair_accused,
     read_rows,
@@ -255,3 +256,60 @@ def test_apply_with_nothing_marked_makes_no_request():
     apply_rows(api, [_row(""), _row("skip")])
 
     assert api.calls == []
+
+
+def test_apply_sends_one_item_when_two_rows_bind_the_same_party_to_the_same_entity():
+    """Two cases citing one appeal docket produce the same write twice."""
+    api = _FakeApi()
+    apply_rows(api, [_row("bind"), {**_row("bind"), "slug": "other"}])
+
+    assert len(api.calls[0]) == 1
+
+
+# --- walking the cases -------------------------------------------------------------
+
+class _ListingApi:
+    def __init__(self, cases, parties):
+        self.cases, self.parties, self.party_reads = cases, parties, []
+
+    def iter_cases(self):
+        yield from self.cases
+
+    def get_court_case_entities(self, court, number):
+        self.party_reads.append((court, number))
+        return self.parties[(court, number)]
+
+
+def _appealed(slug, *accused):
+    return {"slug": slug, "state": "PUBLISHED", "entities": list(accused),
+            "dates": {"stages": [{"stage": "appeal", "courtcase_iri": APPEAL}]},
+            "appeal_verdicts": {APPEAL: "AFFIRMED"}}
+
+
+def test_a_case_the_list_returns_twice_is_reviewed_once():
+    case = _appealed("s", _bind("रतन बहादुर शाही"))
+    api = _ListingApi([case, case], {("supreme", "081-CR-1949"): [_party("रतन बहादुर शाही")]})
+
+    rows = build_review(api, [])
+
+    assert len(rows) == 1
+
+
+def test_two_cases_binding_one_party_row_to_different_entities_is_a_conflict():
+    """A party row holds one nes_id: duplicate entities on two cases citing one
+    appeal would overwrite each other."""
+    one = _appealed("a", _bind("उमेश प्रसाद ढकाल", "umesha-prasada-dhakala"))
+    two = _appealed("b", _bind("उमेश प्रसाद ढकाल", "umesh-prasad-dhakal"))
+    api = _ListingApi([one, two], {("supreme", "081-CR-1949"): [_party("उमेश प्रसाद ढकाल")]})
+
+    rows = build_review(api, [])
+
+    assert [r["decision"] for r in rows] == ["conflict", "conflict"]
+
+
+def test_two_cases_binding_one_party_row_to_the_same_entity_both_stay_bind():
+    ratan = _bind("रतन बहादुर शाही")
+    api = _ListingApi([_appealed("a", ratan), _appealed("b", ratan)],
+                      {("supreme", "081-CR-1949"): [_party("रतन बहादुर शाही")]})
+
+    assert [r["decision"] for r in build_review(api, [])] == ["bind", "bind"]
