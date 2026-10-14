@@ -232,12 +232,17 @@ class CaseListSerializer(serializers.ListSerializer):
         # build_entity_binds(resolved) reads its slice via resolved.get(...).
         self.child.context["resolved_entities"] = resolve_entities(nes_ids)
 
-        from cases.services.appeal_verdicts import appeal_iris, resolve_appeal_verdicts
-
-        # Same for the appeal verdicts: one court query for the page, not one per card.
-        self.child.context["appeal_verdicts"] = resolve_appeal_verdicts(
-            iri for case in instances for iri in appeal_iris(case.dates)
+        from cases.services.appeal_verdicts import (
+            appeal_iris,
+            resolve_appeal_parties,
+            resolve_appeal_verdicts,
         )
+
+        # Same for the appeal verdicts and parties: one court query each for the
+        # page, not one per card.
+        page_iris = [iri for case in instances for iri in appeal_iris(case.dates)]
+        self.child.context["appeal_verdicts"] = resolve_appeal_verdicts(page_iris)
+        self.child.context["appeal_parties"] = resolve_appeal_parties(page_iris)
         return super().to_representation(instances)
 
 
@@ -313,6 +318,24 @@ class CaseSerializer(serializers.ModelSerializer):
         resolved = self.context.get("appeal_verdicts")
         if resolved is None or any(iri not in resolved for iri in iris):
             resolved = resolve_appeal_verdicts(iris)
+        return {iri: resolved[iri] for iri in iris}
+
+    appeal_parties = serializers.SerializerMethodField(
+        help_text="Each appeal stage's courtcase_iri mapped to the NES ids "
+        "resolved onto that docket's party rows. An accused listed here was a "
+        "party to that appeal; an empty list means no party is resolved yet."
+    )
+
+    @extend_schema_field(
+        serializers.DictField(child=serializers.ListField(child=serializers.CharField()))
+    )
+    def get_appeal_parties(self, obj):
+        from cases.services.appeal_verdicts import appeal_iris, resolve_appeal_parties
+
+        iris = appeal_iris(obj.dates)
+        resolved = self.context.get("appeal_parties")
+        if resolved is None or any(iri not in resolved for iri in iris):
+            resolved = resolve_appeal_parties(iris)
         return {iri: resolved[iri] for iri in iris}
 
     entities = serializers.SerializerMethodField(
@@ -593,6 +616,7 @@ class CaseSerializer(serializers.ModelSerializer):
             "proceedings_started_on",
             "proceedings_decided_on",
             "appeal_verdicts",
+            "appeal_parties",
             "entities",
             "tags",
             "description",
