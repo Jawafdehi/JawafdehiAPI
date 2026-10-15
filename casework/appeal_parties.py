@@ -228,7 +228,8 @@ def apply_rows(api, rows: list[dict], batch_size: int = 100) -> dict:
         chunk = marked[start:start + batch_size]
         items = [{"court": r["court"], "case_number": r["case_number"],
                   "side": r["party_side"], "name": r["party_name"],
-                  "nes_id": r["accused_nes_id"]} for r in chunk]
+                  "nes_id": r["accused_nes_id"],
+                  "expected_nes_id": r.get("party_nes_id") or None} for r in chunk]
         response = api.resolve_court_parties(items)
         for result in response.get("results") or []:
             row = chunk[result["index"]]

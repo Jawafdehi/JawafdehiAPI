@@ -230,7 +230,7 @@ def _row(decision, name="रतन बहादुर शाही"):
             "decision": decision}
 
 
-def test_apply_sends_only_the_rows_a_human_marked_bind():
+def test_apply_sends_only_the_rows_marked_bind():
     api = _FakeApi()
     stats = apply_rows(api, [_row("bind"), _row(""), _row("skip"), _row("conflict"),
                              _row("already")])
@@ -238,7 +238,7 @@ def test_apply_sends_only_the_rows_a_human_marked_bind():
     assert api.calls == [[{
         "court": "supreme", "case_number": "081-CR-1949", "side": "defendant",
         "name": "रतन बहादुर शाही",
-        "nes_id": "https://jawafdehi.org/entity/person/ratan",
+        "nes_id": "https://jawafdehi.org/entity/person/ratan", "expected_nes_id": None,
     }]]
     assert stats["resolved"] == 1
 
@@ -337,3 +337,12 @@ def test_a_case_with_no_appeal_is_not_read_in_detail():
     api.get_case = lambda slug: pytest.fail("read a case with no appeal")
 
     assert build_review(api, []) == []
+
+
+def test_apply_only_writes_a_party_row_still_unbound_at_apply_time():
+    """A reviewed file can sit for days; the server must not overwrite a row
+    someone else bound in between."""
+    api = _FakeApi()
+    apply_rows(api, [{**_row("bind"), "party_nes_id": ""}])
+
+    assert api.calls[0][0]["expected_nes_id"] is None

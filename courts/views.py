@@ -26,6 +26,7 @@ import time
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import IntegrityError, connections, router, transaction
+from django.db.models import Q
 from rest_framework import mixins, status, viewsets
 
 from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
@@ -573,6 +574,10 @@ class IngestionEntitiesResolveView(_IngestionView):
     resolve against NES — only writes back an already-resolved IRI onto existing
     rows (returning the count matched/updated per item, plus ``unmatched`` when a
     filter hit no rows). Broader auto-resolution is intentionally out of scope.
+
+    An item may carry ``expected_nes_id`` (null for "unbound"): then only rows
+    still holding that value, or already holding ``nes_id``, are written, and a
+    row bound to someone else since counts as ``unmatched``.
     """
 
     def post(self, request, *args, **kwargs):
@@ -640,6 +645,12 @@ class IngestionEntitiesResolveView(_IngestionView):
             qs = qs.filter(side=side)
         if name := raw.get("name"):
             qs = qs.filter(name=name)
+        if "expected_nes_id" in raw:
+            # Compare-and-set: touch a row only if it still holds what the caller
+            # reviewed (or already holds the target, so a re-apply is not an error).
+            expected = raw["expected_nes_id"]
+            still = Q(nes_id=expected) if expected else Q(nes_id__isnull=True) | Q(nes_id="")
+            qs = qs.filter(still | Q(nes_id=nes_id))
         matched = qs.update(nes_id=nes_id)
         # A bulk .update() bypasses the CaseEntity post_save reindex signal, so
         # the parent CourtCase search doc (which folds party nes_id IRIs into its
