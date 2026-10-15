@@ -1,8 +1,8 @@
 """Integration tests for the jawafdehi-mcp HTTP server bearer auth.
 
 Exercises the ASGI middleware: bearer extraction, OIDC verification (mocked),
-ContextVar lifecycle, 401 on bad tokens, anonymous fallback, and the health /
-protected-resource-metadata endpoints.
+ContextVar lifecycle, 401 on absent and on bad tokens, the ``MCP_ALLOW_ANONYMOUS``
+opt-out, and the health / protected-resource-metadata endpoints.
 """
 
 import inspect
@@ -13,6 +13,7 @@ import pytest
 from jawafdehi_mcp import http_server
 from jawafdehi_mcp.http_server import (
     JawafdehiMCPServer,
+    _anonymous_access_enabled,
     _bearer_from_headers,
     _canonical_base_url,
     _max_request_body_size,
@@ -76,6 +77,42 @@ def mcp_server():
 
 
 @pytest.fixture
+def allow_anonymous(monkeypatch):
+    """Reopen the read-only anonymous catalog for one test.
+
+    Unauthenticated callers are challenged by default, so a test that asks what
+    an identity-less caller may *see* has to opt back in. Tests asserting that
+    such a caller is turned away deliberately do not take this fixture.
+    """
+    monkeypatch.setenv("MCP_ALLOW_ANONYMOUS", "1")
+
+
+@pytest.fixture
+def verified_bearer(monkeypatch):
+    """Headers carrying a token that resolves, for tests not about auth.
+
+    Transport concerns — the Host allowlist, Origin, body limits — need a
+    request that gets past the credential check, and since there is no longer an
+    unauthenticated way to do that, they carry a bearer rather than opt out of
+    the gate they are not testing.
+    """
+
+    async def _resolve(token):
+        return {"sub": "u1", "email": "cw@x.org", "roles": []}
+
+    monkeypatch.setattr(http_server, "resolve_bearer_identity", _resolve)
+    return [(b"authorization", b"Bearer good-token")]
+
+
+def _challenge(send):
+    """The ``WWW-Authenticate`` header off a recorded response."""
+    start = next(m for m in send.messages if m["type"] == "http.response.start")
+    return dict((k.decode(), v.decode()) for k, v in start["headers"])[
+        "www-authenticate"
+    ]
+
+
+@pytest.fixture
 def captured(mcp_server, monkeypatch):
     """Replace handle_request with a recorder of the in-request context."""
     seen = {}
@@ -88,6 +125,27 @@ def captured(mcp_server, monkeypatch):
 
     monkeypatch.setattr(mcp_server.session_manager, "handle_request", _recorder)
     return seen
+
+
+class TestAnonymousOptOut:
+    """``MCP_ALLOW_ANONYMOUS`` is the rollback lever, so it fails closed."""
+
+    def test_unset_means_authentication_required(self, monkeypatch):
+        monkeypatch.delenv("MCP_ALLOW_ANONYMOUS", raising=False)
+        assert _anonymous_access_enabled() is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " on "])
+    def test_explicit_truthy_values_reopen(self, monkeypatch, value):
+        monkeypatch.setenv("MCP_ALLOW_ANONYMOUS", value)
+        assert _anonymous_access_enabled() is True
+
+    @pytest.mark.security
+    @pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "maybe", "ture"])
+    def test_everything_else_stays_closed(self, monkeypatch, value):
+        """Including the near-misses: an operator who meant to reopen the plane
+        and typo'd it gets a closed one, which is the recoverable direction."""
+        monkeypatch.setenv("MCP_ALLOW_ANONYMOUS", value)
+        assert _anonymous_access_enabled() is False
 
 
 class TestBearerHelper:
@@ -141,7 +199,21 @@ class TestMiddleware:
         assert json.loads(send.body)["error"] == "invalid_token"
         assert current_user_identity.get() is None
 
-    async def test_no_bearer_is_anonymous(self, mcp_server, captured, monkeypatch):
+    @pytest.mark.security
+    async def test_no_bearer_is_refused(self, mcp_server, captured, monkeypatch):
+        """The default: no credential, no tools — not even the read-only ones."""
+        monkeypatch.setenv("MCP_QUERY_API_TOKEN", "query-only-token")
+        send = _SendRecorder()
+        await mcp_server._handle_http(_make_scope([]), _dummy_receive, send)
+
+        assert send.status == 401
+        assert json.loads(send.body)["error"] == "unauthorized"
+        # Never reached the session manager, so no catalog was computed at all.
+        assert captured == {}
+
+    async def test_no_bearer_is_anonymous_when_reopened(
+        self, mcp_server, captured, monkeypatch, allow_anonymous
+    ):
         monkeypatch.setenv("MCP_QUERY_API_TOKEN", "query-only-token")
         scope = _make_scope([])
         await mcp_server._handle_http(scope, _dummy_receive, _SendRecorder())
@@ -151,7 +223,7 @@ class TestMiddleware:
         assert captured["allowed_tools"] == ANONYMOUS_TOOL_NAMES
 
     async def test_no_bearer_hides_sql_without_query_token(
-        self, mcp_server, captured, monkeypatch
+        self, mcp_server, captured, monkeypatch, allow_anonymous
     ):
         monkeypatch.delenv("MCP_QUERY_API_TOKEN", raising=False)
 
@@ -167,7 +239,7 @@ class TestMiddleware:
 
     @pytest.mark.security
     async def test_anonymous_cannot_reach_the_document_converter(
-        self, mcp_server, captured, monkeypatch
+        self, mcp_server, captured, monkeypatch, allow_anonymous
     ):
         """convert_to_markdown needs authentication; no /api/ route gates it."""
         monkeypatch.setenv("MCP_QUERY_API_TOKEN", "query-only-token")
@@ -200,7 +272,7 @@ class TestMiddleware:
 
     @pytest.mark.security
     async def test_spoofed_mode_header_has_no_effect(
-        self, mcp_server, captured, monkeypatch
+        self, mcp_server, captured, monkeypatch, allow_anonymous
     ):
         """The doors are gone: x-mcp-mode is now just an unknown header."""
         monkeypatch.setenv("MCP_QUERY_API_TOKEN", "query-only-token")
@@ -238,7 +310,9 @@ class TestMiddleware:
         "host",
         [b"localhost", b"localhost:48000", b"127.0.0.1:48000", b"[::1]:48000"],
     )
-    async def test_local_hosts_are_allowed(self, mcp_server, monkeypatch, host):
+    async def test_local_hosts_are_allowed(
+        self, mcp_server, monkeypatch, host, verified_bearer
+    ):
         called = False
 
         async def recorder(scope, receive, send):
@@ -247,13 +321,15 @@ class TestMiddleware:
 
         monkeypatch.setattr(mcp_server.session_manager, "handle_request", recorder)
         await mcp_server._handle_http(
-            _make_scope([(b"host", host)]),
+            _make_scope([(b"host", host), *verified_bearer]),
             _dummy_receive,
             _SendRecorder(),
         )
         assert called is True
 
-    async def test_canonical_host_and_origin_are_allowed(self, monkeypatch):
+    async def test_canonical_host_and_origin_are_allowed(
+        self, monkeypatch, verified_bearer
+    ):
         monkeypatch.setenv("OIDC_RESOURCE", "https://mcp.example/mcp")
         server = JawafdehiMCPServer()
         called = False
@@ -268,6 +344,7 @@ class TestMiddleware:
                 [
                     (b"host", b"mcp.example"),
                     (b"origin", b"https://mcp.example"),
+                    *verified_bearer,
                 ]
             ),
             _dummy_receive,
@@ -418,16 +495,36 @@ class TestHeaderHelpers:
 
 
 class TestSingleDoor:
-    """One endpoint, no header-selected doors.
+    """One endpoint, no header-selected doors, and one rule behind it.
 
-    The behavioral pivot from the two-door design: an anonymous request is
-    SERVED the read-only catalog rather than challenged, so the metadata document
-    below becomes the only way a client discovers how to authenticate.
+    Every tool needs a verified bearer. The 401 an unauthenticated caller gets
+    is not just a refusal — it is the signal an MCP client needs to start its
+    OAuth flow, which is why the challenge carries the metadata URL.
     """
 
     pytestmark = pytest.mark.asyncio(loop_scope="function")
 
-    async def test_anonymous_is_served_not_challenged(self, mcp_server, captured):
+    @pytest.mark.security
+    async def test_anonymous_is_challenged(self, mcp_server, captured, monkeypatch):
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
+        send = _SendRecorder()
+        await mcp_server._handle_http(_make_scope([]), _dummy_receive, send)
+
+        assert send.status == 401
+        # Short-circuited before the session manager; nothing was served.
+        assert captured == {}
+        challenge = _challenge(send)
+        # RFC 6750 §3.1: no error code for a request that sent no credential.
+        assert "error=" not in challenge
+        assert 'realm="OAuth"' in challenge
+        expected = (
+            "https://api.jawafdehi.org/.well-known/oauth-protected-resource/mcp"
+        )
+        assert f'resource_metadata="{expected}"' in challenge
+
+    async def test_anonymous_is_served_when_reopened(
+        self, mcp_server, captured, allow_anonymous
+    ):
         send = _SendRecorder()
         await mcp_server._handle_http(_make_scope([]), _dummy_receive, send)
         # Reached the session manager instead of short-circuiting on a 401.
@@ -535,7 +632,12 @@ class TestSingleDoor:
     async def test_health_does_not_depend_on_oidc_resource(
         self, mcp_server, monkeypatch
     ):
-        """A pod serving anonymous reads is ready even with OAuth unconfigured."""
+        """OIDC_RESOURCE costs discovery, not service — so it is not readiness.
+
+        Token verification does not read it, so authenticated calls still work;
+        what breaks is the metadata document and the pointer to it in the
+        challenge. Failing the probe would take the pod down for that.
+        """
         monkeypatch.delenv("OIDC_RESOURCE", raising=False)
         mcp_server._ready = True
         send = _SendRecorder()
@@ -600,12 +702,22 @@ class TestSingleDoor:
         assert send.status == 401
         assert json.loads(send.body)["error"] == "invalid_request"
 
-    async def test_absent_authorization_is_still_anonymous(self, mcp_server, captured):
-        """The other half: no header at all is anonymous, not an error."""
+    async def test_absent_authorization_is_challenged_differently(
+        self, mcp_server, monkeypatch
+    ):
+        """The other half: no header at all is "log in", not "your header is wrong".
+
+        Both are 401. Keeping the codes apart is what lets a client tell a typo
+        in its own configuration from never having authenticated — only the
+        latter is worth sending through an OAuth flow.
+        """
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
         send = _SendRecorder()
         await mcp_server._handle_http(_make_scope([]), _dummy_receive, send)
-        assert send.status is None
-        assert captured["identity"] is None
+
+        assert send.status == 401
+        assert json.loads(send.body)["error"] == "unauthorized"
+        assert "invalid_request" not in _challenge(send)
 
     async def test_valid_token_proceeds(self, mcp_server, captured, monkeypatch):
         monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
