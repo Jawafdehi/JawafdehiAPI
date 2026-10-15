@@ -65,7 +65,18 @@ K_TRANSIENT_AT = "orders_transient_at"
 K_TRANSIENT_RETRIES = "orders_transient_retries"
 
 #: Days since the last hearing before an order document is expected on the site.
-MIN_DAYS_FOR_DOCUMENT_AVAILABILITY = 365
+#:
+#: Raised from 365 to 1095 (3 years) on evidence, not taste. Of the Special Court
+#: full texts we captured for cases decided since 2025, ~12% arrived MORE than a
+#: year after the verdict — and that is an undercount, because the old 365-day
+#: cutoff stamped a permanent failure at the one-year mark and so censored its
+#: own evidence: anything the court published later could never be captured and
+#: therefore never appeared in the measurement.
+#:
+#: This only governs the GENUINE "no such record" case. A case the portal openly
+#: admits it has not uploaded yet is handled by ``UPLOAD_PENDING`` below and is
+#: never given up on, so the exact value here matters much less than it used to.
+MIN_DAYS_FOR_DOCUMENT_AVAILABILITY = 1095
 #: How often a soft-skipped ("too recent") case is re-checked.
 TOO_RECENT_RECHECK_DAYS = 30
 #: Transient (download/network) failures tolerated before a permanent give-up.
@@ -75,6 +86,11 @@ MAX_TRANSIENT_RETRIES = 5
 VALID_RESULTS_MARKER = "फैसला / आदेश को पुर्ण पाठ"
 NO_RECORD_MARKER = "रेकर्ड भेटिएन"
 INVALID_CAPTCHA_MARKER = "Invalid CAPTCHA"
+#: The portal marks a decided case whose full text is not uploaded yet with an
+#: error.png in the document cell, carrying this as its `title`. It is NOT page
+#: text — it only exists in the attribute — which is why reading the cell's
+#: `.get_text()` makes it indistinguishable from a genuine "no record".
+UPLOAD_PENDING_MARKER = "अपलोड हुन बाँकी"
 
 #: The PHP-serialised session cookie embeds the answer as
 #: ``...s:12:"captcha_word";s:5:"hello";...``.
@@ -131,6 +147,11 @@ def order_form_data(
 #: Result-page classifications.
 DOCS = "docs"
 NO_RECORD = "no_record"
+#: Indexed and decided, but the court says the full text is not uploaded yet.
+#: Distinct from NO_RECORD because it is a POSITIVE statement that a document is
+#: owed — so it must stay re-checkable for as long as it takes, never expire into
+#: a permanent failure.
+UPLOAD_PENDING = "upload_pending"
 INVALID_CAPTCHA = "invalid_captcha"
 SERVER_ERROR = "server_error"
 NOT_RESULTS_PAGE = "not_results_page"
@@ -143,6 +164,12 @@ class OrderResult:
     status: str
     doc_urls: list[str] = field(default_factory=list)
     detail: str = ""
+    #: Set on a ``DOCS`` result when the SAME page also carries a row the court
+    #: has not uploaded yet, i.e. the capture is incomplete. Without it a
+    #: part-uploaded case is stamped captured, leaves the backlog for good, and
+    #: the outstanding judgment is never fetched — the same way a permanent
+    #: failure used to lose one.
+    upload_pending: bool = False
 
 
 def parse_order_results(html: str, *, base_url: str = HOMEPAGE_URL) -> OrderResult:
@@ -154,7 +181,14 @@ def parse_order_results(html: str, *, base_url: str = HOMEPAGE_URL) -> OrderResu
       2. missing the ``फैसला / आदेश को पुर्ण पाठ`` marker → ``not_results_page``.
       3. ``रेकर्ड भेटिएन`` → ``no_record``.
       4. else collect ``cells[9] a.download_content`` hrefs → ``docs``; an empty
-         collection is treated as ``no_record``.
+         collection is ``upload_pending`` if any row's document cell carries the
+         court's "not uploaded yet" marker, else ``no_record``.
+
+    Step 4's split is the whole point of this function being more than a link
+    scraper. Both states render as a document cell with no anchor, so collapsing
+    them (as this did until 2026-10) hands the caller a ``no_record`` for a case
+    the court has openly said it still owes us — and the caller's give-up timer
+    then discards it for good.
     """
     html = html or ""
     soup = BeautifulSoup(html, "html.parser")
@@ -181,22 +215,33 @@ def parse_order_results(html: str, *, base_url: str = HOMEPAGE_URL) -> OrderResu
 
     doc_urls: list[str] = []
     seen: set[str] = set()
+    upload_pending = False
     for row in tbody.find_all("tr"):
         cells = row.find_all("td")
         if len(cells) < 10:
             continue
-        link = cells[9].find("a", class_="download_content")
+        cell = cells[9]
+        link = cell.find("a", class_="download_content")
         href = link.get("href") if link else None
         if not href:
+            # The marker lives in an attribute, so it has to be read off the
+            # cell's markup — get_text() would drop it.
+            if UPLOAD_PENDING_MARKER in str(cell):
+                upload_pending = True
             continue
         url = urljoin(base_url, href)
         if url not in seen:
             seen.add(url)
             doc_urls.append(url)
 
-    if not doc_urls:
-        return OrderResult(NO_RECORD)
-    return OrderResult(DOCS, doc_urls=doc_urls)
+    if doc_urls:
+        # Take what is published rather than holding the whole case back — but
+        # carry the pending flag so the caller knows the capture is partial and
+        # keeps the case on the recheck cycle.
+        return OrderResult(DOCS, doc_urls=doc_urls, upload_pending=upload_pending)
+    if upload_pending:
+        return OrderResult(UPLOAD_PENDING)
+    return OrderResult(NO_RECORD)
 
 
 # ── DocumentSource shaping ───────────────────────────────────────────────────
@@ -370,7 +415,15 @@ def orders_backlog_queryset(
         .filter(case_status__contains="फैसला")  # decided
         .exclude(case_status__contains="चालु")  # not ongoing (text field — safe)
         .exclude(case_status__contains="चलिरहेको")
-        .filter(extra_data__court_orders__isnull=True)  # not already captured
+        # Not already captured — OR captured only in part, which is a case whose
+        # page still shows an un-uploaded row. A plain "court_orders IS NULL"
+        # retires a part-uploaded case the moment its first file lands, so the
+        # outstanding judgment is never collected. `too_recent_ready` below still
+        # bounds how often such a case comes back round.
+        .filter(
+            Q(extra_data__court_orders__isnull=True)
+            | Q(extra_data__orders_too_recent=True)
+        )
         .filter(not_failed)
         .filter(too_recent_ready)
         .annotate(capture_priority=_CAPTURE_PRIORITY)
