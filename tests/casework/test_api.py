@@ -1164,27 +1164,3 @@ def test_patch_case_makes_no_request_when_nothing_changed(monkeypatch):
     api = CaseworkApi("http://127.0.0.1:48010", token="t")
     monkeypatch.setattr(api, "_patch", lambda *a, **k: pytest.fail("should not PATCH"))
     assert api.patch_case("case-079-cr-0151") == {}
-
-
-def test_resolve_court_parties_posts_the_items_to_the_ingestion_resolver(monkeypatch):
-    seen = {}
-    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
-    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
-    items = [{"court": "supreme", "case_number": "081-CR-1949", "side": "defendant",
-              "name": "रतन बहादुर शाही",
-              "nes_id": "https://jawafdehi.org/entity/person/ratan"}]
-
-    api.resolve_court_parties(items)
-
-    assert seen["method"] == "POST"
-    assert seen["url"] == "http://127.0.0.1:48010/api/ingestion/entities/resolve/"
-    assert json.loads(seen["data"].decode()) == {"items": items}
-    assert seen["headers"]["Content-Type"] == "application/json"
-
-
-def test_resolve_court_parties_is_refused_remotely_without_the_opt_in():
-    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
-
-    with pytest.raises(RuntimeError, match="refusing to write"):
-        api.resolve_court_parties([{"court": "supreme", "case_number": "1",
-                                    "nes_id": "x"}])

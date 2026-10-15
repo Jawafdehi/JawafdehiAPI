@@ -1,4 +1,4 @@
-"""Each appeal stage's verdict and resolved parties, read from the court rows the stage cites."""
+"""Each appeal stage's verdict and party rows, read from the court rows the stage cites."""
 
 from __future__ import annotations
 
@@ -56,26 +56,17 @@ def resolve_appeal_verdicts(iris: Iterable[str]) -> dict[str, str | None]:
     return resolved
 
 
-def resolve_appeal_parties(iris: Iterable[str]) -> dict[str, list[str]]:
-    """``{iri: [nes_id, ...]}`` -- the entities resolved onto each docket's party rows.
-
-    Sorted and de-duplicated; an unresolved row is left out, so a docket nobody
-    has matched yet maps to an empty list.
-    """
+def load_appeal_dockets(iris: Iterable[str]) -> dict[str, list[dict]]:
+    """``{iri: [{name, side, nes_id}, ...]}`` -- every party row on each docket, in one query."""
     iris = set(iris)
-    resolved: dict[str, set[str]] = {iri: set() for iri in iris}
+    dockets: dict[str, list[dict]] = {iri: [] for iri in iris}
     wanted = _by_docket(iris)
     if wanted:
-        rows = (
-            CaseEntity.objects.filter(
-                court_id__in={court for court, _ in wanted},
-                case_number__in={number for _, number in wanted},
-            )
-            .exclude(nes_id__isnull=True)
-            .exclude(nes_id="")
-            .values_list("court_id", "case_number", "nes_id")
-        )
-        for court, number, nes_id in rows:
+        rows = CaseEntity.objects.filter(
+            court_id__in={court for court, _ in wanted},
+            case_number__in={number for _, number in wanted},
+        ).values_list("court_id", "case_number", "name", "side", "nes_id")
+        for court, number, name, side, nes_id in rows:
             for iri in wanted.get((court.lower(), number.upper()), ()):
-                resolved[iri].add(nes_id)
-    return {iri: sorted(ids) for iri, ids in resolved.items()}
+                dockets[iri].append({"name": name, "side": side, "nes_id": nes_id})
+    return dockets

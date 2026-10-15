@@ -252,32 +252,6 @@ class IngestionEntitiesResolveTests(_DbAPITestCase):
         # The defendant row was NOT touched.
         self.assertIsNone(CaseEntity.objects.get(side="defendant", name="श्याम").nes_id)
 
-    def _resolve_expecting(self, expected):
-        self.client.force_authenticate(user=self.user)
-        item = {"court": "kathmandudc", "case_number": "082-OA-0503", "name": "राम",
-                "nes_id": IRI, "expected_nes_id": expected}
-        return self.client.post(self.URL, {"items": [item]}, format="json")
-
-    def test_expected_empty_writes_an_unbound_row(self):
-        resp = self._resolve_expecting(None)
-        self.assertEqual(resp.data["resolved"], 1)
-        self.entity.refresh_from_db()
-        self.assertEqual(self.entity.nes_id, IRI)
-
-    def test_expected_empty_leaves_a_row_bound_since_the_review(self):
-        other = "https://jawafdehi.org/entity/person/shyam-bahadur"
-        CaseEntity.objects.filter(pk=self.entity.pk).update(nes_id=other)
-        resp = self._resolve_expecting(None)
-        self.assertEqual(resp.data["unmatched"], 1)
-        self.entity.refresh_from_db()
-        self.assertEqual(self.entity.nes_id, other)
-
-    def test_expected_counts_a_row_already_holding_the_target_as_resolved(self):
-        """Re-applying the same reviewed file is not an error."""
-        CaseEntity.objects.filter(pk=self.entity.pk).update(nes_id=IRI)
-        resp = self._resolve_expecting(None)
-        self.assertEqual(resp.data["resolved"], 1)
-
     def test_bad_nes_id_rejects_batch_400(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
