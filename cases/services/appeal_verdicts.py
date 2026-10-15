@@ -62,11 +62,21 @@ def load_appeal_dockets(iris: Iterable[str]) -> dict[str, list[dict]]:
     dockets: dict[str, list[dict]] = {iri: [] for iri in iris}
     wanted = _by_docket(iris)
     if wanted:
+        courts = {court for court, _ in wanted}
+        numbers = {number for _, number in wanted}
+        # Same rule as resolve_appeal_verdicts: a deleted docket names nobody.
+        deleted = {
+            (court.lower(), number.upper())
+            for court, number in CourtCase.objects.filter(
+                court_id__in=courts, case_number__in=numbers, is_deleted=True
+            ).values_list("court_id", "case_number")
+        }
         rows = CaseEntity.objects.filter(
-            court_id__in={court for court, _ in wanted},
-            case_number__in={number for _, number in wanted},
+            court_id__in=courts, case_number__in=numbers
         ).values_list("court_id", "case_number", "name", "side", "nes_id")
         for court, number, name, side, nes_id in rows:
+            if (court.lower(), number.upper()) in deleted:
+                continue
             for iri in wanted.get((court.lower(), number.upper()), ()):
                 dockets[iri].append({"name": name, "side": side, "nes_id": nes_id})
     return dockets

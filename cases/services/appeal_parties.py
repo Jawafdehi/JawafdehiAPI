@@ -35,8 +35,8 @@ _CHANDRABINDU = dict.fromkeys(map(ord, "\u0901"))
 #: title, are not part of the name.
 _GROUP_SUFFIX = re.compile(r"(समेत\s*[०-९0-9]*|[०-९0-9]+\s*जना)\s*$")
 _HONORIFIC = re.compile(r"^\s*डा\s*\.\s*")
-#: गुरुङ and गुरुङ्ग, तामाङ and तामाङ्ग are one surname.
-_FINAL_NGA = re.compile(r"ङ्ग(?![\u0900-\u097f])")
+#: गुरुङ, गुरुङ्ग and गुरुंग, तामाङ, तामाङ्ग and तामांग are one surname.
+_FINAL_NGA = re.compile(r"(?:ङ्ग|ंग)(?![\u0900-\u097f])")
 _NASAL_CONJUNCT = re.compile(r"[ङञणनम]्(?=[क-ह])")
 _STRAY_HALANT = re.compile(r"(?<![क-ह])्")
 _NOT_A_LETTER = re.compile(r"[^ऀ-ॿA-Za-z0-9]")
@@ -107,7 +107,7 @@ class Pairing:
     score: float = 0.0
 
 
-def pair_accused(accused: list[dict], parties: list[dict]) -> list[Pairing]:
+def pair_accused(accused: list[dict], parties_in: list[dict]) -> list[Pairing]:
     """One `Pairing` per accused, in roster order; each party is used at most once.
 
     Exact first: an accused and a party pair exactly only when each is the
@@ -115,9 +115,17 @@ def pair_accused(accused: list[dict], parties: list[dict]) -> list[Pairing]:
     Then near, best score first, dropping any pair with a rival within
     `RIVAL_MARGIN` on either side.
     """
-    parties = [p for p in parties if _GOVERNMENT not in (p.get("name") or "")]
+    # A name listed twice on one docket (duplicate scrape rows) is one person,
+    # not two rivals for the same accused.
+    parties, p_keys, seen = [], [], set()
+    for party in parties_in:
+        keys = frozenset(_party_keys(party))
+        if _GOVERNMENT in (party.get("name") or "") or keys in seen:
+            continue
+        seen.add(keys)
+        parties.append(party)
+        p_keys.append(set(keys))
     a_keys = [_accused_keys(b) for b in accused]
-    p_keys = [_party_keys(p) for p in parties]
     pairs = [Pairing(b.get("nes_id") or "", b.get("display_name") or "") for b in accused]
     used: set[int] = set()
 
@@ -134,7 +142,9 @@ def pair_accused(accused: list[dict], parties: list[dict]) -> list[Pairing]:
     open_p = [pi for pi in range(len(parties)) if pi not in used]
     scores = {(ai, pi): _similarity(a_keys[ai], p_keys[pi]) for ai in open_a for pi in open_p}
     for (ai, pi), score in sorted(scores.items(), key=lambda kv: -kv[1]):
-        if score < MIN_NEAR_SCORE or pairs[ai].tier is not None or pi in used:
+        if score < MIN_NEAR_SCORE:
+            break  # sorted best first: nothing below can pair
+        if pairs[ai].tier is not None or pi in used:
             continue
         rivals = [s for (a2, p2), s in scores.items()
                   if (a2, p2) != (ai, pi) and (a2 == ai or p2 == pi)
@@ -156,7 +166,10 @@ def parties_on_appeal(accused: list[dict], rows: list[dict]) -> list[str]:
     (``name``, ``side``, ``nes_id``).
     """
     linked = {row["nes_id"] for row in rows if row.get("nes_id")}
-    open_accused = [bind for bind in accused if bind.get("nes_id") not in linked]
+    # One entity bound twice to the case is one accused, not a namesake.
+    unique = {bind.get("nes_id"): bind for bind in reversed(accused)}
+    open_accused = [bind for bind in accused
+                    if unique.get(bind.get("nes_id")) is bind and bind.get("nes_id") not in linked]
     open_rows = [row for row in rows if not row.get("nes_id")]
     paired = {pair.nes_id for pair in pair_accused(open_accused, open_rows) if pair.party}
     return sorted(linked | paired)

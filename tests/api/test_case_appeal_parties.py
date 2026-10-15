@@ -179,3 +179,15 @@ def test_matching_adds_no_entity_query_per_card():
         assert client.get("/api/cases/").status_code == 200
 
     assert len(five_cards) <= len(one_card)
+
+
+@pytest.mark.django_db
+def test_a_deleted_appeal_docket_lists_nobody():
+    """Its verdict is already hidden (resolve_appeal_verdicts skips deleted rows)."""
+    from courts.models import CourtCase
+
+    CourtCase.objects.create(case_number="076-CR-1565", court=_court("supreme"), is_deleted=True)
+    _party("supreme", "076-CR-1565", "रतन बहादुर शाही", RATAN)
+    _appealed_case()
+
+    assert _detail()["appeal_parties"] == {SUPREME: []}

@@ -44,6 +44,8 @@ GOVERNMENT = _party("अख्तियार दुरुपयोग अनु
         ("कमलबहादुर बस्नेत", "कमल वहादुर वस्नेत"),  # ब/व, the commonest swap in these rows
         ("वेदनिधी बराल", "बेदनिधि बराल"),
         ("ममिता गुरुङ्ग", "ममिता गुरुङ"),  # word-final ङ्ग / ङ
+        ("ममिता गुरुंग", "ममिता गुरुङ"),  # word-final ंग / ङ (64 Supreme Court rows)
+        ("दावा तामाङ्ग", "दावा तामांग"),
         ("लखनलाल साह", "डा.लखनलाल साह"),  # honorific
         ("हिमलाल ज्ञवाली  १७ जना", "हिमलाल ज्ञवाली"),  # a docket row standing for a group
         ("अनन्तराज सत्याल", "अनन्तराज सत्याल समेत ६४"),
@@ -203,3 +205,26 @@ def test_an_accused_linked_by_hand_does_not_take_another_accuseds_row():
     rows = [_party("सीता भट्टराई", nes_id=sita["nes_id"]), _party("सिता भट्टराई")]
 
     assert parties_on_appeal([sita, sita_b], rows) == sorted([sita["nes_id"], sita_b["nes_id"]])
+
+
+def test_a_name_listed_twice_on_the_docket_still_pairs():
+    """Duplicate scrape rows (8 Supreme Court dockets) are one person, not rivals."""
+    ratan = _bind("रतन बहादुर शाही")
+
+    assert parties_on_appeal([ratan], [_party("रतन बहादुर शाही"), _party("रतनबहादुर शाही")]) == [
+        ratan["nes_id"]
+    ]
+
+
+def test_a_near_name_listed_twice_on_the_docket_still_pairs():
+    buddhi = _bind("बुद्दिराज भट्ट")
+
+    assert parties_on_appeal([buddhi], [_party("बुद्धिराज भट्ट"), _party("बुद्धिराज भट्ट")]) == [
+        buddhi["nes_id"]
+    ]
+
+
+def test_an_accused_bound_twice_still_pairs():
+    ratan = _bind("रतन बहादुर शाही")
+
+    assert parties_on_appeal([ratan, dict(ratan)], [_party("रतन बहादुर शाही")]) == [ratan["nes_id"]]
