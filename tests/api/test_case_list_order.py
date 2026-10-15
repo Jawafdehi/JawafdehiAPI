@@ -21,11 +21,11 @@ def _ordering(params=""):
 
 
 @pytest.mark.django_db
-def test_the_list_breaks_created_at_ties_by_primary_key():
-    assert _ordering()[-1] in ("-pk", "-id")
+def test_the_list_is_newest_first_with_ties_broken_by_primary_key():
+    assert _ordering() == ["-created_at", "-pk"]
 
 
 @pytest.mark.django_db
 def test_the_entity_filtered_list_breaks_ties_by_primary_key():
     order = _ordering("?entity=https://jawafdehi.org/entity/person/ram-bahadur-thapa")
-    assert order[-1] in ("-pk", "-id")
+    assert order == ["-_accused_first", "-created_at", "-pk"]
