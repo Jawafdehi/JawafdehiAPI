@@ -6,6 +6,8 @@ import pytest
 
 from jawafdehi_mcp.identity import (
     ANONYMOUS_TOOL_NAMES,
+    CASEWORKER_ROLE_KEYS,
+    CASEWORKER_TOOL_NAMES,
     current_user_identity,
     get_allowed_tool_names,
 )
@@ -69,23 +71,99 @@ class TestGetAllowedToolNames:
         result = get_allowed_tool_names(None, all_names)
         assert result == ANONYMOUS_TOOL_NAMES
 
-    def test_authenticated_identity_returns_all(self):
+    @pytest.mark.parametrize("role", ["caseworker", "moderator", "contributor"])
+    def test_each_content_role_key_returns_all(self, role):
+        """All three keys map to Caseworker in Django; all three must here too."""
+        all_names = set(TOOL_MAP.keys())
+        identity = {"user_id": 1, "username": "test", "roles": [role]}
+        assert get_allowed_tool_names(identity, all_names) == all_names
+
+    def test_content_role_is_matched_case_insensitively(self):
         all_names = set(TOOL_MAP.keys())
         identity = {"user_id": 1, "username": "test", "roles": ["Contributor"]}
-        result = get_allowed_tool_names(identity, all_names)
-        assert result == all_names
+        assert get_allowed_tool_names(identity, all_names) == all_names
 
-    def test_authenticated_identity_with_empty_roles_returns_all(self):
+    def test_authenticated_identity_with_empty_roles_loses_write_tools(self):
         all_names = set(TOOL_MAP.keys())
         identity = {"user_id": 2, "username": "public", "roles": []}
         result = get_allowed_tool_names(identity, all_names)
-        assert result == all_names
+        assert result == all_names - CASEWORKER_TOOL_NAMES
+        assert "create_jawafdehi_case" not in result
+        # Still strictly more than an anonymous caller gets — reads are not
+        # role-gated, only writes are.
+        assert ANONYMOUS_TOOL_NAMES <= result
 
-    def test_authenticated_identity_without_roles_key_returns_all(self):
+    def test_authenticated_identity_without_roles_key_loses_write_tools(self):
         all_names = set(TOOL_MAP.keys())
         identity = {"user_id": 3, "username": "noroles"}
-        result = get_allowed_tool_names(identity, all_names)
-        assert result == all_names
+        assert get_allowed_tool_names(identity, all_names) == (
+            all_names - CASEWORKER_TOOL_NAMES
+        )
+
+    def test_readonly_role_does_not_confer_writes(self):
+        all_names = set(TOOL_MAP.keys())
+        identity = {"user_id": 4, "username": "ro", "roles": ["readonly"]}
+        assert get_allowed_tool_names(identity, all_names) == (
+            all_names - CASEWORKER_TOOL_NAMES
+        )
+
+    @pytest.mark.security
+    @pytest.mark.parametrize(
+        "roles",
+        [
+            "caseworker",  # a bare string, not a list
+            None,
+            {"caseworker": True},  # the un-flattened Zitadel claim shape
+            ["case worker"],
+            [None, 7],
+        ],
+    )
+    def test_malformed_roles_claim_denies_rather_than_grants(self, roles):
+        """A roles value we do not understand must not read as the role.
+
+        The Zitadel claim arrives as a dict and is flattened to a list upstream
+        (``oidc.py``); if that ever regresses, the mistake has to cost write
+        access rather than hand it out.
+        """
+        all_names = set(TOOL_MAP.keys())
+        identity = {"user_id": 5, "username": "odd", "roles": roles}
+        assert get_allowed_tool_names(identity, all_names) == (
+            all_names - CASEWORKER_TOOL_NAMES
+        )
+
+    def test_result_never_aliases_the_catalog(self):
+        """Callers mutate the returned set; it must not be the module's own."""
+        all_names = set(TOOL_MAP.keys())
+        before = set(all_names)
+        for identity in ({"roles": ["caseworker"]}, {"roles": []}, None):
+            returned = get_allowed_tool_names(identity, all_names)
+            returned.discard("convert_date")
+        assert all_names == before
+
+
+class TestCaseworkerToolSet:
+    def test_every_name_is_a_real_tool(self):
+        assert CASEWORKER_TOOL_NAMES <= ALL_TOOL_NAMES
+
+    def test_disjoint_from_the_anonymous_catalog(self):
+        """A write tool must never have been reachable without a bearer."""
+        assert CASEWORKER_TOOL_NAMES.isdisjoint(ANONYMOUS_TOOL_NAMES)
+
+    def test_role_keys_match_the_django_group_map(self):
+        """Pin the keys against the map the REST API actually enforces.
+
+        These are role KEYS from Zitadel (lowercase), not Django Group names.
+        Matching on "Caseworker" would match nobody and silently strip the write
+        tools from every user, which is why this is asserted rather than trusted.
+        """
+        from jawafdehi_shared.auth.oidc import DEFAULT_ROLE_TO_GROUP
+
+        keys_for_caseworker = {
+            key
+            for key, group in DEFAULT_ROLE_TO_GROUP.items()
+            if group == "Caseworker"
+        }
+        assert CASEWORKER_ROLE_KEYS == keys_for_caseworker
 
 
 class TestAllowedTools:
@@ -142,14 +220,23 @@ class TestAllowedTools:
         finally:
             current_user_identity.set(None)
 
-    def test_roleless_authenticated_identity_returns_all(self, monkeypatch):
-        """A verified identity does not need a role to receive all tools."""
+    def test_roleless_authenticated_identity_gets_the_read_catalog(self, monkeypatch):
+        """A verified identity receives every tool EXCEPT the writes."""
         monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "test-token")
         identity = {"user_id": 2, "username": "public", "roles": []}
         current_user_identity.set(identity)
         try:
-            tools = _get_allowed_tools()
-            assert len(tools) == len(TOOL_MAP)
+            tool_names = {tool.name for tool in _get_allowed_tools()}
+            assert tool_names == ALL_TOOL_NAMES - CASEWORKER_TOOL_NAMES
+        finally:
+            current_user_identity.set(None)
+
+    def test_caseworker_identity_returns_all(self, monkeypatch):
+        monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "test-token")
+        identity = {"user_id": 3, "username": "cw", "roles": ["caseworker"]}
+        current_user_identity.set(identity)
+        try:
+            assert len(_get_allowed_tools()) == len(TOOL_MAP)
         finally:
             current_user_identity.set(None)
 
@@ -177,6 +264,44 @@ class TestCallToolEnforcesTheCatalog:
         try:
             with pytest.raises(ValueError, match=tool_name):
                 await call_tool(tool_name, {})
+        finally:
+            current_user_identity.reset(token)
+
+    @pytest.mark.security
+    @pytest.mark.parametrize(
+        "tool_name", ["create_jawafdehi_case", "upload_material_file", "manage_jobs"]
+    )
+    async def test_roleless_user_invocation_is_refused(self, monkeypatch, tool_name):
+        """Hiding a tool from the list is not a gate; the dispatcher must refuse.
+
+        A client holding a cached catalog from before a role change — or one
+        simply naming a tool it was never offered — reaches ``call_tool``
+        directly.
+        """
+        monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
+        token = current_user_identity.set(
+            {"sub": "u1", "email": "ro@x.org", "roles": ["readonly"]}
+        )
+        try:
+            with pytest.raises(ValueError, match="Caseworker role"):
+                await call_tool(tool_name, {})
+        finally:
+            current_user_identity.reset(token)
+
+    async def test_caseworker_passes_the_gate(self, monkeypatch):
+        """The content role is not refused.
+
+        Asserted on the predicate rather than through ``call_tool``: the
+        dispatcher would go on to execute the tool for real. The direction that
+        must be proven end to end is the refusal, above — a gate that fails open
+        is the dangerous one.
+        """
+        monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
+        token = current_user_identity.set(
+            {"sub": "u2", "email": "cw@x.org", "roles": ["caseworker"]}
+        )
+        try:
+            assert _is_tool_allowed("create_jawafdehi_case") is True
         finally:
             current_user_identity.reset(token)
 
@@ -235,12 +360,19 @@ class TestIsToolAllowed:
         finally:
             current_user_identity.set(None)
 
-    def test_write_tool_allowed_for_roleless_authenticated_identity(self, monkeypatch):
+    def test_write_tool_refused_for_roleless_authenticated_identity(self, monkeypatch):
+        """Note the env token present: a USER identity does not fall back to it.
+
+        ``_get_runtime_allowed_tool_names`` only consults the service token when
+        there is no identity at all, so signing in with no role is narrower than
+        signing in with none — which is the intended shape, not an oversight.
+        """
         monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "test-token")
         identity = {"user_id": 2, "username": "pub", "roles": []}
         current_user_identity.set(identity)
         try:
-            assert _is_tool_allowed("create_jawafdehi_case") is True
+            assert _is_tool_allowed("create_jawafdehi_case") is False
+            assert _is_tool_allowed("search_jawafdehi_cases") is True
         finally:
             current_user_identity.set(None)
 

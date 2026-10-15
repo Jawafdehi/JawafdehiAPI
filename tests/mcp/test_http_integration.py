@@ -107,7 +107,7 @@ class TestMiddleware:
     async def test_valid_bearer_sets_identity_and_full_catalog(
         self, mcp_server, captured, monkeypatch
     ):
-        identity = {"sub": "u1", "email": "a@x.org", "roles": []}
+        identity = {"sub": "u1", "email": "a@x.org", "roles": ["caseworker"]}
 
         async def _resolve(token):
             assert token == "good-token"
