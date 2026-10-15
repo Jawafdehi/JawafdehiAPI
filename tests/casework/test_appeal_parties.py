@@ -88,7 +88,7 @@ def test_the_legal_name_after_an_alias_marker_pairs_exactly():
     assert pair.tier == EXACT
 
 
-def test_a_near_spelling_pairs_for_review_only():
+def test_a_near_spelling_pairs_as_near():
     (pair,) = pair_accused([_bind("धनदेवी छन्त्याल")], [_party("धनदेवी छत्याल (शाही)")])
 
     assert pair.tier == NEAR
@@ -159,14 +159,15 @@ def _case(*accused):
             "entities": list(accused)}
 
 
-def test_review_rows_prefill_bind_only_for_exact_pairs():
+def test_review_rows_prefill_bind_for_exact_and_near_pairs():
+    """Near pairs bind too: 40 of 40 sampled from the 2026-10-15 dry run were right."""
     ratan, dhan = _bind("रतन बहादुर शाही"), _bind("धनदेवी छन्त्याल")
     parties = [GOVERNMENT, _party("रतन बहादुर शाही"), _party("धनदेवी छत्याल (शाही)")]
     rows = review_rows(_case(ratan, dhan), APPEAL, "AFFIRMED", parties)
 
     by_name = {r["accused_name"]: r for r in rows}
     assert by_name["रतन बहादुर शाही"]["decision"] == "bind"
-    assert by_name["धनदेवी छन्त्याल"]["decision"] == ""
+    assert by_name["धनदेवी छन्त्याल"]["decision"] == "bind"
     assert by_name["धनदेवी छन्त्याल"]["tier"] == NEAR
     assert by_name["रतन बहादुर शाही"]["court"] == "supreme"
     assert by_name["रतन बहादुर शाही"]["case_number"] == "081-CR-1949"

@@ -7,8 +7,8 @@ accused who were on that appeal and nobody else.
 
 Two steps, never one:
 
-1. Dry run (the default) writes a review CSV. Exact pairs are pre-marked
-   ``bind``; near pairs and leftover parties are left blank for a human.
+1. Dry run (the default) writes a review CSV. Exact and near pairs are
+   pre-marked ``bind``; leftover parties are left blank.
 2. ``--apply --from-csv`` writes ONLY the rows marked ``bind``, as ``nes_id`` on
    the court party row (``POST /ingestion/entities/resolve/``). It re-matches
    nothing.
@@ -37,7 +37,7 @@ from casework.court_record import court_ref, split_alias
 EXACT = "exact"
 NEAR = "near"
 
-#: Below this a near pair is not offered for review at all.
+#: Below this a near pair is not made at all.
 MIN_NEAR_SCORE = 0.85
 #: A near pair is dropped when a rival comes within this of it.
 RIVAL_MARGIN = 0.05
@@ -69,7 +69,7 @@ def name_key(name: str) -> str:
 
     Folds spaces, punctuation, zero-width joiners, a doctor's title, a group
     suffix, vowel length, ब/व, the nasal forms and chandrabindu. No other
-    consonant: साह and शाह stay apart, as do कमल and कमला -- those go to review
+    consonant: साह and शाह stay apart, as do कमल and कमला -- those pair
     as near pairs.
     """
     text = unicodedata.normalize("NFC", name or "").translate(_ZERO_WIDTH)
@@ -167,7 +167,7 @@ def _decision(pair: Pairing) -> str:
         return "already"
     if party_id:
         return "conflict"
-    return "bind" if pair.tier == EXACT else ""
+    return "bind"
 
 
 def review_rows(case: dict, appeal_iri: str, verdict: str | None,
