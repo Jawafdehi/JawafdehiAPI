@@ -265,7 +265,9 @@ def _mark_cross_case_conflicts(rows: list[dict]) -> None:
 def build_review(api, slugs: list[str]) -> list[dict]:
     """Every case's appeal dockets, paired. Read-only.
 
-    Each slug is reviewed once even when the case list returns it twice.
+    Each slug is reviewed once even when the case list returns it twice. An
+    appealed case is re-read in detail: the list sends `name: {}`, and only the
+    detail carries the Nepali name of an accused shown in English.
     """
     cases = [api.get_case(slug) for slug in slugs] if slugs else api.iter_cases()
     rows: list[dict] = []
@@ -276,6 +278,10 @@ def build_review(api, slugs: list[str]) -> list[dict]:
         seen.add(case.get("slug") or "")
         if not any(e.get("type") == "accused" for e in case.get("entities") or []):
             continue
+        if not _appeal_stages(case):
+            continue
+        if not slugs:
+            case = api.get_case(case["slug"])
         verdicts = case.get("appeal_verdicts") or {}
         for iri in _appeal_stages(case):
             ref = court_ref(iri)

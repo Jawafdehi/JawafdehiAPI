@@ -269,11 +269,15 @@ def test_apply_sends_one_item_when_two_rows_bind_the_same_party_to_the_same_enti
 # --- walking the cases -------------------------------------------------------------
 
 class _ListingApi:
-    def __init__(self, cases, parties):
+    def __init__(self, cases, parties, details=None):
         self.cases, self.parties, self.party_reads = cases, parties, []
+        self.details = details or {}
 
     def iter_cases(self):
         yield from self.cases
+
+    def get_case(self, slug):
+        return self.details.get(slug) or next(c for c in self.cases if c["slug"] == slug)
 
     def get_court_case_entities(self, court, number):
         self.party_reads.append((court, number))
@@ -313,3 +317,22 @@ def test_two_cases_binding_one_party_row_to_the_same_entity_both_stay_bind():
                       {("supreme", "081-CR-1949"): [_party("रतन बहादुर शाही")]})
 
     assert [r["decision"] for r in build_review(api, [])] == ["bind", "bind"]
+
+
+def test_the_nepali_name_is_read_from_the_case_detail():
+    """The case LIST sends `name: {}`; only the detail carries `name.ne`, so a
+    person shown as "Ratan Bahadur Shahi" pairs only once the detail is read."""
+    listed = {**_bind("Ratan Bahadur Shahi", "ratan-bahadur-shahi"), "name": {}}
+    detailed = {**listed, "name": {"en": "Ratan Bahadur Shahi", "ne": "रतन बहादुर शाही"}}
+    api = _ListingApi([_appealed("s", listed)],
+                      {("supreme", "081-CR-1949"): [_party("रतन बहादुर शाही")]},
+                      details={"s": _appealed("s", detailed)})
+
+    assert [r["decision"] for r in build_review(api, [])] == ["bind"]
+
+
+def test_a_case_with_no_appeal_is_not_read_in_detail():
+    api = _ListingApi([{"slug": "s", "state": "PUBLISHED", "entities": [_bind("राम")]}], {})
+    api.get_case = lambda slug: pytest.fail("read a case with no appeal")
+
+    assert build_review(api, []) == []
