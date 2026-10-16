@@ -1,0 +1,264 @@
+"""Extract a batch of materials' documents into pages, tables and figures.
+
+The batch half of the pipeline. ``ingest_document_content`` loads a corpus
+somebody else extracted; this opens the documents we hold.
+
+    # what WOULD be extracted, and why each candidate was picked or skipped
+    uv run python manage.py extract_document_content --source ciaa_annual_report --dry-run
+
+    # queue them for the worker (the normal path)
+    uv run python manage.py extract_document_content --source ciaa_annual_report --limit 20
+
+    # extract here, in this process, writing as each document finishes
+    uv run python manage.py extract_document_content --iri <iri> --inline
+
+    # the chart worklist: render every candidate page for a vision read
+    uv run python manage.py extract_document_content --iri <iri> --inline \
+        --render-charts work/2026-10-16-charts/
+
+**Queue by default, not inline.** Measured on the FY2081/82 CIAA annual report
+(17.7 MB, 446 pages): 160 s and 433 MiB peak RSS for one document. A source with
+a thousand of those is a two-day run that a disconnected terminal kills halfway
+through, where the queue gives each document its own lease, retry and record.
+``--inline`` exists for one document, for a fixture, and for a cluster Job that
+deliberately wants no worker in the loop.
+
+**Nothing here is reindexed.** Stored content does not feed the search index —
+the indexer reads ``data["text"]``, which ``material_convert`` writes — so an
+extraction changes what ``…/content`` serves and nothing a search can see. The
+two pipelines are independent on purpose; do not "fix" one by running the other.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from django.core.management.base import BaseCommand, CommandError
+
+from ...document_content import store_document_content
+from ...extract import (
+    DocumentFetchError,
+    document_urls,
+    enqueue_material_extract,
+    fetch_document,
+)
+from ...models import DocumentContent, Material
+
+#: How many rows to look at when hunting for candidates. A source filter plus a
+#: limit is the normal case and stops long before this; the cap is here so an
+#: unfiltered run over 346k materials cannot sit in a loop reading JSONB for an
+#: hour before printing anything.
+SCAN_CEILING = 20_000
+
+
+class Command(BaseCommand):
+    help = "Extract (or queue extraction of) document content for a set of materials."
+
+    def add_arguments(self, parser) -> None:
+        parser.add_argument(
+            "--source",
+            action="append",
+            default=[],
+            help="restrict to this material source token; repeatable",
+        )
+        parser.add_argument(
+            "--iri",
+            action="append",
+            default=[],
+            help="extract exactly this material IRI; repeatable",
+        )
+        parser.add_argument(
+            "--limit",
+            type=int,
+            default=50,
+            help="at most this many documents (default 50)",
+        )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help=(
+                "re-extract documents we already hold content for (the default "
+                "is to leave them alone)"
+            ),
+        )
+        parser.add_argument(
+            "--inline",
+            action="store_true",
+            help="extract in THIS process instead of queueing for the worker",
+        )
+        parser.add_argument(
+            "--render-charts",
+            help=(
+                "with --inline: write a PNG per chart-candidate page plus a "
+                "manifest under this directory, for a vision read"
+            ),
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="resolve and report candidates, change nothing",
+        )
+
+    def handle(self, *args, **options) -> None:
+        if options["render_charts"] and not options["inline"]:
+            # Rendering needs the document's bytes in hand, which only the
+            # inline path has. Queueing with --render-charts would silently
+            # render nothing and report success.
+            raise CommandError("--render-charts only applies with --inline.")
+        if options["limit"] < 1:
+            raise CommandError("--limit must be at least 1.")
+
+        candidates, skipped = self._candidates(options)
+        for note in skipped:
+            self.stdout.write(self.style.WARNING(f"  skipped {note}"))
+        if not candidates:
+            self.stdout.write(self.style.WARNING("no candidates matched."))
+            return
+
+        if options["dry_run"]:
+            for iri, urls in candidates:
+                self.stdout.write(f"  would extract {iri} from {urls[0]}")
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"dry run OK — {len(candidates)} document(s) would be extracted"
+                )
+            )
+            return
+
+        if options["inline"]:
+            self._run_inline(candidates, options)
+        else:
+            self._enqueue(candidates, options)
+
+    # ── selection ────────────────────────────────────────────────────────────
+
+    def _candidates(self, options: dict) -> tuple[list[tuple[str, list[str]]], list[str]]:
+        """``[(iri, source_urls)]`` plus a note per material that cannot be done.
+
+        A material is a candidate when it is live, carries a document this
+        pipeline can open, and (unless ``--force``) has no stored content yet.
+        Everything else is REPORTED rather than silently dropped: "this source
+        has no extractable documents" and "this source is already done" look
+        identical from an empty run, and they call for opposite next steps.
+        """
+        rows = Material.objects.using("ngm").filter(is_deleted=False)
+        if options["iri"]:
+            rows = rows.filter(pk__in=options["iri"])
+        if options["source"]:
+            rows = rows.filter(source__in=options["source"])
+        if not options["force"]:
+            rows = rows.exclude(
+                pk__in=DocumentContent.objects.using("ngm").values("material_id")
+            )
+        rows = rows.order_by("pk").only("iri", "data")
+
+        wanted = set(options["iri"])
+        found: list[tuple[str, list[str]]] = []
+        skipped: list[str] = []
+        seen = 0
+        for row in rows.iterator(chunk_size=200):
+            seen += 1
+            if seen > SCAN_CEILING:
+                skipped.append(
+                    f"stopped after scanning {SCAN_CEILING} materials; narrow with "
+                    "--source or raise the ceiling"
+                )
+                break
+            urls = document_urls(row.data or {})
+            if not urls:
+                # Only worth a line when the caller named this exact document.
+                # Over a whole source it is the common case (most materials are a
+                # scraped page, not a PDF) and would bury the real output.
+                if row.pk in wanted:
+                    skipped.append(f"{row.pk}: carries no extractable document")
+                continue
+            found.append((row.pk, urls))
+            if len(found) >= options["limit"]:
+                break
+
+        for iri in sorted(wanted - {iri for iri, _urls in found}):
+            if not any(note.startswith(f"{iri}:") for note in skipped):
+                # Named but absent from the queryset: gone, soft-deleted, or
+                # already extracted and --force was not passed.
+                skipped.append(
+                    f"{iri}: not selected — no live material, or content already "
+                    "stored (use --force to replace it)"
+                )
+        return found, skipped
+
+    # ── the two ways to run ──────────────────────────────────────────────────
+
+    def _enqueue(self, candidates, options: dict) -> None:
+        queued = 0
+        for iri, _urls in candidates:
+            job = enqueue_material_extract(iri, force=options["force"])
+            if job is None:  # pragma: no cover - only when the jobs app is absent
+                raise CommandError("the jobs app is unavailable; use --inline")
+            queued += 1
+            self.stdout.write(f"  job {job.pk} [{job.status}] {iri}")
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"queued {queued} extraction(s). Run them with: "
+                "manage.py extract_worker --apply --once"
+            )
+        )
+
+    def _run_inline(self, candidates, options: dict) -> None:
+        from ...extraction import ExtractionUnavailable, extract_pdf
+        from ...extraction.charts import write_chart_renders
+
+        render_root = Path(options["render_charts"]) if options["render_charts"] else None
+        totals = {"docs": 0, "pages": 0, "tables": 0, "figures": 0, "charts": 0}
+        failures: list[str] = []
+        for iri, urls in candidates:
+            doc_id = iri.rstrip("/").rsplit("/", 1)[-1]
+            data = None
+            for url in urls:
+                try:
+                    data = fetch_document(url)
+                    break
+                except DocumentFetchError as exc:
+                    failures.append(f"{iri}: {exc}")
+            if data is None:
+                continue
+            try:
+                bundle = extract_pdf(data, doc_id=doc_id, source_url=urls[0])
+            except ExtractionUnavailable as exc:
+                failures.append(f"{iri}: {exc}")
+                continue
+            # One transaction per document, not one per run: a long inline run
+            # that dies at document 400 should leave the first 399 extracted —
+            # each is independently complete and separately addressable, which is
+            # not true of one corpus loaded from a single dataset revision.
+            written = store_document_content(iri, bundle)
+            totals["docs"] += 1
+            for key in ("pages", "tables", "figures"):
+                totals[key] += written[key]
+            totals["charts"] += len(bundle.chart_pages)
+            self.stdout.write(
+                f"  {iri}: {written['pages']} pages, {written['tables']} tables, "
+                f"{len(bundle.chart_pages)} chart page(s) [{bundle.transcript_verdict}]"
+            )
+            if render_root is not None:
+                manifest = write_chart_renders(
+                    data,
+                    render_root / doc_id,
+                    doc_id=doc_id,
+                    pages=bundle.chart_pages,
+                )
+                self.stdout.write(
+                    f"    rendered {len(manifest['candidates'])} page(s) → "
+                    f"{render_root / doc_id}"
+                )
+
+        summary = (
+            f"extracted {totals['docs']} document(s): {totals['pages']} pages, "
+            f"{totals['tables']} tables, {totals['figures']} figures; "
+            f"{totals['charts']} chart page(s) detected and NOT read"
+        )
+        if failures:
+            self.stdout.write(self.style.WARNING(summary))
+            for note in failures:
+                self.stdout.write(self.style.WARNING(f"  failed {note}"))
+            return
+        self.stdout.write(self.style.SUCCESS(summary))
