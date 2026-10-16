@@ -19,6 +19,7 @@ from .models import (
     CaseStateChange,
     Feedback,
     FeedbackType,
+    RelationshipType,
     name_for_user,
 )
 
@@ -232,12 +233,17 @@ class CaseListSerializer(serializers.ListSerializer):
         # build_entity_binds(resolved) reads its slice via resolved.get(...).
         self.child.context["resolved_entities"] = resolve_entities(nes_ids)
 
-        from cases.services.appeal_verdicts import appeal_iris, resolve_appeal_verdicts
-
-        # Same for the appeal verdicts: one court query for the page, not one per card.
-        self.child.context["appeal_verdicts"] = resolve_appeal_verdicts(
-            iri for case in instances for iri in appeal_iris(case.dates)
+        from cases.services.appeal_verdicts import (
+            appeal_iris,
+            load_appeal_dockets,
+            resolve_appeal_verdicts,
         )
+
+        # Same for the appeal verdicts and docket party rows: one court query each
+        # for the page, not one per card.
+        page_iris = [iri for case in instances for iri in appeal_iris(case.dates)]
+        self.child.context["appeal_verdicts"] = resolve_appeal_verdicts(page_iris)
+        self.child.context["appeal_dockets"] = load_appeal_dockets(page_iris)
         return super().to_representation(instances)
 
 
@@ -314,6 +320,53 @@ class CaseSerializer(serializers.ModelSerializer):
         if resolved is None or any(iri not in resolved for iri in iris):
             resolved = resolve_appeal_verdicts(iris)
         return {iri: resolved[iri] for iri in iris}
+
+    appeal_parties = serializers.SerializerMethodField(
+        help_text="Each appeal stage's courtcase_iri mapped to the NES ids on "
+        "that docket: party rows linked by hand, plus each accused of this case "
+        "whose name pairs with a docket row. An accused listed here was a party "
+        "to that appeal."
+    )
+
+    @extend_schema_field(
+        serializers.DictField(child=serializers.ListField(child=serializers.CharField()))
+    )
+    def get_appeal_parties(self, obj):
+        from cases.services.appeal_parties import parties_on_appeal
+        from cases.services.appeal_verdicts import appeal_iris, load_appeal_dockets
+        from cases.services.nes_resolver import build_entity_binds
+
+        iris = appeal_iris(obj.dates)
+        if not iris:
+            return {}
+        dockets = self.context.get("appeal_dockets")
+        if dockets is None or any(iri not in dockets for iri in iris):
+            dockets = load_appeal_dockets(iris)
+        accused_rels = [
+            rel
+            for rel in obj.entity_relationships.all()
+            if rel.relationship_type == RelationshipType.ACCUSED and rel.nes_id
+        ]
+        # include_identity carries name.ne: an accused shown in English pairs on it.
+        accused = build_entity_binds(
+            accused_rels, self._resolved_entities(obj), include_identity=True
+        )
+        return {iri: parties_on_appeal(accused, dockets[iri]) for iri in iris}
+
+    def _resolved_entities(self, obj):
+        """The page-wide map on the list path; on detail, one lookup shared by
+        ``get_entities`` and ``get_appeal_parties``."""
+        resolved = self.context.get("resolved_entities")
+        if resolved is not None:
+            return resolved
+        cache = self.__dict__.setdefault("_resolved_by_case", {})
+        if obj.pk not in cache:
+            from cases.services.nes_resolver import resolve_entities
+
+            cache[obj.pk] = resolve_entities(
+                rel.nes_id for rel in obj.entity_relationships.all()
+            )
+        return cache[obj.pk]
 
     entities = serializers.SerializerMethodField(
         help_text="Entity binds for this case (NES entity id, relationship type, "
@@ -395,16 +448,14 @@ class CaseSerializer(serializers.ModelSerializer):
         every caller — see ``build_entity_binds``. The case-level ``notes`` field
         (``get_notes`` above) is a different, internal column and stays gated.
         """
-        from cases.services.nes_resolver import build_entity_binds, resolve_entities
+        from cases.services.nes_resolver import build_entity_binds
 
         try:
             relationships = list(obj.entity_relationships.all())
             # On the list path CaseListSerializer pre-resolves the whole page in
             # one batched call and shares the superset map here (avoids a per-case
             # N+1). The retrieve path has no such map → resolve this case's ids.
-            resolved = self.context.get("resolved_entities")
-            if resolved is None:
-                resolved = resolve_entities(rel.nes_id for rel in relationships)
+            resolved = self._resolved_entities(obj)
             return build_entity_binds(
                 relationships, resolved, include_identity=self.include_entity_identity
             )
@@ -601,6 +652,7 @@ class CaseSerializer(serializers.ModelSerializer):
             "proceedings_started_on",
             "proceedings_decided_on",
             "appeal_verdicts",
+            "appeal_parties",
             "entities",
             "tags",
             "description",

@@ -650,10 +650,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 queryset.filter(entity_relationships__nes_id=entity_param)
                 .distinct()
                 .annotate(_accused_first=accused_first)
-                .order_by("-_accused_first", "-created_at")
+                .order_by("-_accused_first", "-created_at", "-pk")
             )
 
-        return queryset.order_by("-created_at")
+        # ``-pk`` breaks created_at ties: bulk-created cases share one, and a
+        # partial ORDER BY lets Postgres reshuffle them between page requests.
+        return queryset.order_by("-created_at", "-pk")
 
     # This list is ROLE-SCOPED: an anonymous caller gets a PUBLISHED-only page,
     # but the SAME URL returns a wider DRAFT/IN_REVIEW-inclusive page to an
