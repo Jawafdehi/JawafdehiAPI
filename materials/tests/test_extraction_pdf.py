@@ -31,7 +31,12 @@ import fitz
 from materials.extraction import ExtractionUnavailable, extract_pdf
 from materials.extraction.bundle import PDF_EXTRACTOR_DATASET
 from materials.extraction.charts import page_chart_signals
-from materials.extraction.pdf import _cell_grid, _markdown_table
+from materials.extraction.pdf import (
+    _cell_grid,
+    _fidelity,
+    _markdown_table,
+    _read_document,
+)
 
 
 def _table_page(page, rows: list[list[str]], *, top: float = 140.0) -> None:
@@ -202,21 +207,74 @@ class ExtractPdfTests(TestCase):
         with self.assertRaisesRegex(ExtractionUnavailable, "password"):
             extract_pdf(data, doc_id="locked")
 
-    def test_the_likhit_seam_this_depends_on_still_exists(self):
-        # The extractor reaches into two names likhit does not export. If a bump
-        # moves them, fail HERE — with the name in the message — rather than
-        # part-way through a corpus run.
-        from likhit.extractors.font_classifier import scan_pdf_fonts  # noqa: F401
-        from likhit.extractors.kalimati import fix_kalimati_cmap  # noqa: F401
-        from likhit.extractors.tables import merge_continuation_tables  # noqa: F401
-        from likhit.nepali_pdf_repair import _extract_fragments_and_tables
-
+    def test_the_likhit_strategy_this_depends_on_still_answers(self):
+        # The extractor rests on one likhit entry point and on three fields of
+        # what it returns. A bump that moves any of them must fail HERE, with the
+        # name in the message, rather than part-way through a corpus run.
         import inspect
 
-        signature = inspect.signature(_extract_fragments_and_tables)
+        from likhit.extractors.base import ExtractionStrategy
+        from likhit.extractors.font_based import FontBasedStrategy
+
+        self.assertTrue(issubclass(FontBasedStrategy, ExtractionStrategy))
+        signature = inspect.signature(FontBasedStrategy.extract_text)
+        self.assertEqual(list(signature.parameters), ["self", "file_path", "pages"])
+
+        data = _pdf(lambda doc: doc.new_page().insert_text((72, 90), "x", fontsize=11))
+        raw = _read_document(data)
+        for field in ("fragments", "tables", "needs_ocr_pages"):
+            self.assertTrue(hasattr(raw, field), field)
+        self.assertTrue(hasattr(raw.fragments[0], "page_number"))
+
+
+class FidelityTests(TestCase):
+    """What a page's ``anchor_fidelity`` claims about the text we stored.
+
+    The vocabulary is published — a reader uses it to decide whether to trust a
+    quoted figure — so the difference between "repaired" and "suspect" is a
+    difference between "this is good" and "this is probably junk".
+    """
+
+    class _Analysis:
+        def __init__(self, suspicious: bool):
+            self.has_suspicious_text_layer = suspicious
+
+    NEPALI = "आयोगमा दर्ता भएका उजुरीको संख्या १९४८८ रहेको छ। यो विवरण तालिकामा छ।"
+    MOJIBAKE = "kl/R5]b @M dlxnf, afnaflnsf tyf;dfh sNof0f dGqfno"
+    ENGLISH = "The Auditor General is responsible to conduct the audit of all."
+
+    def test_text_that_came_out_nepali_was_read_whatever_it_took(self):
+        # The Auditor General's 56th report is Preeti throughout, so every page's
+        # RAW layer is mojibake and likhit's analysis calls all 608 suspicious —
+        # while the repaired text is clean Nepali. Judging on the input labelled
+        # 554 of its 586 readable pages "suspect", telling a reader that a correct
+        # audit finding is probably junk.
         self.assertEqual(
-            list(signature.parameters), ["doc", "font_strategies", "needs_reorder"]
+            _fidelity(self.NEPALI, self._Analysis(suspicious=True)), "repaired"
         )
+
+    def test_mojibake_in_and_mojibake_out_is_suspect(self):
+        # The 48th report is Spins-typeset, which the pinned likhit cannot read:
+        # 1.7 MB of this. Judging on the font table alone called it "tight".
+        self.assertEqual(
+            _fidelity(self.MOJIBAKE, self._Analysis(suspicious=True)), "suspect"
+        )
+
+    def test_a_clean_nepali_page_needed_no_repair(self):
+        self.assertEqual(
+            _fidelity(self.NEPALI, self._Analysis(suspicious=False)), "tight"
+        )
+
+    def test_a_genuinely_english_page_is_not_mojibake(self):
+        # The shelf carries an English-language report. 0% Devanagari is correct
+        # for it, and must not read as a failed decode.
+        self.assertEqual(
+            _fidelity(self.ENGLISH, self._Analysis(suspicious=False)), "tight"
+        )
+
+    def test_a_page_with_no_text_claims_no_fidelity_at_all(self):
+        # Empty is not "tight": there is nothing to have read well.
+        self.assertEqual(_fidelity("   ", self._Analysis(True)), "")
 
 
 class GridRenderingTests(TestCase):
