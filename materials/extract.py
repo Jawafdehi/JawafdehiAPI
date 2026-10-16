@@ -71,6 +71,15 @@ class DocumentFetchError(RuntimeError):
     """The source document could not be fetched — network, HTTP, or too large."""
 
 
+class NothingToExtract(ValueError):
+    """The job cannot run and re-running it will not change that.
+
+    Separated from a fetch failure so the worker can tell the queue which it is:
+    a mis-linked or unreadable document is not worth three attempts and a
+    dead-letter entry, where a timed-out download is.
+    """
+
+
 def document_urls(data: dict[str, Any]) -> list[str]:
     """Ordered source-document URLs for this material, best first.
 
@@ -189,70 +198,97 @@ def fetch_document(url: str, *, max_bytes: int = MAX_DOCUMENT_BYTES) -> bytes:
     return b"".join(chunks)
 
 
-def extract_and_store(
-    iri: str, *, urls: list[str], doc_id: str = "", on_stage=None
-) -> dict:
-    """Fetch, extract and store one document. Returns a result summary.
+def fetch_and_extract(iri: str, urls: list[str], *, doc_id: str = "", on_stage=None):
+    """``(source_url, bytes, bundle)`` for the first URL that yields a document.
 
-    Tries each URL in order — they are alternates of the same document (RAW, then
-    ALTERNATE, PERMALINK) — and the first that yields a readable PDF wins. Raises
-    the LAST failure when none do, rather than returning an empty success: a
-    document nobody could open must not be stored as a document with no content,
-    which a client cannot tell from a document with nothing in it.
+    The URLs are alternates of the same document (RAW, then ALTERNATE, PERMALINK)
+    and the first readable one wins. Shared by the worker and the batch command's
+    ``--inline`` mode, which both need this and only one of which needs the bytes
+    afterwards (to render chart pages).
+
+    **Which failure is raised decides how many times we pay for it.** Every URL
+    failing to *download* is :class:`DocumentFetchError` — an object store 503 or
+    a timeout is worth another attempt. Downloading fine and not being a readable
+    PDF is :class:`NothingToExtract`, which the worker reports as non-retryable:
+    a material whose RAW link is an HTML error page will not become a PDF on the
+    third try, and three attempts is three times the cost for the same answer.
+
+    Never returns empty: a document nobody could open must not be stored as a
+    document with no content, which a client cannot tell from one that is empty.
 
     The heavy imports (fitz, likhit) are function-local on purpose. This module
     is imported by the API process for :func:`enqueue_material_extract`, and that
     process must not pay for — or hold the memory of — a PDF toolchain it never
     runs.
     """
-    from .document_content import store_document_content
     from .extraction import ExtractionUnavailable, extract_pdf
 
     def stage(note: str) -> None:
         if on_stage is not None:
             on_stage(note)
 
-    problems: list[str] = []
+    fetch_problems: list[str] = []
+    read_problems: list[str] = []
     for url in urls:
         stage(f"fetch:{url[-40:]}")
         try:
             data = fetch_document(url)
         except DocumentFetchError as exc:
-            problems.append(str(exc))
+            fetch_problems.append(str(exc))
             continue
         stage(f"extract:{len(data) // 1024}KiB")
         try:
-            bundle = extract_pdf(data, doc_id=doc_id or _doc_id_for(iri), source_url=url)
+            bundle = extract_pdf(
+                data, doc_id=doc_id or _doc_id_for(iri), source_url=url
+            )
         except ExtractionUnavailable as exc:
-            problems.append(f"{url}: {exc}")
+            read_problems.append(f"{url}: {exc}")
             continue
-        stage("store")
-        written = store_document_content(iri, bundle)
-        return {
-            "material_iri": iri,
-            "source_url": url,
-            "dataset_revision": bundle.dataset_revision,
-            "page_count": bundle.page_count,
-            "transcript_verdict": bundle.transcript_verdict,
-            "figures_verdict": bundle.figures_verdict,
-            # Page numbers only — the chart worklist, not content. Kept on the
-            # job rather than in the document's rows because a chart listed with
-            # no points would read as "we read this chart and it had no data".
-            "chart_pages": bundle.chart_pages,
-            **written,
-        }
+        return url, data, bundle
+
+    if read_problems:
+        raise NothingToExtract(
+            f"{iri} has no readable document: " + "; ".join(read_problems)
+        )
     raise DocumentFetchError(
-        f"no source produced a readable document for {iri}: " + "; ".join(problems)
+        f"could not fetch any source for {iri}: " + "; ".join(fetch_problems)
     )
 
 
-class NothingToExtract(ValueError):
-    """The job cannot run and re-running it will not change that.
+def extraction_result(iri: str, source_url: str, bundle, written: dict) -> dict:
+    """What a finished extraction reports — counts and provenance, no content.
 
-    Separated from a fetch failure so the worker can tell the queue which it is:
-    a mis-linked or unreadable document is not worth three attempts and a
-    dead-letter entry, where a timed-out download is.
+    Deliberately small: this becomes ``job.result``, and a 446-page report's
+    pages are megabytes of transcript that the jobs API's 2.5 MB body limit would
+    reject outright.
     """
+    return {
+        "material_iri": iri,
+        "source_url": source_url,
+        "dataset_revision": bundle.dataset_revision,
+        "page_count": bundle.page_count,
+        "transcript_verdict": bundle.transcript_verdict,
+        "figures_verdict": bundle.figures_verdict,
+        # Page numbers only — the chart worklist, not content. Kept on the job
+        # rather than in the document's rows because a chart listed with no
+        # points would read as "we read this chart and it had no data".
+        "chart_pages": bundle.chart_pages,
+        **written,
+    }
+
+
+def extract_and_store(
+    iri: str, *, urls: list[str], doc_id: str = "", on_stage=None
+) -> dict:
+    """Fetch, extract and store one document. Returns a result summary."""
+    from .document_content import store_document_content
+
+    url, _data, bundle = fetch_and_extract(
+        iri, urls, doc_id=doc_id, on_stage=on_stage
+    )
+    if on_stage is not None:
+        on_stage("store")
+    return extraction_result(iri, url, bundle, store_document_content(iri, bundle))
 
 
 def handle_material_extract(payload: dict, *, on_stage=None) -> dict:

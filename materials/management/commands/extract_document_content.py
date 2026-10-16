@@ -38,9 +38,10 @@ from django.core.management.base import BaseCommand, CommandError
 from ...document_content import store_document_content
 from ...extract import (
     DocumentFetchError,
+    NothingToExtract,
     document_urls,
     enqueue_material_extract,
-    fetch_document,
+    fetch_and_extract,
 )
 from ...models import DocumentContent, Material
 
@@ -204,7 +205,6 @@ class Command(BaseCommand):
         )
 
     def _run_inline(self, candidates, options: dict) -> None:
-        from ...extraction import ExtractionUnavailable, extract_pdf
         from ...extraction.charts import write_chart_renders
 
         render_root = Path(options["render_charts"]) if options["render_charts"] else None
@@ -212,18 +212,14 @@ class Command(BaseCommand):
         failures: list[str] = []
         for iri, urls in candidates:
             doc_id = iri.rstrip("/").rsplit("/", 1)[-1]
-            data = None
-            for url in urls:
-                try:
-                    data = fetch_document(url)
-                    break
-                except DocumentFetchError as exc:
-                    failures.append(f"{iri}: {exc}")
-            if data is None:
-                continue
             try:
-                bundle = extract_pdf(data, doc_id=doc_id, source_url=urls[0])
-            except ExtractionUnavailable as exc:
+                # The same fetch-and-read the worker runs, so an inline
+                # extraction and a queued one cannot produce different content.
+                _url, data, bundle = fetch_and_extract(iri, urls, doc_id=doc_id)
+            except (DocumentFetchError, NothingToExtract) as exc:
+                # One document's failure is reported and the run carries on: a
+                # batch over a source routinely meets a dead link, and aborting
+                # would make the rest of the source hostage to it.
                 failures.append(f"{iri}: {exc}")
                 continue
             # One transaction per document, not one per run: a long inline run
