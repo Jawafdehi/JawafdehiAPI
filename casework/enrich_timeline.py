@@ -6,7 +6,8 @@ commit `0321a85`). Reads a case's press-release AND court-order source text
 entirely over the Jawafdehi HTTP API, asks the premium LLM tier (with a
 `convert_date` tool loop) to reconstruct the case's factual timeline, and
 writes exactly ONE field: `api.patch_field(case_slug, "timeline", entries)`
-(donor `enrich_timeline.py:358`). Never touches the database directly.
+(donor `enrich_timeline.py:358`), and in the same request adds `timeline` to
+`ai_generated_sections`. Never touches the database directly.
 
 CONCERNS / BRIEF-VS-DONOR DIFFERENCES (flagged for the dispatcher, not
 silently "fixed" -- see task-14c-report.md for the full writeup):
@@ -841,7 +842,7 @@ def main(argv=None):
             continue
 
         try:
-            api.patch_field(slug, "timeline", entries)
+            api.patch_field(slug, "timeline", entries, ai_sections=("timeline",))
             report.record(slug, "timeline", "enriched", f"{len(entries)} entries")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="write", status="enriched",

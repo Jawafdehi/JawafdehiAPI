@@ -885,6 +885,8 @@ class _StubApi:
         self._fail_detail_for = set(fail_detail_for)
         self._ngm = ngm or {}
         self.patched = []
+        # `(slug, ai_sections)` per PATCH request: what the write marked AI-generated.
+        self.ai_marked = []
 
     def iter_cases(self, params=None, timeout=60):
         yield from self._cases.values()
@@ -901,8 +903,9 @@ class _StubApi:
             return self._ngm[path]
         raise RuntimeError(f"no NGM stub configured for {path}")
 
-    def patch_field(self, slug, field, value, timeout=60):
+    def patch_field(self, slug, field, value, timeout=60, ai_sections=()):
         self.patched.append((slug, field, value))
+        self.ai_marked.append((slug, tuple(ai_sections)))
         self._cases[slug][field] = value
         return {}
 
@@ -1032,6 +1035,20 @@ def test_apply_patches_timeline_field_only(monkeypatch, patched_fetch_markdown):
     )
     fields = {field for _, field, _ in api.patched}
     assert fields == {"timeline"}
+
+
+def test_apply_marks_timeline_ai_generated_in_the_same_write(
+    monkeypatch, patched_fetch_markdown
+):
+    response = json.dumps([{"date": "2024-01-15", "title": "क"}])
+    api = _StubApi([CASE_READY_PRESS_ONLY])
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: "",
+        invoke_with_tools_stub=lambda **kw: response,
+        argv=["--apply"],
+    )
+    assert api.patched, "the case was written"
+    assert api.ai_marked == [(slug, ("timeline",)) for slug, _, _ in api.patched]
 
 
 def test_court_only_case_is_processed_via_the_court_types_bucket(

@@ -13,6 +13,7 @@ from django.db import transaction
 
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
 
+from cases.fields import AI_GENERATED_SECTIONS
 from cases.models import (
     Case,
     CaseEntityRelationship,
@@ -169,6 +170,10 @@ class CaseImporter:
                 tags=data.get("tags", []),
                 key_allegations=data.get("key_allegations", []),
                 timeline=data.get("timeline", []),
+                # scrape_case's sections are Gemini-written, so label each non-empty one.
+                ai_generated_sections=[
+                    name for name in AI_GENERATED_SECTIONS if data.get(name)
+                ],
             )
             case.save()
 

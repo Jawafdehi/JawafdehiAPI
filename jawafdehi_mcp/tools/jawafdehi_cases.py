@@ -164,6 +164,17 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
     "tags": {"type": "array", "items": {"type": "string"}},
     "key_allegations": {"type": "array", "items": {"type": "string"}},
     "timeline": {"type": "array", "items": TIMELINE_ITEM_INPUT_SCHEMA},
+    "ai_generated_sections": {
+        "type": "array",
+        "items": {
+            "type": "string",
+            "enum": ["description", "key_allegations", "timeline"],
+        },
+        "description": (
+            "Sections written by AI and not yet reviewed by a person. The public "
+            "site labels each one."
+        ),
+    },
     "evidence": {"type": "array", "items": EVIDENCE_ITEM_INPUT_SCHEMA},
     "notes": {"type": "string"},
     "public_notes": {

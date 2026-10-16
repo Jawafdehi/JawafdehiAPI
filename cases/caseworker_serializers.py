@@ -17,7 +17,12 @@ from jawafdehi_shared.entities.ids import (
     is_valid_material_iri,
 )
 
-from .fields import edit_history_date_error, parse_edit_history_date
+from .fields import (
+    AI_GENERATED_SECTIONS,
+    edit_history_date_error,
+    normalize_ai_generated_sections,
+    parse_edit_history_date,
+)
 from .image_serializers import ImageIdField
 from .stages import StageError, validate_stages
 from .models import (
@@ -357,7 +362,7 @@ class CaseEntityValidationMixin:
 
 
 class CaseWriteFieldsSerializer(serializers.Serializer):
-    """The 17 field declarations and 2 normalizers common to create and PATCH.
+    """The field declarations and normalizers common to create and PATCH.
 
     Must subclass `serializers.Serializer`: DRF collects declared fields in
     `SerializerMetaclass`, reading `_declared_fields` off each base, so fields
@@ -365,7 +370,7 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
     silently disappear from the subclasses.
 
     Field ORDER does change as a result. `_get_declared_fields` returns
-    ``dict(base_fields + fields)``, so these 17 now come first and each
+    ``dict(base_fields + fields)``, so these now come first and each
     subclass's own declarations follow:
 
         create: title…bigo, offence_type, state, alleged_entities, related_entities
@@ -418,6 +423,13 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         child=serializers.CharField(), required=False
     )
     timeline = TimelineItemSerializer(many=True, required=False)
+    # Editable in every state, PUBLISHED included: removing a label after review
+    # happens on live cases. Duplicates are folded so an enricher's
+    # ``add /ai_generated_sections/-`` op is idempotent.
+    ai_generated_sections = serializers.ListField(
+        child=serializers.ChoiceField(choices=AI_GENERATED_SECTIONS),
+        required=False,
+    )
     evidence = EvidenceItemSerializer(many=True, required=False)
     # Internal casework notes (Case.notes TextField; no max_length). Casework-only
     # — read gating stays in the read serializer's SerializerMethodField (BB-04);
@@ -484,6 +496,10 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
         return value
+
+    def validate_ai_generated_sections(self, value):
+        """De-duplicate and store in canonical section order."""
+        return normalize_ai_generated_sections(value)
 
     def validate_slug(self, value):
         """Normalize empty/whitespace slugs to None.

@@ -585,6 +585,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "key_allegations",
                     "timeline",
                     "description",
+                    "ai_generated_sections",
                     "tags",
                     "tags_source",
                     "court_cases",

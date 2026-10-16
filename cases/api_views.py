@@ -137,6 +137,7 @@ _PATCH_SCALAR_FIELDS = frozenset(
         "tags",
         "key_allegations",
         "timeline",
+        "ai_generated_sections",
         "slug",
         "missing_details",
         "bigo",
@@ -717,6 +718,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "tags",
             "key_allegations",
             "timeline",
+            "ai_generated_sections",
             "notes",
             "public_notes",
             "case_publish_date",
@@ -1673,6 +1675,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 list(case.key_allegations) if case.key_allegations else []
             ),
             "timeline": list(case.timeline) if case.timeline else [],
+            # Present even when empty, so ``add /ai_generated_sections/-`` has a
+            # list to append to.
+            "ai_generated_sections": list(case.ai_generated_sections or []),
             # Evidence is now the CaseMaterialReference join (case.material_references),
             # not a JSON blob on Case. It is read-only in the patch snapshot for now;
             # material-reference writes move to a dedicated CaseMaterialReference path
