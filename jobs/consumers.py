@@ -189,8 +189,15 @@ def _material_extract_build_payload(job) -> dict:
 register(
     KindSpec(
         kind="material_extract",
-        # A 446-page report is minutes of CPU; the handler heartbeats per stage,
-        # which extends the lease, so this is the floor rather than the ceiling.
+        # The lease has to cover the WHOLE extract stage, because that stage does
+        # not heartbeat: reading a document is one call into likhit's extractor
+        # and there is no page-by-page seam inside it to ping from. Measured worst
+        # case in the archive's largest shelf — the Auditor General's 63rd annual
+        # report, 79.7 MiB and 1,113 pages — is 575 s, so 1800 s is ~3x headroom.
+        # If a corpus ever appears that exceeds it, the symptom is two workers
+        # extracting one document after the reaper re-queues a job that is still
+        # running: wasteful, but not corrupting, since each writes the document
+        # wholesale in one transaction.
         lease_seconds=1800,
         # A fetch flake retries; an unreadable document raises NothingToExtract,
         # which the worker reports as non-retryable, so the budget is only ever

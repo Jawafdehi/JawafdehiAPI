@@ -4,35 +4,37 @@ Deterministic — no network, no model, no cost per call — which is what makes
 usable both in a batch over a whole source and on demand for one document a
 reader just asked for.
 
-**Why this goes through likhit's fragment layer and not ``page.get_text()``.**
-The archive's documents are Nepali, and a large share of them are typeset in
-legacy encodings: on one CIAA annual report the fonts resolve to
-``{'Kalimati': 'broken_cmap', 'Himalb': 'legacy_remap', 'Times New Roman':
-'correct', …}``. PyMuPDF's own text layer for those pages is mojibake that still
-*looks* like text — it has a length, it tokenises, it would pass any emptiness
-check — so an extractor built on it would fill the archive with confident
-nonsense. ``likhit`` exists to repair exactly that, and this reuses it rather
-than re-deriving it.
+**Why this goes through likhit and not ``page.get_text()``.** The archive's
+documents are Nepali, and a large share are typeset in legacy encodings: on one
+CIAA annual report the fonts resolve to ``{'Kalimati': 'broken_cmap', 'Himalb':
+'legacy_remap', 'Times New Roman': 'correct', …}``, and the Auditor General's
+56th annual report is Preeti throughout. PyMuPDF's own text layer for those pages
+is mojibake that still *looks* like text — it has a length, it tokenises, it
+would pass any emptiness check — so an extractor built on it would fill the
+archive with confident nonsense. ``likhit`` exists to repair exactly that.
 
-**Why the fragment layer specifically**, rather than
-``extract_repaired_text_blocks``, which is the published entry point: that
-function attributes an assembled *paragraph* to a page by matching its text back
-against the fragments, and paragraphs are built across page boundaries. Measured
-on pages 30-36 of the FY2081/82 report, it put 7,546 characters on page 1 of the
-slice and one table-only block on each of pages 2, 3, 5 and 7 — the prose of five
-pages folded onto the first. Fragments carry their own ``page_number`` and
-reproduce the per-page character counts PyMuPDF reports (1,342 against 1,404 on
-that first page, the difference being table text), so pages are grouped from
-them instead. ``folded`` is in the upstream's ``coverage_state`` vocabulary for
-precisely this failure; we avoid it rather than record it.
+**Why ``FontBasedStrategy`` and not ``extract_repaired_text_blocks``**, which is
+the obvious published entry point: that function attributes an assembled
+*paragraph* to a page by matching its text back against the fragments, and
+paragraphs are built across page boundaries. Measured on pages 30-36 of the
+FY2081/82 CIAA report, it put 7,546 characters on page 1 of the slice and one
+table-only block on each of pages 2, 3, 5 and 7 — the prose of five pages folded
+onto the first. ``folded`` is in the upstream's ``coverage_state`` vocabulary for
+precisely this failure; pages are grouped from fragments instead, which carry
+their own ``page_number`` and reproduce PyMuPDF's per-page character counts.
 
-The cost of that choice is a dependency on two names likhit does not export
-(``_extract_fragments_and_tables`` and the font/cmap helpers it composes).
-:func:`_repaired_fragments_and_tables` is the only place that reaches in, and it
-fails as :class:`ExtractionUnavailable` with the missing name rather than an
-AttributeError from somewhere deep in a batch run. ``test_extraction_pdf`` pins
-the seam against a real PDF, so a likhit bump that moves it fails a test instead
-of a corpus.
+An earlier version of this module composed that function's first half by hand,
+out of ``nepali_pdf_repair._extract_fragments_and_tables``. That reached into a
+private name AND skipped two things the strategy does — see :func:`_read_document`
+— one of which cost 1.7 MB of mojibake on a real Auditor General report.
+
+**The text is only as good as the installed likhit, and that is measurable.**
+The same 517-page report, same code path, two revisions: the pinned
+``5ae527711c`` yields 0.1% Devanagari (mojibake), ``main`` yields 78.6%
+(readable Nepali) — the v19 extractor line is what reads that font family. So
+fidelity is judged on the text we PRODUCED rather than on the fonts we found
+(:func:`_fidelity`), which is what lets a reader see the difference instead of
+inheriting it.
 """
 
 from __future__ import annotations
@@ -64,10 +66,11 @@ _CAPTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-#: Pages whose text layer decoded to something that does not read as Nepali are
-#: still stored, flagged ``suspect`` — see ``_page_fidelity``. The threshold is
-#: likhit's own (``PdfPageAnalysis.has_suspicious_text_layer``); we do not have a
-#: second opinion and inventing one here would just be a different arbitrary line.
+#: Pages whose text decoded to something that does not read as Nepali are stored
+#: anyway, flagged ``suspect`` — see :func:`_fidelity`, where the ORDER of that
+#: judgement matters more than the threshold. The threshold itself is likhit's
+#: (``PdfPageAnalysis.has_suspicious_text_layer``); we have no second opinion, and
+#: inventing one here would just be a different arbitrary line.
 
 
 class ExtractionUnavailable(RuntimeError):
@@ -98,66 +101,85 @@ def _open(data: bytes):
     return doc
 
 
-def _repaired_fragments_and_tables(data: bytes):
-    """likhit's page-exact fragments + detected tables for the whole document.
+def _read_document(data: bytes):
+    """likhit's page-exact fragments, tables, and the pages it could not read.
 
-    Mirrors the first half of ``likhit.nepali_pdf_repair.extract_repaired_text_blocks``
-    — scan the fonts, repair a broken Kalimati cmap, extract — and stops before
-    the paragraph assembly that loses page attribution (see the module docstring).
+    ``FontBasedStrategy.extract_text`` is the strategy the Nepali-PDF converter
+    itself runs, reached through the ``ExtractionStrategy`` interface rather than
+    through any private name. Two things it does that the ``nepali_pdf_repair``
+    helper does not, both of which we were missing:
+
+    - **content-based legacy detection.** A legacy font that the name table has
+      no opinion about is reinterpreted from what its spans actually spell. Some
+      faces are routed this way *deliberately* — likhit's own name table carries
+      a "DO NOT add spins" note explaining that content detection picks a better
+      map for that family than any single name-table entry could — so a path that
+      skips it cannot read those documents at all.
+    - **``needs_ocr_pages``**, which includes pages carrying a *decoy* text layer:
+      a scanned raster with a junk core-font layer over it. Inferring "unread"
+      from "no text" alone would store that junk as the page's transcript.
+
+    Continuation merging is already applied by the strategy, so a table broken
+    across a page boundary arrives as one table with a region per page rather
+    than as a headerless second table a reader would cite on its own.
+
+    Takes a path, hence the temp file: a cheap write against minutes of parsing.
     """
     try:
-        from likhit.extractors.font_classifier import scan_pdf_fonts
-        from likhit.extractors.kalimati import fix_kalimati_cmap
-        from likhit.extractors.tables import merge_continuation_tables
-        from likhit.nepali_pdf_repair import _extract_fragments_and_tables
+        from likhit.extractors.font_based import FontBasedStrategy
     except ImportError as exc:  # pragma: no cover - a likhit bump, not a document
-        raise ExtractionUnavailable(f"likhit's extraction seam has moved: {exc}") from exc
+        raise ExtractionUnavailable(
+            f"likhit's extraction strategy has moved: {exc}"
+        ) from exc
 
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+        handle.write(data)
+        handle.flush()
+        try:
+            raw = FontBasedStrategy().extract_text(handle.name)
+        except ExtractionUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 - likhit raises ExtractionError + others
+            # The strategy refuses a document with no text layer at all
+            # ("No text content found in document"). For us that is not a
+            # failure — it is a scan, and the right answer is a document of
+            # ``unread`` pages plus the chart worklist, which is what the vision
+            # tier needs. Decided by looking at the PDF rather than by matching
+            # the message: if NO page has a text layer it is a scan, and if some
+            # page does then the strategy fell over on something real and we must
+            # not file a readable document as unreadable.
+            if _has_any_text_layer(data):
+                raise ExtractionUnavailable(
+                    f"could not read this PDF's text: {exc}"
+                ) from exc
+            return _NothingRead()
+    return raw
+
+
+class _NothingRead:
+    """A document whose every page is a scan: no fragments, no tables.
+
+    ``needs_ocr_pages`` is left empty rather than filled with every page number —
+    :func:`_coverage_state` reaches the same verdict from "no text and there is
+    ink on the page", and a list asserting we checked each page individually
+    would be a claim this path did not make.
+    """
+
+    fragments: list = []
+    tables: list = []
+    needs_ocr_pages: list = []
+
+
+def _has_any_text_layer(data: bytes) -> bool:
     import fitz
 
     doc = fitz.open(stream=data, filetype="pdf")
     try:
-        strategies = scan_pdf_fonts(doc)
-        needs_reorder = False
-        if any(strategy == "broken_cmap" for strategy in strategies.values()):
-            # Returns a NEW document with the cmap patched; the original is
-            # superseded, so rebind rather than keeping both.
-            doc, needs_reorder = fix_kalimati_cmap(doc)
-        fragments, tables = _extract_fragments_and_tables(
-            doc, strategies, needs_reorder=needs_reorder
-        )
-    except ExtractionUnavailable:
-        raise
-    except Exception as exc:  # noqa: BLE001 - likhit raises ExtractionError + others
-        raise ExtractionUnavailable(f"could not read this PDF's text: {exc}") from exc
+        return any(doc[index].get_text().strip() for index in range(doc.page_count))
     finally:
         doc.close()
-    # Continuation merging is likhit's: a table broken across a page boundary is
-    # one table, and it keeps a region per page so we can still say where it
-    # starts. Without it the second half of a long table arrives as a headerless
-    # table of its own, which a reader would cite as a table in its own right.
-    return fragments, strategies, merge_continuation_tables(tables)
-
-
-def _legacy_fonts(strategies: dict[str, str]) -> set[str]:
-    """Font names whose text only reads correctly because likhit remapped it."""
-    return {
-        name
-        for name, strategy in (strategies or {}).items()
-        if strategy in {"broken_cmap", "legacy_remap"}
-    }
-
-
-def _page_uses_legacy_font(page, legacy: set[str]) -> bool:
-    if not legacy:
-        return False
-    try:
-        names = {entry[3] for entry in page.get_fonts(full=False)}
-    except Exception:  # noqa: BLE001 - a malformed font table is not fatal
-        return False
-    # PyMuPDF reports subset fonts as ``ABCDEF+Himalb``; the strategy map is keyed
-    # on the base name, so compare on the part after the subset tag.
-    return any(name.split("+")[-1] in legacy for name in names)
 
 
 def _cell_grid(table) -> list[list[str]]:
@@ -290,13 +312,15 @@ def extract_pdf(
                 "landscape": rect.width > rect.height,
                 "has_ink": bool(page.get_images(full=True)) or bool(page.get_drawings()),
             }
-        legacy_by_page = {}
-        fragments, strategies, tables = _repaired_fragments_and_tables(data)
-        legacy = _legacy_fonts(strategies)
-        for index in range(page_count):
-            legacy_by_page[index + 1] = _page_uses_legacy_font(doc[index], legacy)
     finally:
         doc.close()
+
+    raw = _read_document(data)
+    fragments, tables = raw.fragments, raw.tables
+    # likhit's own verdict on which pages carry no born-digital text — including
+    # a scanned page wearing a decoy text layer, which no amount of looking at
+    # the text we got back would reveal.
+    needs_ocr = {int(p) for p in (raw.needs_ocr_pages or [])}
 
     analyses = {a.page_number: a for a in analyze_pdf_pages(data)}
 
@@ -344,9 +368,10 @@ def extract_pdf(
             header=list(grid[0]) if grid else [],
             n_rows=len(grid),
             n_cols=len(grid[0]) if grid else 0,
-            # The text layer decoded; where it needed a legacy remap to do so,
-            # say that rather than calling it tight.
-            fidelity="repaired" if legacy_by_page.get(page_no) else "tight",
+            # Same judgement as the page's, from one function and on the same
+            # evidence — the table's own cells. Two notions of fidelity on one
+            # page would eventually disagree about the same characters.
+            fidelity=_fidelity(markdown, analyses.get(page_no)),
             markdown=markdown,
         )
         table_records.append(record)
@@ -369,10 +394,10 @@ def extract_pdf(
                 page_no=page_no,
                 uid=f"{doc_id}#p{page_no:04d}",
                 text=text,
-                coverage_state=_coverage_state(text, geo.get("has_ink", False)),
-                anchor_fidelity=_page_fidelity(
-                    text, legacy_by_page.get(page_no, False), analyses.get(page_no)
+                coverage_state=_coverage_state(
+                    text, geo.get("has_ink", False), page_no in needs_ocr
                 ),
+                anchor_fidelity=_fidelity(text, analyses.get(page_no)),
                 ocr_source="text_layer" if text else "",
                 landscape=bool(geo.get("landscape")),
                 n_table_blocks=per_page_index.get(page_no, 0),
@@ -434,28 +459,82 @@ def _page_text(fragments: list, regions: list, tables: list[TableRecord]) -> str
     return "\n".join(blocks)
 
 
-def _coverage_state(text: str, has_ink: bool) -> str:
-    """What this page is, when its text is empty.
+def _coverage_state(text: str, has_ink: bool, needs_ocr: bool) -> str:
+    """What this page is — and, when its text is empty, which kind of empty.
 
     ``blank`` and ``unread`` are both "no text" and are not the same fact: one is
     a page with nothing on it, the other a page with something on it we did not
     read. Collapsing them is how an untranscribed scan gets served as an empty
     page, and an absence of transcription gets reported as an absence of findings.
+
+    ``needs_ocr`` is likhit's own verdict and outranks the text, because of the
+    one case the text cannot reveal: a scanned page wearing a *decoy* core-font
+    layer. That page yields text, and the text is junk — "anchored" would file a
+    scan nobody has read as a page we read.
     """
+    if needs_ocr:
+        return "unread"
     if text.strip():
         return "anchored"
     return "unread" if has_ink else "blank"
 
 
-def _page_fidelity(text: str, legacy: bool, analysis) -> str:
+def _fidelity(text: str, analysis) -> str:
+    """How much to trust this page's text — judged on the text we PRODUCED.
+
+    The tempting version of this reads the input: flag the page when likhit's
+    ``has_suspicious_text_layer`` fires. Both ways of wiring that are wrong, and
+    each was measured on the Auditor General shelf:
+
+    - **Flag on suspicion first** and a repaired page is called ``suspect``. The
+      56th annual report is typeset in Preeti, so all 608 pages report
+      ``devanagari_char_count=0`` with a suspicious Latin ratio while the
+      repaired text is clean Nepali — 554 of its 586 readable pages would carry
+      a warning telling a reader that a correct audit finding is probably junk.
+    - **Flag only fonts the name table knows** and the opposite happens. The 48th
+      report is typeset in Spins, which likhit deliberately leaves out of that
+      table, and under the pinned revision it extracts to 0.1% Devanagari — 1.7 MB
+      of mojibake that this function would have called ``tight``.
+
+    So neither the font nor the raw layer decides it: the output does. Text that
+    came out as Devanagari was read, whatever it took to get there; text that was
+    mojibake going in and is still not Devanagari coming out was not. A page of
+    genuinely Latin text — the shelf has an English-language report — is clean,
+    and is separated from mojibake by the raw layer's own suspicion flag.
+
+    Either way the text is stored. A page we read badly still says the page
+    exists and roughly what is on it, and a reader told the read is suspect can
+    go to the PDF; dropping it would leave a silent hole instead.
+    """
     if not text.strip():
         return ""
-    if analysis is not None and getattr(analysis, "has_suspicious_text_layer", False):
-        # Stored, not discarded: a page we read badly is still evidence that the
-        # page exists and roughly what is on it, and a reader told the read is
-        # suspect can go to the PDF. Dropping it would leave a silent hole.
+    suspicious_input = analysis is not None and getattr(
+        analysis, "has_suspicious_text_layer", False
+    )
+    if _devanagari_share(text) >= _DEVANAGARI_FLOOR:
+        # Read. ``repaired`` where it took a remap to get here, so a reader can
+        # tell a page that needed work from one that did not.
+        return "repaired" if suspicious_input else "tight"
+    if suspicious_input:
         return "suspect"
-    return "repaired" if legacy else "tight"
+    return "tight"
+
+
+#: Share of a page's characters that must be Devanagari for the page to count as
+#: read. Deliberately low: a page of a Nepali audit report is full of Western
+#: digits, rupee figures and English agency names, and the two documents measured
+#: here sit at 0.1% (mojibake) and 72-80% (read) — three orders of magnitude
+#: apart, so nothing near this line is a close call.
+_DEVANAGARI_FLOOR = 0.15
+
+_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+def _devanagari_share(text: str) -> float:
+    stripped = "".join(text.split())
+    if not stripped:
+        return 0.0
+    return len(_DEVANAGARI.findall(stripped)) / len(stripped)
 
 
 def _transcript_verdict(pages: list[PageRecord]) -> str:

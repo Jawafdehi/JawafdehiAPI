@@ -49,12 +49,20 @@ EXTRACT_KIND = "material_extract"
 #: not extractable rather than extracted into something weaker.
 _PDF_CONTENT_TYPES = ("application/pdf", "application/x-pdf")
 
-#: Cap on a fetched document. The largest CIAA annual report is 20 MB and the
-#: largest Auditor General report is of that order, so 64 MiB is generous — but
-#: it has to exist: this runs over an archive of 346k documents, in a pod with a
-#: 2 GiB limit, and one mis-linked multi-gigabyte file must fail that one job
-#: loudly instead of OOM-killing a worker that was draining a queue.
-MAX_DOCUMENT_BYTES = getattr(settings, "DOCUMENT_EXTRACT_MAX_BYTES", 64 * 1024 * 1024)
+#: Cap on a fetched document, **measured against the archive rather than guessed
+#: from the CIAA corpus**. This was 64 MiB on the reasoning that the largest CIAA
+#: annual report is 20 MB; surveying the Auditor General's 18 annual reports then
+#: found two above that line — `oag-13463` (the 63rd, FY2083) at **79.7 MiB** and
+#: `oag-11101` at 64.1 MiB — so the cap would have refused the newest and largest
+#: report on the shelf, as a fetch failure that reads like a network problem.
+#:
+#: 128 MiB, because a cap still has to exist: this runs over 346k documents in a
+#: pod with a 2 GiB limit, and one mis-linked multi-gigabyte file must fail that
+#: one job loudly rather than OOM-killing a worker mid-drain. For scale, that
+#: 79.7 MiB / 1,113-page report extracts at a 923 MiB peak, so the document is
+#: never the largest thing in the process — note though that the fetch below
+#: holds the body twice for an instant when it joins its chunks.
+MAX_DOCUMENT_BYTES = getattr(settings, "DOCUMENT_EXTRACT_MAX_BYTES", 128 * 1024 * 1024)
 
 #: Per-document fetch timeout, seconds.
 FETCH_TIMEOUT = getattr(settings, "DOCUMENT_EXTRACT_FETCH_TIMEOUT", 120)
