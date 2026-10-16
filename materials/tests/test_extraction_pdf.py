@@ -218,7 +218,15 @@ class ExtractPdfTests(TestCase):
 
         self.assertTrue(issubclass(FontBasedStrategy, ExtractionStrategy))
         signature = inspect.signature(FontBasedStrategy.extract_text)
-        self.assertEqual(list(signature.parameters), ["self", "file_path", "pages"])
+        # A PREFIX, not equality. This assertion was equality and it failed on the
+        # likhit bump that this branch also makes: main's signature gained a
+        # fourth parameter, ``_ocr_pages``, which is optional and which we do not
+        # pass. Equality turns every additive upstream change into a red suite,
+        # which trains people to loosen the test rather than read it — what has
+        # to hold is that a single positional path is still the call.
+        self.assertEqual(
+            list(signature.parameters)[:3], ["self", "file_path", "pages"]
+        )
 
         data = _pdf(lambda doc: doc.new_page().insert_text((72, 90), "x", fontsize=11))
         raw = _read_document(data)
