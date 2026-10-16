@@ -190,8 +190,8 @@ class DeclaredCounts:
 class ContentBundle:
     """One document's extracted content, ready to be written.
 
-    ``chart_pages`` is the exception: it is a worklist, not content, and is NOT
-    persisted. It records which pages look like they carry a chart so the vision
+    ``chart_pages`` and ``redactions`` are the exceptions: they are facts about
+    the run rather than content, and are NOT persisted. It records which pages look like they carry a chart so the vision
     tier has a bounded list to work through. Persisting them as figures with no
     points would be the lie this schema exists to avoid — a chart listed with an
     empty series reads as "we read this and it had no data".
@@ -209,6 +209,11 @@ class ContentBundle:
     figures: list[FigureRecord] = field(default_factory=list)
     declared: DeclaredCounts | None = None
     chart_pages: list[int] = field(default_factory=list)
+    #: Personal-data removals per class, from ``materials.extraction.redact``.
+    #: Counts only — never a match and never a location — so this is safe to log
+    #: and to put in a job result. Not persisted, for the same reason
+    #: ``chart_pages`` is not: it describes the RUN, not the document.
+    redactions: dict = field(default_factory=dict)
 
     @property
     def pages_with_text(self) -> int:

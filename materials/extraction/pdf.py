@@ -50,6 +50,7 @@ from .bundle import (
     TableRecord,
 )
 from .charts import detect_chart_pages
+from .redact import redact_bundle, redaction_summary
 
 logger = logging.getLogger("materials.extraction")
 
@@ -285,6 +286,7 @@ def extract_pdf(
     doc_id: str,
     source_url: str = "",
     detect_charts: bool = True,
+    redact: bool = True,
 ) -> ContentBundle:
     """Extract one PDF's pages and tables into a :class:`ContentBundle`.
 
@@ -424,6 +426,13 @@ def extract_pdf(
         chart_pages=chart_pages,
     )
     bundle.transcript_verdict = _transcript_verdict(pages)
+    if redact:
+        # AFTER the pages are judged, never before. A placeholder is ASCII, so
+        # redacting first would drag a page's Devanagari share down and could
+        # report a removal as a failed decode — the same confusion likhit's own
+        # quality module strips placeholders to avoid. Fidelity describes the
+        # read; redaction is what happened to the text afterwards.
+        bundle.redactions = redaction_summary(redact_bundle(bundle))
     # Nothing here reads a chart. Say which of the two silences this is: no chart
     # pages at all, or chart pages nobody has read. A zero count would claim we
     # looked inside the images and found no data.

@@ -281,6 +281,9 @@ def extraction_result(iri: str, source_url: str, bundle, written: dict) -> dict:
         # rather than in the document's rows because a chart listed with no
         # points would read as "we read this chart and it had no data".
         "chart_pages": bundle.chart_pages,
+        # What the redactor removed, per class. Counts name nothing, so they are
+        # safe here; the journal that names values is dropped at the source.
+        "redactions": bundle.redactions,
         **written,
     }
 
