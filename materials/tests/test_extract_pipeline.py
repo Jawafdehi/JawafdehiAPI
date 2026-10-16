@@ -28,7 +28,6 @@ from jobs import queue as jobs_queue
 from jobs.models import Job
 from materials import extract as material_extract
 from materials.jsonld import MATERIAL_CONTEXT
-from materials.management.commands import extract_document_content as cmd
 from materials.models import DocumentContent, DocumentPage, DocumentTable, Material
 
 SOURCE = "ciaa_annual_report"
@@ -164,7 +163,7 @@ class InlineExtractionTests(TestCase):
         _material("aaa")
         out = StringIO()
 
-        with patch.object(cmd, "fetch_document", return_value=_pdf_bytes(2)):
+        with patch.object(material_extract, "fetch_document", return_value=_pdf_bytes(2)):
             call_command(
                 "extract_document_content",
                 "--iri",
@@ -186,7 +185,7 @@ class InlineExtractionTests(TestCase):
         out = StringIO()
 
         with patch.object(
-            cmd,
+            material_extract,
             "fetch_document",
             side_effect=material_extract.DocumentFetchError("HTTP 503"),
         ):
@@ -221,7 +220,7 @@ class InlineExtractionTests(TestCase):
         doc.close()
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(cmd, "fetch_document", return_value=data):
+            with patch.object(material_extract, "fetch_document", return_value=data):
                 call_command(
                     "extract_document_content",
                     "--iri",
@@ -341,7 +340,7 @@ class WorkerTests(TestCase):
             "sha256:earlier",
         )
 
-    def test_an_unreadable_document_fails_without_burning_the_retry_budget(self):
+    def test_a_document_that_is_not_a_pdf_fails_without_burning_the_budget(self):
         _material("aaa")
         material_extract.enqueue_material_extract(_iri("aaa"))
 
@@ -349,15 +348,43 @@ class WorkerTests(TestCase):
             material_extract, "fetch_document", return_value=b"not a pdf at all"
         ):
             call_command(
-                "extract_worker", "--apply", "--once", stdout=StringIO(), stderr=StringIO()
+                "extract_worker",
+                "--apply",
+                "--once",
+                stdout=StringIO(),
+                stderr=StringIO(),
             )
 
         job = Job.objects.get()
-        # DocumentFetchError here reports "no source produced a readable
-        # document", which IS retryable (the next source, or a re-upload, may
-        # work) — so the queue re-queues it once rather than dead-lettering a
-        # transient failure. What must not happen is a stored document.
-        self.assertIn(job.status, (Job.QUEUED, Job.FAILED, Job.DEAD))
+        # It downloaded fine and is not a readable document — a RAW link pointing
+        # at an HTML error page will not become a PDF on the third try. FAILED,
+        # not re-queued: three attempts is three times the cost for one answer.
+        self.assertEqual(job.status, Job.FAILED)
+        self.assertEqual(job.attempts, 1)
+        self.assertFalse(DocumentContent.objects.filter(pk=_iri("aaa")).exists())
+
+    def test_a_download_failure_is_retried(self):
+        _material("aaa")
+        material_extract.enqueue_material_extract(_iri("aaa"))
+
+        with patch.object(
+            material_extract,
+            "fetch_document",
+            side_effect=material_extract.DocumentFetchError("HTTP 503"),
+        ):
+            call_command(
+                "extract_worker",
+                "--apply",
+                "--once",
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+        # An object store 503 or a timeout is worth another attempt, so the
+        # queue re-queues with backoff rather than giving up on the document.
+        job = Job.objects.get()
+        self.assertEqual(job.status, Job.QUEUED)
+        self.assertEqual(job.stage, "retry_scheduled")
         self.assertFalse(DocumentContent.objects.filter(pk=_iri("aaa")).exists())
 
     def test_a_material_with_nothing_to_read_fails_the_job_at_claim(self):
