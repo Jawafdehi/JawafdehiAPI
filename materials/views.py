@@ -31,6 +31,7 @@ from rest_framework.decorators import (
     permission_classes,
 )
 from rest_framework.parsers import FormParser, MultiPartParser
+from drf_spectacular.utils import extend_schema
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
@@ -1170,6 +1171,19 @@ def _not_modified(request, content):
     return None
 
 
+@extend_schema(  # ty: ignore[invalid-argument-type]
+    # drf-spectacular types its decorator as taking a plain callable, and
+    # `api_view` below has already turned this into an AsView. The documented
+    # order for a function-based view is exactly this, so the mismatch is in the
+    # library's annotation rather than in the stack.
+    methods=["POST"],
+    exclude=True,
+    description=(
+        "Internal: starts a parse of this document. Called by the MCP document "
+        "tools when a caseworker reads a document nobody has opened yet, not by "
+        "clients directly. See materials.views._request_extraction."
+    ),
+)
 @api_view(["GET", "POST"])
 @permission_classes([AllowAny])
 def material_content(request, source: str, ident: str):
@@ -1241,6 +1255,14 @@ def material_content(request, source: str, ident: str):
 
 def _request_extraction(request, iri: str, doc):
     """``POST …/content`` — ask for this document to be opened.
+
+    **Internal.** This is the mechanism, not the interface: no client is expected
+    to call it, and it is excluded from the public schema. What calls it is the
+    MCP document tools (``jawafdehi_mcp/tools/documents.py``) — a caseworker who
+    tries to *read* a document nobody has opened starts the parse by reading it,
+    which is the only moment anyone has a reason to want it parsed. A separate
+    "please extract this" step is a thing to know about, and ~94% of the archive
+    has never been read, so almost every first read would need it.
 
     The on-demand half of the extraction pipeline: the batch command queues a
     whole source, and this queues one document because somebody wants it now.

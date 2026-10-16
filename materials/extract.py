@@ -144,13 +144,32 @@ def enqueue_material_extract(material_iri: str, *, priority: int = 100, force: b
     forced re-run of an unchanged document is a no-op with a new timestamp.
     """
     from jobs import queue as jobs_queue
+    from jobs.models import Job
 
-    return jobs_queue.enqueue(
+    job = jobs_queue.enqueue(
         EXTRACT_KIND,
         payload={"material_iri": material_iri, "force": bool(force)},
         dedup_key=f"{EXTRACT_KIND}:{material_iri}",
         priority=priority,
     )
+    if (
+        force
+        and job is not None
+        and job.status == Job.QUEUED
+        and not (job.payload or {}).get("force")
+    ):
+        # Dedup handed back a job somebody queued WITHOUT force — a batch tick,
+        # usually — and that job will skip the document if content already
+        # exists. An operator asking for a re-extract would then get a silent
+        # no-op from a job that reports DONE. Upgrade the waiting job instead of
+        # queueing a second one: two jobs for one document would each replace
+        # the other's rows.
+        #
+        # QUEUED only. A RUNNING job has already read its payload, so writing to
+        # it changes nothing and races the worker.
+        job.payload = {**(job.payload or {}), "force": True}
+        job.save(update_fields=["payload", "updated_at"])
+    return job
 
 
 def build_extract_payload(job) -> dict:

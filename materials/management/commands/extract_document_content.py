@@ -37,6 +37,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from ...document_content import store_document_content
 from ...extract import (
+    EXTRACT_KIND,
     DocumentFetchError,
     NothingToExtract,
     document_urls,
@@ -151,6 +152,9 @@ class Command(BaseCommand):
             rows = rows.exclude(
                 pk__in=DocumentContent.objects.using("ngm").values("material_id")
             )
+        cursor = "" if options["iri"] else self._cursor(options)
+        if cursor:
+            rows = rows.filter(pk__gt=cursor)
         rows = rows.order_by("pk").only("iri", "data")
 
         wanted = set(options["iri"])
@@ -161,8 +165,9 @@ class Command(BaseCommand):
             seen += 1
             if seen > SCAN_CEILING:
                 skipped.append(
-                    f"stopped after scanning {SCAN_CEILING} materials; narrow with "
-                    "--source or raise the ceiling"
+                    f"stopped after scanning {SCAN_CEILING} materials (from "
+                    f"{cursor or 'the start'}); the next run resumes after the "
+                    "last material queued"
                 )
                 break
             urls = document_urls(row.data or {})
@@ -186,6 +191,34 @@ class Command(BaseCommand):
                     "stored (use --force to replace it)"
                 )
         return found, skipped
+
+    def _cursor(self, options: dict) -> str:
+        """Where the last run got to: the highest IRI we have queued a job for.
+
+        **Without this, a repeating batch over the whole archive never finishes.**
+        Selection walks materials in IRI order and stops at ``SCAN_CEILING``;
+        already-extracted ones are excluded in SQL, but the ~94% that carry no
+        PDF are not, and they are what the scan budget is spent on. So every tick
+        re-scans the same prefix of the archive, finds the same nothing, and the
+        long tail is never reached — a job that looks healthy and makes no
+        progress, which is worse than one that fails.
+        
+        The cursor is the job history itself rather than a new table, the way the
+        court sweep's rotation is: the jobs carry the material IRI in their
+        payload, and the highest one is where to start. If job rows are ever
+        pruned the cursor resets and the walk repeats — wasteful, not wrong,
+        since an extracted document is skipped in SQL anyway.
+        """
+        from jobs.models import Job
+
+        iris = [
+            (job.payload or {}).get("material_iri") or ""
+            for job in Job.objects.filter(kind=EXTRACT_KIND).only("payload")
+        ]
+        highest = max(iris, default="")
+        if highest:
+            self.stdout.write(f"  resuming after {highest}")
+        return highest
 
     # ── the two ways to run ──────────────────────────────────────────────────
 
