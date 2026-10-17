@@ -437,3 +437,114 @@ class ChartWorklistTests(TestCase):
         content = DocumentContent.objects.get(pk=_iri("aaa"))
         self.assertEqual(content.figures_verdict, "not_attempted")
         self.assertEqual(DocumentTable.objects.filter(content=content).count(), 0)
+
+
+class ResumeCursorTests(TestCase):
+    """A repeating batch over the whole archive has to make progress.
+
+    Selection walks materials in IRI order and stops at a scan ceiling.
+    Already-extracted ones are excluded in SQL; the ~94% that carry no PDF are
+    not, and they are what the budget is spent on — so without a cursor every
+    tick re-scans the same prefix, finds the same nothing, and the long tail is
+    never reached. That failure looks like a healthy job doing nothing.
+    """
+
+    databases = {"default", "ngm"}
+
+    def test_a_second_run_starts_after_the_last_material_queued(self):
+        for ident in ("aaa", "bbb", "ccc"):
+            _material(ident)
+
+        call_command(
+            "extract_document_content", "--limit", "1", stdout=StringIO()
+        )
+        out = StringIO()
+        call_command("extract_document_content", "--limit", "1", stdout=out)
+
+        queued = sorted(
+            job.payload["material_iri"] for job in Job.objects.all()
+        )
+        self.assertEqual(queued, [_iri("aaa"), _iri("bbb")])
+        self.assertIn("resuming after", out.getvalue())
+
+    def test_naming_a_document_ignores_the_cursor(self):
+        for ident in ("aaa", "bbb"):
+            _material(ident)
+        call_command("extract_document_content", "--limit", "1", stdout=StringIO())
+
+        # An operator asking for one document by IRI means that document, even
+        # when the walk has already passed it.
+        call_command("extract_document_content", "--iri", _iri("aaa"), "--force",
+                     stdout=StringIO())
+
+        # One job, not two — two would each replace the other's rows — and the
+        # waiting one is UPGRADED to force, so the operator's re-extract is not
+        # silently answered by a batch job that will skip the document.
+        self.assertEqual(Job.objects.filter(payload__material_iri=_iri("aaa")).count(), 1)
+        self.assertTrue(Job.objects.get(payload__material_iri=_iri("aaa")).payload["force"])
+
+
+class StalenessTests(TestCase):
+    """Content older than the file it was read from is content about bytes
+    nobody can fetch any more, and a page citation into it points nowhere."""
+
+    databases = {"default", "ngm"}
+
+    DIGEST = "c" * 64
+
+    def _held(self, ident: str, *, stored_digest: str, file_digest: str) -> Material:
+        from materials.provenance import PROVENANCE_KEY
+
+        material = _material(ident)
+        material.data = {
+            **material.data,
+            "associatedMedia": [
+                {
+                    "@type": "MediaObject",
+                    "contentUrl": f"{PDF_URL}?{ident}",
+                    "jawafdehi:linkRole": "RAW",
+                    PROVENANCE_KEY: {"fetch_method": "upload", "sha256": file_digest},
+                }
+            ],
+        }
+        material.save()
+        DocumentContent.objects.using("ngm").create(
+            material=material,
+            doc_id=ident,
+            dataset="jawafdehi:pdf-extract/v1",
+            dataset_revision=f"sha256:{stored_digest}",
+        )
+        Job.objects.all().delete()
+        return material
+
+    def test_recheck_queues_only_the_documents_whose_file_changed(self):
+        self._held("aaa", stored_digest=self.DIGEST, file_digest=self.DIGEST)
+        self._held("bbb", stored_digest=self.DIGEST, file_digest="d" * 64)
+        out = StringIO()
+
+        call_command("extract_document_content", "--recheck", stdout=out)
+
+        self.assertEqual(
+            [j.payload["material_iri"] for j in Job.objects.all()], [_iri("bbb")]
+        )
+        self.assertIn("1 have content older than their file", out.getvalue())
+
+    def test_without_recheck_a_changed_file_is_left_alone(self):
+        self._held("bbb", stored_digest=self.DIGEST, file_digest="d" * 64)
+
+        call_command("extract_document_content", stdout=StringIO())
+
+        # Re-reading the archive is an operator's call, not a side effect of the
+        # weekly backfill tick.
+        self.assertEqual(Job.objects.count(), 0)
+
+    def test_the_sweep_reports_coverage_even_when_it_queues_nothing(self):
+        self._held("aaa", stored_digest=self.DIGEST, file_digest=self.DIGEST)
+        out = StringIO()
+
+        call_command("extract_document_content", "--recheck", stdout=out)
+
+        # An automatic pipeline that reports only what it queued cannot tell
+        # "everything is read" from "the scan never got there".
+        self.assertIn("scanned 1 material(s)", out.getvalue())
+        self.assertIn("1 carry a document", out.getvalue())
