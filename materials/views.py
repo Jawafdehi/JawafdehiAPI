@@ -45,6 +45,7 @@ from jawafdehi_shared.jsonpatch_ops import normalize_patch_ops
 from jawafdehi_shared.storage import store_file_as_link
 from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
+from . import artifacts
 from . import extract as material_extract
 from . import jsonld
 from . import provenance
@@ -82,9 +83,10 @@ LD_JSON = "application/ld+json"
 #: JSON-LD MediaObject mapping understands — jsonld._ROLE_ENCODING_HINTS).
 #: MARKDOWN + SOURCE_PAGE added per ADR (cases-own-no-documents, D-D) so no
 #: legacy source link role is lost when sources fold into materials.
-_UPLOAD_ROLES = frozenset(
-    {"RAW", "ALTERNATE", "PERMALINK", "MARKDOWN", "SOURCE_PAGE"}
-)
+#: Every roled link a client may attach. The two REDACTED_* roles are ours to
+#: write (see materials.artifacts) but are accepted here too, so a corpus that
+#: arrives already redacted can be uploaded as such rather than as an original.
+_UPLOAD_ROLES = artifacts.ALL_ROLES
 
 #: Upload roles that carry an original document worth OCR-ing into full text.
 #: Excludes MARKDOWN (our own extraction output) + SOURCE_PAGE (HTML, not a scan).
@@ -298,6 +300,17 @@ def _material_read_response(request, iri: str) -> Response:
         )
         patch_vary_headers(resp, ("Authorization",))
         return resp
+    # ONE URL, two representations — and the difference now includes which
+    # artifacts are listed. A signed-out reader gets the redacted PDF and the
+    # redacted transcript; our own unredacted copies are withheld, while a link
+    # to the PUBLISHER's copy is never withheld, because that is the citation
+    # chain rather than something we publish. Vary: Authorization below is what
+    # keeps a shared cache from handing one answer to the other, and it was
+    # already required for the visibility annotations.
+    if not _can_see_nonpublic(request):
+        data = artifacts.redact_payload(data)
+    else:
+        data = {**data, "jawafdehi:artifacts": artifacts.artifact_summary(data)}
     resp = Response(data, content_type=LD_JSON)
     if row is not None:
         # The token a conditional PATCH is matched against, so a client can opt
