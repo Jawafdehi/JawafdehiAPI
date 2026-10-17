@@ -50,7 +50,7 @@ from .bundle import (
     TableRecord,
 )
 from .charts import detect_chart_pages
-from .redact import redact_bundle, redaction_summary
+from ..redaction import redact_bundle, redaction_summary
 
 logger = logging.getLogger("materials.extraction")
 
@@ -301,7 +301,7 @@ def extract_pdf(
     A PDF that opens and yields no text is NOT an error — it comes back as pages
     marked ``unread``.
     """
-    from likhit.pdf_page_analysis import analyze_pdf_pages
+    from likhit.pdf_page_analysis import analyze_pdf_pages, page_max_image_coverage
 
     doc = _open(data)
     try:
@@ -313,6 +313,10 @@ def extract_pdf(
             geometry[index + 1] = {
                 "landscape": rect.width > rect.height,
                 "has_ink": bool(page.get_images(full=True)) or bool(page.get_drawings()),
+                # A picture big enough to be the page's content rather than a
+                # logo. Carried per page because of the one omission nothing
+                # else here can see — see _ocr_source.
+                "image_cover": page_max_image_coverage(page),
             }
     finally:
         doc.close()
@@ -397,10 +401,15 @@ def extract_pdf(
                 uid=f"{doc_id}#p{page_no:04d}",
                 text=text,
                 coverage_state=_coverage_state(
-                    text, geo.get("has_ink", False), page_no in needs_ocr
+                    # Coerced: the geometry dict became heterogeneous when
+                    # image_cover (a float) joined it, so the inferred type of
+                    # any .get() off it widened past bool.
+                    text,
+                    bool(geo.get("has_ink", False)),
+                    page_no in needs_ocr,
                 ),
                 anchor_fidelity=_fidelity(text, analyses.get(page_no)),
-                ocr_source="text_layer" if text else "",
+                ocr_source=_ocr_source(text, float(geo.get("image_cover", 0.0) or 0.0)),
                 landscape=bool(geo.get("landscape")),
                 n_table_blocks=per_page_index.get(page_no, 0),
                 chars=len(text),
@@ -466,6 +475,33 @@ def _page_text(fragments: list, regions: list, tables: list[TableRecord]) -> str
     blocks = [line for _y0, line in sorted(prose, key=lambda item: item[0]) if line]
     blocks.extend(table.markdown for table in tables if table.markdown.strip())
     return "\n".join(blocks)
+
+
+#: Share of a page one image must cover before the page is treated as carrying
+#: a picture that IS content. likhit uses 0.85 to call a page image-dominant
+#: (i.e. a scan); this is far lower because the case it catches is different — a
+#: scanned table pasted into an otherwise born-digital page, which is a quarter
+#: of the paper and all of the numbers.
+_EMBEDDED_IMAGE_COVER = 0.25
+
+
+def _ocr_source(text: str, image_cover: float) -> str:
+    """Where this page's text came from — and whether that is all of the page.
+
+    ``text_layer+image`` is the one verdict here that reports an OMISSION rather
+    than a source, and it exists because that omission is otherwise invisible by
+    construction: the page has a text layer, so it is ``anchored`` and every
+    other field says it was read, while a scan pasted into it carries numbers
+    nobody transcribed. A reader who sees ``anchored`` on such a page has been
+    told the page was read. It was not — only the part of it that was typed.
+
+    No judgement is passed on what the image contains; we cannot know without
+    reading it. The flag says there is something here we did not read, which is
+    the same thing ``unread`` says about a whole page.
+    """
+    if not text.strip():
+        return ""
+    return "text_layer+image" if image_cover >= _EMBEDDED_IMAGE_COVER else "text_layer"
 
 
 def _coverage_state(text: str, has_ink: bool, needs_ocr: bool) -> str:

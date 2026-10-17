@@ -39,11 +39,29 @@ logger = logging.getLogger("materials.document_content")
 BULK_BATCH = 500
 
 
+#: Characters Postgres refuses inside a text value. A PDF's text layer can
+#: legitimately contain NUL — a broken encoder, a padded font table, a damaged
+#: stream — and psycopg rejects the whole INSERT with "A string literal cannot
+#: contain NUL (0x00) characters".
+#:
+#: 🛑 **The test gate cannot catch this.** sqlite stores NUL happily, so an
+#: extraction that passes every test here fails on the first production document
+#: that carries one, as a whole job dying on a document that is otherwise
+#: perfectly readable. Stripped at the writer because this is the one place every
+#: producer funnels through.
+_FORBIDDEN = str.maketrans({"\x00": None})
+
+
+def _clean(value: str) -> str:
+    """Text as Postgres will accept it. Never changes a readable character."""
+    return (value or "").translate(_FORBIDDEN)
+
+
 def _fit(value: str, width: int) -> str:
     """Truncate to the model's width. Applied to the short provenance/vocabulary
     fields only: those carry another project's enum values, and a corpus must not
     fail on a verdict string longer than we guessed."""
-    return (value or "")[:width]
+    return _clean(value)[:width]
 
 
 def _uid(explicit: str, doc_id: str, suffix: str) -> str:
@@ -132,7 +150,7 @@ def store_document_content(iri: str, bundle: ContentBundle) -> dict[str, int]:
                     _uid(page.uid, bundle.doc_id, f"p{int(page.page_no or 0):04d}"),
                     160,
                 ),
-                text=page.text or "",
+                text=_clean(page.text),
                 coverage_state=_fit(page.coverage_state, 40),
                 anchor_fidelity=_fit(page.anchor_fidelity, 40),
                 ocr_source=_fit(page.ocr_source, 40),
@@ -154,12 +172,15 @@ def store_document_content(iri: str, bundle: ContentBundle) -> dict[str, int]:
                 uid=_fit(_uid(table.uid, bundle.doc_id, key), 160),
                 page_no=max(int(table.page_no or 0), 0),
                 index_on_page=max(int(table.index_on_page or 1), 0),
-                caption=table.caption or "",
-                header=list(table.header or []),
+                caption=_clean(table.caption),
+                header=[
+                    _clean(cell) if isinstance(cell, str) else cell
+                    for cell in (table.header or [])
+                ],
                 n_rows=max(int(table.n_rows or 0), 0),
                 n_cols=max(int(table.n_cols or 0), 0),
                 fidelity=_fit(table.fidelity, 40),
-                markdown=table.markdown or "",
+                markdown=_clean(table.markdown),
             )
             for ordinal, key, table in _ordered(bundle.tables, "t")
         ],
@@ -176,13 +197,13 @@ def store_document_content(iri: str, bundle: ContentBundle) -> dict[str, int]:
                 uid=_fit(_uid(figure.uid, bundle.doc_id, key), 160),
                 page_no=max(int(figure.page_no or 0), 0),
                 index_on_page=max(int(figure.index_on_page or 1), 0),
-                title=figure.title or "",
+                title=_clean(figure.title),
                 chart_type=_fit(figure.chart_type, 40),
                 unit=_fit(figure.unit, 80),
                 x_axis=_fit(figure.x_axis, 300),
                 y_axis=_fit(figure.y_axis, 300),
-                notes=figure.notes or "",
-                verify_note=figure.verify_note or "",
+                notes=_clean(figure.notes),
+                verify_note=_clean(figure.verify_note),
                 verified=figure.verified,
             ),
             figure,

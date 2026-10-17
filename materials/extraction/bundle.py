@@ -209,7 +209,7 @@ class ContentBundle:
     figures: list[FigureRecord] = field(default_factory=list)
     declared: DeclaredCounts | None = None
     chart_pages: list[int] = field(default_factory=list)
-    #: Personal-data removals per class, from ``materials.extraction.redact``.
+    #: Personal-data removals per class, from ``materials.redaction``.
     #: Counts only — never a match and never a location — so this is safe to log
     #: and to put in a job result. Not persisted, for the same reason
     #: ``chart_pages`` is not: it describes the RUN, not the document.
