@@ -31,6 +31,7 @@ import hashlib
 import logging
 from typing import Any
 
+from . import artifacts
 from . import jsonld
 from . import provenance
 
@@ -180,11 +181,27 @@ def apply_convert_result(job, result: dict) -> None:
     # material-specific R2 layout (docs/data-plane-design.md §3) is folded in with
     # the provenance work (§8 item 2); until then the link is correct, just not
     # prefix-isolated.
+    # The transcript is stored TWICE: as converted, and redacted. Both are files
+    # of ours, and the difference between them is who may read each — see
+    # materials.artifacts. The redacted one is what ``data["text"]`` becomes, and
+    # ``data["text"]`` is what the search indexer reads (materials/search_index),
+    # so an unredacted transcript here is an unredacted snippet in public search
+    # results. That is the exposure this split closes.
+    redacted_text, redaction_counts = _redact(iri, text)
+
     md_bytes = text.encode("utf-8")
     md_file = ContentFile(md_bytes, name="material.md")
     link = store_file_as_link(
         md_file, role="MARKDOWN", content_hash=hashlib.sha256(md_bytes).hexdigest()
     )
+    redacted_link = None
+    if redacted_text is not None:
+        redacted_bytes = redacted_text.encode("utf-8")
+        redacted_link = store_file_as_link(
+            ContentFile(redacted_bytes, name="material.redacted.md"),
+            role=artifacts.REDACTED_TRANSCRIPT_ROLE,
+            content_hash=hashlib.sha256(redacted_bytes).hexdigest(),
+        )
 
     # 2) Read-modify-write the JSONB doc under a row lock so a concurrent write
     # (e.g. a re-upload upserting the same @id) can't clobber our text, or ours
@@ -212,10 +229,11 @@ def apply_convert_result(job, result: dict) -> None:
         # Replace-or-append the MARKDOWN MediaObject (idempotent re-run). MARKDOWN
         # is our own singular derived output, so dedup is by role (drop any prior
         # MARKDOWN, add the fresh one) — not by content hash.
+        ours = {"MARKDOWN", artifacts.REDACTED_TRANSCRIPT_ROLE}
         media = [
             mo
             for mo in _media_list(data)
-            if (mo.get("jawafdehi:linkRole") or "RAW") != "MARKDOWN"
+            if (mo.get("jawafdehi:linkRole") or "RAW") not in ours
         ]
         md_mo = jsonld._media_object({"link": link["link"], "role": "MARKDOWN"})
         if md_mo is not None:
@@ -230,9 +248,28 @@ def apply_convert_result(job, result: dict) -> None:
                 ocr_engine="likhit",
             )
             media.append(md_mo)
+        if redacted_link is not None and redacted_text is not None:
+            redacted_mo = jsonld._media_object(
+                {
+                    "link": redacted_link["link"],
+                    "role": artifacts.REDACTED_TRANSCRIPT_ROLE,
+                }
+            )
+            if redacted_mo is not None:
+                redacted_mo["encodingFormat"] = "text/markdown"
+                redacted_mo[provenance.PROVENANCE_KEY] = provenance.build_provenance(
+                    sha256=hashlib.sha256(redacted_text.encode("utf-8")).hexdigest(),
+                    fetch_method="ocr",
+                    source_url=(result or {}).get("source_url"),
+                    content_length=len(redacted_text.encode("utf-8")),
+                    ocr_engine="likhit",
+                )
+                media.append(redacted_mo)
         data["associatedMedia"] = media
-        # The searchable full text (language-mapped, per MATERIAL_CONTEXT).
-        data["text"] = {_TEXT_LANG: text}
+        # The searchable full text (language-mapped, per MATERIAL_CONTEXT) — the
+        # REDACTED transcript where we have one. The indexer reads this field, so
+        # whatever is here is what a public search snippet can quote.
+        data["text"] = {_TEXT_LANG: redacted_text if redacted_text is not None else text}
 
         row.data = data
         row.save(update_fields=["data", "updated_at"])  # post_save → reindex
@@ -242,3 +279,26 @@ def apply_convert_result(job, result: dict) -> None:
         len(text),
         (result or {}).get("source_url"),
     )
+
+
+def _redact(iri: str, text: str) -> tuple[str | None, dict]:
+    """``(redacted_text, counts)``, or ``(None, {})`` when we cannot redact.
+
+    **None is not "nothing to remove" — it is "we could not look".** The two must
+    stay apart here: a transcript with no identifiers in it is safe to publish,
+    and one the redactor never ran over is not. When this returns None the caller
+    publishes neither a redacted file nor a redacted ``text`` field, so the
+    document keeps its original behaviour (staff-visible transcript, no public
+    redacted copy) instead of being labelled redacted on the strength of a
+    failure.
+    """
+    from .extraction.redact import RedactionUnavailable, redact_text
+
+    try:
+        redacted, counts = redact_text(text)
+    except RedactionUnavailable as exc:  # pragma: no cover - older likhit pin
+        logger.error("material_convert %s: cannot redact transcript: %s", iri, exc)
+        return None, {}
+    if counts:
+        logger.info("material_convert %s: redacted %s", iri, dict(counts))
+    return redacted, dict(counts)

@@ -192,6 +192,10 @@ _ROLE_ENCODING_HINTS = {
     "PERMALINK": None,
     "SOURCE_PAGE": "text/html",
     "MARKDOWN": "text/markdown",
+    # Our own renderings. Unlike RAW, the format of these IS known from the role:
+    # we produced them, so there is nothing to guess.
+    "REDACTED_PDF": "application/pdf",
+    "REDACTED_MARKDOWN": "text/markdown",
 }
 
 

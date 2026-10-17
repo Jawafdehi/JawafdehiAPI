@@ -31,6 +31,7 @@ from rest_framework.decorators import (
     permission_classes,
 )
 from rest_framework.parsers import FormParser, MultiPartParser
+from drf_spectacular.utils import extend_schema
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
@@ -44,6 +45,8 @@ from jawafdehi_shared.jsonpatch_ops import normalize_patch_ops
 from jawafdehi_shared.storage import store_file_as_link
 from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
+from . import artifacts
+from . import extract as material_extract
 from . import jsonld
 from . import provenance
 from .sources import build_catalogue
@@ -80,9 +83,10 @@ LD_JSON = "application/ld+json"
 #: JSON-LD MediaObject mapping understands — jsonld._ROLE_ENCODING_HINTS).
 #: MARKDOWN + SOURCE_PAGE added per ADR (cases-own-no-documents, D-D) so no
 #: legacy source link role is lost when sources fold into materials.
-_UPLOAD_ROLES = frozenset(
-    {"RAW", "ALTERNATE", "PERMALINK", "MARKDOWN", "SOURCE_PAGE"}
-)
+#: Every roled link a client may attach. The two REDACTED_* roles are ours to
+#: write (see materials.artifacts) but are accepted here too, so a corpus that
+#: arrives already redacted can be uploaded as such rather than as an original.
+_UPLOAD_ROLES = artifacts.ALL_ROLES
 
 #: Upload roles that carry an original document worth OCR-ing into full text.
 #: Excludes MARKDOWN (our own extraction output) + SOURCE_PAGE (HTML, not a scan).
@@ -296,6 +300,17 @@ def _material_read_response(request, iri: str) -> Response:
         )
         patch_vary_headers(resp, ("Authorization",))
         return resp
+    # ONE URL, two representations — and the difference now includes which
+    # artifacts are listed. A signed-out reader gets the redacted PDF and the
+    # redacted transcript; our own unredacted copies are withheld, while a link
+    # to the PUBLISHER's copy is never withheld, because that is the citation
+    # chain rather than something we publish. Vary: Authorization below is what
+    # keeps a shared cache from handing one answer to the other, and it was
+    # already required for the visibility annotations.
+    if not _can_see_nonpublic(request):
+        data = artifacts.redact_payload(data)
+    else:
+        data = {**data, "jawafdehi:artifacts": artifacts.artifact_summary(data)}
     resp = Response(data, content_type=LD_JSON)
     if row is not None:
         # The token a conditional PATCH is matched against, so a client can opt
@@ -1083,8 +1098,10 @@ def material_by_iri(request):
 def _resolve_for_content(request, source: str, ident: str):
     """Shared preamble for the content route.
 
-    Returns ``(iri, None)`` once the material is known to exist AND to be visible
-    to this caller, else ``(None, <error Response>)``.
+    Returns ``(iri, jsonld, None)`` once the material is known to exist AND to be
+    visible to this caller, else ``(None, None, <error Response>)``. The document
+    comes back because both callers need it: the GET to say whether an absent
+    extraction could be produced, and the POST to find the file to read.
 
     The visibility gate is the whole point of routing through ``_resolve_material``
     rather than querying ``DocumentContent`` directly. Content is
@@ -1096,7 +1113,7 @@ def _resolve_for_content(request, source: str, ident: str):
     try:
         iri = build_material_iri(source, ident)
     except ValueError:
-        return None, Response(
+        return None, None, Response(
             {"detail": "Invalid material source/ident."},
             status=status.HTTP_400_BAD_REQUEST,
         )
@@ -1108,8 +1125,8 @@ def _resolve_for_content(request, source: str, ident: str):
             {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
         )
         patch_vary_headers(resp, ("Authorization",))
-        return None, resp
-    return iri, None
+        return None, None, resp
+    return iri, data, None
 
 
 def _content_response(payload, content, *, http_status=status.HTTP_200_OK):
@@ -1167,13 +1184,31 @@ def _not_modified(request, content):
     return None
 
 
-@api_view(["GET"])
+@extend_schema(  # ty: ignore[invalid-argument-type]
+    # drf-spectacular types its decorator as taking a plain callable, and
+    # `api_view` below has already turned this into an AsView. The documented
+    # order for a function-based view is exactly this, so the mismatch is in the
+    # library's annotation rather than in the stack.
+    methods=["POST"],
+    exclude=True,
+    description=(
+        "Internal: starts a parse of this document. Called by the MCP document "
+        "tools when a caseworker reads a document nobody has opened yet, not by "
+        "clients directly. See materials.views._request_extraction."
+    ),
+)
+@api_view(["GET", "POST"])
 @permission_classes([AllowAny])
 def material_content(request, source: str, ident: str):
     """``GET /api/materials/<source>/<ident>/content?type=…`` → one kind of content.
 
     ``?type=page`` / ``?type=table`` / ``?type=figure`` list that kind; adding
     ``&num=`` (pages) or ``&id=`` (tables, figures) returns one item in full.
+
+    ``POST`` to the same URL asks for the document to be extracted — see
+    :func:`_request_extraction`. The two sit on one route because they are two
+    halves of one question: a reader who GETs a document we have never opened
+    gets a 404 saying whether asking would help, and POSTs if it would.
 
     **A table and a figure are addressed by ``key``, never by ``ordinal``.** The
     ordinal is presentation order and is recomputed on every ingest, so a saved
@@ -1189,9 +1224,12 @@ def material_content(request, source: str, ident: str):
     are different facts, and a client that conflates them reports the first as
     the second.
     """
-    iri, error = _resolve_for_content(request, source, ident)
+    iri, doc, error = _resolve_for_content(request, source, ident)
     if error is not None:
         return error
+
+    if request.method == "POST":
+        return _request_extraction(request, iri, doc)
 
     kind = (request.query_params.get("type") or "").strip().lower()
     if not kind:
@@ -1206,7 +1244,14 @@ def material_content(request, source: str, ident: str):
     content = content_for(iri)
     if content is None:
         return _content_response(
-            {"detail": "No content for this material."},
+            {
+                "detail": "No content for this material.",
+                # Whether asking for it would help. Without this a client cannot
+                # tell "nobody has opened this document yet" from "there is no
+                # document here to open", and the two have opposite next steps:
+                # POST this URL, or go to the source.
+                "extractable": material_extract.is_extractable(doc or {}),
+            },
             None,
             http_status=status.HTTP_404_NOT_FOUND,
         )
@@ -1219,6 +1264,122 @@ def material_content(request, source: str, ident: str):
     if kind == "page":
         return _page_response(request, iri, content)
     return _keyed_response(request, iri, content, kind)
+
+
+def _request_extraction(request, iri: str, doc):
+    """``POST …/content`` — ask for this document to be opened.
+
+    **Internal.** This is the mechanism, not the interface: no client is expected
+    to call it, and it is excluded from the public schema. What calls it is the
+    MCP document tools (``jawafdehi_mcp/tools/documents.py``) — a caseworker who
+    tries to *read* a document nobody has opened starts the parse by reading it,
+    which is the only moment anyone has a reason to want it parsed. A separate
+    "please extract this" step is a thing to know about, and ~94% of the archive
+    has never been read, so almost every first read would need it.
+
+    The on-demand half of the extraction pipeline: the batch command queues a
+    whole source, and this queues one document because somebody wants it now.
+    Both go through the same queue, the same worker and the same writer, so a
+    reader's document is extracted identically to a batch one — there is no
+    "quick" variant that produces thinner content.
+
+    **It returns 202, not the content.** Extraction is minutes of CPU for a large
+    report (160 s for a 446-page one, measured), so there is no honest way to
+    answer this inside a request. The client polls the GET.
+
+    | Outcome | Response |
+    |---|---|
+    | content already stored | ``200`` with the summary — nothing is queued |
+    | queued (or already queued) | ``202`` with the job, and ``Retry-After`` |
+    | material carries no document we can open | ``409`` |
+    | too many extractions already waiting | ``429`` with ``Retry-After`` |
+
+    ``409`` rather than ``400``: the request is well formed and the URL exists —
+    it is the *material* that has nothing to extract, which is a statement about
+    the resource, not about the request. And 409 rather than 404, because the
+    material is right here and a reader can still read everything else about it.
+
+    Gated on the NGM content role, exactly as the file-upload route on this
+    prefix is. Extraction is a *read* in the sense that it adds no claim of our
+    own, but it spends minutes of shared CPU per call, and an anonymous trigger
+    over 346k materials is a way to spend the entire worker budget. Widening this
+    to any signed-in reader is a deliberate decision that wants a per-caller
+    budget first; ``DOCUMENT_EXTRACT_MAX_QUEUED`` is a queue-wide floor, not a
+    per-caller one.
+    """
+    denied = _require_ngm_role(request)
+    if denied is not None:
+        return denied
+
+    content = content_for(iri)
+    if content is not None:
+        # Idempotent: already extracted is a success, not a conflict. Re-running
+        # is an operator's call (``extract_document_content --force``), because it
+        # replaces every row and moves the ETag of a document nobody changed.
+        return _content_response(
+            {
+                "material": iri,
+                "status": "ready",
+                "content": content_summary(content),
+            },
+            content,
+        )
+
+    if not material_extract.is_extractable(doc or {}):
+        return _content_response(
+            {
+                "material": iri,
+                "status": "unextractable",
+                "detail": (
+                    "This material carries no document this pipeline can open "
+                    "(a PDF under a RAW, ALTERNATE or PERMALINK link)."
+                ),
+            },
+            None,
+            http_status=status.HTTP_409_CONFLICT,
+        )
+
+    if material_extract.queued_count() >= material_extract.MAX_QUEUED_ON_DEMAND:
+        resp = _content_response(
+            {
+                "material": iri,
+                "status": "busy",
+                "detail": (
+                    "Too many extractions are already waiting; try again later."
+                ),
+            },
+            None,
+            http_status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+        resp["Retry-After"] = "300"
+        return resp
+
+    job = material_extract.enqueue_material_extract(iri)
+    if job is None:  # pragma: no cover - only when the jobs app is unavailable
+        return _content_response(
+            {
+                "material": iri,
+                "status": "unavailable",
+                "detail": "The job queue is unavailable; extraction was not queued.",
+            },
+            None,
+            http_status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    resp = _content_response(
+        {
+            "material": iri,
+            "status": "queued",
+            # The job id is reported for traceability, not as a polling target:
+            # /api/jobs is role-gated for consumers, so the client's poll is a GET
+            # of this same URL.
+            "job": {"id": job.pk, "status": job.status, "kind": job.kind},
+            "detail": "Extraction queued; poll this URL with ?type=page.",
+        },
+        None,
+        http_status=status.HTTP_202_ACCEPTED,
+    )
+    resp["Retry-After"] = "30"
+    return resp
 
 
 def _page_response(request, iri: str, content):
