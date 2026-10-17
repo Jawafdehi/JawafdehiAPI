@@ -162,9 +162,14 @@ def test_apply_result_is_idempotent_on_rerun():
 
     with patch(
         "jawafdehi_shared.storage.store_file_as_link",
+        # TWO stores per conversion now — the transcript as converted, and the
+        # redacted rendering of it. See materials.artifacts for which is
+        # published.
         side_effect=[
             {"link": "https://cdn/v1.md", "role": "MARKDOWN"},
+            {"link": "https://cdn/v1.redacted.md", "role": "REDACTED_MARKDOWN"},
             {"link": "https://cdn/v2.md", "role": "MARKDOWN"},
+            {"link": "https://cdn/v2.redacted.md", "role": "REDACTED_MARKDOWN"},
         ],
     ):
         apply_convert_result(job, {"text": "v1", "source_url": "https://a/raw.pdf"})
@@ -178,6 +183,14 @@ def test_apply_result_is_idempotent_on_rerun():
     ]
     assert len(md) == 1 and md[0]["contentUrl"] == "https://cdn/v2.md"
     assert row.data["text"] == {"ne": "v2"}
+    # Both of ours are replaced on a re-run, not accumulated.
+    redacted = [
+        m
+        for m in row.data["associatedMedia"]
+        if m.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
+    ]
+    assert len(redacted) == 1
+    assert redacted[0]["contentUrl"] == "https://cdn/v2.redacted.md"
 
 
 @pytest.mark.django_db
@@ -200,7 +213,10 @@ def test_each_transcript_gets_its_own_object_key():
     seen = []
 
     def _capture(md_file, role=None, content_hash=None):
-        seen.append(content_hash)
+        # Only the original: each conversion also stores a redacted rendering,
+        # and keying THAT is a separate property (it follows the redacted bytes).
+        if role == "MARKDOWN":
+            seen.append(content_hash)
         return {"link": f"https://cdn/{content_hash}.md", "role": role}
 
     for ident, text in (("report-6", "पहिलो पाठ"), ("report-7", "दोस्रो पाठ")):
@@ -223,7 +239,8 @@ def test_identical_transcripts_share_one_object_key():
     seen = []
 
     def _capture(md_file, role=None, content_hash=None):
-        seen.append(content_hash)
+        if role == "MARKDOWN":
+            seen.append(content_hash)
         return {"link": f"https://cdn/{content_hash}.md", "role": role}
 
     for ident in ("report-8", "report-9"):
