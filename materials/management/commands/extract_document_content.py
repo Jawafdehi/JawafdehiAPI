@@ -38,8 +38,10 @@ from django.core.management.base import BaseCommand, CommandError
 from ...document_content import store_document_content
 from ...extract import (
     EXTRACT_KIND,
+    PRIORITY_BACKFILL,
     DocumentFetchError,
     NothingToExtract,
+    content_is_stale,
     document_urls,
     enqueue_material_extract,
     fetch_and_extract,
@@ -96,6 +98,14 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--recheck",
+            action="store_true",
+            help=(
+                "also re-read documents whose stored content is older than the "
+                "file it was read from (a re-upload, a corrected scan)"
+            ),
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="resolve and report candidates, change nothing",
@@ -148,10 +158,27 @@ class Command(BaseCommand):
             rows = rows.filter(pk__in=options["iri"])
         if options["source"]:
             rows = rows.filter(source__in=options["source"])
+        # Empty unless --recheck asks us to look at documents we already hold,
+        # and defined unconditionally so --force (which skips the branch below
+        # entirely) does not reach the loop with it unbound.
+        fresh: set[str] = set()
         if not options["force"]:
-            rows = rows.exclude(
-                pk__in=DocumentContent.objects.using("ngm").values("material_id")
-            )
+            # Materials we hold content for are excluded in SQL rather than in
+            # Python, because they are the cheap majority once a source is done
+            # and they would otherwise eat the scan budget. STALENESS is checked
+            # per candidate below — it needs the document's own provenance, which
+            # is JSONB, and a row whose file has changed is rare enough to pay
+            # for individually.
+            if options["recheck"]:
+                fresh = set(
+                    DocumentContent.objects.using("ngm").values_list(
+                        "material_id", flat=True
+                    )
+                )
+            else:
+                rows = rows.exclude(
+                    pk__in=DocumentContent.objects.using("ngm").values("material_id")
+                )
         cursor = "" if options["iri"] else self._cursor(options)
         if cursor:
             rows = rows.filter(pk__gt=cursor)
@@ -161,6 +188,8 @@ class Command(BaseCommand):
         found: list[tuple[str, list[str]]] = []
         skipped: list[str] = []
         seen = 0
+        stale = 0
+        with_document = 0
         for row in rows.iterator(chunk_size=200):
             seen += 1
             if seen > SCAN_CEILING:
@@ -171,6 +200,19 @@ class Command(BaseCommand):
                 )
                 break
             urls = document_urls(row.data or {})
+            # Counted here, not where candidates are: "carries a document" is a
+            # fact about the ARCHIVE, and reporting only the ones we queued
+            # would say "0 carry a document" for a source that is fully read —
+            # the one answer that must not look like the one where the scan
+            # never reached it.
+            if urls:
+                with_document += 1
+            if urls and row.pk in fresh:
+                # --recheck: we hold content for this one, so the only reason to
+                # queue it is that the FILE changed under us.
+                if not content_is_stale(row.pk, row.data or {}):
+                    continue
+                stale += 1
             if not urls:
                 # Only worth a line when the caller named this exact document.
                 # Over a whole source it is the common case (most materials are a
@@ -182,6 +224,13 @@ class Command(BaseCommand):
             if len(found) >= options["limit"]:
                 break
 
+        # The coverage statement. An automatic pipeline that reports only what
+        # it queued cannot tell "everything is read" from "the scan never got
+        # there" — which is the whole failure mode of a trigger plus a sweep.
+        self.stdout.write(
+            f"  scanned {seen} material(s): {with_document} carry a document, "
+            f"{stale} have content older than their file"
+        )
         for iri in sorted(wanted - {iri for iri, _urls in found}):
             if not any(note.startswith(f"{iri}:") for note in skipped):
                 # Named but absent from the queryset: gone, soft-deleted, or
@@ -225,7 +274,13 @@ class Command(BaseCommand):
     def _enqueue(self, candidates, options: dict) -> None:
         queued = 0
         for iri, _urls in candidates:
-            job = enqueue_material_extract(iri, force=options["force"])
+            job = enqueue_material_extract(
+                iri,
+                force=options["force"] or options["recheck"],
+                # Behind both the on-write trigger and a reader asking by name:
+                # a backfill is work nobody is waiting on.
+                priority=PRIORITY_BACKFILL,
+            )
             if job is None:  # pragma: no cover - only when the jobs app is absent
                 raise CommandError("the jobs app is unavailable; use --inline")
             queued += 1

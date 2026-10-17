@@ -482,3 +482,69 @@ class ResumeCursorTests(TestCase):
         # silently answered by a batch job that will skip the document.
         self.assertEqual(Job.objects.filter(payload__material_iri=_iri("aaa")).count(), 1)
         self.assertTrue(Job.objects.get(payload__material_iri=_iri("aaa")).payload["force"])
+
+
+class StalenessTests(TestCase):
+    """Content older than the file it was read from is content about bytes
+    nobody can fetch any more, and a page citation into it points nowhere."""
+
+    databases = {"default", "ngm"}
+
+    DIGEST = "c" * 64
+
+    def _held(self, ident: str, *, stored_digest: str, file_digest: str) -> Material:
+        from materials.provenance import PROVENANCE_KEY
+
+        material = _material(ident)
+        material.data = {
+            **material.data,
+            "associatedMedia": [
+                {
+                    "@type": "MediaObject",
+                    "contentUrl": f"{PDF_URL}?{ident}",
+                    "jawafdehi:linkRole": "RAW",
+                    PROVENANCE_KEY: {"fetch_method": "upload", "sha256": file_digest},
+                }
+            ],
+        }
+        material.save()
+        DocumentContent.objects.using("ngm").create(
+            material=material,
+            doc_id=ident,
+            dataset="jawafdehi:pdf-extract/v1",
+            dataset_revision=f"sha256:{stored_digest}",
+        )
+        Job.objects.all().delete()
+        return material
+
+    def test_recheck_queues_only_the_documents_whose_file_changed(self):
+        self._held("aaa", stored_digest=self.DIGEST, file_digest=self.DIGEST)
+        self._held("bbb", stored_digest=self.DIGEST, file_digest="d" * 64)
+        out = StringIO()
+
+        call_command("extract_document_content", "--recheck", stdout=out)
+
+        self.assertEqual(
+            [j.payload["material_iri"] for j in Job.objects.all()], [_iri("bbb")]
+        )
+        self.assertIn("1 have content older than their file", out.getvalue())
+
+    def test_without_recheck_a_changed_file_is_left_alone(self):
+        self._held("bbb", stored_digest=self.DIGEST, file_digest="d" * 64)
+
+        call_command("extract_document_content", stdout=StringIO())
+
+        # Re-reading the archive is an operator's call, not a side effect of the
+        # weekly backfill tick.
+        self.assertEqual(Job.objects.count(), 0)
+
+    def test_the_sweep_reports_coverage_even_when_it_queues_nothing(self):
+        self._held("aaa", stored_digest=self.DIGEST, file_digest=self.DIGEST)
+        out = StringIO()
+
+        call_command("extract_document_content", "--recheck", stdout=out)
+
+        # An automatic pipeline that reports only what it queued cannot tell
+        # "everything is read" from "the scan never got there".
+        self.assertIn("scanned 1 material(s)", out.getvalue())
+        self.assertIn("1 carry a document", out.getvalue())

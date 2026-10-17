@@ -37,6 +37,7 @@ from typing import Any
 from django.conf import settings
 
 from . import conversion
+from . import provenance
 
 logger = logging.getLogger("materials.extract")
 
@@ -73,6 +74,16 @@ FETCH_TIMEOUT = getattr(settings, "DOCUMENT_EXTRACT_FETCH_TIMEOUT", 120)
 #: caller's loop over the archive. A batch run bypasses this deliberately: it is
 #: an operator who meant it, running with a ``--limit`` they chose.
 MAX_QUEUED_ON_DEMAND = getattr(settings, "DOCUMENT_EXTRACT_MAX_QUEUED", 500)
+
+
+#: Priority for a document somebody just wrote, ahead of the sweep's backfill
+#: (lower sorts first). Somebody writing a document is the best available signal
+#: that somebody is about to read it.
+PRIORITY_ON_WRITE = 50
+
+#: Priority for the reconciliation sweep's backfill — behind on-write and behind
+#: a reader asking for one document by name.
+PRIORITY_BACKFILL = 200
 
 
 class DocumentFetchError(RuntimeError):
@@ -119,6 +130,55 @@ def _looks_like_pdf(url: str, data: dict[str, Any]) -> bool:
 def is_extractable(data: dict[str, Any]) -> bool:
     """Whether this material carries a document this pipeline can open."""
     return bool(document_urls(data))
+
+
+def document_sha256(data: dict[str, Any]) -> str:
+    """The SHA-256 the best source link records for its own bytes, or "".
+
+    Written by the upload path (and by any ingest that records provenance), so
+    for a document we host this is an exact statement about the file WITHOUT
+    fetching it. Scraped links frequently carry no provenance at all, and the
+    answer there is "" — not a guess, and callers must read it as "unknown"
+    rather than as "unchanged".
+    """
+    urls = set(document_urls(data))
+    for media in conversion._media_list(data):
+        if media.get("contentUrl") in urls:
+            digest = (media.get(provenance.PROVENANCE_KEY) or {}).get("sha256")
+            if isinstance(digest, str) and digest.strip():
+                return digest.strip()
+    return ""
+
+
+def content_is_stale(iri: str, data: dict[str, Any]) -> bool:
+    """Whether this material's stored content needs (re)making.
+
+    True when there is no content at all, and true when the file's recorded
+    digest does not match the one the extraction was read from — a re-upload, a
+    corrected scan, a publisher reissuing a report. That second case is the one
+    worth having: without it a document silently keeps content describing bytes
+    that no longer exist, and a page citation points into a file nobody can get.
+
+    **An unknown digest is not a stale one.** A link with no recorded provenance
+    gives "" on both sides and would re-extract on every single save, which for
+    a scraped corpus means re-reading the whole archive weekly. When we cannot
+    tell, we leave it alone — the sweep reports how many of those there are, so
+    the gap is visible rather than paid for.
+    """
+    from .models import DocumentContent
+
+    stored = (
+        DocumentContent.objects.using("ngm")
+        .filter(pk=iri)
+        .values_list("dataset_revision", flat=True)
+        .first()
+    )
+    if stored is None:
+        return True
+    digest = document_sha256(data)
+    if not digest:
+        return False
+    return stored != f"sha256:{digest}"
 
 
 def queued_count() -> int:

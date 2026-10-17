@@ -169,6 +169,27 @@ class ExtractPdfTests(TestCase):
         # read — hence the table riding in the page text at all.
         self.assertGreater(bundle.pages[0].chars, len("Prose above the table."))
 
+    def test_a_page_that_is_read_and_also_carries_a_picture_says_so(self):
+        def build(doc):
+            page = doc.new_page()
+            page.insert_text((72, 90), "Prose above a pasted scan.", fontsize=11)
+            pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 400, 400))
+            pix.set_rect(pix.irect, (200, 200, 255))
+            page.insert_image(fitz.Rect(72, 150, 500, 650), pixmap=pix)
+            doc.new_page().insert_text((72, 90), "No picture here.", fontsize=11)
+
+        bundle = extract_pdf(_pdf(build), doc_id="mix")
+
+        # The omission nothing else can see. Both pages are `anchored` and every
+        # other field says they were read; on the first one, only the TYPED part
+        # was — a scanned table pasted into a born-digital page is a quarter of
+        # the paper and all of the numbers.
+        self.assertEqual(
+            [p.coverage_state for p in bundle.pages], ["anchored", "anchored"]
+        )
+        self.assertEqual(bundle.pages[0].ocr_source, "text_layer+image")
+        self.assertEqual(bundle.pages[1].ocr_source, "text_layer")
+
     def test_landscape_and_provenance_ride_on_the_result(self):
         def build(doc):
             doc.new_page(width=842, height=595).insert_text(
