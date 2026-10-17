@@ -489,6 +489,16 @@ class TestReadingAnUnparsedDocumentStartsTheParse:
 
         payload = _payload(result)
         assert payload["extraction"] == "started"
+        # The PATH, not just the outcome. These tools hold `…/<ident>/content`
+        # and the trigger appends `/content` itself; passing the read path
+        # produced `…/content/content`, a route that does not exist, and the
+        # tool reported "could not start parsing". A mocked transport returns
+        # the same success whatever it is called with, so asserting only the
+        # outcome let that through a full test run.
+        method, path = caller.await_args_list[1].args[:2]
+        assert method == "POST"
+        assert path.endswith("/ee0b4f80b24b8665/content"), path
+        assert "/content/content" not in path
         # Still an error result: the call returned no contents, and a model told
         # otherwise reports an unparsed document as one with no tables.
         assert result.is_error is True
@@ -502,6 +512,9 @@ class TestReadingAnUnparsedDocumentStartsTheParse:
             )
 
         assert _payload(result)["extraction"] == "started"
+        path = caller.await_args_list[1].args[1]
+        assert path.endswith("/ee0b4f80b24b8665/content"), path
+        assert "/content/content" not in path
 
     @pytest.mark.asyncio
     async def test_a_document_with_no_pdf_is_not_queued_over_and_over(self):

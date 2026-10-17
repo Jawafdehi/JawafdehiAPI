@@ -112,11 +112,41 @@ def redact_bundle(bundle) -> Counter:
         ]
         table.caption, counts = redact_text(table.caption)
         totals.update(counts)
+    for figure in bundle.figures:
+        # A chart read by a model carries free prose — a title, the transcriber's
+        # notes, the reconciliation it did. Nothing stops an identifier printed
+        # on a chart from landing there, and a figure is served to the public
+        # exactly like a page is.
+        figure.title, counts = redact_text(figure.title)
+        totals.update(counts)
+        figure.notes, counts = redact_text(figure.notes)
+        totals.update(counts)
+        figure.verify_note, counts = redact_text(figure.verify_note)
+        totals.update(counts)
+        for point in figure.points:
+            point.label, counts = redact_text(point.label)
+            totals.update(counts)
+            point.series, counts = redact_text(point.series)
+            totals.update(counts)
     if totals:
         logger.info("redacted %s: %s", bundle.doc_id, dict(totals))
-    if not bundle.text_source.endswith(REDACTED_SUFFIX):
-        bundle.text_source = f"{bundle.text_source}{REDACTED_SUFFIX}"
+    bundle.text_source = _mark(bundle.text_source)
     return totals
+
+
+#: ``DocumentContent.text_source`` is 40 characters. The marker has to survive
+#: the writer's truncation, or the claim it makes is cut off mid-word and the
+#: idempotence check below stops recognising its own mark — appending again on
+#: every re-extract.
+_TEXT_SOURCE_WIDTH = 40
+
+
+def _mark(text_source: str) -> str:
+    """``<source>+redacted``, fitted to the column rather than overflowing it."""
+    if text_source.endswith(REDACTED_SUFFIX):
+        return text_source
+    room = _TEXT_SOURCE_WIDTH - len(REDACTED_SUFFIX)
+    return f"{text_source[:room]}{REDACTED_SUFFIX}"
 
 
 def redaction_summary(totals: Counter) -> dict:

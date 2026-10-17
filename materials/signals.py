@@ -103,12 +103,17 @@ def _enqueue_extract(instance) -> None:
         return
     if not material_extract.content_is_stale(instance.pk, data):
         return
+    if material_extract.failed_for_these_bytes(instance.pk, data):
+        # Already tried this exact file and gave up. Re-queueing it on every
+        # save turns one broken document into a weekly cost forever.
+        return
     try:
         material_extract.enqueue_material_extract(
             # Ahead of the sweep's backfill: somebody just wrote this document,
             # so somebody is more likely to be about to read it.
             instance.pk,
             priority=material_extract.PRIORITY_ON_WRITE,
+            sha256=material_extract.document_sha256(data),
         )
     except Exception as exc:  # noqa: BLE001 - a queue outage must not fail a write
         logger.warning("could not queue extraction for %s: %s", instance.pk, exc)

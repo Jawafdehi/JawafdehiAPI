@@ -121,7 +121,7 @@ def _truncate(value: str, budget: int) -> tuple[str, bool]:
 
 
 async def _with_extraction(
-    tool: str, path: str, failure: ToolExecutionResult
+    tool: str, material_path: str, failure: ToolExecutionResult
 ) -> ToolExecutionResult:
     """Turn "no content for this material" into "parsing has started".
 
@@ -137,7 +137,7 @@ async def _with_extraction(
     payload = _payload_of(failure)
     if payload.get("status_code") != 404 or not _extractable(payload):
         return failure
-    started = await _start_extraction(tool, path)
+    started = await _start_extraction(tool, material_path)
     body = dict(payload)
     body.update(started)
     # Still an error result: the call did not return content, and a model told
@@ -159,7 +159,7 @@ def _extractable(payload: dict[str, Any]) -> bool:
     return bool(isinstance(data, dict) and data.get("extractable"))
 
 
-async def _start_extraction(tool: str, path: str) -> dict[str, Any]:
+async def _start_extraction(tool: str, material_path: str) -> dict[str, Any]:
     """Ask the platform to parse this document, and say what came of it.
 
     **Reading a document we have never opened is what starts the parse.** There
@@ -169,18 +169,25 @@ async def _start_extraction(tool: str, path: str) -> dict[str, Any]:
     to do with that answer is to start.
 
     ``POST …/content`` is the platform's internal trigger, not a route clients
-    are expected to call; these tools are what calls it. It returns at once
+    are expected to call; these tools are what calls it. Takes the MATERIAL
+    path and builds the content URL itself, so a caller holding either one
+    cannot build a doubled path. It returns at once
     (202), because parsing a 1,113-page report is ~10 minutes and no tool call
     should sit on that. Every outcome is reported as a note rather than an error:
     the tool's own answer — "we have not parsed this" — is still true and still
     useful, and a failure to START a parse must not turn a successful read of the
     metadata into a failed tool call.
     """
-    result = await request_control_plane("POST", f"{path}/content")
+    # ``material_path``, NOT the path the caller just read. The content tools
+    # hold ``…/<ident>/content`` and appending another ``/content`` to it POSTs
+    # at a route that does not exist — a 404 the tool then reports as "could not
+    # start parsing". It passed review and a full test run because the tests
+    # mocked the transport and asserted the OUTCOME without asserting the path.
+    result = await request_control_plane("POST", f"{material_path}/content")
     status = result.get("status_code")
     payload = result.get("data") if isinstance(result.get("data"), dict) else {}
     if status == 202:
-        logger.info("document_extraction_started", tool_name=tool, path=path)
+        logger.info("document_extraction_started", tool_name=tool, path=material_path)
         return {
             "extraction": "started",
             "note": (
@@ -219,7 +226,10 @@ async def _start_extraction(tool: str, path: str) -> dict[str, Any]:
             ),
         }
     logger.warning(
-        "document_extraction_trigger_failed", tool_name=tool, path=path, status=status
+        "document_extraction_trigger_failed",
+        tool_name=tool,
+        path=material_path,
+        status=status,
     )
     return {
         "extraction": "failed",
@@ -411,12 +421,13 @@ class ListDocumentContentsTool(BaseTool):
         kind = arguments.get("kind")
         if kind not in self.KINDS:
             return _error(f"kind must be one of {', '.join(self.KINDS)}.")
-        path = _material_path(arguments.get("iri", ""), "/content")
-        if path is None:
+        material_path = _material_path(arguments.get("iri", ""))
+        if material_path is None:
             return _error("iri must be a material @id IRI (…/material/<source>/<ident>).")
+        path = f"{material_path}/content"
         result = await _call(self.name, path, params={"type": kind})
         if isinstance(result, ToolExecutionResult):
-            return await _with_extraction(self.name, path, result)
+            return await _with_extraction(self.name, material_path, result)
         return _text(result)
 
 
@@ -460,9 +471,12 @@ class ReadDocumentPartTool(BaseTool):
         }
 
     async def execute(self, arguments: dict[str, Any]) -> list[TextContent]:
-        path = _material_path(arguments.get("iri", ""), "/content")
-        if path is None:
+        material_path = _material_path(arguments.get("iri", ""))
+        # Guarded on the material path itself rather than on the derived one, so
+        # both are known non-None below — the trigger takes the material path.
+        if material_path is None:
             return _error("iri must be a material @id IRI (…/material/<source>/<ident>).")
+        path = f"{material_path}/content"
 
         page = arguments.get("page")
         first, last = arguments.get("from_page"), arguments.get("to_page")
@@ -490,7 +504,7 @@ class ReadDocumentPartTool(BaseTool):
 
         result = await _call(self.name, path, params=params)
         if isinstance(result, ToolExecutionResult):
-            return await _with_extraction(self.name, path, result)
+            return await _with_extraction(self.name, material_path, result)
         return _text(self._bounded(result))
 
     def _bounded(self, result: dict[str, Any]) -> dict[str, Any]:

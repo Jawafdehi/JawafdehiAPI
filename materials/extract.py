@@ -150,6 +150,33 @@ def document_sha256(data: dict[str, Any]) -> str:
     return ""
 
 
+def failed_for_these_bytes(iri: str, data: dict[str, Any]) -> bool:
+    """Whether we already tried this exact file and gave up on it.
+
+    A document with a PDF, no content and a dead job is indistinguishable from
+    one nothing has reached yet — so without this, both the on-write receiver
+    and the weekly sweep re-queue it forever: the same encrypted PDF, the same
+    mis-linked HTML, the same 400 MB scan, fetched and failed every week until
+    somebody reads the job table.
+
+    Keyed on the FILE, not on the material: a replaced file deserves a fresh
+    attempt, and that is the whole point of recording the digest on the job. An
+    unknown digest ("" on either side) is treated as a match, because a scraped
+    link with no provenance is exactly the case where re-trying forever is most
+    expensive and least likely to work.
+    """
+    from jobs.models import Job
+
+    digest = document_sha256(data)
+    terminal = Job.objects.filter(
+        kind=EXTRACT_KIND, status__in=(Job.FAILED, Job.DEAD)
+    ).filter(payload__material_iri=iri)
+    for job in terminal.only("payload"):
+        if (job.payload or {}).get("sha256", "") == digest:
+            return True
+    return False
+
+
 def content_is_stale(iri: str, data: dict[str, Any]) -> bool:
     """Whether this material's stored content needs (re)making.
 
@@ -190,7 +217,13 @@ def queued_count() -> int:
     ).count()
 
 
-def enqueue_material_extract(material_iri: str, *, priority: int = 100, force: bool = False):
+def enqueue_material_extract(
+    material_iri: str,
+    *,
+    priority: int = 100,
+    force: bool = False,
+    sha256: str = "",
+):
     """Queue an extraction for ``material_iri``; returns the ``Job``.
 
     Deduped on the IRI, so a reader asking while a batch run already queued the
@@ -208,7 +241,15 @@ def enqueue_material_extract(material_iri: str, *, priority: int = 100, force: b
 
     job = jobs_queue.enqueue(
         EXTRACT_KIND,
-        payload={"material_iri": material_iri, "force": bool(force)},
+        payload={
+            "material_iri": material_iri,
+            "force": bool(force),
+            # The bytes this attempt is for. What makes a terminal failure
+            # specific to a file rather than to the material, so replacing the
+            # file earns a fresh attempt. "" when the link records no
+            # provenance — see failed_for_these_bytes.
+            "sha256": sha256 or "",
+        },
         dedup_key=f"{EXTRACT_KIND}:{material_iri}",
         priority=priority,
     )
@@ -217,7 +258,7 @@ def enqueue_material_extract(material_iri: str, *, priority: int = 100, force: b
         and job is not None
         and job.status == Job.QUEUED
         and not (job.payload or {}).get("force")
-    ):
+    ):  # noqa: SIM102 - the conditional UPDATE below is what makes this safe
         # Dedup handed back a job somebody queued WITHOUT force — a batch tick,
         # usually — and that job will skip the document if content already
         # exists. An operator asking for a re-extract would then get a silent
@@ -225,10 +266,15 @@ def enqueue_material_extract(material_iri: str, *, priority: int = 100, force: b
         # queueing a second one: two jobs for one document would each replace
         # the other's rows.
         #
-        # QUEUED only. A RUNNING job has already read its payload, so writing to
-        # it changes nothing and races the worker.
-        job.payload = {**(job.payload or {}), "force": True}
-        job.save(update_fields=["payload", "updated_at"])
+        # QUEUED only, and as a CONDITIONAL update rather than a save: a worker
+        # can claim the job between the read above and the write, and a plain
+        # save would then rewrite the payload of a RUNNING job — changing
+        # nothing (it has already been read) while clobbering whatever claim
+        # recorded there. Filtering on the status makes the write a no-op in
+        # exactly that race.
+        payload = {**(job.payload or {}), "force": True}
+        Job.objects.filter(pk=job.pk, status=Job.QUEUED).update(payload=payload)
+        job.refresh_from_db()
     return job
 
 
@@ -410,13 +456,35 @@ def handle_material_extract(payload: dict, *, on_stage=None) -> dict:
             .values_list("dataset_revision", flat=True)
             .first()
         )
-        if existing is not None:
+        # **Not just "do we have content" — do we have content for THESE bytes.**
+        # The earlier version skipped on existence alone, which quietly defeated
+        # the whole staleness path: a replaced file is queued by the on-write
+        # receiver WITHOUT force (the file changed, the operator did not ask for
+        # anything), so the worker saw content, skipped, and the document kept
+        # describing bytes nobody can fetch. The digest the job carries is what
+        # distinguishes "somebody saved this material again" from "the file
+        # under it changed".
+        digest = (payload or {}).get("sha256") or ""
+        stored_matches = existing is not None and (
+            # No digest recorded on either side is the scraped-link case: we
+            # cannot tell, so we leave stored content alone rather than
+            # re-reading the archive on every save.
+            not digest
+            or existing == f"sha256:{digest}"
+        )
+        if stored_matches:
             logger.info("material_extract %s: content already stored, skipping", iri)
             return {
                 "material_iri": iri,
                 "skipped": "already extracted",
                 "dataset_revision": existing,
             }
+        if existing is not None:
+            logger.info(
+                "material_extract %s: stored content is for other bytes (%s), re-reading",
+                iri,
+                existing,
+            )
 
     return extract_and_store(iri, urls=urls, on_stage=on_stage)
 

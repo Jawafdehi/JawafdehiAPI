@@ -78,7 +78,16 @@ def media_list(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def role_of(media: dict[str, Any]) -> str:
-    return (media.get("jawafdehi:linkRole") or "RAW").strip().upper()
+    """The link's role, defaulting to RAW. Tolerates a non-string in JSONB.
+
+    A role that is not a string cannot be matched against the vocabulary, and
+    falling back to RAW is the SAFE default here rather than the lenient one: an
+    unrecognisable role on a link of ours is withheld, not published.
+    """
+    role = media.get("jawafdehi:linkRole")
+    if not isinstance(role, str) or not role.strip():
+        return "RAW"
+    return role.strip().upper()
 
 
 def _our_hosts() -> set[str]:
@@ -101,9 +110,18 @@ def _our_hosts() -> set[str]:
     return hosts
 
 
-def is_our_copy(url: str) -> bool:
-    """Whether this URL is a file we host, as opposed to the publisher's own."""
-    host = urlparse((url or "").strip()).hostname
+def is_our_copy(url: Any) -> bool:
+    """Whether this URL is a file we host, as opposed to the publisher's own.
+
+    ``contentUrl`` comes out of free-form JSONB and is not guaranteed to be a
+    string — a malformed document can carry an int, a list or a dict there. This
+    runs on the material detail payload, the hottest public read in the archive,
+    so a type error here is a 500 on a document a reader can otherwise see.
+    Anything that is not a string is not a URL of ours.
+    """
+    if not isinstance(url, str):
+        return False
+    host = urlparse(url.strip()).hostname
     return bool(host and host.lower() in _our_hosts())
 
 
@@ -115,7 +133,7 @@ def is_withheld(media: dict[str, Any]) -> bool:
     """
     if role_of(media) not in _WITHHELD_ROLES:
         return False
-    return is_our_copy(media.get("contentUrl") or "")
+    return is_our_copy(media.get("contentUrl"))
 
 
 def public_media(data: dict[str, Any]) -> list[dict[str, Any]]:
