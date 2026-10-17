@@ -421,3 +421,151 @@ class TestDescriptionsAreAccurate:
 
     def test_null_readable_is_explained_as_unknown(self):
         assert "does NOT mean zero" in ListDocumentSourcesTool().description
+
+
+class TestReadingAnUnparsedDocumentStartsTheParse:
+    """Reading is the trigger. There is no separate "extract this" step.
+
+    ~94% of the archive has never been opened, so the first honest answer to
+    most reads is "nobody has parsed this" — and the useful thing to do with
+    that answer is to start. The tools call the platform's internal
+    ``POST …/content`` for that; no client calls it, and it is excluded from
+    the public schema.
+    """
+
+    UNPARSED = {
+        "success": True,
+        "data": {"@id": IRI, "name": {"ne": "प्रतिवेदन"}},
+    }
+    NOT_FOUND = {
+        "success": False,
+        "status_code": 404,
+        "data": {"detail": "No content for this material.", "extractable": True},
+    }
+    NOTHING_TO_OPEN = {
+        "success": False,
+        "status_code": 404,
+        "data": {"detail": "No content for this material.", "extractable": False},
+    }
+    QUEUED = {"success": True, "status_code": 202, "data": {"status": "queued"}}
+
+    @pytest.mark.asyncio
+    async def test_an_overview_of_an_unparsed_document_queues_it(self):
+        caller = AsyncMock(side_effect=[self.UNPARSED, self.QUEUED])
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            result = await GetDocumentOverviewTool().execute({"iri": IRI})
+
+        payload = _payload(result)
+        # The overview is STILL returned. "We have not opened this" is a true and
+        # useful answer now; the parse is for the next call.
+        assert payload["readable"] is False
+        assert payload["extraction"] == "started"
+        # Both facts, in one note: nothing can be quoted yet, AND a parse is
+        # running. A model told only the second waits for a document it was
+        # never told it cannot cite.
+        assert "NOT been parsed" in payload["note"]
+        assert "queued" in payload["note"]
+        assert caller.await_args_list[1].args[0] == "POST"
+        assert caller.await_args_list[1].args[1].endswith("/content")
+
+    @pytest.mark.asyncio
+    async def test_a_parsed_document_is_not_re_queued(self):
+        doc = {"@id": IRI, "jawafdehi:content": {"pages": 446, "pages_read": 441}}
+        caller = AsyncMock(return_value={"success": True, "data": doc})
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            payload = _payload(await GetDocumentOverviewTool().execute({"iri": IRI}))
+
+        assert payload["readable"] is True
+        assert "extraction" not in payload
+        assert caller.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_listing_the_contents_of_an_unparsed_document_queues_it(self):
+        caller = AsyncMock(side_effect=[self.NOT_FOUND, self.QUEUED])
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            result = await ListDocumentContentsTool().execute(
+                {"iri": IRI, "kind": "table"}
+            )
+
+        payload = _payload(result)
+        assert payload["extraction"] == "started"
+        # The PATH, not just the outcome. These tools hold `…/<ident>/content`
+        # and the trigger appends `/content` itself; passing the read path
+        # produced `…/content/content`, a route that does not exist, and the
+        # tool reported "could not start parsing". A mocked transport returns
+        # the same success whatever it is called with, so asserting only the
+        # outcome let that through a full test run.
+        method, path = caller.await_args_list[1].args[:2]
+        assert method == "POST"
+        assert path.endswith("/ee0b4f80b24b8665/content"), path
+        assert "/content/content" not in path
+        # Still an error result: the call returned no contents, and a model told
+        # otherwise reports an unparsed document as one with no tables.
+        assert result.is_error is True
+
+    @pytest.mark.asyncio
+    async def test_reading_a_part_of_an_unparsed_document_queues_it(self):
+        caller = AsyncMock(side_effect=[self.NOT_FOUND, self.QUEUED])
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            result = await ReadDocumentPartTool().execute(
+                {"iri": IRI, "kind": "page", "page": 30}
+            )
+
+        assert _payload(result)["extraction"] == "started"
+        path = caller.await_args_list[1].args[1]
+        assert path.endswith("/ee0b4f80b24b8665/content"), path
+        assert "/content/content" not in path
+
+    @pytest.mark.asyncio
+    async def test_a_document_with_no_pdf_is_not_queued_over_and_over(self):
+        caller = AsyncMock(side_effect=[self.NOTHING_TO_OPEN])
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            result = await ListDocumentContentsTool().execute(
+                {"iri": IRI, "kind": "page"}
+            )
+
+        # ``extractable: false`` is the archive saying there is nothing here we
+        # can open — a different fact from "nobody has opened it", and one no
+        # amount of asking changes.
+        assert caller.await_count == 1
+        assert "extraction" not in _payload(result)
+
+    @pytest.mark.asyncio
+    async def test_a_forbidden_document_is_not_an_invitation_to_parse(self):
+        denied = {
+            "success": False,
+            "status_code": 403,
+            "data": {"detail": "Not permitted."},
+        }
+        caller = AsyncMock(side_effect=[denied])
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            await ListDocumentContentsTool().execute({"iri": IRI, "kind": "page"})
+
+        # Reaching for a parse here would answer a question nobody asked and
+        # hide the one that was.
+        assert caller.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_caller_without_the_role_is_told_what_is_missing(self):
+        refused = {"success": False, "status_code": 403, "data": {"detail": "role"}}
+        caller = AsyncMock(side_effect=[self.NOT_FOUND, refused])
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            result = await ListDocumentContentsTool().execute(
+                {"iri": IRI, "kind": "page"}
+            )
+
+        payload = _payload(result)
+        assert payload["extraction"] == "not permitted"
+        assert "Caseworker" in payload["note"]
+
+    @pytest.mark.asyncio
+    async def test_a_failure_to_start_does_not_fail_the_read(self):
+        broken = {"success": False, "status_code": 500, "data": {"detail": "boom"}}
+        caller = AsyncMock(side_effect=[self.UNPARSED, broken])
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            payload = _payload(await GetDocumentOverviewTool().execute({"iri": IRI}))
+
+        # The overview succeeded. A failure to START a parse must not turn a
+        # successful read of the metadata into a failed tool call.
+        assert payload["extraction"] == "failed"
+        assert payload["iri"] == IRI
