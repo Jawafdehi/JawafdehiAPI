@@ -120,123 +120,6 @@ def _truncate(value: str, budget: int) -> tuple[str, bool]:
     return value[:budget], True
 
 
-async def _with_extraction(
-    tool: str, material_path: str, failure: ToolExecutionResult
-) -> ToolExecutionResult:
-    """Turn "no content for this material" into "parsing has started".
-
-    The content routes answer 404 for two different facts, and the body tells
-    them apart: ``extractable`` true means nobody has opened this document yet,
-    false means there is nothing here we can open. Only the first is worth
-    acting on — and only the first is something the caller can wait out.
-
-    Every other failure (403 on a non-public document, 400 on a bad argument, a
-    503 from the archive) is returned untouched. Reaching for a parse on those
-    would answer a question nobody asked and hide the one that was.
-    """
-    payload = _payload_of(failure)
-    if payload.get("status_code") != 404 or not _extractable(payload):
-        return failure
-    started = await _start_extraction(tool, material_path)
-    body = dict(payload)
-    body.update(started)
-    # Still an error result: the call did not return content, and a model told
-    # otherwise will report an empty document as a read one.
-    return ToolExecutionResult(_text(body), is_error=True)
-
-
-def _payload_of(failure: ToolExecutionResult) -> dict[str, Any]:
-    """The envelope a ``_call`` failure carries, or an empty dict."""
-    try:
-        # ToolExecutionResult IS a list of TextContent, not a wrapper around one.
-        return json.loads(failure[0].text)
-    except (AttributeError, IndexError, TypeError, ValueError):
-        return {}
-
-
-def _extractable(payload: dict[str, Any]) -> bool:
-    data = payload.get("data")
-    return bool(isinstance(data, dict) and data.get("extractable"))
-
-
-async def _start_extraction(tool: str, material_path: str) -> dict[str, Any]:
-    """Ask the platform to parse this document, and say what came of it.
-
-    **Reading a document we have never opened is what starts the parse.** There
-    is no separate "please extract this" step for a caller to know about: the
-    archive is 346k documents and ~94% have never been read, so the first honest
-    answer to most reads is "nobody has opened this yet" — and the useful thing
-    to do with that answer is to start.
-
-    ``POST …/content`` is the platform's internal trigger, not a route clients
-    are expected to call; these tools are what calls it. Takes the MATERIAL
-    path and builds the content URL itself, so a caller holding either one
-    cannot build a doubled path. It returns at once
-    (202), because parsing a 1,113-page report is ~10 minutes and no tool call
-    should sit on that. Every outcome is reported as a note rather than an error:
-    the tool's own answer — "we have not parsed this" — is still true and still
-    useful, and a failure to START a parse must not turn a successful read of the
-    metadata into a failed tool call.
-    """
-    # ``material_path``, NOT the path the caller just read. The content tools
-    # hold ``…/<ident>/content`` and appending another ``/content`` to it POSTs
-    # at a route that does not exist — a 404 the tool then reports as "could not
-    # start parsing". It passed review and a full test run because the tests
-    # mocked the transport and asserted the OUTCOME without asserting the path.
-    result = await request_control_plane("POST", f"{material_path}/content")
-    status = result.get("status_code")
-    payload = result.get("data") if isinstance(result.get("data"), dict) else {}
-    if status == 202:
-        logger.info("document_extraction_started", tool_name=tool, path=material_path)
-        return {
-            "extraction": "started",
-            "note": (
-                "Nobody had opened this document, so parsing it has just been "
-                "queued. It takes roughly a minute per hundred pages, and a "
-                "large report can take ten. Call this tool again in a few "
-                "minutes; until then nothing in the document can be quoted."
-            ),
-        }
-    if status == 200:
-        # It was parsed between the read and the trigger — a batch run landed,
-        # or another caller asked first.
-        return {"extraction": "ready", "note": "This document has just been parsed; call again."}
-    if status == 409:
-        return {
-            "extraction": "unavailable",
-            "note": (
-                "This document cannot be parsed: it carries no PDF we can open. "
-                "Cite it as a holding and link the original instead."
-            ),
-        }
-    if status == 429:
-        return {
-            "extraction": "busy",
-            "note": (
-                "Parsing was not queued — too many documents are already waiting. "
-                "Try again later."
-            ),
-        }
-    if status in (401, 403):
-        return {
-            "extraction": "not permitted",
-            "note": (
-                "This document has not been parsed, and starting a parse needs a "
-                "Caseworker role. Ask one to open it, or cite the original PDF."
-            ),
-        }
-    logger.warning(
-        "document_extraction_trigger_failed",
-        tool_name=tool,
-        path=material_path,
-        status=status,
-    )
-    return {
-        "extraction": "failed",
-        "note": f"Could not start parsing this document ({payload.get('detail') or status}).",
-    }
-
-
 class ListDocumentSourcesTool(BaseTool):
     @property
     def name(self) -> str:
@@ -359,13 +242,11 @@ class GetDocumentOverviewTool(BaseTool):
             # overview is still returned either way: the answer "we have not
             # opened this" is true and useful now, and the parse is for the next
             # call.
-            started = await _start_extraction(self.name, path)
-            # APPEND rather than replace. Both facts hold at once — nothing here
-            # can be quoted yet, AND something is now being done about it — and
-            # a model that reads only "parsing has started" will wait for a
-            # document it was never told it cannot cite.
-            overview["note"] = f"{overview['note']} {started.pop('note', '')}".strip()
-            overview.update(started)
+            # No trigger here. Every document that arrives is queued for
+            # reading on arrival, and the sweep reconciles whatever that missed,
+            # so a tool call asking for one is work the platform has already
+            # scheduled — see materials/signals.py. What the tool owes a model is
+            # the true statement that nothing here can be quoted YET.
         else:
             unread = (content.get("pages") or 0) - (content.get("pages_read") or 0)
             overview["readable"] = True
@@ -426,9 +307,7 @@ class ListDocumentContentsTool(BaseTool):
             return _error("iri must be a material @id IRI (…/material/<source>/<ident>).")
         path = f"{material_path}/content"
         result = await _call(self.name, path, params={"type": kind})
-        if isinstance(result, ToolExecutionResult):
-            return await _with_extraction(self.name, material_path, result)
-        return _text(result)
+        return result if isinstance(result, ToolExecutionResult) else _text(result)
 
 
 class ReadDocumentPartTool(BaseTool):
@@ -504,7 +383,7 @@ class ReadDocumentPartTool(BaseTool):
 
         result = await _call(self.name, path, params=params)
         if isinstance(result, ToolExecutionResult):
-            return await _with_extraction(self.name, material_path, result)
+            return result
         return _text(self._bounded(result))
 
     def _bounded(self, result: dict[str, Any]) -> dict[str, Any]:
