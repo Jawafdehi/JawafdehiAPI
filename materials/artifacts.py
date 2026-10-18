@@ -67,6 +67,37 @@ ALL_ROLES = frozenset(
 )
 
 
+#: The permission that lets a principal see our unredacted copies.
+#:
+#: A PERMISSION rather than a role check, because who may read unredacted
+#: personal data is a decision an administrator should be able to make without a
+#: deploy. Django grants it to a Group, and the OIDC authenticator syncs Zitadel
+#: project roles onto Groups — so an admin creates the role, maps it, and ticks
+#: this box in ``/django-admin/``; nothing here changes.
+#:
+#: **Deliberately NOT held by Caseworker.** The content role is the largest staff
+#: group on the platform and exists to author and moderate cases, which needs the
+#: documents and not the identifiers in them. Attaching unredacted access to it
+#: would make "can edit a case" and "can read someone's citizenship number" the
+#: same grant, which is not a decision anyone would make on purpose.
+UNREDACTED_PERMISSION = "materials.view_unredacted"
+
+
+def can_see_unredacted(user: Any) -> bool:
+    """Whether this principal may see our unredacted copies.
+
+    Superusers always can: the Zitadel ``admin`` role maps to ``is_superuser``
+    rather than to a group, and until a dedicated role exists they are the only
+    principals who should. Everyone else needs the permission, granted to a
+    group by an administrator.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False):
+        return True
+    return bool(user.has_perm(UNREDACTED_PERMISSION))
+
+
 def media_list(data: dict[str, Any]) -> list[dict[str, Any]]:
     """``associatedMedia`` as a list — it may legitimately be a single dict."""
     media = (data or {}).get("associatedMedia")

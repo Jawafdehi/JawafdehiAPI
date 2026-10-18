@@ -12,7 +12,8 @@ the two distinctions it rests on.
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, Permission
+from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -130,17 +131,54 @@ class DetailPayloadTests(APITestCase):
         self.assertEqual(sorted(urls), sorted([OURS_REDACTED, OURS_MD_REDACTED]))
         self.assertEqual(response.data["jawafdehi:artifacts"]["withheld_from_this_payload"], 2)
 
-    def test_a_caseworker_gets_all_four(self):
+    def test_a_caseworker_does_not_get_the_unredacted_copies(self):
         user = get_user_model().objects.create_user("cw", password="x")
         user.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
         self.client.force_authenticate(user)
 
         response = self.client.get(URL)
 
+        # The content role is the largest staff group on the platform and exists
+        # to author and moderate cases — which needs the documents, not the
+        # identifiers printed in them. Attaching unredacted access to it would
+        # make "can edit a case" and "can read someone's citizenship number" one
+        # grant, which is not a decision anyone would make on purpose.
+        urls = [m["contentUrl"] for m in response.data["associatedMedia"]]
+        self.assertEqual(sorted(urls), sorted([OURS_REDACTED, OURS_MD_REDACTED]))
+
+    def test_an_admin_gets_all_four(self):
+        admin = get_user_model().objects.create_superuser("root", password="x")
+        self.client.force_authenticate(admin)
+
+        response = self.client.get(URL)
+
+        # The Zitadel `admin` role maps to is_superuser rather than to a group,
+        # and until a dedicated role exists these are the only principals who
+        # should see an unredacted copy.
         urls = [m["contentUrl"] for m in response.data["associatedMedia"]]
         self.assertEqual(len(urls), 4)
         self.assertIn(OURS, urls)
         self.assertIn(OURS_MD, urls)
+
+    def test_a_role_an_admin_granted_the_permission_gets_all_four(self):
+        # The point of a permission rather than a role check: an administrator
+        # creates a role, maps it to a group, ticks this box in /django-admin/,
+        # and nobody deploys anything.
+        group = Group.objects.create(name="PrivacyReviewer")
+        group.permissions.add(
+            Permission.objects.get(
+                codename="view_unredacted",
+                content_type=ContentType.objects.get_for_model(Material),
+            )
+        )
+        user = get_user_model().objects.create_user("reviewer", password="x")
+        user.groups.add(group)
+        self.client.force_authenticate(user)
+
+        response = self.client.get(URL)
+
+        urls = [m["contentUrl"] for m in response.data["associatedMedia"]]
+        self.assertEqual(len(urls), 4)
 
     def test_one_url_two_representations_so_the_response_varies(self):
         response = self.client.get(URL)

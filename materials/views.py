@@ -299,13 +299,19 @@ def _material_read_response(request, iri: str) -> Response:
         patch_vary_headers(resp, ("Authorization",))
         return resp
     # ONE URL, two representations — and the difference now includes which
-    # artifacts are listed. A signed-out reader gets the redacted PDF and the
+    # artifacts are listed. Nearly every caller gets the redacted PDF and the
     # redacted transcript; our own unredacted copies are withheld, while a link
     # to the PUBLISHER's copy is never withheld, because that is the citation
     # chain rather than something we publish. Vary: Authorization below is what
     # keeps a shared cache from handing one answer to the other, and it was
     # already required for the visibility annotations.
-    if not _can_see_nonpublic(request):
+    #
+    # Gated on the PERMISSION, not on ``_can_see_nonpublic``. That predicate
+    # answers a different question — may this caller see a draft case's evidence
+    # — and it is satisfied by the whole Caseworker group. Seeing a document that
+    # is not public and reading the identifiers printed inside it are separate
+    # decisions, and only the second one is this.
+    if not artifacts.can_see_unredacted(getattr(request, "user", None)):
         data = artifacts.redact_payload(data)
     else:
         data = {**data, "jawafdehi:artifacts": artifacts.artifact_summary(data)}
