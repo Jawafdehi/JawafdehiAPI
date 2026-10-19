@@ -1760,13 +1760,20 @@ class Case(models.Model):
 
         self.save()
 
-    def publish(self):
+    def publish(self, review_override_reason: str = ""):
         """
         Publish this case.
 
         Sets state to PUBLISHED and updates versionInfo.
         Auto-generates slug if not already set.
+
+        Reads the review verdict through ``review.gate.check_publish`` (see that
+        module for the off / warn / enforce modes) and returns it, so the caller
+        can store it on the transition log. Returns None in ``off`` mode.
         """
+        # Lazy: review <-> cases is a known import cycle (see AGENTS.md).
+        from review.gate import check_publish
+
         if self.state not in [CaseState.IN_REVIEW, CaseState.DRAFT]:
             raise ValidationError(
                 f"Can only publish cases in IN_REVIEW or DRAFT state, current state is {self.state}"
@@ -1782,6 +1789,9 @@ class Case(models.Model):
         # Validate before publishing
         self.validate()
 
+        # Read the verdict before save(), which bumps updated_at.
+        review_gate = check_publish(self, review_override_reason)
+
         # Update versionInfo
         self.versionInfo = {
             "action": "published",
@@ -1789,6 +1799,7 @@ class Case(models.Model):
         }
 
         self.save()
+        return review_gate
 
     def delete(self, using=None, keep_parents=False):
         """
@@ -2068,6 +2079,11 @@ class CaseStateChange(models.Model):
     # Optional free-text reason (e.g. why a submission was sent back or closed).
     # Never published; internal to casework, same trust boundary as notes.
     reason = models.TextField(blank=True, default="")
+    # What the review app said when this case was published (review.gate's
+    # verdict dict: disposition, review id, stale, would_block, mode, ...).
+    # Set only on PUBLISHED transitions, and only while the gate is not "off".
+    # Kept so we can compare what went live against what the judge said.
+    review_gate = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
