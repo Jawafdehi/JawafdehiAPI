@@ -220,13 +220,18 @@ def parse_order_results(html: str, *, base_url: str = HOMEPAGE_URL) -> OrderResu
         cells = row.find_all("td")
         if len(cells) < 10:
             continue
-        cell = cells[9]
-        link = cell.find("a", class_="download_content")
+        # Search the WHOLE row, not a fixed cell index. The document cell is not
+        # in the same position on every court: a special-court result row has 10
+        # cells with the link in index 9, a SUPREME row has 11 and the link sits
+        # in index 10 — index 9 there is a date. Reading `cells[9]` therefore
+        # found a date cell for every supreme case and reported `no_record`, so
+        # supreme full texts were invisible even when published and linked.
+        link = row.find("a", class_="download_content")
         href = link.get("href") if link else None
         if not href:
             # The marker lives in an attribute, so it has to be read off the
-            # cell's markup — get_text() would drop it.
-            if UPLOAD_PENDING_MARKER in str(cell):
+            # markup — get_text() would drop it.
+            if UPLOAD_PENDING_MARKER in str(row):
                 upload_pending = True
             continue
         url = urljoin(base_url, href)
