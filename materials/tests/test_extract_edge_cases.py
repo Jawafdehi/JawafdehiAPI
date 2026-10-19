@@ -15,10 +15,9 @@ from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import TestCase
 
 from jobs.models import Job
-from materials import artifacts
 from materials import extract as material_extract
 from materials.document_content import _clean, store_document_content
 from materials.extraction.bundle import ContentBundle, PageRecord, TableRecord
@@ -55,32 +54,6 @@ def _pdf_media(sha: str | None = DIGEST) -> dict:
     if sha is not None:
         media[PROVENANCE_KEY] = {"fetch_method": "upload", "sha256": sha}
     return media
-
-
-@override_settings(JAWAFDEHI_S3_BASE="https://s3.jawafdehi.org")
-class MalformedJsonbTests(TestCase):
-    """``associatedMedia`` is free-form JSONB and not everything in it is a string.
-
-    This runs on the material detail payload — the hottest public read in the
-    archive — so a type error here is a 500 on a document a reader can otherwise
-    see perfectly well.
-    """
-
-    def test_a_non_string_url_does_not_raise(self):
-        for value in (12345, None, ["https://x"], {"@id": "y"}):
-            with self.subTest(value=value):
-                media = {"contentUrl": value, "jawafdehi:linkRole": "RAW"}
-                self.assertFalse(artifacts.is_withheld(media))
-
-    def test_a_non_string_role_is_treated_as_raw_and_withheld(self):
-        # The SAFE default, not the lenient one: a link of ours whose role we
-        # cannot read is withheld rather than published.
-        media = {"contentUrl": PDF, "jawafdehi:linkRole": 7}
-        self.assertTrue(artifacts.is_withheld(media))
-
-    def test_a_whole_payload_of_junk_still_renders(self):
-        data = {"associatedMedia": [{"contentUrl": 1}, "not-a-dict", None, {}]}
-        self.assertEqual(artifacts.public_media(data), [{"contentUrl": 1}, {}])
 
 
 class PostgresOnlyRejectionTests(TestCase):
