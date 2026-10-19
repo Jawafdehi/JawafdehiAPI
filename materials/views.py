@@ -1175,6 +1175,13 @@ def material_content(request, source: str, ident: str):
     ``?type=page`` / ``?type=table`` / ``?type=figure`` list that kind; adding
     ``&num=`` (pages) or ``&id=`` (tables, figures) returns one item in full.
 
+    ``&q=`` narrows a table or figure LISTING by caption, title or page number.
+    The match is phonetic as well as literal, so a query typed on a Latin
+    keyboard reaches a Devanagari caption — "vivaran" finds विवरण. It lives here
+    rather than in the client because the vocabulary has to be the one the rest
+    of the platform already searches with; see
+    ``jawafdehi_shared.search.transliterate.matches_search``.
+
     **A table and a figure are addressed by ``key``, never by ``ordinal``.** The
     ordinal is presentation order and is recomputed on every ingest, so a saved
     link keyed on it would quietly resolve to a *different* table as soon as the
@@ -1232,6 +1239,12 @@ def _page_response(request, iri: str, content):
     """
     if request.query_params.get("id") is not None:
         return _bad_request("A page is addressed by num or from/to, not id.")
+    if request.query_params.get("q") is not None:
+        # A page has no title to match, and its text is deferred out of the
+        # listing precisely so a 446-page report does not ship its transcript
+        # to draw a table of contents. Refusing is honest; ignoring `q` would
+        # hand back every page while the caller believed it asked for a few.
+        return _bad_request("q narrows tables and figures; a page has no title.")
 
     num = request.query_params.get("num")
     first = request.query_params.get("from")
@@ -1327,13 +1340,23 @@ def _keyed_response(request, iri: str, content, kind: str):
                 f"A {kind} is addressed by id; {unsupported} applies to pages."
             )
     key = request.query_params.get("id")
+    query = request.query_params.get("q")
+    if key is not None and query is not None:
+        return _bad_request("Use either id or q, not both.")
     lister = list_tables if kind == "table" else list_figures
     if key is None:
-        items = lister(iri)
-        return _content_response(
-            {"material": iri, "type": kind, "count": len(items), "items": items},
-            content,
-        )
+        items = lister(iri, query)
+        payload = {
+            "material": iri,
+            "type": kind,
+            "count": len(items),
+            "items": items,
+        }
+        if query is not None:
+            # Echoed so a caller can tell a narrowed empty result from a
+            # document that holds none of this kind at all.
+            payload["q"] = query
+        return _content_response(payload, content)
     if kind == "table":
         table = get_table(iri, key)
         item = table_payload(table) if table is not None else None

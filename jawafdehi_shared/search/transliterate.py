@@ -21,6 +21,7 @@ output as a recall booster, never an exact key.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 # Romanization scheme used on the Latin side. IAST is the standard lossless
@@ -136,3 +137,92 @@ def to_roman_colloquial(text: str) -> str:
     if not stripped or stripped == kept:
         return kept
     return f"{kept} {stripped}"
+
+
+# ── search key ───────────────────────────────────────────────────────────────
+
+#: Sound classes a Nepali speaker typing Latin does NOT distinguish, applied in
+#: order. Each is a recall decision with a cost, and each is here because the
+#: alternative is a correct guess returning nothing:
+#:
+#: * ``ksh``/``chh`` — क्ष is read "chha" in Nepali, so क्षेत्र is typed both
+#:   "kshetra" and "chhetra".
+#: * ``sh``->``s`` — श, ष and स all collapse in casual spelling (sharma/sarma).
+#: * ``ee``/``oo`` and doubled vowels — a Latin keyboard does not carry
+#:   Devanagari vowel length.
+#:
+#: Over-matching is the intended failure mode: on a listing bounded by one
+#: document this widens the result by a few rows, while under-matching hides the
+#: row the reader came for.
+_SEARCH_SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
+    ("ksh", "ch"),
+    ("chh", "ch"),
+    ("sh", "s"),
+    ("ee", "i"),
+    ("oo", "u"),
+    ("ng", "n"),
+)
+
+#: Almost nobody types the ``h`` of an aspirate: बढी is written "badi" as often
+#: as "badhi".
+_ASPIRATE_RE = re.compile(r"([bcdgjkpt])h")
+
+#: व is romanized "v", spoken closer to "w", and written "b" as often as either
+#: (विवरण/बिबरण, विवेक/बिबेक). Collapsing all three is the single biggest recall
+#: win on this corpus, whose most common word is विवरण.
+_GLIDE_RE = re.compile(r"[vw]")
+
+_REPEAT_RE = re.compile(r"([a-z0-9])\1+")
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _search_fold(text: str) -> str:
+    """Reduce Latin text to its sound classes. Lossy by design; never displayed."""
+    folded = _fold_diacritics(text).lower()
+    folded = _NON_ALNUM_RE.sub(" ", folded)
+    for src, dst in _SEARCH_SUBSTITUTIONS:
+        folded = folded.replace(src, dst)
+    folded = _ASPIRATE_RE.sub(r"\1", folded)
+    folded = _GLIDE_RE.sub("b", folded)
+    folded = _REPEAT_RE.sub(r"\1", folded)
+    return " ".join(folded.split())
+
+
+def search_key(text: str) -> str:
+    """The form both a stored string and a typed query are reduced to.
+
+    Carries the folded ORIGINAL — so English text still matches an English
+    query — and, for Devanagari input, the folded colloquial romanization, which
+    is what lets a Latin-keyboard query reach a Nepali caption.
+    """
+    from .indexing import has_devanagari
+
+    parts = [_search_fold(text)]
+    if has_devanagari(text):
+        parts.append(_search_fold(to_roman_colloquial(text)))
+    return " ".join(p for p in parts if p)
+
+
+def matches_search(haystack: str, query: str) -> bool:
+    """Does ``haystack`` match ``query``, in script or in sound?
+
+    Literal substring is tried first, so a Devanagari query — and an English
+    query against English text — behaves exactly as a plain filter would and
+    costs no transliteration at all.
+
+    The phonetic pass is token-AND and order-free: every token of the query must
+    appear somewhere in the key. Order-sensitive matching meant "ujuri badhi"
+    found nothing while "badhi ujuri" found eighteen rows, which reads to a
+    reader as the archive not holding it.
+    """
+    q = query.strip()
+    if not q:
+        return True
+    if q.casefold() in haystack.casefold():
+        return True
+
+    tokens = [t for t in _search_fold(q).split() if t]
+    if not tokens:
+        return False
+    key = search_key(haystack)
+    return all(token in key for token in tokens)

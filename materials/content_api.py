@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from django.db.models import Prefetch
 
+from jawafdehi_shared.search.transliterate import matches_search
+
 from .models import (
     DocumentContent,
     DocumentFigure,
@@ -187,7 +189,7 @@ def get_page_range(iri: str, first: int, last: int) -> list[dict]:
     return [page_payload(p) for p in rows.order_by("page_no")]
 
 
-def list_tables(iri: str) -> list[dict]:
+def list_tables(iri: str, query: str | None = None) -> list[dict]:
     """Every table stub.
 
     ``defer("markdown")`` is load-bearing, not a micro-optimisation: a bare query
@@ -195,7 +197,8 @@ def list_tables(iri: str) -> list[dict]:
     out of the database only for the serializer to drop it again.
     """
     rows = DocumentTable.objects.filter(content_id=iri).defer("markdown")
-    return [_table_stub(t) for t in rows.order_by("ordinal")]
+    stubs = [_table_stub(t) for t in rows.order_by("ordinal")]
+    return _narrow(stubs, query, "caption")
 
 
 def get_table(iri: str, key: str) -> DocumentTable | None:
@@ -217,18 +220,43 @@ def _figures_queryset(iri: str):
     )
 
 
-def list_figures(iri: str) -> list[dict]:
+def list_figures(iri: str, query: str | None = None) -> list[dict]:
     """Every figure with its full series inline.
 
     Inlined because they are small — 6,116 points across the entire 35-report
     corpus — which is why #514's manifest inlined them too. The asymmetry with
     tables is deliberate and measured.
     """
-    return [figure_payload(f) for f in _figures_queryset(iri)]
+    return _narrow([figure_payload(f) for f in _figures_queryset(iri)], query, "title")
 
 
 def get_figure(iri: str, key: str) -> DocumentFigure | None:
     return _figures_queryset(iri).filter(key=key).first()
+
+
+def _narrow(items: list[dict], query: str | None, field: str) -> list[dict]:
+    """Keep the items whose ``field`` — or page number — matches ``query``.
+
+    **Filtered in Python, deliberately.** The match is phonetic (see
+    ``jawafdehi_shared.search.transliterate``) and no amount of SQL will tell
+    Postgres that "vivaran" is विवरण. The listings this runs over are bounded by
+    one document — 250 tables and 49 figures in the largest report in the
+    archive — so the whole set is already in memory by the time this is reached.
+
+    **The page number matches too.** 17% of tables carry no caption at all (61%
+    in the 35th report), and for those the folio is the only handle a reader
+    has; dropping them from every text query would put a sixth of the archive
+    out of reach of the one control on screen.
+    """
+    if query is None or not query.strip():
+        return items
+    needle = query.strip()
+    return [
+        item
+        for item in items
+        if matches_search(str(item.get(field) or ""), needle)
+        or str(item.get("page_no", "")) == needle
+    ]
 
 
 def version_token(content: DocumentContent) -> str:

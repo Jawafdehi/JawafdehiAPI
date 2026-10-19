@@ -20,6 +20,8 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from rest_framework import status
+
+from jawafdehi_shared.search.transliterate import backend_available
 from rest_framework.test import APITestCase
 
 from materials.content_api import MAX_PAGE_SPAN
@@ -156,6 +158,53 @@ class ContentListingTests(APITestCase):
         self.assertEqual(body["type"], "table")
         self.assertEqual(body["count"], 2)
         self.assertEqual([t["key"] for t in body["items"]], ["p0030-t1", "p0031-t1"])
+
+    def test_q_narrows_a_listing_by_caption(self):
+        # The second table has no caption, so a text query must exclude it.
+        body = self.client.get(self.url, {"type": "table", "q": "उजुरी"}).json()
+        self.assertEqual([t["key"] for t in body["items"]], ["p0030-t1"])
+        self.assertEqual(body["count"], 1)
+        # Echoed so a caller can tell a narrowed empty result from a document
+        # that holds no tables at all.
+        self.assertEqual(body["q"], "उजुरी")
+
+    def test_q_matches_a_devanagari_caption_from_a_latin_keyboard(self):
+        # The point of the whole feature: "ujuri" reaches उजुरी. Skipped where
+        # the transliteration backend is absent and romanization is identity.
+        if not backend_available():
+            self.skipTest("indic-transliteration backend unavailable")
+        body = self.client.get(self.url, {"type": "table", "q": "ujuri"}).json()
+        self.assertEqual([t["key"] for t in body["items"]], ["p0030-t1"])
+
+    def test_q_matches_a_page_number(self):
+        # 17% of tables carry no caption, and for those the folio is the only
+        # handle a reader has.
+        body = self.client.get(self.url, {"type": "table", "q": "31"}).json()
+        self.assertEqual([t["key"] for t in body["items"]], ["p0031-t1"])
+
+    def test_q_narrows_figures_too(self):
+        body = self.client.get(self.url, {"type": "figure", "q": "संख्या"}).json()
+        self.assertEqual(body["count"], 1)
+        empty = self.client.get(self.url, {"type": "figure", "q": "zzz"}).json()
+        self.assertEqual(empty["count"], 0)
+        self.assertEqual(empty["items"], [])
+
+    def test_q_is_refused_on_pages(self):
+        # A page has no title to match and its text is deferred out of the
+        # listing on purpose. Ignoring `q` would return all 446 while the
+        # caller believed it asked for a few.
+        resp = self.client.get(self.url, {"type": "page", "q": "ujuri"})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_q_and_id_together_are_refused(self):
+        resp = self.client.get(
+            self.url, {"type": "table", "id": "p0030-t1", "q": "ujuri"}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_blank_q_is_the_whole_listing(self):
+        body = self.client.get(self.url, {"type": "table", "q": "  "}).json()
+        self.assertEqual(body["count"], 2)
 
     def test_table_listing_omits_markdown(self):
         # The whole reason the plane is split: one report's markdown runs to
