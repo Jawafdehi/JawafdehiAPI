@@ -1112,7 +1112,9 @@ def _resolve_for_content(request, source: str, ident: str):
     return iri, None
 
 
-def _content_response(payload, content, *, http_status=status.HTTP_200_OK):
+def _content_response(
+    payload, content, *, http_status=status.HTTP_200_OK, variant=""
+):
     """Every content response carries the same two headers.
 
     ``Vary: Authorization`` goes on the errors too, not just the 200s, because
@@ -1122,7 +1124,7 @@ def _content_response(payload, content, *, http_status=status.HTTP_200_OK):
     """
     resp = Response(payload, status=http_status)
     if content is not None:
-        resp["ETag"] = version_token(content)
+        resp["ETag"] = version_token(content, variant)
     patch_vary_headers(resp, ("Authorization",))
     return resp
 
@@ -1133,7 +1135,22 @@ def _bad_request(detail: str):
     return resp
 
 
-def _not_modified(request, content):
+def _content_variant(request) -> str:
+    """Which representation of this URL the caller asked for.
+
+    Folded into the ETag. Built from the arguments that CHANGE THE BODY, in a
+    fixed order so the same request always produces the same tag — not from the
+    raw query string, which would make `?type=table&q=x` and `?q=x&type=table`
+    two different tags for one answer.
+    """
+    params = request.query_params
+    return "|".join(
+        f"{name}={params.get(name) or ''}"
+        for name in ("type", "id", "num", "from", "to", "q")
+    )
+
+
+def _not_modified(request, content, variant=""):
     """A 304 when the caller already holds this content, else None.
 
     This route sets an ``ETag`` on every response, and nothing else in the stack
@@ -1156,12 +1173,12 @@ def _not_modified(request, content):
     header = request.headers.get("If-None-Match")
     if not header or content is None:
         return None
-    current = version_token(content).removeprefix("W/")
+    current = version_token(content, variant).removeprefix("W/")
     for candidate in header.split(","):
         tag = candidate.strip()
         if tag == "*" or tag.removeprefix("W/") == current:
             resp = HttpResponseNotModified()
-            resp["ETag"] = version_token(content)
+            resp["ETag"] = version_token(content, variant)
             patch_vary_headers(resp, ("Authorization",))
             return resp
     return None
@@ -1220,15 +1237,16 @@ def material_content(request, source: str, ident: str):
 
     # After the 400s above, so a malformed request is still told it is malformed
     # rather than handed a 304 for a question we never looked at.
-    if (cached := _not_modified(request, content)) is not None:
+    variant = _content_variant(request)
+    if (cached := _not_modified(request, content, variant)) is not None:
         return cached
 
     if kind == "page":
-        return _page_response(request, iri, content)
-    return _keyed_response(request, iri, content, kind)
+        return _page_response(request, iri, content, variant)
+    return _keyed_response(request, iri, content, kind, variant)
 
 
-def _page_response(request, iri: str, content):
+def _page_response(request, iri: str, content, variant: str = ""):
     """``type=page``: the page list, one page by folio, or an inclusive range.
 
     Three shapes, chosen by the arguments present:
@@ -1259,12 +1277,13 @@ def _page_response(request, iri: str, content):
         return _bad_request("A page range needs both from and to.")
 
     if first is not None:
-        return _page_range_response(iri, content, first, last)
+        return _page_range_response(iri, content, first, last, variant)
     if num is None:
         items = list_pages(iri)
         return _content_response(
             {"material": iri, "type": "page", "count": len(items), "items": items},
             content,
+            variant=variant,
         )
 
     page_no = _as_page_number(num)
@@ -1276,9 +1295,12 @@ def _page_response(request, iri: str, content):
             {"detail": "No such page for this material."},
             content,
             http_status=status.HTTP_404_NOT_FOUND,
+            variant=variant,
         )
     return _content_response(
-        {"material": iri, "type": "page", "item": page_payload(page)}, content
+        {"material": iri, "type": "page", "item": page_payload(page)},
+        content,
+        variant=variant,
     )
 
 
@@ -1300,7 +1322,9 @@ def _as_page_number(raw: str) -> int | None:
     return value if value >= 0 else None
 
 
-def _page_range_response(iri: str, content, raw_first: str, raw_last: str):
+def _page_range_response(
+    iri: str, content, raw_first: str, raw_last: str, variant: str = ""
+):
     """``type=page&from=&to=``: an inclusive span of pages, each with its text."""
     first = _as_page_number(raw_first)
     last = _as_page_number(raw_last)
@@ -1325,10 +1349,11 @@ def _page_range_response(iri: str, content, raw_first: str, raw_last: str):
             "items": items,
         },
         content,
+        variant=variant,
     )
 
 
-def _keyed_response(request, iri: str, content, kind: str):
+def _keyed_response(request, iri: str, content, kind: str, variant: str = ""):
     """``type=table`` / ``type=figure``: the listing, or one item by its key."""
     # Reject the page arguments rather than ignoring them. Silently serving the
     # whole listing for ?type=table&from=1&to=10 would hand the caller everything
@@ -1356,7 +1381,7 @@ def _keyed_response(request, iri: str, content, kind: str):
             # Echoed so a caller can tell a narrowed empty result from a
             # document that holds none of this kind at all.
             payload["q"] = query
-        return _content_response(payload, content)
+        return _content_response(payload, content, variant=variant)
     if kind == "table":
         table = get_table(iri, key)
         item = table_payload(table) if table is not None else None
@@ -1368,8 +1393,11 @@ def _keyed_response(request, iri: str, content, kind: str):
             {"detail": f"No such {kind} for this material."},
             content,
             http_status=status.HTTP_404_NOT_FOUND,
+            variant=variant,
         )
-    return _content_response({"material": iri, "type": kind, "item": item}, content)
+    return _content_response(
+        {"material": iri, "type": kind, "item": item}, content, variant=variant
+    )
 
 
 # ── Document-source catalogue ────────────────────────────────────────────────

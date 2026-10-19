@@ -159,6 +159,34 @@ class ContentListingTests(APITestCase):
         self.assertEqual(body["count"], 2)
         self.assertEqual([t["key"] for t in body["items"]], ["p0030-t1", "p0031-t1"])
 
+    def test_the_etag_identifies_the_representation_not_the_document(self):
+        # One URL serves many representations. Keyed on ingested_at alone, a
+        # caller echoing the tag from ?type=table got a 304 for ?type=figure and
+        # reused the tables as if they were the charts.
+        table = self.client.get(self.url, {"type": "table"})
+        figure = self.client.get(self.url, {"type": "figure"})
+        narrowed = self.client.get(self.url, {"type": "table", "q": "ujuri"})
+        tags = {table["ETag"], figure["ETag"], narrowed["ETag"]}
+        self.assertEqual(len(tags), 3)
+
+        # A tag from one representation must not satisfy another...
+        crossed = self.client.get(
+            self.url, {"type": "figure"}, HTTP_IF_NONE_MATCH=table["ETag"]
+        )
+        self.assertEqual(crossed.status_code, status.HTTP_200_OK)
+        # ...while the conditional GET still works for its own.
+        same = self.client.get(
+            self.url, {"type": "table"}, HTTP_IF_NONE_MATCH=table["ETag"]
+        )
+        self.assertEqual(same.status_code, status.HTTP_304_NOT_MODIFIED)
+
+    def test_the_etag_ignores_parameter_order(self):
+        # Built from the arguments that change the body, in a fixed order — not
+        # from the raw query string, which would give one answer two tags.
+        a = self.client.get(f"{self.url}?type=table&q=ujuri")
+        b = self.client.get(f"{self.url}?q=ujuri&type=table")
+        self.assertEqual(a["ETag"], b["ETag"])
+
     def test_q_narrows_a_listing_by_caption(self):
         # The second table has no caption, so a text query must exclude it.
         body = self.client.get(self.url, {"type": "table", "q": "उजुरी"}).json()

@@ -259,14 +259,23 @@ def _narrow(items: list[dict], query: str | None, field: str) -> list[dict]:
     ]
 
 
-def version_token(content: DocumentContent) -> str:
-    """A weak ETag for any content response.
+def version_token(content: DocumentContent, variant: str = "") -> str:
+    """A weak ETag for one content RESPONSE.
 
-    ``ingested_at`` alone is sufficient: the ingest replaces a document's content
-    wholesale inside one transaction, so nothing about any of its rows can change
-    without that timestamp moving.
+    ``ingested_at`` covers the document: the ingest replaces a document's
+    content wholesale inside one transaction, so nothing about any of its rows
+    can change without that timestamp moving.
+
+    ``variant`` covers *which* response. One URL serves many representations —
+    the table listing, the figure listing, one page, a span of pages, and now a
+    narrowed listing per ``q`` — and an ETag identifies a representation, not a
+    resource (RFC 9110 §8.8.1). Keyed on the timestamp alone, a caller echoing
+    the tag from ``?type=table`` got a 304 for ``?type=figure`` and reused the
+    tables as if they were the charts. Browsers key their cache by URL and so
+    were mostly spared; anything echoing a tag by hand was not.
     """
-    return f'W/"{content.ingested_at.timestamp():.6f}"'
+    suffix = f":{variant}" if variant else ""
+    return f'W/"{content.ingested_at.timestamp():.6f}{suffix}"'
 
 
 def content_summary(content: DocumentContent) -> dict:
