@@ -156,20 +156,53 @@ def is_our_copy(url: Any) -> bool:
     return bool(host and host.lower() in _our_hosts())
 
 
-def is_withheld(media: dict[str, Any]) -> bool:
-    """Whether this link is an unredacted copy of ours, withheld from the public.
+#: Which redacted artifact stands in for which original.
+_REPLACED_BY = {
+    **{role: REDACTED_PDF_ROLE for role in ORIGINAL_PDF_ROLES},
+    ORIGINAL_TRANSCRIPT_ROLE: REDACTED_TRANSCRIPT_ROLE,
+}
 
-    Both halves are required. A redacted rendering is published whoever hosts it,
-    and an original hosted by the publisher is their publication, not ours.
+
+def is_withheld(media: dict[str, Any], available_roles: set[str] | None = None) -> bool:
+    """Whether this link is withheld from the public payload.
+
+    Three things must all hold, and the third is the one that keeps this honest:
+
+    1. it is an ORIGINAL — a redacted rendering is published whoever hosts it;
+    2. it is OUR copy — an original hosted by the publisher is their publication,
+       not ours, and hiding it would break a reader's citation chain;
+    3. **a redacted counterpart exists to publish instead.**
+
+    Without (3) this does nothing but remove a link. It buys no privacy: the
+    object stays exactly as reachable as it was, because our storage serves
+    anyone holding the URL and the URL does not change. What it costs is real —
+    measured across the archive's sources, every document on the CIAA and
+    Auditor General shelves is a copy of ours with no redacted sibling, so an
+    unconditional rule takes the download link off all of them and puts nothing
+    in its place. A reader loses the document; nobody gains anything.
+
+    So withholding switches on per document, exactly when there is something to
+    switch to. Set ``MATERIALS_WITHHOLD_UNREDACTED_ALWAYS`` to withhold
+    regardless — the right setting once redaction covers the corpus, and the
+    wrong one before then.
     """
-    if role_of(media) not in _WITHHELD_ROLES:
+    role = role_of(media)
+    if role not in _WITHHELD_ROLES:
         return False
-    return is_our_copy(media.get("contentUrl"))
+    if not is_our_copy(media.get("contentUrl")):
+        return False
+    if getattr(settings, "MATERIALS_WITHHOLD_UNREDACTED_ALWAYS", False):
+        return True
+    if available_roles is None:
+        return False
+    return _REPLACED_BY[role] in available_roles
 
 
 def public_media(data: dict[str, Any]) -> list[dict[str, Any]]:
     """``associatedMedia`` as a signed-out reader sees it."""
-    return [m for m in media_list(data) if not is_withheld(m)]
+    media = media_list(data)
+    available = {role_of(m) for m in media}
+    return [m for m in media if not is_withheld(m, available)]
 
 
 def artifact_summary(data: dict[str, Any]) -> dict[str, Any]:
@@ -181,8 +214,10 @@ def artifact_summary(data: dict[str, Any]) -> dict[str, Any]:
     to know which one they are looking at. Saying *that* we hold it is not the
     same as handing it over.
     """
-    roles = [role_of(m) for m in media_list(data)]
-    withheld = sum(1 for m in media_list(data) if is_withheld(m))
+    media = media_list(data)
+    roles = [role_of(m) for m in media]
+    available = set(roles)
+    withheld = sum(1 for m in media if is_withheld(m, available))
     return {
         "pdf": {
             "original": any(role in ORIGINAL_PDF_ROLES for role in roles),

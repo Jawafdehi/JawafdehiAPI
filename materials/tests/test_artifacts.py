@@ -66,9 +66,33 @@ def _seed(media: list[dict]) -> Material:
 class WhoseCopyTests(TestCase):
     """The rule is not redacted-vs-original. It is whose copy it is."""
 
-    def test_our_unredacted_copies_are_withheld(self):
-        self.assertTrue(artifacts.is_withheld(_mo(OURS, "RAW")))
-        self.assertTrue(artifacts.is_withheld(_mo(OURS_MD, "MARKDOWN")))
+    def test_our_unredacted_copies_are_withheld_once_a_replacement_exists(self):
+        available = {"RAW", "REDACTED_PDF", "MARKDOWN", "REDACTED_MARKDOWN"}
+        self.assertTrue(artifacts.is_withheld(_mo(OURS, "RAW"), available))
+        self.assertTrue(artifacts.is_withheld(_mo(OURS_MD, "MARKDOWN"), available))
+
+    def test_our_original_stays_published_while_nothing_replaces_it(self):
+        # Withholding with nothing to put in its place buys no privacy — our
+        # storage serves anyone holding the URL, and the URL does not change —
+        # and costs the reader the document. Measured across the archive's
+        # sources, every CIAA and Auditor General document is a copy of ours
+        # with no redacted sibling, so an unconditional rule takes the download
+        # link off both shelves and puts nothing there.
+        self.assertFalse(artifacts.is_withheld(_mo(OURS, "RAW"), {"RAW"}))
+        self.assertFalse(
+            artifacts.is_withheld(_mo(OURS_MD, "MARKDOWN"), {"RAW", "MARKDOWN"})
+        )
+
+    def test_each_artifact_is_replaced_by_its_own_counterpart(self):
+        # A redacted TRANSCRIPT does not stand in for the PDF. Letting either
+        # redacted artifact unlock both would withhold a document on the
+        # strength of a different document existing.
+        self.assertFalse(
+            artifacts.is_withheld(_mo(OURS, "RAW"), {"RAW", "REDACTED_MARKDOWN"})
+        )
+        self.assertTrue(
+            artifacts.is_withheld(_mo(OURS, "RAW"), {"RAW", "REDACTED_PDF"})
+        )
 
     def test_the_publishers_own_link_is_never_withheld(self):
         # Hiding this would break the citation chain and protect nothing: the
@@ -108,13 +132,19 @@ class ArtifactSummaryTests(TestCase):
         self.assertTrue(summary["pdf"]["original"])
         self.assertNotIn(OURS, [m["contentUrl"] for m in public])
 
-    def test_a_document_with_only_an_original_says_the_redaction_is_absent(self):
-        summary = artifacts.artifact_summary({"associatedMedia": [_mo(OURS, "RAW")]})
+    def test_a_document_with_only_an_original_keeps_publishing_it(self):
+        data = {"associatedMedia": [_mo(OURS, "RAW")]}
 
-        # Not a zero, not a silence: there is no redacted PDF for this document,
-        # which is why the public payload carries no PDF at all.
+        summary = artifacts.artifact_summary(data)
+
+        # Reported honestly as unredacted — and still served, because there is
+        # nothing to serve instead. This is what makes the change a no-op for
+        # every document in the archive today rather than a lost link.
         self.assertEqual(summary["pdf"], {"original": True, "redacted": False})
-        self.assertEqual(artifacts.public_media({"associatedMedia": [_mo(OURS, "RAW")]}), [])
+        self.assertEqual(summary["withheld_from_this_payload"], 0)
+        self.assertEqual(
+            [m["contentUrl"] for m in artifacts.public_media(data)], [OURS]
+        )
 
 
 @override_settings(JAWAFDEHI_S3_BASE="https://s3.jawafdehi.org")
@@ -190,12 +220,18 @@ class DetailPayloadTests(APITestCase):
 
     def test_the_publishers_link_survives_for_everyone(self):
         Material.objects.filter(pk=IRI).delete()
-        _seed([_mo(PUBLISHERS, "RAW"), _mo(OURS_MD, "MARKDOWN")])
+        _seed([
+            _mo(PUBLISHERS, "RAW"),
+            _mo(OURS_MD, "MARKDOWN"),
+            _mo(OURS_MD_REDACTED, "REDACTED_MARKDOWN"),
+        ])
 
         response = self.client.get(URL)
 
         urls = [m["contentUrl"] for m in response.data["associatedMedia"]]
-        self.assertEqual(urls, [PUBLISHERS])
+        # Our transcript goes (its redacted sibling is here); the publisher's
+        # own file never does.
+        self.assertEqual(sorted(urls), sorted([PUBLISHERS, OURS_MD_REDACTED]))
 
 
 @override_settings(JAWAFDEHI_S3_BASE="https://s3.jawafdehi.org")
@@ -214,12 +250,35 @@ class MalformedJsonbTests(TestCase):
                 media = {"contentUrl": value, "jawafdehi:linkRole": "RAW"}
                 self.assertFalse(artifacts.is_withheld(media))
 
-    def test_a_non_string_role_is_treated_as_raw_and_withheld(self):
+    def test_a_non_string_role_is_treated_as_raw(self):
         # The SAFE default, not the lenient one: a link of ours whose role we
-        # cannot read is withheld rather than published.
+        # cannot read is treated as an original, so it is withheld as soon as a
+        # redacted PDF exists rather than published alongside one.
         media = {"contentUrl": OURS, "jawafdehi:linkRole": 7}
-        self.assertTrue(artifacts.is_withheld(media))
+        self.assertTrue(artifacts.is_withheld(media, {"RAW", "REDACTED_PDF"}))
 
     def test_a_whole_payload_of_junk_still_renders(self):
         data = {"associatedMedia": [{"contentUrl": 1}, "not-a-dict", None, {}]}
         self.assertEqual(artifacts.public_media(data), [{"contentUrl": 1}, {}])
+
+
+@override_settings(
+    JAWAFDEHI_S3_BASE="https://s3.jawafdehi.org",
+    MATERIALS_WITHHOLD_UNREDACTED_ALWAYS=True,
+)
+class StrictModeTests(TestCase):
+    """The switch for when redaction covers the corpus.
+
+    Until then it is the wrong setting: it takes the download link off every
+    document we host and puts nothing in its place. Afterwards it is the right
+    one, because by then "no redacted copy" means something went wrong rather
+    than something has not happened yet.
+    """
+
+    def test_our_original_is_withheld_even_with_nothing_to_replace_it(self):
+        self.assertTrue(artifacts.is_withheld(_mo(OURS, "RAW"), {"RAW"}))
+
+    def test_the_publishers_copy_is_still_never_withheld(self):
+        # Strict is about what WE publish. The government's own URL is a
+        # citation, and no setting here should break it.
+        self.assertFalse(artifacts.is_withheld(_mo(PUBLISHERS, "RAW"), {"RAW"}))
