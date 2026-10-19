@@ -180,12 +180,57 @@ class ContentListingTests(APITestCase):
         )
         self.assertEqual(same.status_code, status.HTTP_304_NOT_MODIFIED)
 
+    def test_the_etag_is_ascii_for_a_devanagari_query(self):
+        # An ETag is an HTTP header value. Embedded verbatim, a Devanagari `q`
+        # made Django MIME-encode the header (=?utf-8?b?...?=), which is not a
+        # valid entity-tag — and a client echoing that back would never match
+        # the raw tag we recompute, so conditional GET silently stopped working
+        # for exactly the queries this endpoint exists to serve.
+        resp = self.client.get(self.url, {"type": "table", "q": "उजुरी"})
+        tag = resp["ETag"]
+        tag.encode("ascii")  # raises if we ever regress
+        self.assertNotIn("=?utf-8?", tag)
+
+        again = self.client.get(
+            self.url, {"type": "table", "q": "उजुरी"}, HTTP_IF_NONE_MATCH=tag
+        )
+        self.assertEqual(again.status_code, status.HTTP_304_NOT_MODIFIED)
+
+    def test_the_etag_ignores_spelling_that_does_not_change_the_body(self):
+        # Matching is case-insensitive and strips the query, so these are one
+        # representation and should share one cache entry.
+        a = self.client.get(self.url, {"type": "table", "q": "ujuri"})
+        b = self.client.get(self.url, {"type": "TABLE", "q": " Ujuri "})
+        self.assertEqual(a["ETag"], b["ETag"])
+
+    def test_an_overlong_q_is_refused(self):
+        # Unbounded `q` lets a caller mint unbounded distinct ETags, each its
+        # own entry in any shared cache in front of this route.
+        resp = self.client.get(self.url, {"type": "table", "q": "x" * 500})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_the_etag_ignores_parameter_order(self):
         # Built from the arguments that change the body, in a fixed order — not
         # from the raw query string, which would give one answer two tags.
         a = self.client.get(f"{self.url}?type=table&q=ujuri")
         b = self.client.get(f"{self.url}?q=ujuri&type=table")
         self.assertEqual(a["ETag"], b["ETag"])
+
+    def test_the_published_schema_documents_every_accepted_argument(self):
+        # This route is a plain @api_view with no serializer for spectacular to
+        # read, so its whole query surface — `type` included, without which the
+        # route cannot be used at all — was invisible in the OpenAPI document.
+        # Pinned here because the OpenApiParameter list is written by hand and
+        # nothing else would notice it drifting from the view.
+        from drf_spectacular.generators import SchemaGenerator
+
+        schema = SchemaGenerator().get_schema(request=None, public=True)
+        operation = schema["paths"]["/api/materials/{source}/{ident}/content/"]["get"]
+        documented = {p["name"] for p in operation["parameters"]}
+        self.assertEqual(
+            documented,
+            {"source", "ident", "type", "id", "num", "from", "to", "q"},
+        )
 
     def test_q_narrows_a_listing_by_caption(self):
         # The second table has no caption, so a text query must exclude it.
@@ -209,6 +254,19 @@ class ContentListingTests(APITestCase):
         # handle a reader has.
         body = self.client.get(self.url, {"type": "table", "q": "31"}).json()
         self.assertEqual([t["key"] for t in body["items"]], ["p0031-t1"])
+
+    def test_q_takes_a_word_and_a_folio_together(self):
+        # How someone narrows a listing they have already filtered once.
+        body = self.client.get(self.url, {"type": "table", "q": "उजुरी 30"}).json()
+        self.assertEqual([t["key"] for t in body["items"]], ["p0030-t1"])
+        # ...and the word must still match: the folio alone does not carry it.
+        miss = self.client.get(self.url, {"type": "table", "q": "zzz 30"}).json()
+        self.assertEqual(miss["count"], 0)
+
+    def test_a_bare_number_stays_an_exact_folio(self):
+        # Not a substring: "3" must not drag in pages 30, 31 and 300.
+        body = self.client.get(self.url, {"type": "table", "q": "3"}).json()
+        self.assertEqual(body["count"], 0)
 
     def test_q_narrows_figures_too(self):
         body = self.client.get(self.url, {"type": "figure", "q": "संख्या"}).json()

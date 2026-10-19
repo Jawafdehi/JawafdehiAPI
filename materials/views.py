@@ -24,6 +24,8 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.http import HttpResponseNotModified
 from django.utils.cache import patch_vary_headers
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
 from rest_framework.decorators import (
     api_view,
@@ -1135,17 +1137,30 @@ def _bad_request(detail: str):
     return resp
 
 
+#: Longest ``q`` we will consider. A caption filter has no use for more, and an
+#: unbounded one lets a caller mint unbounded distinct ETags — each a separate
+#: entry in any shared cache in front of this route.
+MAX_QUERY_LENGTH = 200
+
+
 def _content_variant(request) -> str:
     """Which representation of this URL the caller asked for.
 
     Folded into the ETag. Built from the arguments that CHANGE THE BODY, in a
-    fixed order so the same request always produces the same tag — not from the
-    raw query string, which would make `?type=table&q=x` and `?q=x&type=table`
-    two different tags for one answer.
+    fixed order — not from the raw query string, which would make
+    ``?type=table&q=x`` and ``?q=x&type=table`` two tags for one answer.
+
+    ``type`` and ``q`` are normalised the same way the handlers normalise them,
+    so two spellings that produce an identical body share a tag instead of
+    missing each other's cache entry.
     """
     params = request.query_params
+    normalised = {
+        "type": (params.get("type") or "").strip().lower(),
+        "q": (params.get("q") or "").strip().casefold(),
+    }
     return "|".join(
-        f"{name}={params.get(name) or ''}"
+        f"{name}={normalised.get(name, params.get(name) or '')}"
         for name in ("type", "id", "num", "from", "to", "q")
     )
 
@@ -1184,6 +1199,74 @@ def _not_modified(request, content, variant=""):
     return None
 
 
+#: The query surface of ``…/content``. Written out because this route is a
+#: plain ``@api_view`` with no serializer for spectacular to read, so without
+#: it every argument the endpoint accepts — ``type`` included — was invisible
+#: in the published schema while being required to use the route at all.
+CONTENT_PARAMETERS = [
+    OpenApiParameter(
+        "type",
+        OpenApiTypes.STR,
+        OpenApiParameter.QUERY,
+        required=True,
+        enum=list(CONTENT_TYPES),
+        description="Which kind of content to return.",
+    ),
+    OpenApiParameter(
+        "id",
+        OpenApiTypes.STR,
+        OpenApiParameter.QUERY,
+        description=(
+            "One table or figure by its stable key (`p0030-t1`). Never the "
+            "ordinal, which is recomputed on every ingest."
+        ),
+    ),
+    OpenApiParameter(
+        "num",
+        OpenApiTypes.INT,
+        OpenApiParameter.QUERY,
+        description="One page by its printed folio.",
+    ),
+    OpenApiParameter(
+        "from",
+        OpenApiTypes.INT,
+        OpenApiParameter.QUERY,
+        description=(
+            f"First page of an inclusive range; needs `to`. At most "
+            f"{MAX_PAGE_SPAN} pages per request."
+        ),
+    ),
+    OpenApiParameter(
+        "to",
+        OpenApiTypes.INT,
+        OpenApiParameter.QUERY,
+        description="Last page of an inclusive range; needs `from`.",
+    ),
+    OpenApiParameter(
+        "q",
+        OpenApiTypes.STR,
+        OpenApiParameter.QUERY,
+        description=(
+            "Narrow a table or figure listing by caption, title or page "
+            "number. Matches phonetically as well as literally, so a query "
+            "typed on a Latin keyboard reaches a Devanagari caption "
+            "(`vivaran` finds विवरण). Not accepted with `id`, or on pages."
+        ),
+    ),
+]
+
+
+# `extend_schema` has to sit OUTSIDE `api_view`: spectacular reads the
+# annotation off the view object, and applied to the bare function underneath it
+# is lost when `api_view` wraps it — the parameters silently vanish from the
+# published schema. ty objects because `api_view` returns an `AsView`, not a
+# plain callable; every other `extend_schema` in this repo is on a class-based
+# APIView, which is why this is the first place it comes up.
+@extend_schema(  # ty: ignore[invalid-argument-type]
+    parameters=CONTENT_PARAMETERS,
+    summary="Pages, tables and charts read out of a document",
+    tags=["materials"],
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def material_content(request, source: str, ident: str):
@@ -1225,6 +1308,12 @@ def material_content(request, source: str, ident: str):
     if kind not in CONTENT_TYPES:
         return _bad_request(
             f"Unknown type {kind!r}; expected one of " + ", ".join(CONTENT_TYPES) + "."
+        )
+
+    query = request.query_params.get("q")
+    if query is not None and len(query) > MAX_QUERY_LENGTH:
+        return _bad_request(
+            f"q may be at most {MAX_QUERY_LENGTH} characters; got {len(query)}."
         )
 
     content = content_for(iri)

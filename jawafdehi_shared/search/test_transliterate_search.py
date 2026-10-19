@@ -82,3 +82,26 @@ def test_a_query_that_folds_to_nothing_matches_nothing() -> None:
 def test_search_key_carries_both_scripts() -> None:
     key = search_key("विवरण")
     assert "bibaran" in key
+
+
+def test_ocr_zero_width_joiners_do_not_break_a_conjunct() -> None:
+    """The index analyzers strip U+200C/200D because OCR introduces them inside
+    Devanagari conjuncts; this corpus IS OCR output. Left in, a stray joiner
+    makes the transliterator read a dead consonant plus a fresh syllable —
+    "k setra" instead of "kshetra" — and the row stops answering to anything."""
+    clean = "क्षेत्र"
+    for invisible in ("\u200c", "\u200d", "\ufeff"):
+        dirty = clean.replace("्", "्" + invisible, 1)
+        assert search_key(dirty) == search_key(clean), f"{invisible!r} changed the key"
+        assert matches_search(dirty, "chhetra")
+
+
+def test_devanagari_digits_match_their_ascii_spelling() -> None:
+    # Captions count in Devanagari numerals; nobody types them.
+    assert matches_search("बढी उजुरी परेका १० स्थानीय तह", "10")
+
+
+def test_a_regex_shaped_query_is_matched_literally_not_compiled() -> None:
+    # The query reaches a fold and a substring test, never a regex compile.
+    for query in (".*", "((((", "[a-z]+", "\\"):
+        assert not matches_search("बढी उजुरी", query)

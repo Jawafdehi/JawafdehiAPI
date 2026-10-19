@@ -29,6 +29,8 @@ from it.
 
 from __future__ import annotations
 
+import hashlib
+
 from django.db.models import Prefetch
 
 from jawafdehi_shared.search.transliterate import matches_search
@@ -197,8 +199,11 @@ def list_tables(iri: str, query: str | None = None) -> list[dict]:
     out of the database only for the serializer to drop it again.
     """
     rows = DocumentTable.objects.filter(content_id=iri).defer("markdown")
-    stubs = [_table_stub(t) for t in rows.order_by("ordinal")]
-    return _narrow(stubs, query, "caption")
+    return [
+        _table_stub(t)
+        for t in rows.order_by("ordinal")
+        if _matches(t.caption, t.page_no, query)
+    ]
 
 
 def get_table(iri: str, key: str) -> DocumentTable | None:
@@ -227,36 +232,71 @@ def list_figures(iri: str, query: str | None = None) -> list[dict]:
     corpus — which is why #514's manifest inlined them too. The asymmetry with
     tables is deliberate and measured.
     """
-    return _narrow([figure_payload(f) for f in _figures_queryset(iri)], query, "title")
+    return [
+        figure_payload(f)
+        for f in _figures_queryset(iri)
+        if _matches(f.title, f.page_no, query)
+    ]
 
 
 def get_figure(iri: str, key: str) -> DocumentFigure | None:
     return _figures_queryset(iri).filter(key=key).first()
 
 
-def _narrow(items: list[dict], query: str | None, field: str) -> list[dict]:
-    """Keep the items whose ``field`` — or page number — matches ``query``.
+def _matches(text: str, page_no: int, query: str | None) -> bool:
+    """Does one listing row answer to ``query``?
 
-    **Filtered in Python, deliberately.** The match is phonetic (see
+    **Applied in Python, deliberately.** The match is phonetic (see
     ``jawafdehi_shared.search.transliterate``) and no amount of SQL will tell
     Postgres that "vivaran" is विवरण. The listings this runs over are bounded by
     one document — 250 tables and 49 figures in the largest report in the
-    archive — so the whole set is already in memory by the time this is reached.
+    archive — so the set is small and already being walked.
+
+    Checked BEFORE the row is serialized, so a narrowed figure listing does not
+    build the points of the 48 figures it is about to discard.
 
     **The page number matches too.** 17% of tables carry no caption at all (61%
     in the 35th report), and for those the folio is the only handle a reader
-    has; dropping them from every text query would put a sixth of the archive
-    out of reach of the one control on screen.
+    has; excluding them from every text query would put a sixth of the archive
+    out of reach of the one control on screen. Exact, not a substring: in a
+    table of contents a number means "take me to that page", and "3" matching
+    pages 3, 13, 30 and 300 answers a question nobody asked.
     """
     if query is None or not query.strip():
-        return items
+        return True
     needle = query.strip()
-    return [
-        item
-        for item in items
-        if matches_search(str(item.get(field) or ""), needle)
-        or str(item.get("page_no", "")) == needle
-    ]
+    folio = str(page_no)
+    if needle == folio:
+        return True
+    if matches_search(text or "", needle):
+        return True
+
+    # "ujuri 31" — a word and a folio, which is how someone narrows a long
+    # listing they have already filtered once. Only an EXACT folio token is
+    # taken this way, so the precision of a bare number survives: "3" still
+    # means page 3 and not pages 3, 13, 30 and 300.
+    tokens = needle.split()
+    if len(tokens) < 2 or folio not in tokens:
+        return False
+    rest = [t for t in tokens if t != folio]
+    return bool(rest) and matches_search(text or "", " ".join(rest))
+
+
+def _variant_digest(variant: str) -> str:
+    """A short ASCII digest of the request shape, for the ETag.
+
+    Hashed rather than embedded verbatim because an ETag is an HTTP header
+    value and ``q`` carries Devanagari: Django MIME-encodes a non-ASCII header
+    (``=?utf-8?b?…?=``), which is not a valid entity-tag, and a client echoing
+    that form back would never match the raw tag we recompute — so conditional
+    GET would silently stop working for exactly the queries this endpoint
+    exists to serve. A digest is also bounded, so a long query cannot grow the
+    header, and it keeps a reader's search terms out of proxy logs.
+
+    Not a security boundary: a collision costs one stale 304 between two
+    representations of the same document, so 64 bits is ample.
+    """
+    return hashlib.blake2b(variant.encode("utf-8"), digest_size=8).hexdigest()
 
 
 def version_token(content: DocumentContent, variant: str = "") -> str:
@@ -274,7 +314,7 @@ def version_token(content: DocumentContent, variant: str = "") -> str:
     tables as if they were the charts. Browsers key their cache by URL and so
     were mostly spared; anything echoing a tag by hand was not.
     """
-    suffix = f":{variant}" if variant else ""
+    suffix = f":{_variant_digest(variant)}" if variant else ""
     return f'W/"{content.ingested_at.timestamp():.6f}{suffix}"'
 
 
