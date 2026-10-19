@@ -412,7 +412,19 @@ def orders_backlog_queryset(
                 TextField(),
             )
         )
-        .filter(case_status__contains="फैसला")  # decided
+        # Decided. The two courts record that fact in DIFFERENT columns, and
+        # gating on `case_status` alone silently excluded one of them entirely:
+        # **100% of supreme rows carry a NULL `case_status`** (it is empty by
+        # design there), and a positive `__contains` never matches NULL — so no
+        # supreme case was EVER selected, while every run still printed
+        # `courts=['supreme', 'special']` and looked like it covered both.
+        # Supreme's disposition lives in `verdict_date_ad`/`verdict_type`
+        # instead, promoted from `extra_data.enrichment_hearings`.
+        #
+        # The `.exclude()`s below are NULL-safe (Django emits
+        # `NOT (col LIKE … AND col IS NOT NULL)`, which keeps NULL rows), so
+        # only this positive filter had to change.
+        .filter(Q(case_status__contains="फैसला") | Q(verdict_date_ad__isnull=False))
         .exclude(case_status__contains="चालु")  # not ongoing (text field — safe)
         .exclude(case_status__contains="चलिरहेको")
         # Not already captured — OR captured only in part, which is a case whose
