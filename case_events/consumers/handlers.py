@@ -430,8 +430,12 @@ def handle_notifier(envelope: dict, context) -> None:
 # ── derive ───────────────────────────────────────────────────────────────────
 
 
-def _resolve_case(slug: str):
+def resolve_case(slug: str):
     """A case by its current slug, falling back to a retired one. None if neither.
+
+    Public because :mod:`case_events.notify` needs the same answer to decide
+    whether it may link a case, and a second copy of this would be the one that
+    forgot about retired slugs.
 
     A published case can be re-slugged operationally, and a decision envelope
     carries whatever slug was current when the proposal was decided — which for
@@ -476,7 +480,7 @@ def handle_derive(envelope: dict, context) -> None:
     if not case_slug:
         raise PoisonMessage("approved-decision envelope has no payload.case_slug")
 
-    case = _resolve_case(case_slug)
+    case = resolve_case(case_slug)
     if case is None:
         # Not found live, and not found under a retired slug either. Redelivery
         # will not find it, so bury rather than burn four more attempts.
