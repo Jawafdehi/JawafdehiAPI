@@ -445,6 +445,16 @@ class OrdersBacklogTests(TestCase):
             verdict_date_ad=date(2025, 6, 1),
             registration_date_ad=date(2024, 1, 1),
         )
+        # A disposition with NO date at all: 3,063 live supreme rows record a
+        # verdict_type while both verdict dates stay NULL, so verdict_date_ad
+        # alone still misses them.
+        CourtCase.objects.create(
+            court=cls.supreme,
+            case_number="082-WO-0012",
+            case_status=None,
+            verdict_type="जारी",
+            registration_date_ad=date(2024, 1, 1),
+        )
         # Still excluded: no case_status AND no verdict date = not decided.
         CourtCase.objects.create(
             court=cls.supreme,
@@ -468,7 +478,9 @@ class OrdersBacklogTests(TestCase):
         assert ("supreme", "082-WO-0008") in keys  # transient (not yet permanent)
         # NULL case_status + a verdict date = decided, and must be selectable.
         assert ("supreme", "082-WO-0010") in keys
-        # NULL case_status + no verdict date = genuinely undecided.
+        # A verdict_type with no verdict date is still decided enough to probe.
+        assert ("supreme", "082-WO-0012") in keys
+        # NULL case_status + no verdict date + no verdict type = truly undecided.
         assert ("supreme", "082-WO-0011") not in keys
         # Special/CR (priority 1) sorts ahead of Supreme/WO (priority 4).
         assert keys.index(("special", "082-CR-0001")) < keys.index(

@@ -424,7 +424,29 @@ def orders_backlog_queryset(
         # The `.exclude()`s below are NULL-safe (Django emits
         # `NOT (col LIKE … AND col IS NOT NULL)`, which keeps NULL rows), so
         # only this positive filter had to change.
-        .filter(Q(case_status__contains="फैसला") | Q(verdict_date_ad__isnull=False))
+        #
+        # `verdict_type` is tested as well as `verdict_date_ad` because a
+        # disposition can be recorded without a date: 3,063 supreme rows carry a
+        # verdict_type with both verdict dates NULL and no document. It is NOT a
+        # strictly-final signal — roughly a third of those read as bench-routing
+        # or adjournment (`पूर्ण इजलासमा पेस हुने`, `पुनरावेदन जाने`,
+        # `मुल्तबी रहने`, `PROCEDURAL`), i.e. the case is still live — and the
+        # `चालु`/`चलिरहेको` excludes cannot screen them out, since supreme's
+        # case_status is NULL. That is deliberate and costs almost nothing: a
+        # still-live case probes as no_record and takes the 30-day deferral
+        # stamp, which is the right treatment for a case awaiting a full bench,
+        # and it buys ~2,180 genuinely decided cases that are otherwise
+        # unreachable. No special-court row is added by this clause — every
+        # special row with a verdict date already carries `फैसला`.
+        #
+        # Safe against the empty string, which would otherwise match everything
+        # (the column is `null=True, blank=True`): zero rows in either court
+        # store `verdict_type = ''`.
+        .filter(
+            Q(case_status__contains="फैसला")
+            | Q(verdict_date_ad__isnull=False)
+            | Q(verdict_type__isnull=False)
+        )
         .exclude(case_status__contains="चालु")  # not ongoing (text field — safe)
         .exclude(case_status__contains="चलिरहेको")
         # Not already captured — OR captured only in part, which is a case whose
