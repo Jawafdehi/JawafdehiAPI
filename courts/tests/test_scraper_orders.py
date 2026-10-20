@@ -475,6 +475,34 @@ class OrdersBacklogTests(TestCase):
         )
         # transient failure short of the permanent-fail threshold → re-crawlable
         cls.transient = mk(cls.supreme, "082-WO-0008", orders_transient_retries=2)
+        # How a REAL supreme row looks: case_status is NULL (empty by design on
+        # that court), and the disposition lives in verdict_date_ad instead.
+        # Every supreme row in prod is shaped like this, so gating the backlog on
+        # case_status alone excluded the entire court.
+        cls.supreme_null_status = CourtCase.objects.create(
+            court=cls.supreme,
+            case_number="082-WO-0010",
+            case_status=None,
+            verdict_date_ad=date(2025, 6, 1),
+            registration_date_ad=date(2024, 1, 1),
+        )
+        # A disposition with NO date at all: 3,063 live supreme rows record a
+        # verdict_type while both verdict dates stay NULL, so verdict_date_ad
+        # alone still misses them.
+        CourtCase.objects.create(
+            court=cls.supreme,
+            case_number="082-WO-0012",
+            case_status=None,
+            verdict_type="जारी",
+            registration_date_ad=date(2024, 1, 1),
+        )
+        # Still excluded: no case_status AND no verdict date = not decided.
+        CourtCase.objects.create(
+            court=cls.supreme,
+            case_number="082-WO-0011",
+            case_status=None,
+            registration_date_ad=date(2024, 1, 1),
+        )
 
     def test_backlog_selects_and_prioritises(self):
         rows = list(O.orders_backlog_queryset(today=_TODAY))
@@ -489,6 +517,12 @@ class OrdersBacklogTests(TestCase):
         assert ("kathmandudc", "082-CR-0009") not in keys  # wrong court
         assert ("supreme", "082-WO-0007") not in keys  # recheck window open
         assert ("supreme", "082-WO-0008") in keys  # transient (not yet permanent)
+        # NULL case_status + a verdict date = decided, and must be selectable.
+        assert ("supreme", "082-WO-0010") in keys
+        # A verdict_type with no verdict date is still decided enough to probe.
+        assert ("supreme", "082-WO-0012") in keys
+        # NULL case_status + no verdict date + no verdict type = truly undecided.
+        assert ("supreme", "082-WO-0011") not in keys
         # Special/CR (priority 1) sorts ahead of Supreme/WO (priority 4).
         assert keys.index(("special", "082-CR-0001")) < keys.index(
             ("supreme", "082-WO-0001")
