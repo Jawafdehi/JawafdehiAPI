@@ -200,6 +200,47 @@ def test_parse_fully_uploaded_case_is_not_flagged_pending():
     assert result.upload_pending is False
 
 
+
+# A SUPREME result row: 11 cells, with the download link in index 10 and a DATE
+# in index 9. Special rows have 10 cells with the link at index 9. Reading a
+# fixed index therefore silently loses one court or the other.
+_SUPREME_ROW = (
+    "<tr>"
+    + "".join(f"<td>c{i}</td>" for i in range(9))
+    + "<td>२०८१-०१-०२</td>"
+    + '<td align="center"><a class="download_content" href="{href}">हेर्नुहोस</a></td>'
+    + "</tr>"
+)
+SUPREME_DOCS_HTML = (
+    "<html><body><h3>फैसला / आदेश को पुर्ण पाठ</h3>"
+    '<table class="table table-bordered sc-table"><tbody>'
+    + _SUPREME_ROW.format(href="/cp/assets/uploads/supreme_227733.doc")
+    + "</tbody></table></body></html>"
+)
+
+
+def test_parse_supreme_eleven_cell_row_finds_the_link():
+    # Regression: the parser read cells[9], which on a supreme row is a date, so
+    # every supreme case with a published full text was reported as no_record.
+    result = O.parse_order_results(SUPREME_DOCS_HTML)
+    assert result.status == O.DOCS
+    assert result.doc_urls == [
+        "https://supremecourt.gov.np/cp/assets/uploads/supreme_227733.doc"
+    ]
+
+
+def test_parse_supreme_row_still_detects_upload_pending():
+    html = (
+        "<html><body>फैसला / आदेश को पुर्ण पाठ"
+        '<table class="table"><tbody><tr>'
+        + "".join(f"<td>c{i}</td>" for i in range(9))
+        + "<td>२०८१-०१-०२</td>"
+        + '<td align="center"><img src="/images/error.png" title="फैसला अपलोड हुन बाँकी"></td>'
+        + "</tr></tbody></table></body></html>"
+    )
+    assert O.parse_order_results(html).status == O.UPLOAD_PENDING
+
+
 # ── pure: DocumentSource shaping ─────────────────────────────────────────────
 
 
