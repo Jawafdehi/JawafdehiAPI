@@ -1199,6 +1199,19 @@ SOURCE_MARKDOWN_DIR = Path(
 SOURCE_MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
 CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
 
+# Withhold our own unredacted copies from the public material payload EVEN WHEN
+# no redacted counterpart exists to serve instead (materials.artifacts).
+#
+# Off by default, and the default is the whole point: with it on today, every
+# document on the CIAA and Auditor General shelves loses its download link and
+# gains nothing — the object stays exactly as reachable, because our storage
+# serves anyone holding the URL and the URL does not change. Turn it on once
+# redaction covers the corpus, when "no redacted copy" starts meaning something
+# went wrong rather than something has not happened yet.
+MATERIALS_WITHHOLD_UNREDACTED_ALWAYS = env_flag(
+    "MATERIALS_WITHHOLD_UNREDACTED_ALWAYS", default=False
+)
+
 REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
 
 CASEWORK_API_BASE = os.getenv("CASEWORK_API_BASE", "http://127.0.0.1:40173/api/casework")

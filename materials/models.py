@@ -162,6 +162,12 @@ class Material(models.Model):
         indexes = [
             models.Index(fields=["source", "material_type"]),
         ]
+        permissions = [
+            (
+                "view_unredacted",
+                "Can see unredacted documents and transcripts",
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.iri
