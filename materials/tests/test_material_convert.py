@@ -383,3 +383,41 @@ class _FakeJob:
     def __init__(self, payload):
         self.payload = payload
         self.pk = 1
+
+
+@pytest.mark.django_db
+def test_the_transcript_does_not_stay_in_the_jobs_table():
+    """jobs_job.result is not a gated store, and nothing prunes it.
+
+    The DB-free consumer returns the converted markdown as its result and
+    jobs.queue.finalize commits that dict BEFORE this hook runs, so without
+    scrubbing every conversion leaves a permanent unredacted copy of the
+    document somewhere the view_unredacted permission does not reach.
+    """
+    from jobs.models import Job
+
+    iri = build_material_iri("ciaa", "report-scrub")
+    _store(iri, [_mo("https://a/raw.pdf", "RAW")])
+    job = Job.objects.create(
+        kind="material_convert",
+        status=Job.DONE,
+        payload={"material_iri": iri},
+        result={"text": "नागरिकता नं. १२-०१-७५-०४५६७", "source_url": "https://a/raw.pdf"},
+    )
+
+    with patch(
+        "jawafdehi_shared.storage.store_file_as_link",
+        side_effect=[
+            {"link": "https://cdn/a.md", "role": "MARKDOWN"},
+            {"link": "https://cdn/a.redacted.md", "role": "REDACTED_MARKDOWN"},
+        ],
+    ):
+        apply_convert_result(job, dict(job.result))
+
+    stored = Job.objects.get(pk=job.pk).result
+    assert "text" not in stored
+    assert stored["text_scrubbed"] is True
+    # What the result is actually for survives: did this run, and on what.
+    assert stored["source_url"] == "https://a/raw.pdf"
+    assert len(stored["text_sha256"]) == 64
+    assert stored["text_chars"] == len("नागरिकता नं. १२-०१-७५-०४५६७")

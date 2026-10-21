@@ -273,6 +273,7 @@ def apply_convert_result(job, result: dict) -> None:
 
         row.data = data
         row.save(update_fields=["data", "updated_at"])  # post_save → reindex
+    _scrub_job_result(job)
     logger.info(
         "material_convert %s: stored %d chars markdown + text (from %s)",
         iri,
@@ -302,3 +303,38 @@ def _redact(iri: str, text: str) -> tuple[str | None, dict]:
     if counts:
         logger.info("material_convert %s: redacted %s", iri, dict(counts))
     return redacted, dict(counts)
+
+
+def _scrub_job_result(job) -> None:
+    """Drop the transcript from the job row once it has been stored.
+
+    **The transcript is unredacted and the jobs table is not a gated store.**
+    The DB-free consumer returns the converted markdown as its result, and
+    ``jobs.queue.finalize`` commits that dict into ``jobs_job.result`` BEFORE
+    this hook runs — its own docstring says hooks run after the transaction
+    commits. Nothing prunes that table, so without this every conversion leaves
+    a permanent copy of the document's full text in a place the
+    ``view_unredacted`` permission does not reach and a takedown would not think
+    to look.
+
+    What stays is what the result is actually for: which source URL was read,
+    how long the text was, and its digest — enough to answer "did this run, and
+    on what" from the jobs dashboard without holding the document.
+
+    Best-effort by the same contract as the rest of this hook: a failure here
+    leaves the row as the queue wrote it, which is the status quo rather than a
+    new exposure.
+    """
+    try:
+        from jobs.models import Job
+
+        result = dict(job.result or {})
+        text = result.pop("text", None)
+        if text is None:
+            return
+        result["text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        result["text_chars"] = len(text)
+        result["text_scrubbed"] = True
+        Job.objects.filter(pk=job.pk).update(result=result)
+    except Exception as exc:  # noqa: BLE001 - scrubbing must not fail the apply
+        logger.warning("could not scrub job %s result: %s", getattr(job, "pk", "?"), exc)

@@ -16,48 +16,27 @@ from . import jds_client
 
 # Lazy singleton MarkItDown instance (loading plugins is expensive).
 _md = None
-_ocr_dpi_patched = False
 
 
-def _patch_likhit_ocr_dpi():
-    """likhit renders PDF pages for OCR at a hardcoded 300 DPI, which produces
-    images (~2.7 MB) that exceed the Bedrock chat-completions payload limit
-    ("length limit exceeded"). 150 DPI stays under the limit and still OCRs
-    Nepali Devanagari cleanly. likhit exposes no DPI setting, so we override its
-    full-page-OCR renderer with a DPI-configurable copy (LIKHIT_OCR_DPI, default
-    150). Patch once, at import; leaves the installed package untouched."""
-    global _ocr_dpi_patched
-    if _ocr_dpi_patched:
-        return
-    import io
+def _set_likhit_ocr_dpi():
+    """Hold OCR renders at a Bedrock-safe DPI.
 
-    import fitz
-    from likhit.converters import nepali_pdf
+    likhit renders a page for OCR at 300 DPI by default, which produces images
+    (~2.7 MB) that exceed the Bedrock chat-completions payload limit — "length
+    limit exceeded". 150 DPI stays under it and still reads Devanagari cleanly.
 
-    dpi = int(os.getenv("LIKHIT_OCR_DPI", "150"))
+    **This used to be a monkeypatch, and the likhit bump turned it into a silent
+    no-op.** It replaced ``nepali_pdf._run_full_page_ocr``; at the pinned
+    revision that function is orphaned — nothing calls it — and the live path
+    runs ``_run_page_ocr`` → ``_ocr_render_matrix`` → ``_ocr_initial_dpi()``,
+    which reads this env var and falls back to 300. So the patch would have kept
+    sitting in the tree claiming to prevent exactly the payload failure it had
+    stopped preventing, while every OCR'd page rendered at four times the pixels
+    and was billed for it.
 
-    def _run_full_page_ocr(raw, ocr_service):
-        markdown_parts = []
-        doc = fitz.open(stream=raw, filetype="pdf")
-        try:
-            for page_number in range(1, doc.page_count + 1):
-                page = doc[page_number - 1]
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
-                image_stream = io.BytesIO(pixmap.tobytes("png"))
-                image_stream.seek(0)
-                ocr_result = ocr_service.extract_text(image_stream)
-                extracted_text = ocr_result.text.strip()
-                formatted_text = nepali_pdf._format_full_page_ocr_text(extracted_text)
-                markdown_parts.append(formatted_text if extracted_text else "")
-                markdown_parts.append("")
-        finally:
-            doc.close()
-        from markitdown import DocumentConverterResult
-
-        return DocumentConverterResult(markdown="\n".join(markdown_parts).strip())
-
-    nepali_pdf._run_full_page_ocr = _run_full_page_ocr
-    _ocr_dpi_patched = True
+    ``setdefault``: an operator who sets LIKHIT_OCR_DPI deliberately keeps it.
+    """
+    os.environ.setdefault("LIKHIT_OCR_DPI", "150")
 
 
 def _markitdown():
@@ -65,7 +44,7 @@ def _markitdown():
     if _md is None:
         from markitdown import MarkItDown
 
-        _patch_likhit_ocr_dpi()
+        _set_likhit_ocr_dpi()
         _md = MarkItDown(enable_plugins=True)
     return _md
 

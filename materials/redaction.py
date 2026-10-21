@@ -36,8 +36,10 @@ required, not belt-and-braces. A transcript is exactly such a mixture.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
+from typing import Any
 
 logger = logging.getLogger("materials.extraction")
 
@@ -78,3 +80,66 @@ def redact_text(text: str) -> tuple[str, Counter]:
     text, _journal, table_counts = redact_table_text(text)
     counts.update(table_counts)
     return text, counts
+
+
+#: The JSON-LD key carrying a document's full text. A language map
+#: (``{"ne": "…"}``) per MATERIAL_CONTEXT, though a bare string is tolerated
+#: because the corpus contains both.
+TEXT_KEY = "text"
+
+
+def _redact_value(value: Any) -> tuple[Any, Counter, bool]:
+    """Redact a ``text`` value whatever shape it arrived in."""
+    if isinstance(value, str):
+        redacted, counts = redact_text(value)
+        return redacted, counts, redacted != value
+    if isinstance(value, dict):
+        out: dict = {}
+        totals: Counter = Counter()
+        changed = False
+        for lang, text in value.items():
+            if isinstance(text, str):
+                redacted, counts = redact_text(text)
+                totals.update(counts)
+                changed = changed or redacted != text
+                out[lang] = redacted
+            else:
+                out[lang] = text
+        return out, totals, changed
+    return value, Counter(), False
+
+
+def redact_jsonld(jsonld: dict) -> tuple[dict, str, Counter]:
+    """``(document with redacted text, the text as it arrived, counts)``.
+
+    **The one place a document's text is redacted**, called from the single
+    upsert primitive so that every writer is covered by construction. There were
+    five writers of ``data["text"]`` — the convert job and four scrapers — and
+    redacting inside one of them left the others publishing identifiers into a
+    field the search indexer reads. The AG shelf is charge sheets naming
+    individuals and ingests entirely through a scraper, so the highest-PII
+    corpus we hold was the one still exposed.
+
+    Returns the original text ONLY when redaction changed something. For the
+    overwhelming majority of the archive the two are identical, and keeping a
+    second copy of bytes that answer no question is cost without a reader.
+    """
+    text = (jsonld or {}).get(TEXT_KEY)
+    if text is None:
+        return jsonld, "", Counter()
+    redacted, counts, changed = _redact_value(text)
+    if not changed:
+        return jsonld, "", counts
+    return {**jsonld, TEXT_KEY: redacted}, json.dumps(text, ensure_ascii=False), counts
+
+
+def original_text(source_text: str) -> Any:
+    """The stored original, back in the shape it was written in."""
+    if not source_text:
+        return None
+    try:
+        return json.loads(source_text)
+    except ValueError:
+        # Stored before this was JSON-encoded, or hand-edited. A bare string is
+        # a legitimate `text` shape, so return it rather than losing it.
+        return source_text

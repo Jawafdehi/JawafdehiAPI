@@ -35,7 +35,24 @@ from typing import Any
 
 from django.db import transaction
 
+import logging
+
+from .redaction import redact_jsonld
+
 from .models import Material
+
+logger = logging.getLogger("materials.ingest")
+
+
+def _removals(counts) -> dict:
+    """Only the counters that mean something was REMOVED.
+
+    likhit's redactors also return table diagnostics and refusals on every call
+    — ``table_blocks_seen``, ``physical_cells``, ``*_refused_*`` — so logging
+    the raw Counter reports "redacted" for a document with nothing in it, which
+    makes the one signal that redaction did anything useless.
+    """
+    return {k: v for k, v in counts.items() if k.endswith("_redacted") and v}
 
 
 def upsert_single_source_material(
@@ -58,7 +75,25 @@ def upsert_single_source_material(
     """
     # Validate the doc + the promoted-column agreement on a transient instance
     # (validate_unique=False — an existing ``@id`` is an UPDATE, not a duplicate).
+    # REDACT HERE, not in the callers. This is the single primitive every write
+    # funnels through — the convert job, four scrapers, the upload endpoint and
+    # every PATCH — so redacting at this boundary is what makes "the public text
+    # is redacted" true by construction rather than true of whichever writer
+    # remembered. It was previously done inside the convert job alone, which
+    # left the AG charge-sheet shelf (scraper-ingested, and the highest-PII
+    # corpus we hold) publishing identifiers into the field the search indexer
+    # reads.
+    #
+    # The text as it arrived is kept on the row, outside ``data``, and only when
+    # redaction changed it — see Material.source_text. Transcription is
+    # expensive and not reproducible byte-for-byte, so the original is preserved
+    # rather than re-derivable: nobody should have to OCR a document twice to
+    # answer a question about what it said.
+    jsonld, source_text, counts = redact_jsonld(jsonld)
+    if counts:
+        logger.info("redacted %s on ingest: %s", jsonld.get("@id"), _removals(counts))
     candidate = Material.from_jsonld(jsonld, material_type=material_type)
+    candidate.source_text = source_text
     # from_jsonld already set the source-based birth default; an explicit override
     # wins. Assign it BEFORE full_clean so an invalid policy is REJECTED by the
     # choices check rather than silently persisted (this is the single validation
@@ -75,6 +110,10 @@ def upsert_single_source_material(
         "source": candidate.source,
         "ident": candidate.ident,
         "data": candidate.data,
+        # Written on every upsert like ``data``: a re-ingest whose text no longer
+        # carries an identifier must CLEAR the stored original, or the row keeps
+        # answering with text the document no longer has.
+        "source_text": candidate.source_text,
         "is_deleted": False,
     }
     # An explicit override applies on update too; the implicit birth default must

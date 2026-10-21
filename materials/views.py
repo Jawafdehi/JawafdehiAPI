@@ -46,6 +46,7 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
 from . import artifacts
 from . import jsonld
+from . import redaction
 from . import provenance
 from .sources import build_catalogue
 from .content_api import (
@@ -315,6 +316,16 @@ def _material_read_response(request, iri: str) -> Response:
         data = artifacts.redact_payload(data)
     else:
         data = {**data, "jawafdehi:artifacts": artifacts.artifact_summary(data)}
+        # ONE endpoint, two representations — and for a permitted caller that
+        # includes the text as it arrived. Transcription is expensive and not
+        # reproducible byte-for-byte, so the original is served from what was
+        # stored at ingest rather than re-derived; nobody should have to OCR a
+        # document twice to read what it said. Only present when redaction
+        # actually changed something (Material.source_text), so for most of the
+        # archive this is a no-op and the two representations are identical.
+        original = row and redaction.original_text(row.source_text)
+        if original is not None:
+            data = {**data, redaction.TEXT_KEY: original}
     resp = Response(data, content_type=LD_JSON)
     if row is not None:
         # The token a conditional PATCH is matched against, so a client can opt
