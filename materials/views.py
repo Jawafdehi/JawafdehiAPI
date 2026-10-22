@@ -47,6 +47,7 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 from . import artifacts
 from . import extract as material_extract
 from . import jsonld
+from . import redaction
 from . import provenance
 from .sources import build_catalogue
 from .content_api import (
@@ -316,6 +317,16 @@ def _material_read_response(request, iri: str) -> Response:
         data = artifacts.redact_payload(data)
     else:
         data = {**data, "jawafdehi:artifacts": artifacts.artifact_summary(data)}
+        # ONE endpoint, two representations — and for a permitted caller that
+        # includes the text as it arrived. Transcription is expensive and not
+        # reproducible byte-for-byte, so the original is served from what was
+        # stored at ingest rather than re-derived; nobody should have to OCR a
+        # document twice to read what it said. Only present when redaction
+        # actually changed something (Material.source_text), so for most of the
+        # archive this is a no-op and the two representations are identical.
+        original = row and redaction.original_text(row.source_text)
+        if original is not None:
+            data = {**data, redaction.TEXT_KEY: original}
     resp = Response(data, content_type=LD_JSON)
     if row is not None:
         # The token a conditional PATCH is matched against, so a client can opt
@@ -685,9 +696,24 @@ def _patch_material(request, iri: str) -> Response:
                     {"detail": f"Patched material is invalid: {exc}"},
                     status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
+            # Redact here too. This verb writes `data` directly rather than
+            # through the upsert primitive, and `/text` is not a blocked patch
+            # path — so without this a PATCH is a supported way to put a raw
+            # citizenship number into the field the search indexer publishes,
+            # and the stored original would silently go stale beside it.
+            patched, patched_source_text, patch_counts = redaction.redact_jsonld(
+                patched
+            )
+            if patch_counts:
+                logger.info("redacted %s on patch: %s", iri, patch_counts)
             if patched != row.data:
                 row.data = patched
-                updated_fields.append("data")
+                row.source_text = redaction.keep_original(
+                    incoming=patched_source_text,
+                    stored=row.source_text,
+                    text_changed=True,
+                )
+                updated_fields.extend(["data", "source_text"])
                 # This verb writes `data` directly instead of going through
                 # `upsert_single_source_material`, so the model-layer invariant
                 # has to be invoked explicitly or it silently stops applying on

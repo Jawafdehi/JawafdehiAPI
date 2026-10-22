@@ -38,7 +38,10 @@ def _convert_with_timeout(convert_source, url: str) -> dict:
 
     timeout = getattr(settings, "CONVERT_SOURCE_TIMEOUT", 180)
     ex = ThreadPoolExecutor(max_workers=1)
-    fut = ex.submit(convert_source, {"url": [url]})
+    # cache=False: the cache holds unredacted markdown on the worker's disk,
+    # outside the view_unredacted gate, and a material is converted once — so it
+    # buys this path nothing and costs it a copy of the document.
+    fut = ex.submit(convert_source, {"url": [url]}, cache=False)
     try:
         return fut.result(timeout=timeout)
     except FutureTimeout:

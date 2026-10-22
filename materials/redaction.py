@@ -1,8 +1,16 @@
 """Removing personal data from a document's text before anything stores it.
 
-Shared by both producers of text, which is why it sits here rather than inside
-either: the transcript path (``materials.conversion``) and the page-level
-extraction path both run it over what they are about to store.
+Sits at the top of the app rather than inside one writer because more than one
+calls it: the ingest primitive, the convert job and the PATCH verb all redact
+what they are about to store.
+
+🛑 **The legacy parquet import is NOT covered by this.** The ``DocumentPage`` and
+``DocumentTable`` rows that ``ingest_document_content`` loads from the upstream
+parquet are written as they arrive, and ``…/content`` serves them to anyone —
+that is the 35 CIAA annual reports already in the corpus. Documents *this* branch
+reads are covered: :func:`redact_bundle` runs inside ``extraction.pdf`` before
+the writer ever sees the bundle. So the gap closes only as those 35 are re-read
+from their PDFs, not by anything here.
 
 ``likhit.privacy`` is the detector and the redactor; this is the one place the
 extraction pipeline calls it, and the order it calls it in.
@@ -36,8 +44,10 @@ required, not belt-and-braces. A transcript is exactly such a mixture.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
+from typing import Any
 
 logger = logging.getLogger("materials.extraction")
 
@@ -86,6 +96,89 @@ def redact_text(text: str) -> tuple[str, Counter]:
     text, _journal, table_counts = redact_table_text(text)
     counts.update(table_counts)
     return text, counts
+
+
+#: The JSON-LD key carrying a document's full text. A language map
+#: (``{"ne": "…"}``) per MATERIAL_CONTEXT, though a bare string is tolerated
+#: because the corpus contains both.
+TEXT_KEY = "text"
+
+
+def _redact_value(value: Any) -> tuple[Any, Counter, bool]:
+    """Redact a ``text`` value whatever shape it arrived in."""
+    if isinstance(value, str):
+        redacted, counts = redact_text(value)
+        return redacted, counts, redacted != value
+    if isinstance(value, dict):
+        out: dict = {}
+        totals: Counter = Counter()
+        changed = False
+        for lang, text in value.items():
+            if isinstance(text, str):
+                redacted, counts = redact_text(text)
+                totals.update(counts)
+                changed = changed or redacted != text
+                out[lang] = redacted
+            else:
+                out[lang] = text
+        return out, totals, changed
+    return value, Counter(), False
+
+
+def redact_jsonld(jsonld: dict) -> tuple[dict, str, Counter]:
+    """``(document with redacted text, the text as it arrived, counts)``.
+
+    **The one place a document's text is redacted**, called from the single
+    upsert primitive so that every writer is covered by construction. There were
+    five writers of ``data["text"]`` — the convert job and four scrapers — and
+    redacting inside one of them left the others publishing identifiers into a
+    field the search indexer reads. The AG shelf is charge sheets naming
+    individuals and ingests entirely through a scraper, so the highest-PII
+    corpus we hold was the one still exposed.
+
+    Returns the original text ONLY when redaction changed something. For the
+    overwhelming majority of the archive the two are identical, and keeping a
+    second copy of bytes that answer no question is cost without a reader.
+    """
+    text = (jsonld or {}).get(TEXT_KEY)
+    if text is None:
+        return jsonld, "", Counter()
+    redacted, counts, changed = _redact_value(text)
+    if not changed:
+        return jsonld, "", counts
+    return {**jsonld, TEXT_KEY: redacted}, json.dumps(text, ensure_ascii=False), counts
+
+
+def original_text(source_text: str) -> Any:
+    """The stored original, back in the shape it was written in."""
+    if not source_text:
+        return None
+    try:
+        return json.loads(source_text)
+    except ValueError:
+        # Stored before this was JSON-encoded, or hand-edited. A bare string is
+        # a legitimate `text` shape, so return it rather than losing it.
+        return source_text
+
+
+def keep_original(*, incoming: str, stored: str, text_changed: bool) -> str:
+    """Which original to keep on the row after a write.
+
+    Three cases, and the middle one is why this is not just ``incoming``:
+
+    * this write carried text we had to redact — keep what arrived;
+    * this write carried text we did NOT have to redact, and the document's
+      text did not change — somebody round-tripped the redacted representation
+      (read the API, wrote it back, which is exactly what a caseworker edit
+      does). Keeping ``incoming`` would blank the only copy of the original, and
+      it is not recoverable without re-running the transcription;
+    * this write carried genuinely different text with nothing to redact — a
+      correction that removed the identifier. Clear it, or the row goes on
+      answering with text the document no longer has.
+    """
+    if incoming:
+        return incoming
+    return "" if text_changed else stored
 
 
 def redact_bundle(bundle) -> Counter:
