@@ -4,12 +4,13 @@ Sits at the top of the app rather than inside one writer because more than one
 calls it: the ingest primitive, the convert job and the PATCH verb all redact
 what they are about to store.
 
-🛑 **The page-level content plane is NOT covered by this.** ``DocumentPage`` and
-``DocumentTable`` rows are written by ``ingest_document_content`` straight from
-the upstream parquet, and ``…/content`` serves them to anyone. That corpus is 35
-CIAA annual reports today, and closing it belongs with the extraction pipeline
-that will become their second writer — not here, where it would be a claim this
-branch does not deliver.
+🛑 **The legacy parquet import is NOT covered by this.** The ``DocumentPage`` and
+``DocumentTable`` rows that ``ingest_document_content`` loads from the upstream
+parquet are written as they arrive, and ``…/content`` serves them to anyone —
+that is the 35 CIAA annual reports already in the corpus. Documents *this* branch
+reads are covered: :func:`redact_bundle` runs inside ``extraction.pdf`` before
+the writer ever sees the bundle. So the gap closes only as those 35 are re-read
+from their PDFs, not by anything here.
 
 ``likhit.privacy`` is the detector and the redactor; this is the one place the
 extraction pipeline calls it, and the order it calls it in.
@@ -49,6 +50,14 @@ from collections import Counter
 from typing import Any
 
 logger = logging.getLogger("materials.extraction")
+
+#: ``text_source`` suffix recording that a document's text went through the
+#: redactor. It rides on the provenance block the material detail payload already
+#: serves, because a reader comparing our text against the published PDF has to
+#: be able to tell a removal from a transcription error — and the placeholders
+#: themselves say so in the text, but only on the pages that carried a value.
+REDACTED_SUFFIX = "+redacted"
+
 
 class RedactionUnavailable(RuntimeError):
     """``likhit.privacy`` is not importable — the pin predates the subpackage.
@@ -170,3 +179,72 @@ def keep_original(*, incoming: str, stored: str, text_changed: bool) -> str:
     if incoming:
         return incoming
     return "" if text_changed else stored
+
+
+def redact_bundle(bundle) -> Counter:
+    """Redact every stored surface of ``bundle`` in place; return what was removed.
+
+    Pages and table markdown both go through both passes. The journals are
+    dropped on purpose: a journal row names the value it replaced, so keeping one
+    would re-create the problem the redaction exists to solve. The counters say
+    how much was removed per class and name nothing, which is why they are safe
+    to log and to put in a job result.
+    """
+    totals: Counter = Counter()
+    for page in bundle.pages:
+        page.text, counts = redact_text(page.text)
+        page.chars = len(page.text)
+        totals.update(counts)
+    for table in bundle.tables:
+        table.markdown, counts = redact_text(table.markdown)
+        totals.update(counts)
+        # The header is a list of cell strings rather than one blob, so it is
+        # redacted cell by cell. It is rarely where an identifier sits, and
+        # "rarely" is not "never" — a one-column table of citizenship numbers
+        # puts one in the header.
+        table.header = [
+            redact_text(cell)[0] if isinstance(cell, str) else cell
+            for cell in (table.header or [])
+        ]
+        table.caption, counts = redact_text(table.caption)
+        totals.update(counts)
+    for figure in bundle.figures:
+        # A chart read by a model carries free prose — a title, the transcriber's
+        # notes, the reconciliation it did. Nothing stops an identifier printed
+        # on a chart from landing there, and a figure is served to the public
+        # exactly like a page is.
+        figure.title, counts = redact_text(figure.title)
+        totals.update(counts)
+        figure.notes, counts = redact_text(figure.notes)
+        totals.update(counts)
+        figure.verify_note, counts = redact_text(figure.verify_note)
+        totals.update(counts)
+        for point in figure.points:
+            point.label, counts = redact_text(point.label)
+            totals.update(counts)
+            point.series, counts = redact_text(point.series)
+            totals.update(counts)
+    if totals:
+        logger.info("redacted %s: %s", bundle.doc_id, dict(totals))
+    bundle.text_source = _mark(bundle.text_source)
+    return totals
+
+
+#: ``DocumentContent.text_source`` is 40 characters. The marker has to survive
+#: the writer's truncation, or the claim it makes is cut off mid-word and the
+#: idempotence check below stops recognising its own mark — appending again on
+#: every re-extract.
+_TEXT_SOURCE_WIDTH = 40
+
+
+def _mark(text_source: str) -> str:
+    """``<source>+redacted``, fitted to the column rather than overflowing it."""
+    if text_source.endswith(REDACTED_SUFFIX):
+        return text_source
+    room = _TEXT_SOURCE_WIDTH - len(REDACTED_SUFFIX)
+    return f"{text_source[:room]}{REDACTED_SUFFIX}"
+
+
+def redaction_summary(totals: Counter) -> dict:
+    """Counts per class, for a job result. Never a match, never a location."""
+    return {key: int(value) for key, value in sorted(totals.items())}
