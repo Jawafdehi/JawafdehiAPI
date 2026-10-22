@@ -24,6 +24,8 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.http import HttpResponseNotModified
 from django.utils.cache import patch_vary_headers
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
 from rest_framework.decorators import (
     api_view,
@@ -1131,7 +1133,9 @@ def _resolve_for_content(request, source: str, ident: str):
     return iri, None
 
 
-def _content_response(payload, content, *, http_status=status.HTTP_200_OK):
+def _content_response(
+    payload, content, *, http_status=status.HTTP_200_OK, variant=""
+):
     """Every content response carries the same two headers.
 
     ``Vary: Authorization`` goes on the errors too, not just the 200s, because
@@ -1141,7 +1145,7 @@ def _content_response(payload, content, *, http_status=status.HTTP_200_OK):
     """
     resp = Response(payload, status=http_status)
     if content is not None:
-        resp["ETag"] = version_token(content)
+        resp["ETag"] = version_token(content, variant)
     patch_vary_headers(resp, ("Authorization",))
     return resp
 
@@ -1152,7 +1156,35 @@ def _bad_request(detail: str):
     return resp
 
 
-def _not_modified(request, content):
+#: Longest ``q`` we will consider. A caption filter has no use for more, and an
+#: unbounded one lets a caller mint unbounded distinct ETags — each a separate
+#: entry in any shared cache in front of this route.
+MAX_QUERY_LENGTH = 200
+
+
+def _content_variant(request) -> str:
+    """Which representation of this URL the caller asked for.
+
+    Folded into the ETag. Built from the arguments that CHANGE THE BODY, in a
+    fixed order — not from the raw query string, which would make
+    ``?type=table&q=x`` and ``?q=x&type=table`` two tags for one answer.
+
+    ``type`` and ``q`` are normalised the same way the handlers normalise them,
+    so two spellings that produce an identical body share a tag instead of
+    missing each other's cache entry.
+    """
+    params = request.query_params
+    normalised = {
+        "type": (params.get("type") or "").strip().lower(),
+        "q": (params.get("q") or "").strip().casefold(),
+    }
+    return "|".join(
+        f"{name}={normalised.get(name, params.get(name) or '')}"
+        for name in ("type", "id", "num", "from", "to", "q")
+    )
+
+
+def _not_modified(request, content, variant=""):
     """A 304 when the caller already holds this content, else None.
 
     This route sets an ``ETag`` on every response, and nothing else in the stack
@@ -1175,17 +1207,85 @@ def _not_modified(request, content):
     header = request.headers.get("If-None-Match")
     if not header or content is None:
         return None
-    current = version_token(content).removeprefix("W/")
+    current = version_token(content, variant).removeprefix("W/")
     for candidate in header.split(","):
         tag = candidate.strip()
         if tag == "*" or tag.removeprefix("W/") == current:
             resp = HttpResponseNotModified()
-            resp["ETag"] = version_token(content)
+            resp["ETag"] = version_token(content, variant)
             patch_vary_headers(resp, ("Authorization",))
             return resp
     return None
 
 
+#: The query surface of ``…/content``. Written out because this route is a
+#: plain ``@api_view`` with no serializer for spectacular to read, so without
+#: it every argument the endpoint accepts — ``type`` included — was invisible
+#: in the published schema while being required to use the route at all.
+CONTENT_PARAMETERS = [
+    OpenApiParameter(
+        "type",
+        OpenApiTypes.STR,
+        OpenApiParameter.QUERY,
+        required=True,
+        enum=list(CONTENT_TYPES),
+        description="Which kind of content to return.",
+    ),
+    OpenApiParameter(
+        "id",
+        OpenApiTypes.STR,
+        OpenApiParameter.QUERY,
+        description=(
+            "One table or figure by its stable key (`p0030-t1`). Never the "
+            "ordinal, which is recomputed on every ingest."
+        ),
+    ),
+    OpenApiParameter(
+        "num",
+        OpenApiTypes.INT,
+        OpenApiParameter.QUERY,
+        description="One page by its printed folio.",
+    ),
+    OpenApiParameter(
+        "from",
+        OpenApiTypes.INT,
+        OpenApiParameter.QUERY,
+        description=(
+            f"First page of an inclusive range; needs `to`. At most "
+            f"{MAX_PAGE_SPAN} pages per request."
+        ),
+    ),
+    OpenApiParameter(
+        "to",
+        OpenApiTypes.INT,
+        OpenApiParameter.QUERY,
+        description="Last page of an inclusive range; needs `from`.",
+    ),
+    OpenApiParameter(
+        "q",
+        OpenApiTypes.STR,
+        OpenApiParameter.QUERY,
+        description=(
+            "Narrow a table or figure listing by caption, title or page "
+            "number. Matches phonetically as well as literally, so a query "
+            "typed on a Latin keyboard reaches a Devanagari caption "
+            "(`vivaran` finds विवरण). Not accepted with `id`, or on pages."
+        ),
+    ),
+]
+
+
+# `extend_schema` has to sit OUTSIDE `api_view`: spectacular reads the
+# annotation off the view object, and applied to the bare function underneath it
+# is lost when `api_view` wraps it — the parameters silently vanish from the
+# published schema. ty objects because `api_view` returns an `AsView`, not a
+# plain callable; every other `extend_schema` in this repo is on a class-based
+# APIView, which is why this is the first place it comes up.
+@extend_schema(  # ty: ignore[invalid-argument-type]
+    parameters=CONTENT_PARAMETERS,
+    summary="Pages, tables and charts read out of a document",
+    tags=["materials"],
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def material_content(request, source: str, ident: str):
@@ -1193,6 +1293,13 @@ def material_content(request, source: str, ident: str):
 
     ``?type=page`` / ``?type=table`` / ``?type=figure`` list that kind; adding
     ``&num=`` (pages) or ``&id=`` (tables, figures) returns one item in full.
+
+    ``&q=`` narrows a table or figure LISTING by caption, title or page number.
+    The match is phonetic as well as literal, so a query typed on a Latin
+    keyboard reaches a Devanagari caption — "vivaran" finds विवरण. It lives here
+    rather than in the client because the vocabulary has to be the one the rest
+    of the platform already searches with; see
+    ``jawafdehi_shared.search.transliterate.matches_search``.
 
     **A table and a figure are addressed by ``key``, never by ``ordinal``.** The
     ordinal is presentation order and is recomputed on every ingest, so a saved
@@ -1222,6 +1329,12 @@ def material_content(request, source: str, ident: str):
             f"Unknown type {kind!r}; expected one of " + ", ".join(CONTENT_TYPES) + "."
         )
 
+    query = request.query_params.get("q")
+    if query is not None and len(query) > MAX_QUERY_LENGTH:
+        return _bad_request(
+            f"q may be at most {MAX_QUERY_LENGTH} characters; got {len(query)}."
+        )
+
     content = content_for(iri)
     if content is None:
         return _content_response(
@@ -1232,15 +1345,16 @@ def material_content(request, source: str, ident: str):
 
     # After the 400s above, so a malformed request is still told it is malformed
     # rather than handed a 304 for a question we never looked at.
-    if (cached := _not_modified(request, content)) is not None:
+    variant = _content_variant(request)
+    if (cached := _not_modified(request, content, variant)) is not None:
         return cached
 
     if kind == "page":
-        return _page_response(request, iri, content)
-    return _keyed_response(request, iri, content, kind)
+        return _page_response(request, iri, content, variant)
+    return _keyed_response(request, iri, content, kind, variant)
 
 
-def _page_response(request, iri: str, content):
+def _page_response(request, iri: str, content, variant: str = ""):
     """``type=page``: the page list, one page by folio, or an inclusive range.
 
     Three shapes, chosen by the arguments present:
@@ -1251,6 +1365,12 @@ def _page_response(request, iri: str, content):
     """
     if request.query_params.get("id") is not None:
         return _bad_request("A page is addressed by num or from/to, not id.")
+    if request.query_params.get("q") is not None:
+        # A page has no title to match, and its text is deferred out of the
+        # listing precisely so a 446-page report does not ship its transcript
+        # to draw a table of contents. Refusing is honest; ignoring `q` would
+        # hand back every page while the caller believed it asked for a few.
+        return _bad_request("q narrows tables and figures; a page has no title.")
 
     num = request.query_params.get("num")
     first = request.query_params.get("from")
@@ -1265,12 +1385,13 @@ def _page_response(request, iri: str, content):
         return _bad_request("A page range needs both from and to.")
 
     if first is not None:
-        return _page_range_response(iri, content, first, last)
+        return _page_range_response(iri, content, first, last, variant)
     if num is None:
         items = list_pages(iri)
         return _content_response(
             {"material": iri, "type": "page", "count": len(items), "items": items},
             content,
+            variant=variant,
         )
 
     page_no = _as_page_number(num)
@@ -1282,9 +1403,12 @@ def _page_response(request, iri: str, content):
             {"detail": "No such page for this material."},
             content,
             http_status=status.HTTP_404_NOT_FOUND,
+            variant=variant,
         )
     return _content_response(
-        {"material": iri, "type": "page", "item": page_payload(page)}, content
+        {"material": iri, "type": "page", "item": page_payload(page)},
+        content,
+        variant=variant,
     )
 
 
@@ -1306,7 +1430,9 @@ def _as_page_number(raw: str) -> int | None:
     return value if value >= 0 else None
 
 
-def _page_range_response(iri: str, content, raw_first: str, raw_last: str):
+def _page_range_response(
+    iri: str, content, raw_first: str, raw_last: str, variant: str = ""
+):
     """``type=page&from=&to=``: an inclusive span of pages, each with its text."""
     first = _as_page_number(raw_first)
     last = _as_page_number(raw_last)
@@ -1331,10 +1457,11 @@ def _page_range_response(iri: str, content, raw_first: str, raw_last: str):
             "items": items,
         },
         content,
+        variant=variant,
     )
 
 
-def _keyed_response(request, iri: str, content, kind: str):
+def _keyed_response(request, iri: str, content, kind: str, variant: str = ""):
     """``type=table`` / ``type=figure``: the listing, or one item by its key."""
     # Reject the page arguments rather than ignoring them. Silently serving the
     # whole listing for ?type=table&from=1&to=10 would hand the caller everything
@@ -1346,13 +1473,23 @@ def _keyed_response(request, iri: str, content, kind: str):
                 f"A {kind} is addressed by id; {unsupported} applies to pages."
             )
     key = request.query_params.get("id")
+    query = request.query_params.get("q")
+    if key is not None and query is not None:
+        return _bad_request("Use either id or q, not both.")
     lister = list_tables if kind == "table" else list_figures
     if key is None:
-        items = lister(iri)
-        return _content_response(
-            {"material": iri, "type": kind, "count": len(items), "items": items},
-            content,
-        )
+        items = lister(iri, query)
+        payload = {
+            "material": iri,
+            "type": kind,
+            "count": len(items),
+            "items": items,
+        }
+        if query is not None:
+            # Echoed so a caller can tell a narrowed empty result from a
+            # document that holds none of this kind at all.
+            payload["q"] = query
+        return _content_response(payload, content, variant=variant)
     if kind == "table":
         table = get_table(iri, key)
         item = table_payload(table) if table is not None else None
@@ -1364,8 +1501,11 @@ def _keyed_response(request, iri: str, content, kind: str):
             {"detail": f"No such {kind} for this material."},
             content,
             http_status=status.HTTP_404_NOT_FOUND,
+            variant=variant,
         )
-    return _content_response({"material": iri, "type": kind, "item": item}, content)
+    return _content_response(
+        {"material": iri, "type": kind, "item": item}, content, variant=variant
+    )
 
 
 # ── Document-source catalogue ────────────────────────────────────────────────
