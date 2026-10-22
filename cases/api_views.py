@@ -1313,11 +1313,15 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         original submit() handling). Returns a Response to send, or None.
         """
         from_state = case.state
+        # The reason travels in the ``X-Transition-Reason`` header (see the log
+        # write below). For a publish it doubles as the REVISE override reason.
+        reason = (request.headers.get("X-Transition-Reason") or "").strip()
+        review_gate = None
         try:
             if target_state == CaseState.IN_REVIEW:
                 case.submit()
             elif target_state == CaseState.PUBLISHED:
-                case.publish()
+                review_gate = case.publish(review_override_reason=reason)
             elif target_state == CaseState.CLOSED:
                 # Soft-delete (state -> CLOSED + versionInfo audit entry).
                 case.delete()
@@ -1352,13 +1356,13 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # RFC-6902 body stays a pure patch and we stop overloading the internal
         # ``/notes`` field for return reasons. Inside the same atomic block as the
         # caller, so the log row and the state change commit or roll back together.
-        reason = (request.headers.get("X-Transition-Reason") or "").strip()
         CaseStateChange.objects.create(
             case=case,
             from_state=from_state,
             to_state=case.state,
             actor=request.user if request.user.is_authenticated else None,
             reason=reason[:2000],  # defensive cap; TextField is unbounded
+            review_gate=review_gate,
         )
         return None
 
