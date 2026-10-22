@@ -195,6 +195,10 @@ def apply_convert_result(job, result: dict) -> None:
         logger.error(
             "material_convert %s: not storing a transcript we could not redact", iri
         )
+        # Scrub FIRST. Returning early here used to leave the full unredacted
+        # transcript in jobs_job.result forever — the one path where it matters
+        # most, because nothing downstream ever stored or gated it.
+        _scrub_job_result(job)
         return
 
     link = _store(text, "MARKDOWN", "material.md")
@@ -257,7 +261,15 @@ def apply_convert_result(job, result: dict) -> None:
         # reproducible byte-for-byte, so an original we drop costs an OCR run to
         # recover. Stored here rather than left to the ingest boundary because
         # this path does not go through it — it writes the row directly.
-        row.source_text = json.dumps({_TEXT_LANG: text}, ensure_ascii=False)
+        # Only when redaction changed something — the column's contract. On the
+        # rest of the archive the two are identical and a second copy answers no
+        # question; the markers stripped from the indexed text are still in the
+        # MARKDOWN artifact, which is where a reader would look for them.
+        row.source_text = (
+            json.dumps({_TEXT_LANG: text}, ensure_ascii=False)
+            if redacted_text != text
+            else ""
+        )
 
         row.data = data
         row.save(  # post_save → reindex

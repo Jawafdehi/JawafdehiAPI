@@ -1,8 +1,15 @@
 """Removing personal data from a document's text before anything stores it.
 
-Shared by both producers of text, which is why it sits here rather than inside
-either: the transcript path (``materials.conversion``) and the page-level
-extraction path both run it over what they are about to store.
+Sits at the top of the app rather than inside one writer because more than one
+calls it: the ingest primitive, the convert job and the PATCH verb all redact
+what they are about to store.
+
+🛑 **The page-level content plane is NOT covered by this.** ``DocumentPage`` and
+``DocumentTable`` rows are written by ``ingest_document_content`` straight from
+the upstream parquet, and ``…/content`` serves them to anyone. That corpus is 35
+CIAA annual reports today, and closing it belongs with the extraction pipeline
+that will become their second writer — not here, where it would be a claim this
+branch does not deliver.
 
 ``likhit.privacy`` is the detector and the redactor; this is the one place the
 extraction pipeline calls it, and the order it calls it in.
@@ -143,3 +150,23 @@ def original_text(source_text: str) -> Any:
         # Stored before this was JSON-encoded, or hand-edited. A bare string is
         # a legitimate `text` shape, so return it rather than losing it.
         return source_text
+
+
+def keep_original(*, incoming: str, stored: str, text_changed: bool) -> str:
+    """Which original to keep on the row after a write.
+
+    Three cases, and the middle one is why this is not just ``incoming``:
+
+    * this write carried text we had to redact — keep what arrived;
+    * this write carried text we did NOT have to redact, and the document's
+      text did not change — somebody round-tripped the redacted representation
+      (read the API, wrote it back, which is exactly what a caseworker edit
+      does). Keeping ``incoming`` would blank the only copy of the original, and
+      it is not recoverable without re-running the transcription;
+    * this write carried genuinely different text with nothing to redact — a
+      correction that removed the identifier. Clear it, or the row goes on
+      answering with text the document no longer has.
+    """
+    if incoming:
+        return incoming
+    return "" if text_changed else stored

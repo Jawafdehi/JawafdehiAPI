@@ -255,3 +255,71 @@ class ConvertPathTests(TestCase):
         # document redacted on the strength of a failure.
         self.assertNotIn("text", row.data)
         self.assertEqual(row.source_text, "")
+
+
+class PreservingTheOriginalTests(TestCase):
+    """The original must survive a round-trip, and must not survive a correction.
+
+    These pull in opposite directions and the difference is what changed: an
+    edit that writes back the redacted representation it just read is not a
+    document whose text changed, and treating it as one blanks the only copy of
+    something that costs an OCR run to recover.
+    """
+
+    databases = {"default", "ngm"}
+
+    def test_writing_back_the_redacted_text_does_not_destroy_the_original(self):
+        upsert_single_source_material(_doc({"ne": BODY}), material_type="document")
+        redacted = Material.objects.get(pk=IRI).data["text"]
+
+        # Exactly what a caseworker edit does: read the API, change a field,
+        # write the whole document back.
+        upsert_single_source_material(
+            {**_doc(redacted), "name": {"ne": "सच्याइएको नाम"}},
+            material_type="document",
+        )
+
+        row = Material.objects.get(pk=IRI)
+        self.assertIn(IDENTIFIER, row.source_text)
+        self.assertEqual(row.data["name"]["ne"], "सच्याइएको नाम")
+
+    def test_a_correction_that_removes_the_identifier_clears_it(self):
+        upsert_single_source_material(_doc({"ne": BODY}), material_type="document")
+
+        upsert_single_source_material(
+            _doc({"ne": "सच्याइएको विवरण, कुनै पहिचान छैन।"}),
+            material_type="document",
+        )
+
+        # Different text, nothing to redact: the document no longer says it, so
+        # neither should the row.
+        self.assertEqual(Material.objects.get(pk=IRI).source_text, "")
+
+
+class PatchTests(APITestCase):
+    """PATCH writes `data` directly, and `/text` is not a blocked path.
+
+    So before this it was a supported way to put a raw citizenship number into
+    the field the search indexer publishes — authenticated, 200, no warning.
+    """
+
+    databases = {"default", "ngm"}
+
+    def setUp(self):
+        upsert_single_source_material(_doc({"ne": "सफा विवरण।"}), material_type="document")
+        user = get_user_model().objects.create_user("cw", password="x")
+        user.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
+        self.client.force_authenticate(user)
+
+    def test_patching_text_in_is_redacted(self):
+        response = self.client.patch(
+            f"/api/materials/?iri={IRI}",
+            {"patch_ops": [{"op": "replace", "path": "/text", "value": {"ne": BODY}}]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        row = Material.objects.get(pk=IRI)
+        self.assertNotIn(IDENTIFIER, row.data["text"]["ne"])
+        # And the original is kept, by the same rule as every other writer.
+        self.assertIn(IDENTIFIER, row.source_text)

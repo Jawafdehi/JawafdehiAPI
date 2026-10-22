@@ -37,7 +37,7 @@ from django.db import transaction
 
 import logging
 
-from .redaction import redact_jsonld
+from .redaction import TEXT_KEY, keep_original, redact_jsonld
 
 from .models import Material
 
@@ -90,10 +90,14 @@ def upsert_single_source_material(
     # rather than re-derivable: nobody should have to OCR a document twice to
     # answer a question about what it said.
     jsonld, source_text, counts = redact_jsonld(jsonld)
-    if counts:
-        logger.info("redacted %s on ingest: %s", jsonld.get("@id"), _removals(counts))
+    removals = _removals(counts)
+    if removals:
+        # Guarded on the REMOVALS, not on the raw Counter: likhit's redactors
+        # return table diagnostics on every call, so `if counts:` is true for
+        # every document ever ingested and the one signal that redaction did
+        # something would fire with `{}` beside it.
+        logger.info("redacted %s on ingest: %s", jsonld.get("@id"), removals)
     candidate = Material.from_jsonld(jsonld, material_type=material_type)
-    candidate.source_text = source_text
     # from_jsonld already set the source-based birth default; an explicit override
     # wins. Assign it BEFORE full_clean so an invalid policy is REJECTED by the
     # choices check rather than silently persisted (this is the single validation
@@ -110,10 +114,6 @@ def upsert_single_source_material(
         "source": candidate.source,
         "ident": candidate.ident,
         "data": candidate.data,
-        # Written on every upsert like ``data``: a re-ingest whose text no longer
-        # carries an identifier must CLEAR the stored original, or the row keeps
-        # answering with text the document no longer has.
-        "source_text": candidate.source_text,
         "is_deleted": False,
     }
     # An explicit override applies on update too; the implicit birth default must
@@ -124,6 +124,24 @@ def upsert_single_source_material(
         mutable["visibility_policy"] = candidate.visibility_policy
     create_defaults = {**mutable, "visibility_policy": candidate.visibility_policy}
     with transaction.atomic(using="ngm"):
+        # The stored original is decided against what is ALREADY on the row, so
+        # it needs the existing row in hand — a caseworker who reads the
+        # redacted representation and writes it back must not blank the only
+        # copy of the original. See redaction.keep_original.
+        existing = (
+            Material.objects.using("ngm")
+            .filter(pk=candidate.iri)
+            .values("data", "source_text")
+            .first()
+        )
+        candidate.source_text = keep_original(
+            incoming=source_text,
+            stored=(existing or {}).get("source_text") or "",
+            text_changed=(existing or {}).get("data", {}).get(TEXT_KEY)
+            != candidate.data.get(TEXT_KEY),
+        )
+        mutable["source_text"] = candidate.source_text
+        create_defaults["source_text"] = candidate.source_text
         material, _ = Material.objects.using("ngm").update_or_create(
             iri=candidate.iri,
             defaults=mutable,

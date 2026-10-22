@@ -695,9 +695,24 @@ def _patch_material(request, iri: str) -> Response:
                     {"detail": f"Patched material is invalid: {exc}"},
                     status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
+            # Redact here too. This verb writes `data` directly rather than
+            # through the upsert primitive, and `/text` is not a blocked patch
+            # path — so without this a PATCH is a supported way to put a raw
+            # citizenship number into the field the search indexer publishes,
+            # and the stored original would silently go stale beside it.
+            patched, patched_source_text, patch_counts = redaction.redact_jsonld(
+                patched
+            )
+            if patch_counts:
+                logger.info("redacted %s on patch: %s", iri, patch_counts)
             if patched != row.data:
                 row.data = patched
-                updated_fields.append("data")
+                row.source_text = redaction.keep_original(
+                    incoming=patched_source_text,
+                    stored=row.source_text,
+                    text_changed=True,
+                )
+                updated_fields.extend(["data", "source_text"])
                 # This verb writes `data` directly instead of going through
                 # `upsert_single_source_material`, so the model-layer invariant
                 # has to be invoked explicitly or it silently stops applying on
