@@ -32,7 +32,7 @@ repository (the OAG release), which is why ``[REDACTED:PHONE-NO]`` is a
 registered placeholder that nothing in likhit emits. Verified on this pin: a
 sample carrying all three gives back a redacted citizenship number, a redacted
 date of birth, and an untouched mobile number. So calling a document "redacted"
-is a claim about two classes, and :func:`redaction_summary` reports the counts
+is a claim about two classes, and what gets recorded is the count per class
 rather than a boolean.
 
 **Both passes, every surface.** The inline pass handles a label and its value in
