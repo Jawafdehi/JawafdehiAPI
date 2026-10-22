@@ -129,6 +129,24 @@ class Material(models.Model):
     source = models.CharField(max_length=120, db_index=True)
     ident = models.CharField(max_length=300, db_index=True)
     # The full schema.org JSON-LD document.
+    #: The text exactly as it arrived, kept only when redaction changed it.
+    #:
+    #: Deliberately a COLUMN rather than a key inside ``data``: ``data`` is the
+    #: document the detail payload serves and the search indexer reads, so
+    #: anything stored there is published by default and withheld only by
+    #: remembering to. Here the opposite holds — nothing serializes this unless
+    #: a view asks for it, and the only view that asks checks
+    #: ``materials.view_unredacted`` first.
+    #:
+    #: Also deliberately NOT a second file in object storage. Our bucket serves
+    #: any object to anyone holding the URL, so an R2 copy would be a
+    #: publication decision wearing an access control's clothes; a column behind
+    #: a permission check is the gate the artifact rule could only approximate.
+    #:
+    #: Empty when redaction removed nothing — then the redacted text IS the
+    #: original, and a second copy would be bytes with no question to answer.
+    source_text = models.TextField(blank=True, default="")
+
     data = models.JSONField()
     # Soft-delete flag (accountability platform: rows are never hard-deleted).
     # Reads (list/detail) exclude ``is_deleted=True`` rows; DELETE flips it True.

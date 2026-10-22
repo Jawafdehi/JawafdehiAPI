@@ -200,6 +200,47 @@ def test_parse_fully_uploaded_case_is_not_flagged_pending():
     assert result.upload_pending is False
 
 
+
+# A SUPREME result row: 11 cells, with the download link in index 10 and a DATE
+# in index 9. Special rows have 10 cells with the link at index 9. Reading a
+# fixed index therefore silently loses one court or the other.
+_SUPREME_ROW = (
+    "<tr>"
+    + "".join(f"<td>c{i}</td>" for i in range(9))
+    + "<td>२०८१-०१-०२</td>"
+    + '<td align="center"><a class="download_content" href="{href}">हेर्नुहोस</a></td>'
+    + "</tr>"
+)
+SUPREME_DOCS_HTML = (
+    "<html><body><h3>फैसला / आदेश को पुर्ण पाठ</h3>"
+    '<table class="table table-bordered sc-table"><tbody>'
+    + _SUPREME_ROW.format(href="/cp/assets/uploads/supreme_227733.doc")
+    + "</tbody></table></body></html>"
+)
+
+
+def test_parse_supreme_eleven_cell_row_finds_the_link():
+    # Regression: the parser read cells[9], which on a supreme row is a date, so
+    # every supreme case with a published full text was reported as no_record.
+    result = O.parse_order_results(SUPREME_DOCS_HTML)
+    assert result.status == O.DOCS
+    assert result.doc_urls == [
+        "https://supremecourt.gov.np/cp/assets/uploads/supreme_227733.doc"
+    ]
+
+
+def test_parse_supreme_row_still_detects_upload_pending():
+    html = (
+        "<html><body>फैसला / आदेश को पुर्ण पाठ"
+        '<table class="table"><tbody><tr>'
+        + "".join(f"<td>c{i}</td>" for i in range(9))
+        + "<td>२०८१-०१-०२</td>"
+        + '<td align="center"><img src="/images/error.png" title="फैसला अपलोड हुन बाँकी"></td>'
+        + "</tr></tbody></table></body></html>"
+    )
+    assert O.parse_order_results(html).status == O.UPLOAD_PENDING
+
+
 # ── pure: DocumentSource shaping ─────────────────────────────────────────────
 
 
@@ -434,6 +475,34 @@ class OrdersBacklogTests(TestCase):
         )
         # transient failure short of the permanent-fail threshold → re-crawlable
         cls.transient = mk(cls.supreme, "082-WO-0008", orders_transient_retries=2)
+        # How a REAL supreme row looks: case_status is NULL (empty by design on
+        # that court), and the disposition lives in verdict_date_ad instead.
+        # Every supreme row in prod is shaped like this, so gating the backlog on
+        # case_status alone excluded the entire court.
+        cls.supreme_null_status = CourtCase.objects.create(
+            court=cls.supreme,
+            case_number="082-WO-0010",
+            case_status=None,
+            verdict_date_ad=date(2025, 6, 1),
+            registration_date_ad=date(2024, 1, 1),
+        )
+        # A disposition with NO date at all: 3,063 live supreme rows record a
+        # verdict_type while both verdict dates stay NULL, so verdict_date_ad
+        # alone still misses them.
+        CourtCase.objects.create(
+            court=cls.supreme,
+            case_number="082-WO-0012",
+            case_status=None,
+            verdict_type="जारी",
+            registration_date_ad=date(2024, 1, 1),
+        )
+        # Still excluded: no case_status AND no verdict date = not decided.
+        CourtCase.objects.create(
+            court=cls.supreme,
+            case_number="082-WO-0011",
+            case_status=None,
+            registration_date_ad=date(2024, 1, 1),
+        )
 
     def test_backlog_selects_and_prioritises(self):
         rows = list(O.orders_backlog_queryset(today=_TODAY))
@@ -448,6 +517,12 @@ class OrdersBacklogTests(TestCase):
         assert ("kathmandudc", "082-CR-0009") not in keys  # wrong court
         assert ("supreme", "082-WO-0007") not in keys  # recheck window open
         assert ("supreme", "082-WO-0008") in keys  # transient (not yet permanent)
+        # NULL case_status + a verdict date = decided, and must be selectable.
+        assert ("supreme", "082-WO-0010") in keys
+        # A verdict_type with no verdict date is still decided enough to probe.
+        assert ("supreme", "082-WO-0012") in keys
+        # NULL case_status + no verdict date + no verdict type = truly undecided.
+        assert ("supreme", "082-WO-0011") not in keys
         # Special/CR (priority 1) sorts ahead of Supreme/WO (priority 4).
         assert keys.index(("special", "082-CR-0001")) < keys.index(
             ("supreme", "082-WO-0001")

@@ -28,7 +28,9 @@ the queue (``jobs.consumers``); OCR itself is the worker's job.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import re
 from typing import Any
 
 from . import artifacts
@@ -140,10 +142,7 @@ def apply_convert_result(job, result: dict) -> None:
     Best-effort by contract (``jobs.finalize`` swallows hook errors); a failure
     here leaves the job DONE but the text unset — a re-run (re-upload) recovers.
     """
-    from django.core.files.base import ContentFile
     from django.db import transaction
-
-    from jawafdehi_shared.storage import store_file_as_link
 
     iri = (job.payload or {}).get("material_iri")
     text = (result or {}).get("text") or ""
@@ -188,20 +187,24 @@ def apply_convert_result(job, result: dict) -> None:
     # so an unredacted transcript here is an unredacted snippet in public search
     # results. That is the exposure this split closes.
     redacted_text, redaction_counts = _redact(iri, text)
-
-    md_bytes = text.encode("utf-8")
-    md_file = ContentFile(md_bytes, name="material.md")
-    link = store_file_as_link(
-        md_file, role="MARKDOWN", content_hash=hashlib.sha256(md_bytes).hexdigest()
-    )
-    redacted_link = None
-    if redacted_text is not None:
-        redacted_bytes = redacted_text.encode("utf-8")
-        redacted_link = store_file_as_link(
-            ContentFile(redacted_bytes, name="material.redacted.md"),
-            role=artifacts.REDACTED_TRANSCRIPT_ROLE,
-            content_hash=hashlib.sha256(redacted_bytes).hexdigest(),
+    if redacted_text is None:
+        # We could not redact. Storing the conversion anyway would publish the
+        # transcript and the identifiers in it, so nothing is written at all —
+        # and it is logged as an error rather than left to look like a document
+        # that simply has no text. A re-upload re-runs the whole job.
+        logger.error(
+            "material_convert %s: not storing a transcript we could not redact", iri
         )
+        # Scrub FIRST. Returning early here used to leave the full unredacted
+        # transcript in jobs_job.result forever — the one path where it matters
+        # most, because nothing downstream ever stored or gated it.
+        _scrub_job_result(job)
+        return
+
+    link = _store(text, "MARKDOWN", "material.md")
+    redacted_link = _store(
+        redacted_text, artifacts.REDACTED_TRANSCRIPT_ROLE, "material.redacted.md"
+    )
 
     # 2) Read-modify-write the JSONB doc under a row lock so a concurrent write
     # (e.g. a re-upload upserting the same @id) can't clobber our text, or ours
@@ -235,44 +238,44 @@ def apply_convert_result(job, result: dict) -> None:
             for mo in _media_list(data)
             if (mo.get("jawafdehi:linkRole") or "RAW") not in ours
         ]
-        md_mo = jsonld._media_object({"link": link["link"], "role": "MARKDOWN"})
-        if md_mo is not None:
-            # Provenance: this markdown was produced by OCR/likhit conversion from
-            # the source doc (data-plane §3 — provenance rides on the MediaObject).
-            md_mo["encodingFormat"] = "text/markdown"
-            md_mo[provenance.PROVENANCE_KEY] = provenance.build_provenance(
-                sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                fetch_method="ocr",
-                source_url=(result or {}).get("source_url"),
-                content_length=len(text.encode("utf-8")),
-                ocr_engine="likhit",
-            )
-            media.append(md_mo)
-        if redacted_link is not None and redacted_text is not None:
-            redacted_mo = jsonld._media_object(
-                {
-                    "link": redacted_link["link"],
-                    "role": artifacts.REDACTED_TRANSCRIPT_ROLE,
-                }
-            )
-            if redacted_mo is not None:
-                redacted_mo["encodingFormat"] = "text/markdown"
-                redacted_mo[provenance.PROVENANCE_KEY] = provenance.build_provenance(
-                    sha256=hashlib.sha256(redacted_text.encode("utf-8")).hexdigest(),
-                    fetch_method="ocr",
-                    source_url=(result or {}).get("source_url"),
-                    content_length=len(redacted_text.encode("utf-8")),
-                    ocr_engine="likhit",
-                )
-                media.append(redacted_mo)
+        source_url = (result or {}).get("source_url")
+        for mo in (
+            _media(link, "MARKDOWN", text, source_url, derived=False),
+            _media(
+                redacted_link,
+                artifacts.REDACTED_TRANSCRIPT_ROLE,
+                redacted_text,
+                source_url,
+                derived=True,
+            ),
+        ):
+            if mo is not None:
+                media.append(mo)
         data["associatedMedia"] = media
         # The searchable full text (language-mapped, per MATERIAL_CONTEXT) — the
         # REDACTED transcript where we have one. The indexer reads this field, so
         # whatever is here is what a public search snippet can quote.
-        data["text"] = {_TEXT_LANG: redacted_text if redacted_text is not None else text}
+        data["text"] = {_TEXT_LANG: _without_markers(redacted_text)}
+        # The original, kept once and reachable only with view_unredacted. The
+        # expensive half of this job is the transcription, and it is not
+        # reproducible byte-for-byte, so an original we drop costs an OCR run to
+        # recover. Stored here rather than left to the ingest boundary because
+        # this path does not go through it — it writes the row directly.
+        # Only when redaction changed something — the column's contract. On the
+        # rest of the archive the two are identical and a second copy answers no
+        # question; the markers stripped from the indexed text are still in the
+        # MARKDOWN artifact, which is where a reader would look for them.
+        row.source_text = (
+            json.dumps({_TEXT_LANG: text}, ensure_ascii=False)
+            if redacted_text != text
+            else ""
+        )
 
         row.data = data
-        row.save(update_fields=["data", "updated_at"])  # post_save → reindex
+        row.save(  # post_save → reindex
+            update_fields=["data", "source_text", "updated_at"]
+        )
+    _scrub_job_result(job)
     logger.info(
         "material_convert %s: stored %d chars markdown + text (from %s)",
         iri,
@@ -292,13 +295,123 @@ def _redact(iri: str, text: str) -> tuple[str | None, dict]:
     redacted copy) instead of being labelled redacted on the strength of a
     failure.
     """
-    from .redaction import RedactionUnavailable, redact_text
+    from .redaction import redact_text
 
     try:
         redacted, counts = redact_text(text)
-    except RedactionUnavailable as exc:  # pragma: no cover - older likhit pin
-        logger.error("material_convert %s: cannot redact transcript: %s", iri, exc)
+    except Exception as exc:  # noqa: BLE001 - ANY failure means do not publish
+        # Not just RedactionUnavailable. These are regexes over transcripts
+        # averaging ~56,000 characters, so a re.error, a TypeError or a bug in
+        # the redactor raises out of this hook — which jobs.finalize swallows,
+        # leaving the job DONE, nothing stored, and the document permanently
+        # absent from search with no failure to retry. Catching it here turns an
+        # invisible loss into a logged refusal.
+        logger.exception("material_convert %s: redaction failed: %s", iri, exc)
         return None, {}
     if counts:
         logger.info("material_convert %s: redacted %s", iri, dict(counts))
     return redacted, dict(counts)
+
+
+def _store(text: str, role: str, name: str):
+    """Put one transcript in object storage, keyed on its own bytes.
+
+    The key must follow the CONTENT, not the name: the name is a constant, and
+    the backend hashes it, so a per-role constant name once had every material's
+    transcript resolving to a single object that each conversion overwrote —
+    seventeen production materials shared one .md URL (measured 2026-09-30).
+    """
+    from django.core.files.base import ContentFile
+    from jawafdehi_shared.storage import store_file_as_link
+
+    raw = text.encode("utf-8")
+    return store_file_as_link(
+        ContentFile(raw, name=name),
+        role=role,
+        content_hash=hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _media(link, role: str, text: str, source_url, *, derived: bool):
+    """One stored transcript as a roled MediaObject carrying its provenance.
+
+    Both transcripts go through here so they cannot drift — the redacted one was
+    previously assembled by a near-copy of this block, which is how it ended up
+    stripped from associatedMedia unconditionally and re-added only
+    conditionally.
+
+    ``derived`` is the honest half: the redacted copy was not produced by OCR-ing
+    the publisher's file, it was produced by redacting our own transcript.
+    Stamping both ``fetch_method="ocr"`` would describe two artifacts as the same
+    kind of claim about the same source, differing only in a digest.
+    """
+    mo = jsonld._media_object({"link": link["link"], "role": role})
+    if mo is None:
+        return None
+    raw = text.encode("utf-8")
+    mo["encodingFormat"] = "text/markdown"
+    mo[provenance.PROVENANCE_KEY] = provenance.build_provenance(
+        sha256=hashlib.sha256(raw).hexdigest(),
+        fetch_method="redaction" if derived else "ocr",
+        source_url=source_url,
+        content_length=len(raw),
+        ocr_engine="likhit",
+    )
+    return mo
+
+
+def _without_markers(text: str) -> str:
+    """Text with likhit's own in-band markers removed.
+
+    likhit emits ``<!-- likhit:page N -->`` per page and stamps
+    ``<!-- likhit:needs-ocr pages=… -->`` on a document it could not fully read.
+    They are useful provenance in the FILE and noise in the index: this is the
+    field search reads, so a 446-page report would otherwise contribute 446 HTML
+    comments to its body, and a highlight can return one inside a user-facing
+    snippet. likhit exports the stripper for exactly this; nothing called it.
+    """
+    try:
+        from likhit.renderers.markdown import strip_page_anchors
+    except ImportError:  # pragma: no cover - older likhit pin
+        return text
+    return _NEEDS_OCR.sub("", strip_page_anchors(text)).strip()
+
+
+#: likhit's "this document was not fully read" stamp. Kept in the file, dropped
+#: from the indexed text with the page anchors.
+_NEEDS_OCR = re.compile(r"<!--\s*likhit:needs-ocr[^>]*-->")
+
+
+def _scrub_job_result(job) -> None:
+    """Drop the transcript from the job row once it has been stored.
+
+    **The transcript is unredacted and the jobs table is not a gated store.**
+    The DB-free consumer returns the converted markdown as its result, and
+    ``jobs.queue.finalize`` commits that dict into ``jobs_job.result`` BEFORE
+    this hook runs — its own docstring says hooks run after the transaction
+    commits. Nothing prunes that table, so without this every conversion leaves
+    a permanent copy of the document's full text in a place the
+    ``view_unredacted`` permission does not reach and a takedown would not think
+    to look.
+
+    What stays is what the result is actually for: which source URL was read,
+    how long the text was, and its digest — enough to answer "did this run, and
+    on what" from the jobs dashboard without holding the document.
+
+    Best-effort by the same contract as the rest of this hook: a failure here
+    leaves the row as the queue wrote it, which is the status quo rather than a
+    new exposure.
+    """
+    try:
+        from jobs.models import Job
+
+        result = dict(job.result or {})
+        text = result.pop("text", None)
+        if text is None:
+            return
+        result["text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        result["text_chars"] = len(text)
+        result["text_scrubbed"] = True
+        Job.objects.filter(pk=job.pk).update(result=result)
+    except Exception as exc:  # noqa: BLE001 - scrubbing must not fail the apply
+        logger.warning("could not scrub job %s result: %s", getattr(job, "pk", "?"), exc)
