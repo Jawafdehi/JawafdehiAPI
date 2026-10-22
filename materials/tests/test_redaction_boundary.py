@@ -163,3 +163,95 @@ class WhoSeesTheOriginalTests(APITestCase):
         response = self.client.get(URL)
 
         self.assertIn("Authorization", response.get("Vary", ""))
+
+
+class ConvertPathTests(TestCase):
+    """The convert job writes the row directly, so it needs the same guarantees.
+
+    It does NOT go through upsert_single_source_material — it does a locked
+    read-modify-write — so the ingest boundary does not cover it. That is also
+    the path doing the expensive half of the work, which makes it the one place
+    an unkept original costs an OCR run to recover.
+    """
+
+    databases = {"default", "ngm"}
+
+    def _apply(self, text: str):
+        from unittest.mock import patch
+
+        from materials.conversion import apply_convert_result
+
+        upsert_single_source_material(_doc(), material_type="document")
+
+        class _Job:
+            pk = 1
+            payload = {"material_iri": IRI}
+            result = {"text": text}
+
+        links = iter(
+            [
+                {"link": "https://cdn/a.md", "role": "MARKDOWN"},
+                {"link": "https://cdn/a.red.md", "role": "REDACTED_MARKDOWN"},
+            ]
+        )
+        with patch(
+            "jawafdehi_shared.storage.store_file_as_link",
+            side_effect=lambda *a, **k: next(links),
+        ):
+            apply_convert_result(_Job(), {"text": text, "source_url": "https://a/x.pdf"})
+        return Material.objects.get(pk=IRI)
+
+    def test_the_converted_text_is_redacted_and_the_original_kept(self):
+        row = self._apply(BODY)
+
+        self.assertNotIn(IDENTIFIER, row.data["text"]["ne"])
+        self.assertIn(IDENTIFIER, row.source_text)
+
+    def test_likhit_markers_do_not_reach_the_indexed_text(self):
+        row = self._apply(
+            "<!-- likhit:needs-ocr pages=3 reason=x -->\n"
+            "<!-- likhit:page 1 -->\nपहिलो पृष्ठ\n<!-- likhit:page 2 -->\nदोस्रो पृष्ठ"
+        )
+
+        # This is the field search reads: a 446-page report would otherwise
+        # contribute 446 HTML comments to its body, and a highlight can return
+        # one inside a user-facing snippet.
+        body = row.data["text"]["ne"]
+        self.assertNotIn("likhit:page", body)
+        self.assertNotIn("needs-ocr", body)
+        self.assertIn("पहिलो पृष्ठ", body)
+
+    def test_both_transcripts_are_attached_with_honest_provenance(self):
+        row = self._apply(BODY)
+
+        by_role = {
+            m["jawafdehi:linkRole"]: m
+            for m in row.data["associatedMedia"]
+            if isinstance(m, dict)
+        }
+        self.assertIn("MARKDOWN", by_role)
+        self.assertIn("REDACTED_MARKDOWN", by_role)
+        # The redacted copy was produced by redacting our transcript, not by
+        # OCR-ing the publisher's file. Stamping both "ocr" would describe two
+        # artifacts as the same claim about the same source.
+        self.assertEqual(
+            by_role["REDACTED_MARKDOWN"]["jawafdehi:provenance"]["fetch_method"],
+            "redaction",
+        )
+        self.assertEqual(
+            by_role["MARKDOWN"]["jawafdehi:provenance"]["fetch_method"], "ocr"
+        )
+
+    def test_a_redaction_failure_stores_nothing_rather_than_the_transcript(self):
+        from unittest.mock import patch
+
+        with patch(
+            "materials.redaction.redact_text", side_effect=RuntimeError("regex blew up")
+        ):
+            row = self._apply(BODY)
+
+        # Any failure, not just a missing redactor. Storing the conversion
+        # anyway would publish the identifiers; storing half of it would label a
+        # document redacted on the strength of a failure.
+        self.assertNotIn("text", row.data)
+        self.assertEqual(row.source_text, "")

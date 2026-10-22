@@ -71,11 +71,18 @@ def _ext_from_url(url, content_type=""):
     return ".bin"
 
 
-def convert_source(source):
+def convert_source(source, *, cache=True):
     """Return markdown text for a single source dict.
 
     Returns dict: {markdown, status, url, note}
     status in {attached, converted, skipped, error}
+
+    ``cache=False`` skips the on-disk markdown cache. The cache holds UNREDACTED
+    text under SOURCE_MARKDOWN_DIR, which for a material conversion is a copy of
+    the document sitting outside the ``view_unredacted`` gate for the life of the
+    pod — and it buys that path nothing, because a material is converted once.
+    Casework review keeps it: the same source is re-converted across review runs,
+    which is what the cache exists for.
     """
     # 1. If markdown already attached to the source, use it.
     if source.get("markdown"):
@@ -98,7 +105,7 @@ def convert_source(source):
     # 2. Cache by content hash of url.
     cache_key = hashlib.sha256(url.encode()).hexdigest()[:24]
     cache_path = Path(settings.SOURCE_MARKDOWN_DIR) / f"{cache_key}.md"
-    if cache_path.exists():
+    if cache and cache_path.exists():
         return {
             "markdown": cache_path.read_text(encoding="utf-8"),
             "status": "converted",
@@ -117,7 +124,8 @@ def convert_source(source):
             md_text = result.text_content or ""
         finally:
             os.unlink(tmp)
-        cache_path.write_text(md_text, encoding="utf-8")
+        if cache:
+            cache_path.write_text(md_text, encoding="utf-8")
         return {
             "markdown": md_text,
             "status": "converted",

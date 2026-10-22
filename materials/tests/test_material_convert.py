@@ -307,7 +307,7 @@ def test_worker_handler_converts_first_working_source():
 def test_worker_handler_falls_back_to_next_source_when_empty():
     from materials.job_handlers import handle_material_convert
 
-    def _convert(source):
+    def _convert(source, *, cache=True):
         url = source["url"][0]
         if url == "https://a/raw.pdf":
             return {"markdown": "", "status": "error", "url": url, "note": "boom"}
@@ -340,7 +340,7 @@ def test_worker_handler_falls_back_when_convert_source_raises():
     degrades to an error result so the loop tries the next alternate URL."""
     from materials.job_handlers import handle_material_convert
 
-    def _convert(source):
+    def _convert(source, *, cache=True):
         if source["url"][0] == "https://a/raw.pdf":
             raise RuntimeError("library crash")
         return {"markdown": "ok", "status": "converted",
@@ -363,7 +363,7 @@ def test_worker_handler_times_out_a_stalled_conversion(settings):
 
     settings.CONVERT_SOURCE_TIMEOUT = 1  # keep the test fast
 
-    def _hang(_source):
+    def _hang(_source, *, cache=True):
         time.sleep(30)  # far longer than the timeout
         return {"markdown": "never", "status": "converted", "url": "x", "note": ""}
 
