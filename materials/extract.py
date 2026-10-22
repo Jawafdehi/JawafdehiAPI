@@ -37,6 +37,7 @@ from typing import Any
 from django.conf import settings
 
 from . import conversion
+from . import provenance
 
 logger = logging.getLogger("materials.extract")
 
@@ -73,6 +74,16 @@ FETCH_TIMEOUT = getattr(settings, "DOCUMENT_EXTRACT_FETCH_TIMEOUT", 120)
 #: caller's loop over the archive. A batch run bypasses this deliberately: it is
 #: an operator who meant it, running with a ``--limit`` they chose.
 MAX_QUEUED_ON_DEMAND = getattr(settings, "DOCUMENT_EXTRACT_MAX_QUEUED", 500)
+
+
+#: Priority for a document somebody just wrote, ahead of the sweep's backfill
+#: (lower sorts first). Somebody writing a document is the best available signal
+#: that somebody is about to read it.
+PRIORITY_ON_WRITE = 50
+
+#: Priority for the reconciliation sweep's backfill — behind on-write and behind
+#: a reader asking for one document by name.
+PRIORITY_BACKFILL = 200
 
 
 class DocumentFetchError(RuntimeError):
@@ -121,6 +132,82 @@ def is_extractable(data: dict[str, Any]) -> bool:
     return bool(document_urls(data))
 
 
+def document_sha256(data: dict[str, Any]) -> str:
+    """The SHA-256 the best source link records for its own bytes, or "".
+
+    Written by the upload path (and by any ingest that records provenance), so
+    for a document we host this is an exact statement about the file WITHOUT
+    fetching it. Scraped links frequently carry no provenance at all, and the
+    answer there is "" — not a guess, and callers must read it as "unknown"
+    rather than as "unchanged".
+    """
+    urls = set(document_urls(data))
+    for media in conversion._media_list(data):
+        if media.get("contentUrl") in urls:
+            digest = (media.get(provenance.PROVENANCE_KEY) or {}).get("sha256")
+            if isinstance(digest, str) and digest.strip():
+                return digest.strip()
+    return ""
+
+
+def failed_for_these_bytes(iri: str, data: dict[str, Any]) -> bool:
+    """Whether we already tried this exact file and gave up on it.
+
+    A document with a PDF, no content and a dead job is indistinguishable from
+    one nothing has reached yet — so without this, both the on-write receiver
+    and the weekly sweep re-queue it forever: the same encrypted PDF, the same
+    mis-linked HTML, the same 400 MB scan, fetched and failed every week until
+    somebody reads the job table.
+
+    Keyed on the FILE, not on the material: a replaced file deserves a fresh
+    attempt, and that is the whole point of recording the digest on the job. An
+    unknown digest ("" on either side) is treated as a match, because a scraped
+    link with no provenance is exactly the case where re-trying forever is most
+    expensive and least likely to work.
+    """
+    from jobs.models import Job
+
+    digest = document_sha256(data)
+    terminal = Job.objects.filter(
+        kind=EXTRACT_KIND, status__in=(Job.FAILED, Job.DEAD)
+    ).filter(payload__material_iri=iri)
+    for job in terminal.only("payload"):
+        if (job.payload or {}).get("sha256", "") == digest:
+            return True
+    return False
+
+
+def content_is_stale(iri: str, data: dict[str, Any]) -> bool:
+    """Whether this material's stored content needs (re)making.
+
+    True when there is no content at all, and true when the file's recorded
+    digest does not match the one the extraction was read from — a re-upload, a
+    corrected scan, a publisher reissuing a report. That second case is the one
+    worth having: without it a document silently keeps content describing bytes
+    that no longer exist, and a page citation points into a file nobody can get.
+
+    **An unknown digest is not a stale one.** A link with no recorded provenance
+    gives "" on both sides and would re-extract on every single save, which for
+    a scraped corpus means re-reading the whole archive weekly. When we cannot
+    tell, we leave it alone — the sweep reports how many of those there are, so
+    the gap is visible rather than paid for.
+    """
+    from .models import DocumentContent
+
+    stored = (
+        DocumentContent.objects.using("ngm")
+        .filter(pk=iri)
+        .values_list("dataset_revision", flat=True)
+        .first()
+    )
+    if stored is None:
+        return True
+    digest = document_sha256(data)
+    if not digest:
+        return False
+    return stored != f"sha256:{digest}"
+
+
 def queued_count() -> int:
     """Extractions queued or running right now."""
     from jobs.models import Job
@@ -130,7 +217,13 @@ def queued_count() -> int:
     ).count()
 
 
-def enqueue_material_extract(material_iri: str, *, priority: int = 100, force: bool = False):
+def enqueue_material_extract(
+    material_iri: str,
+    *,
+    priority: int = 100,
+    force: bool = False,
+    sha256: str = "",
+):
     """Queue an extraction for ``material_iri``; returns the ``Job``.
 
     Deduped on the IRI, so a reader asking while a batch run already queued the
@@ -144,13 +237,45 @@ def enqueue_material_extract(material_iri: str, *, priority: int = 100, force: b
     forced re-run of an unchanged document is a no-op with a new timestamp.
     """
     from jobs import queue as jobs_queue
+    from jobs.models import Job
 
-    return jobs_queue.enqueue(
+    job = jobs_queue.enqueue(
         EXTRACT_KIND,
-        payload={"material_iri": material_iri, "force": bool(force)},
+        payload={
+            "material_iri": material_iri,
+            "force": bool(force),
+            # The bytes this attempt is for. What makes a terminal failure
+            # specific to a file rather than to the material, so replacing the
+            # file earns a fresh attempt. "" when the link records no
+            # provenance — see failed_for_these_bytes.
+            "sha256": sha256 or "",
+        },
         dedup_key=f"{EXTRACT_KIND}:{material_iri}",
         priority=priority,
     )
+    if (
+        force
+        and job is not None
+        and job.status == Job.QUEUED
+        and not (job.payload or {}).get("force")
+    ):  # noqa: SIM102 - the conditional UPDATE below is what makes this safe
+        # Dedup handed back a job somebody queued WITHOUT force — a batch tick,
+        # usually — and that job will skip the document if content already
+        # exists. An operator asking for a re-extract would then get a silent
+        # no-op from a job that reports DONE. Upgrade the waiting job instead of
+        # queueing a second one: two jobs for one document would each replace
+        # the other's rows.
+        #
+        # QUEUED only, and as a CONDITIONAL update rather than a save: a worker
+        # can claim the job between the read above and the write, and a plain
+        # save would then rewrite the payload of a RUNNING job — changing
+        # nothing (it has already been read) while clobbering whatever claim
+        # recorded there. Filtering on the status makes the write a no-op in
+        # exactly that race.
+        payload = {**(job.payload or {}), "force": True}
+        Job.objects.filter(pk=job.pk, status=Job.QUEUED).update(payload=payload)
+        job.refresh_from_db()
+    return job
 
 
 def build_extract_payload(job) -> dict:
@@ -331,13 +456,35 @@ def handle_material_extract(payload: dict, *, on_stage=None) -> dict:
             .values_list("dataset_revision", flat=True)
             .first()
         )
-        if existing is not None:
+        # **Not just "do we have content" — do we have content for THESE bytes.**
+        # The earlier version skipped on existence alone, which quietly defeated
+        # the whole staleness path: a replaced file is queued by the on-write
+        # receiver WITHOUT force (the file changed, the operator did not ask for
+        # anything), so the worker saw content, skipped, and the document kept
+        # describing bytes nobody can fetch. The digest the job carries is what
+        # distinguishes "somebody saved this material again" from "the file
+        # under it changed".
+        digest = (payload or {}).get("sha256") or ""
+        stored_matches = existing is not None and (
+            # No digest recorded on either side is the scraped-link case: we
+            # cannot tell, so we leave stored content alone rather than
+            # re-reading the archive on every save.
+            not digest
+            or existing == f"sha256:{digest}"
+        )
+        if stored_matches:
             logger.info("material_extract %s: content already stored, skipping", iri)
             return {
                 "material_iri": iri,
                 "skipped": "already extracted",
                 "dataset_revision": existing,
             }
+        if existing is not None:
+            logger.info(
+                "material_extract %s: stored content is for other bytes (%s), re-reading",
+                iri,
+                existing,
+            )
 
     return extract_and_store(iri, urls=urls, on_stage=on_stage)
 
