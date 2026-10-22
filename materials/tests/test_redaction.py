@@ -6,7 +6,7 @@ reporting of how narrow the removal actually is, and the one interaction that
 would otherwise go unnoticed — a removal being reported as a failed decode.
 
     DATABASE_URL=sqlite:// NES_DB_URL=sqlite:// NGM_DATABASE_URL=sqlite:// \
-        uv run pytest materials/tests/test_extraction_redact.py
+        uv run pytest materials/tests/test_redaction.py
 """
 
 from __future__ import annotations
