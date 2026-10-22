@@ -121,7 +121,7 @@ bigo-enrichment = [
 
 [tool.uv.sources]
 # Shared by material enrichment and the embedded MCP document converter.
-likhit = { git = "https://github.com/Jawafdehi/likhit.git", rev = "d19c0aa840d3c9303339e9464b548f4392a73f8f" }
+likhit = { git = "https://github.com/Jawafdehi/likhit.git", rev = "7f3f05359503e845e5f97f835fd91291a384b517" }
 
 [build-system]
 requires = ["hatchling"]
