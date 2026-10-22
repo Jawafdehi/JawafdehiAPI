@@ -162,9 +162,14 @@ def test_apply_result_is_idempotent_on_rerun():
 
     with patch(
         "jawafdehi_shared.storage.store_file_as_link",
+        # TWO stores per conversion now — the transcript as converted, and the
+        # redacted rendering of it. See materials.artifacts for which is
+        # published.
         side_effect=[
             {"link": "https://cdn/v1.md", "role": "MARKDOWN"},
+            {"link": "https://cdn/v1.redacted.md", "role": "REDACTED_MARKDOWN"},
             {"link": "https://cdn/v2.md", "role": "MARKDOWN"},
+            {"link": "https://cdn/v2.redacted.md", "role": "REDACTED_MARKDOWN"},
         ],
     ):
         apply_convert_result(job, {"text": "v1", "source_url": "https://a/raw.pdf"})
@@ -178,6 +183,14 @@ def test_apply_result_is_idempotent_on_rerun():
     ]
     assert len(md) == 1 and md[0]["contentUrl"] == "https://cdn/v2.md"
     assert row.data["text"] == {"ne": "v2"}
+    # Both of ours are replaced on a re-run, not accumulated.
+    redacted = [
+        m
+        for m in row.data["associatedMedia"]
+        if m.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
+    ]
+    assert len(redacted) == 1
+    assert redacted[0]["contentUrl"] == "https://cdn/v2.redacted.md"
 
 
 @pytest.mark.django_db
@@ -200,7 +213,10 @@ def test_each_transcript_gets_its_own_object_key():
     seen = []
 
     def _capture(md_file, role=None, content_hash=None):
-        seen.append(content_hash)
+        # Only the original: each conversion also stores a redacted rendering,
+        # and keying THAT is a separate property (it follows the redacted bytes).
+        if role == "MARKDOWN":
+            seen.append(content_hash)
         return {"link": f"https://cdn/{content_hash}.md", "role": role}
 
     for ident, text in (("report-6", "पहिलो पाठ"), ("report-7", "दोस्रो पाठ")):
@@ -223,7 +239,8 @@ def test_identical_transcripts_share_one_object_key():
     seen = []
 
     def _capture(md_file, role=None, content_hash=None):
-        seen.append(content_hash)
+        if role == "MARKDOWN":
+            seen.append(content_hash)
         return {"link": f"https://cdn/{content_hash}.md", "role": role}
 
     for ident in ("report-8", "report-9"):
@@ -290,7 +307,7 @@ def test_worker_handler_converts_first_working_source():
 def test_worker_handler_falls_back_to_next_source_when_empty():
     from materials.job_handlers import handle_material_convert
 
-    def _convert(source):
+    def _convert(source, *, cache=True):
         url = source["url"][0]
         if url == "https://a/raw.pdf":
             return {"markdown": "", "status": "error", "url": url, "note": "boom"}
@@ -323,7 +340,7 @@ def test_worker_handler_falls_back_when_convert_source_raises():
     degrades to an error result so the loop tries the next alternate URL."""
     from materials.job_handlers import handle_material_convert
 
-    def _convert(source):
+    def _convert(source, *, cache=True):
         if source["url"][0] == "https://a/raw.pdf":
             raise RuntimeError("library crash")
         return {"markdown": "ok", "status": "converted",
@@ -346,7 +363,7 @@ def test_worker_handler_times_out_a_stalled_conversion(settings):
 
     settings.CONVERT_SOURCE_TIMEOUT = 1  # keep the test fast
 
-    def _hang(_source):
+    def _hang(_source, *, cache=True):
         time.sleep(30)  # far longer than the timeout
         return {"markdown": "never", "status": "converted", "url": "x", "note": ""}
 
@@ -366,3 +383,41 @@ class _FakeJob:
     def __init__(self, payload):
         self.payload = payload
         self.pk = 1
+
+
+@pytest.mark.django_db
+def test_the_transcript_does_not_stay_in_the_jobs_table():
+    """jobs_job.result is not a gated store, and nothing prunes it.
+
+    The DB-free consumer returns the converted markdown as its result and
+    jobs.queue.finalize commits that dict BEFORE this hook runs, so without
+    scrubbing every conversion leaves a permanent unredacted copy of the
+    document somewhere the view_unredacted permission does not reach.
+    """
+    from jobs.models import Job
+
+    iri = build_material_iri("ciaa", "report-scrub")
+    _store(iri, [_mo("https://a/raw.pdf", "RAW")])
+    job = Job.objects.create(
+        kind="material_convert",
+        status=Job.DONE,
+        payload={"material_iri": iri},
+        result={"text": "नागरिकता नं. १२-०१-७५-०४५६७", "source_url": "https://a/raw.pdf"},
+    )
+
+    with patch(
+        "jawafdehi_shared.storage.store_file_as_link",
+        side_effect=[
+            {"link": "https://cdn/a.md", "role": "MARKDOWN"},
+            {"link": "https://cdn/a.redacted.md", "role": "REDACTED_MARKDOWN"},
+        ],
+    ):
+        apply_convert_result(job, dict(job.result))
+
+    stored = Job.objects.get(pk=job.pk).result
+    assert "text" not in stored
+    assert stored["text_scrubbed"] is True
+    # What the result is actually for survives: did this run, and on what.
+    assert stored["source_url"] == "https://a/raw.pdf"
+    assert len(stored["text_sha256"]) == 64
+    assert stored["text_chars"] == len("नागरिकता नं. १२-०१-७५-०४५६७")

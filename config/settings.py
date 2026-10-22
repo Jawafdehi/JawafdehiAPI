@@ -1212,6 +1212,25 @@ MATERIALS_WITHHOLD_UNREDACTED_ALWAYS = env_flag(
     "MATERIALS_WITHHOLD_UNREDACTED_ALWAYS", default=False
 )
 
+# Which likhit tier the PUBLIC copy of a document's text is redacted to
+# (materials.redaction). One of likhit's RedactionMode values.
+#
+# `strict` removes citizenship number, date of birth, mobile, landline, email,
+# bank account, age and passport. It does NOT remove a PAN (a business
+# registration number, public by design, and often the only handle tying a
+# procurement finding to a registered contractor) and it does not remove names,
+# which for this corpus is the product rather than a gap.
+#
+# The narrower `identifiers` tier is the scope that was formally adjudicated, and
+# it is not the default, because on the corpus that actually carries personal
+# data it is close to a no-op: on a real charge sheet it removes 3 values and
+# leaves 5 mobile numbers in the text the search indexer publishes, against 11
+# for `strict`. Narrow it only with a measurement in hand.
+#
+# An unrecognised value, or `none`, REFUSES rather than falling back — see
+# materials.redaction._redactor.
+MATERIALS_REDACTION_MODE = os.getenv("MATERIALS_REDACTION_MODE", "strict")
+
 REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
 
 CASEWORK_API_BASE = os.getenv("CASEWORK_API_BASE", "http://127.0.0.1:40173/api/casework")
