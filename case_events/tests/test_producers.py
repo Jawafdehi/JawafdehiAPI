@@ -233,6 +233,122 @@ class TestBackfilledHearingsAreNotDiscoveries:
         assert dockets.backfilled_in_window(window_hours=1) == 0
 
 
+#: Real values, copied from the hearing rows behind the 24 proposals this filter
+#: is meant to stop. Typing plausible ones instead would test the regex against
+#: itself — the whole difficulty here is that the corpus spells things in ways
+#: nobody would think to type, which is why ``मिसिल साथै राख्‍ने`` is written with
+#: its zero-width joiner escaped and visible.
+NOT_NEWSWORTHY_VALUES = [
+    ("decision_type", "हेर्दा हेर्दै"),
+    ("case_status", "हेर्दाहेर्दै"),  # same outcome, no space
+    ("decision_type", "हेर्दा हेर्दै भोलीलाई"),
+    ("case_status", "स्थगित"),
+    ("case_status", "स्थगीत"),  # same outcome, different vowel sign
+    ("case_status", "स्थगित (लगाउको कारणवाट)"),
+    ("case_status", "हेर्न नमिल्ने"),
+    ("case_status", "हेर्न नभ्याइने"),
+    ("case_status", "नभ्याउने"),
+    ("case_status", "बेन्च नबसेको"),
+    ("case_status", "बेन्च बस्न नभ्याएको"),
+    ("decision_type", "अन्य आदेश"),  # Special Court: flat leaf
+    ("decision_type", "आदेश >> अन्य"),  # district: two levels
+    ("decision_type", "आदेश >> अन्य फाइल हेर्नुहोस्"),
+    ("decision_type", "मिसिल साथै राख्‍ने"),
+    ("decision_type", "लगाउ राख्ने"),
+]
+
+#: Real values from the same 41 rows that must survive. The last is the one that
+#: makes the anchoring necessary rather than tidy: unanchored, ``लगाउ`` swallows
+#: it, and an order in a related case is a real order.
+NEWSWORTHY_VALUES = [
+    ("case_status", "फैसला"),
+    ("decision_type", "आंशिक सफाई"),
+    ("decision_type", "बुझ्ने आदेश"),
+    ("decision_type", "प्रमाण बुझ्ने"),
+    ("decision_type", "पून साक्षी बुझ्ने"),
+    ("decision_type", "जवाफ माग्ने"),
+    ("decision_type", "म्याद जारी गर्ने"),
+    ("decision_type", "आदेश >> धरौटी माग गर्ने"),
+    ("decision_type", "आदेश >> लगाउको मुद्दामा आदेश भएको"),
+]
+
+
+class TestNonNewsworthyHearingsAreNotEmitted:
+    """A sitting that recorded nothing should not cost a model call.
+
+    These assert on ``hearing_signals`` rather than on the regex directly. The
+    filter is a queryset exclusion, so the interesting failure is not "does the
+    pattern match" but "does the database agree" — and the suite runs on sqlite
+    while production is Postgres, two regex engines that have to behave the same
+    on these patterns for the filter to be worth anything.
+    """
+
+    @pytest.mark.parametrize("field,value", NOT_NEWSWORTHY_VALUES)
+    def test_a_recorded_non_event_is_not_emitted(self, field, value):
+        court = make_court()
+        make_hearing(court, **{field: value})
+
+        assert list(dockets.hearing_signals(timezone.now() - timedelta(hours=1))) == []
+
+    @pytest.mark.parametrize("field,value", NEWSWORTHY_VALUES)
+    def test_a_real_outcome_is_still_emitted(self, field, value):
+        court = make_court()
+        make_hearing(court, **{field: value})
+
+        assert len(list(dockets.hearing_signals(timezone.now() - timedelta(hours=1)))) == 1
+
+    def test_a_district_hearing_with_no_case_status_survives(self):
+        """Pins the NULL behaviour the exclusion is allowed to rely on.
+
+        District rows hold a NULL ``case_status`` and carry their outcome in
+        ``decision_type`` alone. Django compiles the negation with an ``IS NOT
+        NULL`` guard per branch, so the null one is FALSE rather than NULL and
+        the row survives — unlike the missing-JSON-key case a few lines up in the
+        producer, which has no such guard. If that ever changes, a whole court
+        drops out of the pipeline while the Special Court keeps working, and this
+        is the test that says so.
+        """
+        court = make_court(identifier="kaskidc")
+        make_hearing(
+            court,
+            case_number="081-C1-0435",
+            case_status=None,
+            decision_type="आदेश >> धरौटी माग गर्ने",
+        )
+
+        assert len(list(dockets.hearing_signals(timezone.now() - timedelta(hours=1)))) == 1
+
+    def test_a_row_with_neither_column_populated_survives(self):
+        """Nothing recorded is not the same as "nothing happened" recorded.
+
+        An unpopulated row is a data-quality gap, and the filter has no business
+        deciding it on no evidence — the model at least sees the surrounding
+        fields.
+        """
+        court = make_court()
+        make_hearing(court, case_status=None, decision_type=None)
+
+        assert len(list(dockets.hearing_signals(timezone.now() - timedelta(hours=1)))) == 1
+
+    def test_the_saturation_count_matches_what_is_emitted(self):
+        """``window_totals`` and the scan must not drift apart.
+
+        They share ``_hearings_in_window`` precisely so that "emitted N of M"
+        stays true; a filter applied to only one of them would make the
+        non-zero exit on saturation fire against rows nothing intends to emit.
+        """
+        court = make_court()
+        make_hearing(court, case_number="081-CR-0001", case_status="फैसला")
+        make_hearing(court, case_number="081-CR-0002", decision_type="हेर्दा हेर्दै")
+        make_hearing(court, case_number="081-CR-0003", case_status="स्थगित")
+
+        emitted = len(list(dockets.hearing_signals(timezone.now() - timedelta(hours=1))))
+        totals = dockets.window_totals(window_hours=1)
+
+        assert emitted == 1
+        assert totals[subjects.SIGNAL_DOCKET_HEARING_ADDED] == 1
+
+
 class TestVerdictSignals:
     def test_a_decided_case_becomes_a_verdict_signal(self):
         court = make_court()

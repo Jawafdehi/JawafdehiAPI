@@ -62,6 +62,48 @@ DEFAULT_WINDOW_HOURS = 48
 #: :func:`window_totals`, and the non-zero exit in ``emit_docket_signals``.
 DEFAULT_LIMIT = 5000
 
+#: Docket outcomes that record a sitting without recording anything to publish.
+#:
+#: A hearing row says what happened in two free-text columns, and a large
+#: minority of them say, in various words, that nothing did. Measured against the
+#: 41 hearing-derived proposals that reached the review queue before this existed,
+#: 24 were of this kind: six carried over to the next sitting, five adjourned at a
+#: party's request, five never reached the bench, and eight recorded that *an*
+#: order was made without recording what it was. Each one cost a model call and a
+#: row a human has to clear, to publish a timeline entry saying a court met and
+#: deferred.
+#:
+#: **Patterns, not equality, and each stops before the first character the corpus
+#: disagrees with itself about.** The same outcome is spelled several ways and the
+#: difference is invisible on screen: ``हेर्दाहेर्दै`` and ``हेर्दा हेर्दै`` differ
+#: by a space, ``स्थगित`` and ``स्थगीत`` by a vowel sign (613,624 and 126,936 rows
+#: respectively, so neither is a typo to ignore), and ``मिसिल साथै राख्‍ने`` carries
+#: a zero-width joiner that no typed literal will ever match. Matching a prefix
+#: that ends before those positions is what makes this robust; matching the whole
+#: value would quietly filter one spelling and keep the other.
+#:
+#: **Anchored to the start OR to just after ``>>``**, because the same taxonomy is
+#: encoded two ways. District rows carry two levels (``आदेश >> अन्य``) and Special
+#: Court rows carry the bare leaf (``अन्य आदेश``). Anchoring only at the start
+#: would filter one court and miss the other. Anchoring at all is the point —
+#: unanchored, ``लगाउ`` would also swallow ``लगाउको मुद्दामा आदेश भएको``, which is
+#: a real order in a related case.
+_NOT_NEWSWORTHY_PATTERNS = (
+    r"हेर्दा\s*हेर्दै",  # carried over to the next sitting
+    r"स्थग[िी]त",  # adjourned, however spelled
+    r"हेर्न\s*न(मिल्ने|भ्याइने)",  # could not be taken up
+    r"नभ्याउने",  # never reached the bench
+    r"बेन्च\s*(नबसेको|बस्न)",  # the bench did not sit
+    r"अन्य",  # "other" — an order whose content went unrecorded
+    r"मिसिल\s*साथै\s*राख",  # kept on the file
+    r"लगाउ\s*राख",  # held with the related case
+)
+
+#: The two bench-did-not-sit patterns are extrapolated from the corpus (14,070 and
+#: 12,125 rows) rather than observed among the 41 — same class of non-event, no
+#: case in the queue happened to hit one yet.
+NOT_NEWSWORTHY_RE = r"(^|>>\s*)(" + "|".join(_NOT_NEWSWORTHY_PATTERNS) + ")"
+
 
 def _courtcase_iri(court_id: str, case_number: str) -> str | None:
     """The canonical court-case ``@id``, or None if this row cannot have one.
@@ -119,12 +161,39 @@ def _hearings_in_window(since):
     missing *key*. Every hearing carrying any other annotation would vanish from
     the producer silently — a quiet window and a healthy exit code, with the
     facts gone once it slid. The explicit ``isnull`` branch restores them.
+
+    **Also excludes rows whose recorded outcome is not news** — see
+    :data:`NOT_NEWSWORTHY_RE`. Filtering at this point rather than in the consumer
+    or the model prompt is deliberate: a row dropped here costs no bus message, no
+    match and no model call. And because ``limit`` is applied to this queryset,
+    rows removed here no longer consume the budget that genuine hearings are
+    dropped for exceeding — so this narrows the saturation hazard above rather
+    than merely quietening the output.
+
+    **The outcome exclusion is a plain ``exclude`` and does not need the
+    treatment the paragraph above describes**, which is worth saying because the
+    two look like the same hazard and are not. Both outcome columns are nullable
+    and district rows reliably hold a NULL ``case_status``, so the fear is that
+    they would vanish the way a missing JSON key does. They do not: for a real
+    column Django compiles the negation as ``NOT ((col REGEXP … AND col IS NOT
+    NULL) OR …)``, and that ``IS NOT NULL`` guard makes a null branch FALSE rather
+    than NULL. The special-casing Django withholds from a missing JSON *key* it
+    does apply to a null *column*. Verified against the generated SQL, and pinned
+    by two tests — adding a ``Coalesce`` here would be cargo-culting the trap
+    above onto a case that does not have it.
     """
     from courts.models import HEARING_SOURCE_BACKFILL, CourtCaseHearing
 
-    return CourtCaseHearing.objects.filter(created_at__gte=since).filter(
-        Q(extra_data__source__isnull=True)
-        | ~Q(extra_data__source=HEARING_SOURCE_BACKFILL)
+    return (
+        CourtCaseHearing.objects.filter(created_at__gte=since)
+        .filter(
+            Q(extra_data__source__isnull=True)
+            | ~Q(extra_data__source=HEARING_SOURCE_BACKFILL)
+        )
+        .exclude(
+            Q(case_status__regex=NOT_NEWSWORTHY_RE)
+            | Q(decision_type__regex=NOT_NEWSWORTHY_RE)
+        )
     )
 
 
