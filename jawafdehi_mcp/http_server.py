@@ -62,17 +62,41 @@ def _bearer_from_headers(headers: dict[bytes, bytes]) -> str | None:
 def _authorization_offered(headers: dict[bytes, bytes]) -> bool:
     """Whether the caller sent an ``Authorization`` header of any shape.
 
-    Distinguishes "anonymous" from "tried to authenticate and got it wrong".
-    ``_bearer_from_headers`` returns ``None`` for both, and with a single door
-    those two must not be treated alike: an anonymous caller is served, while a
-    malformed credential has to be told so.
+    Distinguishes "sent nothing" from "tried to authenticate and got it wrong".
+    ``_bearer_from_headers`` returns ``None`` for both, and the two earn
+    different RFC 6750 answers: a missing credential is challenged without an
+    error code, a malformed one is told what was wrong with it.
     """
     return bool(headers.get(b"authorization", b"").strip())
 
 
-def _bearer_challenge(error: str) -> str:
-    """Build a ``WWW-Authenticate`` value, pointing at RFC 9728 metadata."""
-    challenge = f'Bearer error="{error}"'
+def _anonymous_access_enabled() -> bool:
+    """Whether to serve unauthenticated callers the read-only catalog.
+
+    Off by default: every tool requires a verified bearer. The switch exists so
+    the anonymous catalog can be restored by setting an environment variable and
+    restarting, without a code change — this flipped a plane that had been open
+    since the server shipped, and the rollback wants to be a config edit.
+    Delete it (and ``identity.ANONYMOUS_TOOL_NAMES`` with it) once the
+    mandatory-login behaviour has held in production long enough to be dull.
+    """
+    return os.getenv("MCP_ALLOW_ANONYMOUS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _bearer_challenge(error: str | None = None) -> str:
+    """Build a ``WWW-Authenticate`` value, pointing at RFC 9728 metadata.
+
+    ``error`` is omitted for a request that carried no credential at all:
+    RFC 6750 §3.1 reserves the error codes for a credential that was supplied
+    and failed, and MCP clients key their OAuth flow off ``resource_metadata``
+    rather than off an error code.
+    """
+    challenge = 'Bearer realm="OAuth"' if error is None else f'Bearer error="{error}"'
     rm_url = _resource_metadata_url(_canonical_base_url())
     if rm_url:
         challenge += f', resource_metadata="{rm_url}"'
@@ -311,19 +335,25 @@ class JawafdehiMCPServer:
     ) -> None:
         """Authenticate the request's bearer token, then delegate to MCP.
 
-        One door, one rule. A verified bearer resolves an identity and receives
-        the full catalog; an anonymous request proceeds with the read-only
-        anonymous catalog (see ``identity.ANONYMOUS_TOOL_NAMES``) rather than a
-        401, because every tool in that set wraps an ``AllowAny`` REST route that
-        ``/api/`` already serves anonymously. A bearer that is *present but
-        invalid* is still rejected with a challenge — that is a broken caller,
-        not an anonymous one.
+        One door, one rule: every tool needs a verified bearer. A request
+        without one is answered with ``401`` and a ``WWW-Authenticate``
+        challenge naming the RFC 9728 metadata document, which is what makes an
+        MCP client start its OAuth flow — clients begin one *only* on a 401, so
+        while this server answered anonymous callers with a catalog it was
+        impossible for one to know it should log in. Being anonymous is now a
+        thing you are told, not a thing you have to think to check.
 
-        Consequence worth knowing: MCP clients begin an OAuth flow only on a
-        401, so an anonymous client is never prompted to log in. It gets the
-        read-only catalog, and ``get_current_user`` is how it can tell. The
-        protected-resource metadata below is what makes authenticating
-        discoverable.
+        A credential that is present but malformed or invalid is rejected the
+        same way it always was, with an error code distinguishing it from a
+        caller who simply has not logged in yet.
+
+        ``/health`` and the metadata document stay open, above: the first is a
+        kubelet probe, the second is how a challenged client learns where to
+        authenticate.
+
+        Setting ``MCP_ALLOW_ANONYMOUS`` restores the previous behaviour — the
+        read-only ``identity.ANONYMOUS_TOOL_NAMES`` catalog, served without a
+        challenge. See ``_anonymous_access_enabled``.
         """
         path = scope.get("path", "")
         method = scope.get("method", "GET").upper()
@@ -350,10 +380,12 @@ class JawafdehiMCPServer:
                 )
                 return
             # Lifespan readiness only. A missing OIDC_RESOURCE is NOT unready:
-            # the anonymous read catalog serves correctly without it, and failing
-            # the probe would take down a pod that is doing its job. The
-            # misconfiguration surfaces on the metadata endpoint, which 503s, and
-            # on every authenticated call.
+            # token verification does not depend on it, so a pod that has it
+            # unset still serves every authenticated call, and failing the probe
+            # would take the pod down for a fault that costs discovery rather
+            # than service. The misconfiguration surfaces where it bites — the
+            # metadata endpoint 503s, and the 401 challenge loses the
+            # ``resource_metadata`` hint that points a client at it.
             ready = self._ready
             await self._send_response(
                 send,
@@ -397,8 +429,9 @@ class JawafdehiMCPServer:
             )
             return
         if path == WELL_KNOWN_PROTECTED_RESOURCE:
-            # Always advertised. This is now the only way a client discovers how
-            # to authenticate, since an anonymous request is not challenged.
+            # Unauthenticated by necessity: this is the document a challenged
+            # client fetches to find out WHERE to authenticate, so gating it
+            # behind authentication would close the only way in.
             base = _canonical_base_url()
             if not base:
                 await self._send_json(
@@ -415,11 +448,12 @@ class JawafdehiMCPServer:
 
         token = _bearer_from_headers(headers)
 
-        # A credential we cannot parse is a malformed request, not an anonymous
-        # one (RFC 6750 §3.1 `invalid_request`). Without this branch a wrong
-        # scheme or an empty `Bearer` would fall through to the anonymous catalog
-        # with a 200, and the caller would never learn its header was wrong —
-        # exactly the silent degradation this door already risks.
+        # A credential we cannot parse is a malformed request, not a missing one
+        # (RFC 6750 §3.1 `invalid_request`). Both now end in 401, but they are
+        # kept apart deliberately: `invalid_request` tells a caller its header is
+        # wrong, where the bare challenge below tells one that never sent a
+        # header to go and log in. Collapsing them would send a client with a
+        # typo'd scheme around the OAuth flow it has already completed.
         if token is None and _authorization_offered(headers):
             await self._send_json(
                 send,
@@ -431,6 +465,24 @@ class JawafdehiMCPServer:
                 extra_headers=[
                     ("www-authenticate", _bearer_challenge("invalid_request"))
                 ],
+            )
+            return
+
+        # No credential at all. This is the branch an MCP client is waiting for:
+        # the 401 is what tells it to go and authenticate, and the challenge
+        # carries the address of the metadata that says where.
+        if token is None and not _anonymous_access_enabled():
+            await self._send_json(
+                send,
+                401,
+                {
+                    "error": "unauthorized",
+                    "detail": (
+                        "Authentication is required. Supply an OIDC bearer "
+                        "token; see the linked protected-resource metadata."
+                    ),
+                },
+                extra_headers=[("www-authenticate", _bearer_challenge())],
             )
             return
 

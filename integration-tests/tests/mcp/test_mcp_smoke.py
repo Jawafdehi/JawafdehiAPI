@@ -7,24 +7,8 @@ import pytest
 
 MCP_HEADERS = {"accept": "application/json, text/event-stream"}
 MCP_E2E_BEARER = os.getenv("MCP_E2E_BEARER", "e2e-ngm-query-only")
-ANONYMOUS_TOOL_CATALOG = {
-    "get_current_user",
-    "search_control_plane",
-    "ngm_query_judicial",
-    "search_jawafdehi_cases",
-    "get_jawafdehi_case",
-    "search_nes_entities",
-    "get_nes_entities",
-    "get_nes_entity_prefixes",
-    "get_nes_tags",
-    "get_nes_entity_versions",
-    "browse_materials",
-    "browse_court_data",
-    "convert_date",
-}
 FULL_TOOL_CATALOG = {
-    # Document reading — authenticated only, so these are deliberately absent
-    # from ANONYMOUS_TOOL_CATALOG above.
+    # Document reading — authenticated only, like everything else here now.
     "list_document_sources",
     "get_document_overview",
     "list_document_contents",
@@ -60,7 +44,14 @@ FULL_TOOL_CATALOG = {
 
 @pytest.mark.live
 @pytest.mark.smoke
-def test_mcp_health_and_protocol(clients):
+def test_mcp_health_and_anonymous_challenge(clients):
+    """Against the real stack: no bearer, no protocol — and a usable challenge.
+
+    The 401 is what makes an MCP client start its OAuth flow, so the two things
+    worth proving end to end are that the refusal happens and that what comes
+    back actually leads somewhere: a ``WWW-Authenticate`` pointing at metadata
+    that is itself reachable unauthenticated.
+    """
     client = clients["platform"]
 
     health = client.get("/mcp/health")
@@ -80,59 +71,28 @@ def test_mcp_health_and_protocol(clients):
             },
         },
     )
-    assert initialize.status_code == 200, initialize.text
-    assert initialize.json()["result"]["serverInfo"]["name"] == "jawafdehi-mcp"
+    assert initialize.status_code == 401, initialize.text
+    assert initialize.json()["error"] == "unauthorized"
+
+    challenge = initialize.headers["www-authenticate"]
+    assert challenge.startswith("Bearer ")
+    # No error code for a caller that supplied nothing (RFC 6750 §3.1).
+    assert "error=" not in challenge
+    assert "resource_metadata=" in challenge
+
+    metadata_url = challenge.split('resource_metadata="', 1)[1].split('"', 1)[0]
+    assert metadata_url.endswith("/.well-known/oauth-protected-resource/mcp")
+
+    metadata = client.get("/.well-known/oauth-protected-resource/mcp")
+    assert metadata.status_code == 200, metadata.text
+    assert metadata.json()["authorization_servers"]
 
     listed = client.post(
         "/mcp",
         headers=MCP_HEADERS,
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
     )
-    assert listed.status_code == 200, listed.text
-    tool_names = {tool["name"] for tool in listed.json()["result"]["tools"]}
-    assert tool_names == ANONYMOUS_TOOL_CATALOG
-
-    hidden = client.post(
-        "/mcp",
-        headers=MCP_HEADERS,
-        json={
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": "create_jawafdehi_case",
-                "arguments": {},
-            },
-        },
-    )
-    assert hidden.status_code == 200, hidden.text
-    hidden_result = hidden.json()["result"]
-    assert hidden_result["isError"] is True
-    assert "not available for the current user" in hidden_result["content"][0]["text"]
-
-    query = client.post(
-        "/mcp",
-        headers=MCP_HEADERS,
-        json={
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tools/call",
-            "params": {
-                "name": "ngm_query_judicial",
-                "arguments": {
-                    "query": (
-                        "SELECT identifier FROM courts "
-                        "ORDER BY identifier LIMIT 1"
-                    )
-                },
-            },
-        },
-    )
-    assert query.status_code == 200, query.text
-    tool_payload = query.json()["result"]["content"][0]["text"]
-    result = json.loads(tool_payload)
-    assert result["success"] is True, result
-    assert result["data"]["row_count"] == 1
+    assert listed.status_code == 401, listed.text
 
 
 @pytest.mark.live
@@ -143,6 +103,25 @@ def test_authenticated_mcp_catalog_and_forwarded_authorization(clients):
         **MCP_HEADERS,
         "authorization": f"Bearer {MCP_E2E_BEARER}",
     }
+
+    # The protocol handshake lives here now: it is the first thing a bearer
+    # buys, and there is no unauthenticated path left that reaches it.
+    initialize = client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "integration-tests", "version": "1.0"},
+            },
+        },
+    )
+    assert initialize.status_code == 200, initialize.text
+    assert initialize.json()["result"]["serverInfo"]["name"] == "jawafdehi-mcp"
 
     listed = client.post(
         "/mcp",

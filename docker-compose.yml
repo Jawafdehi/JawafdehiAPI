@@ -160,6 +160,9 @@ services:
       # Least-privilege bearer used only by the anonymous public SQL tool.
       # Full-capability stdio credentials are never injected into the HTTP service.
       MCP_QUERY_API_TOKEN: ${MCP_QUERY_API_TOKEN:-}
+      # Unset, like production: the transport challenges a caller with no bearer.
+      # Set it to 1 to reopen the read-only anonymous catalog.
+      MCP_ALLOW_ANONYMOUS: ${MCP_ALLOW_ANONYMOUS:-}
       MCP_EMBEDDED_API_TIMEOUT: ${MCP_EMBEDDED_API_TIMEOUT:-30}
       MCP_EMBEDDED_API_MAX_CONCURRENCY: ${MCP_EMBEDDED_API_MAX_CONCURRENCY:-16}
       MCP_CONTROL_PLANE_TIMEOUT: ${MCP_CONTROL_PLANE_TIMEOUT:-30}
