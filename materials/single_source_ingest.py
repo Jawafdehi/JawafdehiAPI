@@ -35,7 +35,13 @@ from typing import Any
 
 from django.db import transaction
 
+import logging
+
+from .redaction import TEXT_KEY, keep_original, redact_jsonld
+
 from .models import Material
+
+logger = logging.getLogger("materials.ingest")
 
 
 def upsert_single_source_material(
@@ -58,6 +64,28 @@ def upsert_single_source_material(
     """
     # Validate the doc + the promoted-column agreement on a transient instance
     # (validate_unique=False — an existing ``@id`` is an UPDATE, not a duplicate).
+    # REDACT HERE, not in the callers. This is the single primitive every write
+    # funnels through — the convert job, four scrapers, the upload endpoint and
+    # every PATCH — so redacting at this boundary is what makes "the public text
+    # is redacted" true by construction rather than true of whichever writer
+    # remembered. It was previously done inside the convert job alone, which
+    # left the AG charge-sheet shelf (scraper-ingested, and the highest-PII
+    # corpus we hold) publishing identifiers into the field the search indexer
+    # reads.
+    #
+    # The text as it arrived is kept on the row, outside ``data``, and only when
+    # redaction changed it — see Material.source_text. Transcription is
+    # expensive and not reproducible byte-for-byte, so the original is preserved
+    # rather than re-derivable: nobody should have to OCR a document twice to
+    # answer a question about what it said.
+    jsonld, source_text, counts = redact_jsonld(jsonld)
+    if counts:
+        # Safe to guard on directly, and safe to log: the counter is keyed on
+        # likhit's removal JOURNAL, so it is empty for a document that had
+        # nothing in it and every key in it names a class that was taken out.
+        # Counts only — a journal row names the value it replaced, which would
+        # re-create the problem the redaction exists to solve.
+        logger.info("redacted %s on ingest: %s", jsonld.get("@id"), dict(counts))
     candidate = Material.from_jsonld(jsonld, material_type=material_type)
     # from_jsonld already set the source-based birth default; an explicit override
     # wins. Assign it BEFORE full_clean so an invalid policy is REJECTED by the
@@ -85,6 +113,24 @@ def upsert_single_source_material(
         mutable["visibility_policy"] = candidate.visibility_policy
     create_defaults = {**mutable, "visibility_policy": candidate.visibility_policy}
     with transaction.atomic(using="ngm"):
+        # The stored original is decided against what is ALREADY on the row, so
+        # it needs the existing row in hand — a caseworker who reads the
+        # redacted representation and writes it back must not blank the only
+        # copy of the original. See redaction.keep_original.
+        existing = (
+            Material.objects.using("ngm")
+            .filter(pk=candidate.iri)
+            .values("data", "source_text")
+            .first()
+        )
+        candidate.source_text = keep_original(
+            incoming=source_text,
+            stored=(existing or {}).get("source_text") or "",
+            text_changed=(existing or {}).get("data", {}).get(TEXT_KEY)
+            != candidate.data.get(TEXT_KEY),
+        )
+        mutable["source_text"] = candidate.source_text
+        create_defaults["source_text"] = candidate.source_text
         material, _ = Material.objects.using("ngm").update_or_create(
             iri=candidate.iri,
             defaults=mutable,
