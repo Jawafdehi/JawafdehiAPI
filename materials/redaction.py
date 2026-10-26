@@ -4,42 +4,52 @@ Sits at the top of the app rather than inside one writer because more than one
 calls it: the ingest primitive, the convert job and the PATCH verb all redact
 what they are about to store.
 
-🛑 **The legacy parquet import is NOT covered by this.** The ``DocumentPage`` and
-``DocumentTable`` rows that ``ingest_document_content`` loads from the upstream
-parquet are written as they arrive, and ``…/content`` serves them to anyone —
-that is the 35 CIAA annual reports already in the corpus. Documents *this* branch
-reads are covered: :func:`redact_bundle` runs inside ``extraction.pdf`` before
-the writer ever sees the bundle. So the gap closes only as those 35 are re-read
-from their PDFs, not by anything here.
+🛑 **The page-level content plane is NOT covered by this.** ``DocumentPage`` and
+``DocumentTable`` rows are written by ``ingest_document_content`` straight from
+the upstream parquet, and ``…/content`` serves them to anyone. That corpus is 35
+CIAA annual reports today, and closing it belongs with the extraction pipeline
+that will become their second writer — not here, where it would be a claim this
+branch does not deliver.
 
 ``likhit.privacy`` is the detector and the redactor; this is the one place the
-extraction pipeline calls it, and the order it calls it in.
+platform calls it, and the tier it calls it at.
 
 **Why here and not after.** The package's own CLI route is: convert to markdown on
-disk, then run ``likhit-redact`` twice over the resulting tree, once for inline
-values and once for table cells. That produces three artifacts and *writes the
-unredacted one first* — structurally wrong for a service that must never persist
-unredacted text. Redacting the bundle before the writer sees it means the
-unredacted text exists only in this process's memory, which is the property the
-redaction plan (``docs/2026-10-13-likhit-pii-redaction``) asks for and could not
-express against the package as shipped.
+disk, then run ``likhit-redact`` over the resulting tree. That produces three
+artifacts and *writes the unredacted one first* — structurally wrong for a service
+that must never persist unredacted text. Redacting before the writer sees the text
+means the unredacted copy exists only in this process's memory and in
+``Material.source_text``, which is behind ``materials.view_unredacted``. That is
+the property the redaction plan (``docs/2026-10-13-likhit-pii-redaction``) asks
+for and could not express against the package as shipped.
 
-**What is actually removed is narrower than what is found, and that gap is the
-point.** Today the redactor removes two classes — citizenship numbers and dates
-of birth. Phone, landline, email, PAN and bank account are *detected and
-deliberately left in place*: the contact pass exists, but it lives in another
-repository (the OAG release), which is why ``[REDACTED:PHONE-NO]`` is a
-registered placeholder that nothing in likhit emits. Verified on this pin: a
-sample carrying all three gives back a redacted citizenship number, a redacted
-date of birth, and an untouched mobile number. So calling a document "redacted"
-is a claim about two classes, and what gets recorded is the count per class
-rather than a boolean.
+**The tier is STRICT, and the tier is the whole policy.** likhit 0.2.0 replaced
+the two-passes-by-hand arrangement with named tiers, and which one we ask for is
+the only decision this module makes. ``strict`` removes citizenship number, date
+of birth, mobile, landline, email, bank account, age and passport.
 
-**Both passes, every surface.** The inline pass handles a label and its value in
-one span; the table pass handles a value in a cell away from its label. They are
-independent — the table pass's row-spent guard reads only its own ``TABLE_*``
-markers — so running both over text that mixes prose and rendered tables is
-required, not belt-and-braces. A transcript is exactly such a mixture.
+Two things it does NOT remove, both deliberate and both upstream's reasoning:
+
+* **PAN.** A permanent account number identifies a *business*, is public by
+  design, and is frequently the only handle a reader has to tie a procurement
+  finding to a registered contractor. Removing it protects nobody and costs the
+  reader the check.
+* **Names.** No tier removes one, and upstream is explicit that none ever will.
+  For this corpus that is the product: naming officials who were prosecuted,
+  convicted or acquitted is what a public accountability record is for.
+
+The narrower ``identifiers`` tier — citizenship and date of birth only — is the
+scope that was formally adjudicated, and it is not what we ship, because it is
+close to a no-op on the corpus that actually carries personal data. Measured on a
+real charge sheet (likhit's ``samples/aarop-patra.pdf``, 103k characters):
+``identifiers`` removes **3** values and leaves **5 mobile numbers** in the text
+the search indexer publishes; ``strict`` removes **11**. Override with
+``MATERIALS_REDACTION_MODE`` only with that measurement in hand.
+
+**Every surface, in one call.** ``likhit.privacy.redact_text`` runs inline →
+tables → contact itself. Driving the passes by hand — which is what this module
+used to do — meant every caller had to know that the table pass exists and that
+omitting it leaves table-held identifiers in place.
 """
 
 from __future__ import annotations
@@ -48,6 +58,8 @@ import json
 import logging
 from collections import Counter
 from typing import Any
+
+from django.conf import settings
 
 logger = logging.getLogger("materials.extraction")
 
@@ -60,7 +72,7 @@ REDACTED_SUFFIX = "+redacted"
 
 
 class RedactionUnavailable(RuntimeError):
-    """``likhit.privacy`` is not importable — the pin predates the subpackage.
+    """``likhit.privacy`` cannot give us the tier we asked for.
 
     Raised rather than silently skipped. A pipeline that quietly stores
     unredacted text when the redactor is missing is worse than one that stops:
@@ -68,34 +80,60 @@ class RedactionUnavailable(RuntimeError):
     """
 
 
-def _passes():
+def _redactor():
+    """``(redact_text, mode)`` from likhit, or refuse.
+
+    Two distinct failures, both of which used to be one ImportError: a pin older
+    than ``likhit.privacy`` (no redactor at all), and a pin that has the redactor
+    but not the tiers — anything between likhit #107 and #113. The second one is
+    the dangerous one, because ``from likhit.privacy import redact_text`` would
+    have succeeded against #112's table-pass helper of the same name and silently
+    redacted at a narrower scope than the one named here.
+    """
     try:
-        from likhit.privacy import redact_inline_text, redact_table_text
+        from likhit.privacy import RedactionMode, redact_text
     except ImportError as exc:  # pragma: no cover - only on an older likhit pin
         raise RedactionUnavailable(
-            "likhit.privacy is not available in this build; "
-            f"the installed likhit predates the redactor ({exc})"
+            "likhit.privacy does not expose the tiered redactor in this build; "
+            f"the installed likhit predates it ({exc})"
         ) from exc
-    return redact_inline_text, redact_table_text
+
+    configured = getattr(settings, "MATERIALS_REDACTION_MODE", "strict")
+    try:
+        mode = RedactionMode(configured)
+    except ValueError as exc:
+        # Not a fallback. An unreadable setting means nobody knows what scope the
+        # corpus was redacted at, and guessing one writes that uncertainty into
+        # every document from here.
+        raise RedactionUnavailable(
+            f"MATERIALS_REDACTION_MODE={configured!r} is not a likhit tier; "
+            f"expected one of {[m.value for m in RedactionMode]}"
+        ) from exc
+    if mode is RedactionMode.NONE:
+        raise RedactionUnavailable(
+            "MATERIALS_REDACTION_MODE='none' would publish the text unredacted; "
+            "to disable redaction, do not call this module"
+        )
+    return redact_text, mode
 
 
 def redact_text(text: str) -> tuple[str, Counter]:
-    """Both redaction passes over one piece of text, inline first.
+    """Redact one piece of text to the configured tier.
 
-    Inline first is conventional rather than required — the passes read their own
-    markers and neither hides the other's targets — but a fixed order is what
-    makes two runs over the same document produce the same bytes, which the
-    content ETag depends on.
+    The counter is keyed on the **kind that was removed** — ``citizenship``,
+    ``mobile``, ``bank_account`` — taken from likhit's journal rather than from
+    its raw statistics. Those statistics are a working record: they carry
+    ``*_redacted`` for some classes and ``*_targeted`` for others, plus
+    diagnostics like ``physical_cells`` that are present on every call and count
+    nothing removed. Keying on them is how "did we redact anything?" became true
+    for every document in the archive, and how the contact classes would have
+    gone unreported the moment they started being removed.
     """
     if not text.strip():
         return text, Counter()
-    redact_inline_text, redact_table_text = _passes()
-    counts: Counter = Counter()
-    text, _journal, inline_counts = redact_inline_text(text)
-    counts.update(inline_counts)
-    text, _journal, table_counts = redact_table_text(text)
-    counts.update(table_counts)
-    return text, counts
+    redact, mode = _redactor()
+    result = redact(text, mode=mode)
+    return result.text, Counter(row["kind"] for row in result.journal)
 
 
 #: The JSON-LD key carrying a document's full text. A language map

@@ -1,9 +1,10 @@
 """Personal data is removed before anything stores the text.
 
 The pipeline's contract with the redaction plan: unredacted text exists only in
-the extracting process's memory. What is pinned here is that contract, the honest
-reporting of how narrow the removal actually is, and the one interaction that
-would otherwise go unnoticed — a removal being reported as a failed decode.
+the extracting process's memory. What is pinned here is that contract, which tier
+we ask likhit for (and so what a published transcript still contains), and the one
+interaction that would otherwise go unnoticed — a removal reported as a failed
+decode.
 
     DATABASE_URL=sqlite:// NES_DB_URL=sqlite:// NGM_DATABASE_URL=sqlite:// \
         uv run pytest materials/tests/test_redaction.py
@@ -14,13 +15,23 @@ from __future__ import annotations
 from collections import Counter
 from unittest import TestCase
 
+from django.test import override_settings
+
+from materials.redaction import (
+    REDACTED_SUFFIX,
+    RedactionUnavailable,
+    redact_bundle,
+    redact_text,
+)
 from materials.extraction.bundle import ContentBundle, PageRecord, TableRecord
 from materials.extraction.pdf import _devanagari_share, _fidelity
-from materials.redaction import REDACTED_SUFFIX, redact_bundle, redact_text
 
 CITIZENSHIP = "नागरिकता नं. १२-०१-७५-०४५६७ रहेको"
 DATE_OF_BIRTH = "जन्म मिति २०४५।०३।१२ रहेको"
 MOBILE = "सम्पर्क ९८४१२३४५६७"
+EMAIL = "इमेल: ram.bahadur@example.com.np"
+BANK = "बैंक खाता नं. ०१२३४५६७८९०१२३"
+PAN = "स्थायी लेखा नम्बर (PAN): ६०१२३४५६७"
 
 
 def _bundle(**kwargs) -> ContentBundle:
@@ -36,6 +47,7 @@ def _bundle(**kwargs) -> ContentBundle:
     return ContentBundle(**defaults)
 
 
+
 class RedactTextTests(TestCase):
     """What the redactor removes, and — just as load-bearing — what it does not."""
 
@@ -45,16 +57,54 @@ class RedactTextTests(TestCase):
         self.assertIn("[REDACTED:CITIZENSHIP-NO]", redacted)
         self.assertIn("[REDACTED:DATE-OF-BIRTH]", redacted)
         self.assertNotIn("१२-०१-७५-०४५६७", redacted)
-        self.assertEqual(counts["citizenship_redacted"], 1)
+        self.assertEqual(counts["citizenship"], 1)
 
-    def test_what_is_removed_is_narrower_than_what_is_found(self):
-        redacted, _counts = redact_text(MOBILE)
+    def test_contact_details_and_a_bank_account_are_removed_too(self):
+        # The tier we ship is `strict`, not the narrower adjudicated
+        # `identifiers`. On a real charge sheet the difference is 3 removals
+        # against 11, and the eight it adds are mostly phone numbers — so a test
+        # that only pinned citizenship would pass at either tier and tell us
+        # nothing about which one is live.
+        redacted, counts = redact_text(f"{MOBILE}। {EMAIL}। {BANK}।")
 
-        # The mobile number SURVIVES. The contact pass exists but lives in
-        # another repository, which is why [REDACTED:PHONE-NO] is a registered
-        # placeholder that nothing in likhit emits. Asserting the gap keeps
-        # "redacted" from being read as "clean".
-        self.assertIn("९८४१२३४५६७", redacted)
+        self.assertNotIn("९८४१२३४५६७", redacted)
+        self.assertNotIn("ram.bahadur@example.com.np", redacted)
+        self.assertNotIn("०१२३४५६७८९०१२३", redacted)
+        self.assertEqual(
+            {"mobile", "email", "bank_account"}, set(counts) & {"mobile", "email", "bank_account"}
+        )
+
+    def test_a_pan_survives_because_it_identifies_a_company(self):
+        # Not an oversight and not a tier that can be widened to cover it: a PAN
+        # is a business registration number, public by design, and often the
+        # only handle tying a procurement finding to a registered contractor.
+        redacted, _counts = redact_text(PAN)
+
+        self.assertIn("६०१२३४५६७", redacted)
+
+    def test_the_counter_is_keyed_on_what_was_removed(self):
+        # likhit's raw statistics carry `*_targeted` for the contact classes,
+        # `*_redacted` for the others, and diagnostics like `physical_cells` on
+        # every call. Keying on them made "did we redact anything?" true for
+        # every document, and would have hidden every contact removal.
+        _redacted, counts = redact_text("कुनै पनि व्यक्तिगत विवरण नभएको पाठ।")
+
+        self.assertEqual(counts, Counter())
+
+    @override_settings(MATERIALS_REDACTION_MODE="identifiers-ish")
+    def test_an_unreadable_tier_refuses_rather_than_falling_back(self):
+        # A fallback would mean nobody knows what scope the corpus was redacted
+        # at, and would write that uncertainty into every document from here.
+        with self.assertRaises(RedactionUnavailable):
+            redact_text(CITIZENSHIP)
+
+    @override_settings(MATERIALS_REDACTION_MODE="none")
+    def test_the_do_nothing_tier_is_refused(self):
+        # `none` is a legitimate likhit tier — it is how the research corpus and
+        # the retained original are produced. Reaching it through THIS module
+        # would publish the text unredacted.
+        with self.assertRaises(RedactionUnavailable):
+            redact_text(CITIZENSHIP)
 
     def test_a_value_in_a_cell_away_from_its_label_is_found(self):
         markdown = (
@@ -98,19 +148,29 @@ class RedactBundleTests(TestCase):
         self.assertIn("[REDACTED:DATE-OF-BIRTH]", text)
         self.assertNotIn("१२-०१-७५-०४५६७", text)
         self.assertNotIn("२०४५।०३।१२", text)
-        self.assertEqual(totals["citizenship_redacted"], 1)
-        self.assertEqual(totals["date_of_birth_redacted"], 1)
+        self.assertEqual(totals["citizenship"], 1)
+        self.assertEqual(totals["date_of_birth"], 1)
 
-    def test_what_is_removed_is_narrower_than_what_is_found_and_says_so(self):
-        bundle = _bundle(pages=[PageRecord(page_no=1, text=MOBILE)])
+    def test_a_mobile_number_in_a_bundle_is_removed_too(self):
+        """This assertion used to run the other way, and the inversion is the
+        point of the tier change rather than a test being fixed to pass.
 
-        redact_bundle(bundle)
+        While the bundle pass drove likhit's inline and table passes by hand, a
+        mobile number survived every one of them: `[REDACTED:PHONE-NO]` was a
+        registered placeholder that nothing we called emitted. Asking
+        `likhit.privacy.redact_text` for the `strict` tier is what closed that,
+        and on the charge-sheet corpus phone numbers are the single largest
+        class of personal data — so a bundle test that still pinned the gap
+        would now be pinning a defect.
+        """
 
-        # The mobile number SURVIVES. The contact pass exists but lives in
-        # another repository, which is why [REDACTED:PHONE-NO] is a registered
-        # placeholder that nothing in likhit emits. Asserting the gap keeps
-        # "redacted" from being read as "clean".
-        self.assertIn("९८४१२३४५६७", bundle.pages[0].text)
+        bundle = _bundle(pages=[PageRecord(page_no=1, text=MOBILE, chars=0)])
+
+        totals = redact_bundle(bundle)
+
+        self.assertIn("[REDACTED:PHONE-NO]", bundle.pages[0].text)
+        self.assertNotIn("९८४१२३४५६७", bundle.pages[0].text)
+        self.assertEqual(totals["mobile"], 1)
 
     def test_the_document_records_that_it_was_redacted(self):
         bundle = _bundle()
@@ -236,7 +296,10 @@ class RedactionVersusFidelityTests(TestCase):
         )
         redacted, counts = redact_text(annex)
 
-        self.assertEqual(counts["physical_citizenship"], 14)
+        # Keyed on the removal journal's kind, which is the same `citizenship`
+        # whether the inline pass or the table pass took the value out — the
+        # count is what matters here, and all fourteen are table cells.
+        self.assertEqual(counts["citizenship"], 14)
         # 0.531 -> 0.029 against a floor of 0.15: fourteen Devanagari identifiers
         # become fourteen ASCII placeholders and the page stops looking Nepali.
         self.assertGreater(_devanagari_share(annex), 0.15)
