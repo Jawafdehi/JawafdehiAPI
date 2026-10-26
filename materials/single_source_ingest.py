@@ -44,17 +44,6 @@ from .models import Material
 logger = logging.getLogger("materials.ingest")
 
 
-def _removals(counts) -> dict:
-    """Only the counters that mean something was REMOVED.
-
-    likhit's redactors also return table diagnostics and refusals on every call
-    — ``table_blocks_seen``, ``physical_cells``, ``*_refused_*`` — so logging
-    the raw Counter reports "redacted" for a document with nothing in it, which
-    makes the one signal that redaction did anything useless.
-    """
-    return {k: v for k, v in counts.items() if k.endswith("_redacted") and v}
-
-
 def upsert_single_source_material(
     jsonld: dict[str, Any], *, material_type: str, visibility_policy: str | None = None
 ) -> Material:
@@ -90,13 +79,13 @@ def upsert_single_source_material(
     # rather than re-derivable: nobody should have to OCR a document twice to
     # answer a question about what it said.
     jsonld, source_text, counts = redact_jsonld(jsonld)
-    removals = _removals(counts)
-    if removals:
-        # Guarded on the REMOVALS, not on the raw Counter: likhit's redactors
-        # return table diagnostics on every call, so `if counts:` is true for
-        # every document ever ingested and the one signal that redaction did
-        # something would fire with `{}` beside it.
-        logger.info("redacted %s on ingest: %s", jsonld.get("@id"), removals)
+    if counts:
+        # Safe to guard on directly, and safe to log: the counter is keyed on
+        # likhit's removal JOURNAL, so it is empty for a document that had
+        # nothing in it and every key in it names a class that was taken out.
+        # Counts only — a journal row names the value it replaced, which would
+        # re-create the problem the redaction exists to solve.
+        logger.info("redacted %s on ingest: %s", jsonld.get("@id"), dict(counts))
     candidate = Material.from_jsonld(jsonld, material_type=material_type)
     # from_jsonld already set the source-based birth default; an explicit override
     # wins. Assign it BEFORE full_clean so an invalid policy is REJECTED by the
