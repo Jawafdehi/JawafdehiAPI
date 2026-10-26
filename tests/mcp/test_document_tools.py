@@ -421,3 +421,26 @@ class TestDescriptionsAreAccurate:
 
     def test_null_readable_is_explained_as_unknown(self):
         assert "does NOT mean zero" in ListDocumentSourcesTool().description
+
+
+class TestReadingAnUnparsedDocument:
+    """The tools report an unparsed document; they do not ask for it.
+
+    Everything that arrives is queued for reading on arrival and the sweep
+    reconciles what that missed, so a tool asking for a parse would be asking
+    for work already scheduled. What a tool owes a model is the true statement
+    that nothing here can be quoted yet.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_overview_says_nothing_can_be_quoted_and_asks_for_nothing(self):
+        doc = {"@id": IRI, "name": {"ne": "प्रतिवेदन"}}
+        caller = AsyncMock(return_value={"success": True, "data": doc})
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            payload = _payload(await GetDocumentOverviewTool().execute({"iri": IRI}))
+
+        assert payload["readable"] is False
+        assert "NOT been parsed" in payload["note"]
+        # One call, and it is the read. No POST, no second round trip.
+        assert caller.await_count == 1
+        assert caller.await_args_list[0].args[0] == "GET"

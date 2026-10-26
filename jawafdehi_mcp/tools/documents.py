@@ -238,6 +238,15 @@ class GetDocumentOverviewTool(BaseTool):
                 "nothing in it can be quoted. Cite it as a holding, or link the "
                 "original PDF above."
             )
+            # Reading it is what starts the parse — see _start_extraction. The
+            # overview is still returned either way: the answer "we have not
+            # opened this" is true and useful now, and the parse is for the next
+            # call.
+            # No trigger here. Every document that arrives is queued for
+            # reading on arrival, and the sweep reconciles whatever that missed,
+            # so a tool call asking for one is work the platform has already
+            # scheduled — see materials/signals.py. What the tool owes a model is
+            # the true statement that nothing here can be quoted YET.
         else:
             unread = (content.get("pages") or 0) - (content.get("pages_read") or 0)
             overview["readable"] = True
@@ -293,9 +302,10 @@ class ListDocumentContentsTool(BaseTool):
         kind = arguments.get("kind")
         if kind not in self.KINDS:
             return _error(f"kind must be one of {', '.join(self.KINDS)}.")
-        path = _material_path(arguments.get("iri", ""), "/content")
-        if path is None:
+        material_path = _material_path(arguments.get("iri", ""))
+        if material_path is None:
             return _error("iri must be a material @id IRI (…/material/<source>/<ident>).")
+        path = f"{material_path}/content"
         result = await _call(self.name, path, params={"type": kind})
         return result if isinstance(result, ToolExecutionResult) else _text(result)
 
@@ -340,9 +350,12 @@ class ReadDocumentPartTool(BaseTool):
         }
 
     async def execute(self, arguments: dict[str, Any]) -> list[TextContent]:
-        path = _material_path(arguments.get("iri", ""), "/content")
-        if path is None:
+        material_path = _material_path(arguments.get("iri", ""))
+        # Guarded on the material path itself rather than on the derived one, so
+        # both are known non-None below — the trigger takes the material path.
+        if material_path is None:
             return _error("iri must be a material @id IRI (…/material/<source>/<ident>).")
+        path = f"{material_path}/content"
 
         page = arguments.get("page")
         first, last = arguments.get("from_page"), arguments.get("to_page")

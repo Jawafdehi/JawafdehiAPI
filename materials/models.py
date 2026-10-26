@@ -506,3 +506,36 @@ class DocumentFigurePoint(models.Model):
 
     def __str__(self) -> str:
         return f"{self.figure_id}#{self.point_index}"
+
+
+class ExtractionScan(models.Model):
+    """How far the extraction sweep has walked the archive.
+
+    A crawl frontier, the way ``courts.ScrapedDate`` is one, and it exists
+    because the obvious cursor does not work. Deriving "where we got to" from
+    the highest material already QUEUED only advances past rows that produced a
+    job — and ~94% of the archive carries no PDF at all. A contiguous region of
+    non-extractable materials larger than one tick's scan budget therefore
+    stalls the sweep forever: every run re-reads the same rows, finds the same
+    nothing, and reports success. That is a batch that looks healthy and cannot
+    finish, which is the exact failure the sweep exists to prevent.
+
+    One row, created on first use. Not a setting and not a job payload: the
+    position has to survive a job history being pruned, and it has to be
+    writable by the command that advances it without a queue round-trip.
+    """
+
+    #: Single-row table; the PK is fixed so a second row cannot appear.
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    #: The last material IRI the sweep LOOKED AT — not the last one it queued.
+    last_iri = models.TextField(blank=True, default="")
+    #: Set when a pass reaches the end and wraps, so an operator can tell "the
+    #: archive has been walked once" from "we are still on the first lap".
+    laps = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "material_extraction_scan"
+
+    def __str__(self) -> str:
+        return f"scan@{self.last_iri or 'start'} (lap {self.laps})"
