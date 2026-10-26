@@ -148,19 +148,29 @@ class RedactBundleTests(TestCase):
         self.assertIn("[REDACTED:DATE-OF-BIRTH]", text)
         self.assertNotIn("१२-०१-७५-०४५६७", text)
         self.assertNotIn("२०४५।०३।१२", text)
-        self.assertEqual(totals["citizenship_redacted"], 1)
-        self.assertEqual(totals["date_of_birth_redacted"], 1)
+        self.assertEqual(totals["citizenship"], 1)
+        self.assertEqual(totals["date_of_birth"], 1)
 
-    def test_what_is_removed_is_narrower_than_what_is_found_and_says_so(self):
-        bundle = _bundle(pages=[PageRecord(page_no=1, text=MOBILE)])
+    def test_a_mobile_number_in_a_bundle_is_removed_too(self):
+        """This assertion used to run the other way, and the inversion is the
+        point of the tier change rather than a test being fixed to pass.
 
-        redact_bundle(bundle)
+        While the bundle pass drove likhit's inline and table passes by hand, a
+        mobile number survived every one of them: `[REDACTED:PHONE-NO]` was a
+        registered placeholder that nothing we called emitted. Asking
+        `likhit.privacy.redact_text` for the `strict` tier is what closed that,
+        and on the charge-sheet corpus phone numbers are the single largest
+        class of personal data — so a bundle test that still pinned the gap
+        would now be pinning a defect.
+        """
 
-        # The mobile number SURVIVES. The contact pass exists but lives in
-        # another repository, which is why [REDACTED:PHONE-NO] is a registered
-        # placeholder that nothing in likhit emits. Asserting the gap keeps
-        # "redacted" from being read as "clean".
-        self.assertIn("९८४१२३४५६७", bundle.pages[0].text)
+        bundle = _bundle(pages=[PageRecord(page_no=1, text=MOBILE, chars=0)])
+
+        totals = redact_bundle(bundle)
+
+        self.assertIn("[REDACTED:PHONE-NO]", bundle.pages[0].text)
+        self.assertNotIn("९८४१२३४५६७", bundle.pages[0].text)
+        self.assertEqual(totals["mobile"], 1)
 
     def test_the_document_records_that_it_was_redacted(self):
         bundle = _bundle()
@@ -286,7 +296,10 @@ class RedactionVersusFidelityTests(TestCase):
         )
         redacted, counts = redact_text(annex)
 
-        self.assertEqual(counts["physical_citizenship"], 14)
+        # Keyed on the removal journal's kind, which is the same `citizenship`
+        # whether the inline pass or the table pass took the value out — the
+        # count is what matters here, and all fourteen are table cells.
+        self.assertEqual(counts["citizenship"], 14)
         # 0.531 -> 0.029 against a floor of 0.15: fourteen Devanagari identifiers
         # become fourteen ASCII placeholders and the page stops looking Nepali.
         self.assertGreater(_devanagari_share(annex), 0.15)
