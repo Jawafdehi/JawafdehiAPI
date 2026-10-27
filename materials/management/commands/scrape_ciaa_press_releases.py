@@ -221,6 +221,11 @@ class Command(BaseCommand):
             help="stop after this many consecutive 302/404s from CIAA (default 10)",
         )
         parser.add_argument(
+            "--allow-source-down", action="store_true",
+            help="exit 0 even when the source was unreachable and nothing was "
+                 "fetched (for a manual run that only wants to probe)",
+        )
+        parser.add_argument(
             "--max-consecutive-transient", type=int, default=25,
             help="give up after this many consecutive transient failures (timeout / "
             "5xx / non-result) so a source outage can't loop forever (default 25)",
@@ -262,11 +267,14 @@ class Command(BaseCommand):
         consecutive_transient = 0
         press_id = o["start_id"]
 
+        source_down = False
+
         while consecutive_missing < o["max_consecutive_missing"]:
             if consecutive_transient >= o["max_consecutive_transient"]:
                 # A persistent outage (every fetch times out / 5xx) never produces a
                 # 302 to trip the missing-stop, so bound it here rather than loop the
                 # id space forever.
+                source_down = True
                 self.stderr.write(
                     f"stop: {consecutive_transient} consecutive transient failures "
                     f"at id ~{press_id} (source likely down)"
@@ -315,6 +323,22 @@ class Command(BaseCommand):
         self.stdout.write(
             f"done [{mode}]: " + " ".join(f"{key}={value}" for key, value in stats.items())
         )
+
+        if source_down and not stats["fetched"] and not o["allow_source_down"]:
+            # Exit non-zero so the CronJob goes red. Without this the run reports
+            # success for doing nothing, and the Job's own status cannot tell
+            # "there was nothing new" from "the site has been unreachable for
+            # days" — which is not hypothetical: ciaa.gov.np was down from at
+            # least 25 to 27 October 2026 and all three nightly Jobs were green.
+            #
+            # Deliberately NOT raised when something was fetched: a site that
+            # serves half the id range and then falls over has still done useful
+            # work, and failing the Job would hide that behind a red.
+            raise CommandError(
+                f"ciaa.gov.np looks unreachable: scanned {stats['scanned']} id(s), "
+                f"{stats['transient']} transient failure(s), fetched nothing. "
+                "Pass --allow-source-down to treat this as a successful no-op."
+            )
 
     def _ingest(self, material, source, record, stats) -> None:
         """PUT the doc, then upload each attachment. One failure is logged and
