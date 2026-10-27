@@ -37,13 +37,17 @@ from django.core.management.base import BaseCommand, CommandError
 
 from ...document_content import store_document_content
 from ...extract import (
+    PRIORITY_BACKFILL,
     DocumentFetchError,
     NothingToExtract,
+    content_is_stale,
+    document_sha256,
     document_urls,
+    failed_for_these_bytes,
     enqueue_material_extract,
     fetch_and_extract,
 )
-from ...models import DocumentContent, Material
+from ...models import DocumentContent, ExtractionScan, Material
 
 #: How many rows to look at when hunting for candidates. A source filter plus a
 #: limit is the normal case and stops long before this; the cap is here so an
@@ -95,6 +99,24 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--retry-failed",
+            action="store_true",
+            help=(
+                "also re-attempt documents a previous run gave up on. They are "
+                "skipped by default so one broken file is not fetched and failed "
+                "every tick forever — but a failure can be transient (a portal "
+                "outage, a 503 from storage), so forever is the wrong default too"
+            ),
+        )
+        parser.add_argument(
+            "--recheck",
+            action="store_true",
+            help=(
+                "also re-read documents whose stored content is older than the "
+                "file it was read from (a re-upload, a corrected scan)"
+            ),
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="resolve and report candidates, change nothing",
@@ -117,7 +139,7 @@ class Command(BaseCommand):
             return
 
         if options["dry_run"]:
-            for iri, urls in candidates:
+            for iri, urls, _sha in candidates:
                 self.stdout.write(f"  would extract {iri} from {urls[0]}")
             self.stdout.write(
                 self.style.SUCCESS(
@@ -133,8 +155,10 @@ class Command(BaseCommand):
 
     # ── selection ────────────────────────────────────────────────────────────
 
-    def _candidates(self, options: dict) -> tuple[list[tuple[str, list[str]]], list[str]]:
-        """``[(iri, source_urls)]`` plus a note per material that cannot be done.
+    def _candidates(
+        self, options: dict
+    ) -> tuple[list[tuple[str, list[str], str]], list[str]]:
+        """``[(iri, source_urls, sha256)]`` plus a note per material we skip.
 
         A material is a candidate when it is live, carries a document this
         pipeline can open, and (unless ``--force``) has no stored content yet.
@@ -147,25 +171,66 @@ class Command(BaseCommand):
             rows = rows.filter(pk__in=options["iri"])
         if options["source"]:
             rows = rows.filter(source__in=options["source"])
+        # Empty unless --recheck asks us to look at documents we already hold,
+        # and defined unconditionally so --force (which skips the branch below
+        # entirely) does not reach the loop with it unbound.
+        fresh: set[str] = set()
         if not options["force"]:
-            rows = rows.exclude(
-                pk__in=DocumentContent.objects.using("ngm").values("material_id")
-            )
+            # Materials we hold content for are excluded in SQL rather than in
+            # Python, because they are the cheap majority once a source is done
+            # and they would otherwise eat the scan budget. STALENESS is checked
+            # per candidate below — it needs the document's own provenance, which
+            # is JSONB, and a row whose file has changed is rare enough to pay
+            # for individually.
+            if options["recheck"]:
+                fresh = set(
+                    DocumentContent.objects.using("ngm").values_list(
+                        "material_id", flat=True
+                    )
+                )
+            else:
+                rows = rows.exclude(
+                    pk__in=DocumentContent.objects.using("ngm").values("material_id")
+                )
+        cursor = "" if options["iri"] else self._cursor(options)
+        if cursor:
+            rows = rows.filter(pk__gt=cursor)
         rows = rows.order_by("pk").only("iri", "data")
 
         wanted = set(options["iri"])
-        found: list[tuple[str, list[str]]] = []
+        found: list[tuple[str, list[str], str]] = []
         skipped: list[str] = []
         seen = 0
+        stale = 0
+        gave_up = 0
+        with_document = 0
+        last_seen = ""
+        exhausted = True
         for row in rows.iterator(chunk_size=200):
             seen += 1
+            last_seen = row.pk
             if seen > SCAN_CEILING:
+                exhausted = False
                 skipped.append(
-                    f"stopped after scanning {SCAN_CEILING} materials; narrow with "
-                    "--source or raise the ceiling"
+                    f"stopped after scanning {SCAN_CEILING} materials (from "
+                    f"{cursor or 'the start'}); the next run resumes after the "
+                    "last material queued"
                 )
                 break
             urls = document_urls(row.data or {})
+            # Counted here, not where candidates are: "carries a document" is a
+            # fact about the ARCHIVE, and reporting only the ones we queued
+            # would say "0 carry a document" for a source that is fully read —
+            # the one answer that must not look like the one where the scan
+            # never reached it.
+            if urls:
+                with_document += 1
+            if urls and row.pk in fresh:
+                # --recheck: we hold content for this one, so the only reason to
+                # queue it is that the FILE changed under us.
+                if not content_is_stale(row.pk, row.data or {}):
+                    continue
+                stale += 1
             if not urls:
                 # Only worth a line when the caller named this exact document.
                 # Over a whole source it is the common case (most materials are a
@@ -173,11 +238,34 @@ class Command(BaseCommand):
                 if row.pk in wanted:
                     skipped.append(f"{row.pk}: carries no extractable document")
                 continue
-            found.append((row.pk, urls))
+            if (
+                not options["force"]
+                and not options["retry_failed"]
+                and failed_for_these_bytes(row.pk, row.data or {})
+            ):
+                # Tried this exact file and gave up. Counted rather than silently
+                # skipped: a source whose documents all fail looks identical to
+                # one that is fully read, and only the count says which.
+                gave_up += 1
+                continue
+            found.append((row.pk, urls, document_sha256(row.data or {})))
             if len(found) >= options["limit"]:
+                exhausted = False
                 break
 
-        for iri in sorted(wanted - {iri for iri, _urls in found}):
+        # Record the walk BEFORE reporting, so a crash in the reporting path
+        # cannot cost the position and re-walk the region next week.
+        if not options["iri"]:
+            self._advance(last_seen, exhausted=exhausted)
+        # The coverage statement. An automatic pipeline that reports only what
+        # it queued cannot tell "everything is read" from "the scan never got
+        # there" — which is the whole failure mode of a trigger plus a sweep.
+        self.stdout.write(
+            f"  scanned {seen} material(s): {with_document} carry a document, "
+            f"{stale} have content older than their file, "
+            f"{gave_up} failed before on these same bytes"
+        )
+        for iri in sorted(wanted - {iri for iri, _urls, _sha in found}):
             if not any(note.startswith(f"{iri}:") for note in skipped):
                 # Named but absent from the queryset: gone, soft-deleted, or
                 # already extracted and --force was not passed.
@@ -187,12 +275,59 @@ class Command(BaseCommand):
                 )
         return found, skipped
 
+    def _cursor(self, options: dict) -> str:
+        """Where the last sweep LOOKED to, not where it last queued.
+
+        **The difference is what makes the sweep able to finish.** A cursor
+        derived from the job history only advances past rows that produced a
+        job, and ~94% of the archive carries no PDF — so a contiguous region of
+        non-extractable materials bigger than one tick's scan budget stalls the
+        walk forever: the same rows re-read every week, the same nothing found,
+        and a healthy-looking report. The position is therefore recorded by the
+        scan itself (:meth:`_advance`), in a one-row frontier table the way the
+        court crawler's ScrapedDate is.
+
+        Ignored when the caller names IRIs: an operator asking for a document
+        means that document, wherever the walk happens to be.
+        """
+        scan = ExtractionScan.objects.using("ngm").filter(pk=1).first()
+        cursor = scan.last_iri if scan else ""
+        if cursor:
+            self.stdout.write(f"  resuming after {cursor}")
+        return cursor
+
+    def _advance(self, last_seen: str, *, exhausted: bool) -> None:
+        """Record how far this pass looked.
+
+        ``exhausted`` means the queryset ran out before the budget did — the end
+        of the archive — so the next pass starts over. Wrapping rather than
+        stopping is deliberate: a finished archive still gains documents, and a
+        sweep parked at the end would never see them. The lap counter is what
+        lets an operator tell "walked it once" from "still on the first pass".
+        """
+        scan, _ = ExtractionScan.objects.using("ngm").get_or_create(pk=1)
+        if exhausted:
+            scan.last_iri = ""
+            scan.laps += 1
+        elif last_seen:
+            scan.last_iri = last_seen
+        scan.save()
+
     # ── the two ways to run ──────────────────────────────────────────────────
 
     def _enqueue(self, candidates, options: dict) -> None:
         queued = 0
-        for iri, _urls in candidates:
-            job = enqueue_material_extract(iri, force=options["force"])
+        for iri, _urls, sha in candidates:
+            job = enqueue_material_extract(
+                iri,
+                force=options["force"] or options["recheck"],
+                # The bytes this attempt is for, so a terminal failure is
+                # specific to the file rather than to the material.
+                sha256=sha,
+                # Behind both the on-write trigger and a reader asking by name:
+                # a backfill is work nobody is waiting on.
+                priority=PRIORITY_BACKFILL,
+            )
             if job is None:  # pragma: no cover - only when the jobs app is absent
                 raise CommandError("the jobs app is unavailable; use --inline")
             queued += 1
@@ -210,7 +345,7 @@ class Command(BaseCommand):
         render_root = Path(options["render_charts"]) if options["render_charts"] else None
         totals = {"docs": 0, "pages": 0, "tables": 0, "figures": 0, "charts": 0}
         failures: list[str] = []
-        for iri, urls in candidates:
+        for iri, urls, _sha in candidates:
             doc_id = iri.rstrip("/").rsplit("/", 1)[-1]
             try:
                 # The same fetch-and-read the worker runs, so an inline
