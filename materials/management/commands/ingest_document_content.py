@@ -67,33 +67,24 @@ from typing import Any
 import duckdb
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
-from django.utils import timezone
 
 from jawafdehi_shared.entities.ids import build_material_iri
 
-from ...models import (
-    DocumentContent,
-    DocumentFigure,
-    DocumentFigurePoint,
-    DocumentPage,
-    DocumentTable,
-    Material,
+from ...document_content import store_document_content
+from ...extraction.bundle import (
+    ContentBundle,
+    DeclaredCounts,
+    FigurePointRecord,
+    FigureRecord,
+    PageRecord,
+    TableRecord,
 )
+from ...models import Material
 
 #: Parquet tables the command needs, by basename. ``documents`` carries one row
 #: per document; the rest are keyed to it by ``doc_id`` (tables/figures) or by
 #: ``figure_uid`` (figure_data).
 REQUIRED_TABLES = ("documents", "pages", "tables", "figures", "figure_data")
-
-#: Chunk size for the two bulk_creates that can get large: pages (one row carries
-#: a whole page of transcript, ~370 KB per report unbatched) and points (tens of
-#: thousands of rows per corpus).
-#:
-#: For MEMORY, not for sqlite's bound-parameter cap — Django already clamps
-#: ``batch_size`` down to whatever the backend admits via ``bulk_batch_size()``,
-#: so the cap is handled whether this is set or not. What Django does not do is
-#: keep one statement from being enormous on Postgres.
-BULK_BATCH = 500
 
 HF_API = "https://huggingface.co/api/datasets"
 
@@ -288,18 +279,6 @@ def _bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"true", "t", "yes", "1"}
     return bool(value)
-
-
-def _key(page_no: int, index_on_page: int, kind: str) -> str:
-    """The stable, URL-safe handle for a table/figure: ``p0018-t1``.
-
-    Built from where the thing physically sits in the document, so it survives
-    the upstream gaining or losing items elsewhere — unlike ``ordinal``, which is
-    recomputed each ingest. ``(page_no, index_on_page)`` is unique within a
-    document (verified across the whole CIAA corpus), and the DB holds a unique
-    constraint on it so a corpus that broke that assumption would fail loudly.
-    """
-    return f"p{page_no:04d}-{kind}{index_on_page}"
 
 
 def _tristate(value: Any) -> bool | None:
@@ -606,147 +585,89 @@ class Command(BaseCommand):
         figures: list[dict],
         points_by_figure: dict[str, list[dict]],
     ) -> dict[str, int]:
-        """Replace one material's content wholesale. Runs inside the caller's
-        transaction.
+        """Map this dataset's parquet columns onto a bundle, then store it.
 
-        Delete-then-insert rather than update-in-place: the upstream can drop a
-        table between revisions, and an upsert keyed on ``uid`` would leave the
-        dropped row behind forever. The cascade from DocumentContent takes the
-        tables, figures and points with it.
+        Everything below the mapping — delete-then-insert, the ``key`` a client
+        addresses a table by, the material's ETag — belongs to
+        ``materials.document_content`` and is shared with the PDF extractor. What
+        stays here is the part only this dataset has: its column names, and the
+        NaN/JSON-string conventions of the parquet it publishes.
         """
-        DocumentContent.objects.using("ngm").filter(pk=iri).delete()
-        content = DocumentContent.objects.using("ngm").create(
-            material_id=iri,
+        bundle = ContentBundle(
             doc_id=doc_id,
             dataset=dataset,
             dataset_revision=revision,
             page_count=_int(doc.get("n_pages")),
-            text_source=_text(doc.get("text_source"))[:40],
-            transcript_verdict=_text(doc.get("transcript_quality_verdict"))[:40],
-            figures_verdict=_text(doc.get("figures_quality_verdict"))[:40],
-            # Counts come from the upstream document row, NOT from len() over the
-            # rows we are about to write. The two agree today and the difference
-            # matters when they stop: a mismatch means we failed to ingest part of
-            # what the dataset says exists, and a count derived from our own rows
-            # would report the shortfall as the truth and hide it.
-            n_tables=_int(doc.get("n_tables")),
-            n_figures=_int(doc.get("n_figures")),
-            n_points=_int(doc.get("n_figure_data_points")),
-            pages_with_text=_int(doc.get("pages_with_text")),
-        )
-
-        DocumentPage.objects.using("ngm").bulk_create(
-            [
-                DocumentPage(
-                    content=content,
+            text_source=_text(doc.get("text_source")),
+            transcript_verdict=_text(doc.get("transcript_quality_verdict")),
+            figures_verdict=_text(doc.get("figures_quality_verdict")),
+            # The upstream's own counters, which the writer stores in preference
+            # to a count of the rows we managed to write — see DeclaredCounts.
+            declared=DeclaredCounts(
+                tables=_int(doc.get("n_tables")),
+                figures=_int(doc.get("n_figures")),
+                points=_int(doc.get("n_figure_data_points")),
+                pages_with_text=_int(doc.get("pages_with_text")),
+            ),
+            pages=[
+                PageRecord(
                     page_no=_int(row.get("page_no")),
-                    uid=_text(row.get("page_uid"))[:160],
+                    uid=_text(row.get("page_uid")),
                     text=_text(row.get("text")),
-                    coverage_state=_text(row.get("coverage_state"))[:40],
-                    anchor_fidelity=_text(row.get("anchor_fidelity"))[:40],
-                    ocr_source=_text(row.get("ocr_source"))[:40],
+                    coverage_state=_text(row.get("coverage_state")),
+                    anchor_fidelity=_text(row.get("anchor_fidelity")),
+                    ocr_source=_text(row.get("ocr_source")),
                     landscape=_bool(row.get("landscape")),
                     n_table_blocks=_int(row.get("n_table_blocks")),
                     chars=_int(row.get("chars")),
                 )
                 for row in pages
             ],
-            # Pages carry the document's whole transcript, so one report is ~370 KB
-            # in a single statement if this is unbatched. See BULK_BATCH.
-            batch_size=BULK_BATCH,
-        )
-
-        DocumentTable.objects.using("ngm").bulk_create(
-            [
-                DocumentTable(
-                    content=content,
-                    ordinal=ordinal,
-                    key=_key(
-                        _int(row.get("page_no")),
-                        _int(row.get("table_index_on_page"), 1),
-                        "t",
-                    ),
-                    uid=_text(row.get("table_uid"))[:160],
+            tables=[
+                TableRecord(
                     page_no=_int(row.get("page_no")),
                     index_on_page=_int(row.get("table_index_on_page"), 1),
+                    uid=_text(row.get("table_uid")),
                     caption=_text(row.get("intro_text")),
                     header=_header(row.get("header_json")),
                     n_rows=_int(row.get("n_rows")),
                     n_cols=_int(row.get("n_cols")),
-                    fidelity=_text(row.get("anchor_fidelity"))[:40],
+                    fidelity=_text(row.get("anchor_fidelity")),
                     markdown=_text(row.get("markdown")),
                 )
-                for ordinal, row in enumerate(tables, start=1)
-            ]
+                for row in tables
+            ],
+            figures=[
+                FigureRecord(
+                    page_no=_int(row.get("page_no")),
+                    index_on_page=_int(row.get("figure_index_on_page"), 1),
+                    uid=_text(row.get("figure_uid")),
+                    title=_text(row.get("title_ne")),
+                    chart_type=_text(row.get("chart_type")),
+                    unit=_text(row.get("unit")),
+                    x_axis=_text(row.get("x_axis")),
+                    y_axis=_text(row.get("y_axis")),
+                    notes=_text(row.get("notes")),
+                    verify_note=_text(row.get("verify_note")),
+                    verified=_tristate(row.get("verified_clean")),
+                    points=[
+                        FigurePointRecord(
+                            point_index=_int(point.get("point_index")),
+                            label=_text(point.get("label")),
+                            series=_text(point.get("series")),
+                            value=_float(point.get("value")),
+                            estimated=_bool(point.get("value_estimated")),
+                        )
+                        # Keyed on the UNTRUNCATED upstream uid: the stored uid is
+                        # cut to the column width, so looking points up off the
+                        # stored string would silently drop every point of an
+                        # over-long figure uid.
+                        for point in points_by_figure.get(
+                            _text(row.get("figure_uid")), []
+                        )
+                    ],
+                )
+                for row in figures
+            ],
         )
-
-        figure_rows = [
-            DocumentFigure(
-                content=content,
-                ordinal=ordinal,
-                key=_key(
-                    _int(row.get("page_no")),
-                    _int(row.get("figure_index_on_page"), 1),
-                    "f",
-                ),
-                uid=_text(row.get("figure_uid"))[:160],
-                page_no=_int(row.get("page_no")),
-                index_on_page=_int(row.get("figure_index_on_page"), 1),
-                title=_text(row.get("title_ne")),
-                chart_type=_text(row.get("chart_type"))[:40],
-                unit=_text(row.get("unit"))[:80],
-                x_axis=_text(row.get("x_axis"))[:300],
-                y_axis=_text(row.get("y_axis"))[:300],
-                notes=_text(row.get("notes")),
-                verify_note=_text(row.get("verify_note")),
-                verified=_tristate(row.get("verified_clean")),
-            )
-            for ordinal, row in enumerate(figures, start=1)
-        ]
-        DocumentFigure.objects.using("ngm").bulk_create(figure_rows)
-
-        # bulk_create does not populate PKs on every backend, so re-read the ids
-        # by uid rather than trusting the in-memory objects.
-        figure_ids = dict(
-            DocumentFigure.objects.using("ngm")
-            .filter(content=content)
-            .values_list("uid", "id")
-        )
-        # Pair each stored row back to the source row it came from. Points are
-        # keyed on the UNTRUNCATED upstream uid while ``figure_ids`` is keyed on
-        # the stored (possibly truncated) one, so looking both up off the same
-        # string would silently drop every point of an over-long uid.
-        points = [
-            DocumentFigurePoint(
-                figure_id=figure_ids[stored.uid],
-                point_index=_int(p.get("point_index")),
-                label=_text(p.get("label"))[:300],
-                series=_text(p.get("series"))[:300],
-                value=_float(p.get("value")),
-                is_estimated=_bool(p.get("value_estimated")),
-            )
-            for stored, source_row in zip(figure_rows, figures)
-            for p in points_by_figure.get(_text(source_row.get("figure_uid")), [])
-        ]
-        DocumentFigurePoint.objects.using("ngm").bulk_create(
-            points, batch_size=BULK_BATCH
-        )
-
-        # Touch the material's own updated_at. Its detail payload now carries the
-        # content summary, and its ETag — which is ALSO the If-Match token for a
-        # conditional PATCH — is derived from updated_at alone. Without this a
-        # re-ingest changes the body and not the validator, and every cache on the
-        # path serves the old counts indefinitely.
-        #
-        # .update(), not .save(): a save would fire the post_save search indexer
-        # for every document, and nothing in the search doc comes from the
-        # extraction, so that work would be pure cost. auto_now does not fire on
-        # .update(), hence the explicit timestamp.
-        Material.objects.using("ngm").filter(pk=iri).update(updated_at=timezone.now())
-
-        return {
-            "pages": len(pages),
-            "tables": len(tables),
-            "figures": len(figure_rows),
-            "points": len(points),
-        }
+        return store_document_content(iri, bundle)

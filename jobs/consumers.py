@@ -164,6 +164,50 @@ register(
 )
 
 
+# --- material_extract: a document's pages, tables and charts ------------------
+#
+# The structural sibling of material_convert: that one produces the flat text the
+# search indexer reads, this one produces the pages/tables/figures that
+# ``…/content`` serves. Unlike it, the work is NOT done by the DB-free HTTP
+# poller — the result is thousands of rows and can exceed a megabyte of
+# transcript, and DATA_UPLOAD_MAX_MEMORY_SIZE (2.5 MB) would reject exactly the
+# largest documents at the point of handing the work back. So this kind is run
+# in-process by ``manage.py extract_worker``, with ngm DB access, the way
+# court_scrape is; the queue still owns claims, leases, retries and dedup.
+#
+# No on_result for the same reason: the worker has already written the content
+# through materials.document_content by the time it finalizes, and job.result
+# carries counts.
+
+
+def _material_extract_build_payload(job) -> dict:
+    from materials.extract import build_extract_payload
+
+    return build_extract_payload(job)
+
+
+register(
+    KindSpec(
+        kind="material_extract",
+        # The lease has to cover the WHOLE extract stage, because that stage does
+        # not heartbeat: reading a document is one call into likhit's extractor
+        # and there is no page-by-page seam inside it to ping from. Measured worst
+        # case in the archive's largest shelf — the Auditor General's 63rd annual
+        # report, 79.7 MiB and 1,113 pages — is 575 s, so 1800 s is ~3x headroom.
+        # If a corpus ever appears that exceeds it, the symptom is two workers
+        # extracting one document after the reaper re-queues a job that is still
+        # running: wasteful, but not corrupting, since each writes the document
+        # wholesale in one transaction.
+        lease_seconds=1800,
+        # A fetch flake retries; an unreadable document raises NothingToExtract,
+        # which the worker reports as non-retryable, so the budget is only ever
+        # spent on transient failures.
+        max_attempts=2,
+        build_payload=_material_extract_build_payload,
+    )
+)
+
+
 # --- court_scrape: crawl a court's recent cause-lists into the ngm lake -------
 #
 # Unlike the DB-free review/material kinds, court_scrape WRITES via the courts
