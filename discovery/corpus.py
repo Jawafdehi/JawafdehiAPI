@@ -127,24 +127,50 @@ def _iter_materials() -> Iterator[Resource]:
 
 
 def _iter_courtcases() -> Iterator[Resource]:
-    """Every NGM court case (all public).
+    """The PUBLICLY VISIBLE NGM court cases — not the whole docket.
 
     The courtcase ``@id`` IRI (``/courtcase/<court>/<case_number>``) identifies
     the court-case ROW; its schema.org JSON-LD lives under the corresponding
     MATERIAL IRI (``/material/court/<court>.<case_number>``), served at
     ``/api/materials/court/<court>.<case_number>`` — used for describedby.
+
+    ⚠️ This enumerator used to filter on ``is_deleted`` alone, which published the
+    ENTIRE ~2.3M-row docket as sitemap/ResourceSync ``<loc>``s — including the
+    ~98.8% that ``court_case_public_visible`` withholds from search, protected
+    matters among them. Discovery is a public surface and must apply the same gate
+    the search index does; the module docstring's "public-only guarantee" was
+    false for this type until it did.
+
+    Gating also makes the surface servable: ungated, the courtcase sitemap spanned
+    46 child pages of 50k URLs and the deeper ones exceeded the origin timeout
+    (HTTP 524). The visible slice fits in one page.
     """
     from courts.models import CourtCase
+    from courts.search_visibility import (
+        court_case_public_visible,
+        published_referenced_iris,
+    )
     from materials.jsonld import court_case_material_iri
     from jawafdehi_shared.entities.ids import parse_material_iri
 
-    # Exclude soft-deleted rows (mirrors ``courts.views`` list/retrieve, which
-    # filter ``is_deleted=False``): a tombstoned court case must not linger as a
-    # live ``<loc>`` in the public sitemap / ResourceSync.
-    qs = CourtCase.objects.filter(is_deleted=False).values_list(
-        "court", "case_number", "updated_at"
+    # Refresh the publish-link cache once up front so this enumeration sees the
+    # current PUBLISHED references — mirroring reindex_courtcases, whose gating
+    # this now matches exactly.
+    published_referenced_iris(refresh=True)
+
+    # ``select_related("court")`` + full model instances (NOT ``values_list``):
+    # the predicate reads ``case_type``, ``plaintiff``/``defendant`` and the court
+    # forum off the row, so the columns must be loaded. They are columns the row
+    # already carries — no extra query per case.
+    qs = (
+        CourtCase.objects.select_related("court")
+        .filter(is_deleted=False)
+        .order_by("court_id", "case_number")
     )
-    for court, case_number, updated_at in qs.iterator():
+    for case in qs.iterator():
+        if not court_case_public_visible(case):
+            continue
+        court, case_number, updated_at = case.court_id, case.case_number, case.updated_at
         try:
             # Both the courtcase @id IRI and the describedby material IRI can
             # raise ValueError (e.g. MAX_IRI_LENGTH on a concatenated ident), so
@@ -236,14 +262,55 @@ def iter_resources(types: tuple[str, ...] | None = None) -> Iterator[Resource]:
         yield from enumerator()
 
 
+def _count_visible_courtcases() -> int:
+    """Count the publicly visible court cases — WITHOUT scanning the docket.
+
+    ``court_case_public_visible`` is a Python predicate (folded-Devanagari offence
+    matching, a 130k-key code map, a cross-DB published-reference set), so there
+    is no queryset that counts it. Streaming it here is not an option: this feeds
+    ``discovery.views._corpus_version()``, which runs on EVERY discovery request
+    to build the cache key — i.e. *before* the cache is consulted — so a 2.3M-row
+    scan here would run in-request on every hit. That is what already made the
+    deep courtcase sitemap pages time out (HTTP 524).
+
+    So count the ``ngm-courtcases`` index instead. It holds exactly
+    ``court_case_public_visible ∧ not is_deleted`` by construction —
+    ``reindex_courtcases`` streams that gate and the live ``index_or_evict``
+    signal evicts on a show→hide transition — so it is the same set this module's
+    enumerator yields, answerable in milliseconds.
+
+    ⚠️ Returns 0 when OpenSearch is unreachable, which drops court cases from the
+    sitemap index until it recovers. That is the deliberate failure direction: a
+    missing type is self-healing and leaks nothing, whereas falling back to the
+    raw DB count would advertise 46 child sitemaps that this enumerator can no
+    longer fill.
+
+    The durable fix is a materialized ``public_visible`` column on CourtCase,
+    which would make this a plain indexed DB count and let the REST list endpoint
+    be gated by filtering rather than by auth. That is a migration + a backfill
+    over 2.3M rows, deliberately not bundled into this security fix.
+    """
+    from jawafdehi_shared.search.opensearch import COURTCASE_INDEX, make_client
+
+    try:
+        return int(make_client().count(index=COURTCASE_INDEX)["count"])
+    except Exception:  # noqa: BLE001 — any transport failure must degrade, not 500.
+        logger.warning(
+            "discovery: courtcase visible-count unavailable (OpenSearch); "
+            "omitting court cases from the sitemap index this request",
+            exc_info=True,
+        )
+        return 0
+
+
 def count_resources(types: tuple[str, ...] | None = None) -> int:
     """Total count of public resources (used to decide sitemap-index paging).
 
-    Counts at the DB level per type (cheap; no row materialization).
+    Counts at the DB level per type (cheap; no row materialization), EXCEPT court
+    cases — see :func:`_count_visible_courtcases`.
     """
     from cases.models import Case, CaseState
     from entities.models import StoredEntity
-    from courts.models import CourtCase
     from materials.models import Material, Visibility
 
     counters: dict[str, Callable[[], int]] = {
@@ -254,8 +321,8 @@ def count_resources(types: tuple[str, ...] | None = None) -> int:
         TYPE_MATERIAL: lambda: Material.objects.filter(
             is_deleted=False, visibility=Visibility.LISTED
         ).count(),
-        # Match _iter_courtcases: soft-deleted court cases are not public.
-        TYPE_COURTCASE: lambda: CourtCase.objects.filter(is_deleted=False).count(),
+        # Match _iter_courtcases: only PUBLICLY VISIBLE court cases are public.
+        TYPE_COURTCASE: _count_visible_courtcases,
         TYPE_CASE: lambda: Case.objects.filter(state=CaseState.PUBLISHED).count(),
     }
     total = 0
