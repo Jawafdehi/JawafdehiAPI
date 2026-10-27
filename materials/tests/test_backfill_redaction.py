@@ -18,8 +18,8 @@ from unittest import mock
 from django.core.management import CommandError, call_command
 from django.test import TestCase
 
+from materials import redaction
 from materials.jsonld import MATERIAL_CONTEXT
-from materials.management.commands import backfill_redaction
 from materials.models import Material
 
 CITIZENSHIP_VALUE = "१२-०१-७५-०४५६७"
@@ -171,20 +171,50 @@ class GateTests(TestCase):
     def test_the_gate_knows_every_class_the_scanner_reports(self):
         """An unknown class is an ungated one, so upstream adding one must fail here.
 
-        ``_introduced_at`` records which tier first removes each class. If likhit
-        starts reporting a class this table does not know, the gate would silently
+        ``_removal_tiers`` records which tier first removes each class. If likhit
+        starts reporting a class that table does not know, the gate would silently
         stop checking it — the one failure mode a gate must not have.
         """
         from likhit.privacy import scan_text
 
         detections, _names = scan_text(f"{WITH_CITIZENSHIP} {WITH_MOBILE}")
         unknown = (
-            set(detections)
-            - set(backfill_redaction._introduced_at())
-            - backfill_redaction.NOT_REMOVED
+            set(detections) - set(redaction._removal_tiers()) - redaction.NOT_REMOVED
         )
 
         self.assertEqual(unknown, set(), f"likhit reports ungated class(es): {unknown}")
+
+    def test_nothing_exempt_from_the_gate_is_ever_actually_removed(self):
+        """The test above passes if a REMOVABLE class is wrongly listed as exempt.
+
+        That is not hypothetical — it is the defect the first corpus run found.
+        ``phone_labelled`` was read as a shape diagnostic and exempted, and the
+        coverage test above was satisfied *by the exemption*. likhit removes it:
+        an English-labelled phone number is journalled under that kind, 193 times
+        in one charge-sheet sweep, so residual ones were going ungated.
+
+        So assert the exemption from the other side: anything we refuse to gate on
+        must be something the redactor never takes out.
+        """
+        from likhit.privacy import RedactionMode
+        from likhit.privacy import redact_text as likhit_redact
+
+        probe = (
+            f"{WITH_CITIZENSHIP} {WITH_MOBILE} Phone No.: 014234567 "
+            "इमेल: ram@example.com.np खाता नं. ०१२३४५६७८९०१२३ "
+            "स्थायी लेखा नम्बर (PAN): ६०१२३४५६७"
+        )
+        removed = {
+            row["kind"]
+            for row in likhit_redact(probe, mode=RedactionMode.STRICT).journal
+        }
+
+        wrongly_exempt = removed & redaction.NOT_REMOVED
+        self.assertEqual(
+            wrongly_exempt,
+            set(),
+            f"the gate exempts {wrongly_exempt}, which the redactor does remove",
+        )
 
 
 class SelectionTests(TestCase):
@@ -212,3 +242,36 @@ class SelectionTests(TestCase):
         self.assertEqual(other.data["text"], WITH_CITIZENSHIP)
         named.refresh_from_db()
         self.assertNotIn(CITIZENSHIP_VALUE, named.data["text"])
+
+
+class WithheldVisibilityTests(TestCase):
+    """A withheld transcript must be countable, or the gate is a silent drop.
+
+    It is deliberately not announced in the public payload — see
+    ``redaction.withheld_by_the_write_path`` for why that would be a map to
+    unredacted data while the original PDFs are still served. So the operator
+    signal has to be exact, and it is: an original kept outside ``data`` while
+    ``data`` serves no text is a combination nothing else produces.
+    """
+
+    databases = "__all__"
+
+    def test_a_withheld_row_is_counted_and_a_normal_one_is_not(self):
+        withheld = _material("withheld", WITH_CITIZENSHIP, source_text='"original"')
+        withheld.data.pop("text")
+        withheld.save()
+        _material("ordinary", WITH_CITIZENSHIP)
+        _material("redacted-normally", "कुनै पाठ", source_text='"original"')
+
+        found = list(redaction.withheld_by_the_write_path())
+
+        self.assertEqual([m.iri for m in found], [withheld.iri])
+
+    def test_the_count_is_reported_even_when_nothing_else_is(self):
+        withheld = _material("withheld2", WITH_CITIZENSHIP, source_text='"original"')
+        withheld.data.pop("text")
+        withheld.save()
+
+        output = _run()
+
+        self.assertIn("1 document(s) are carrying a withheld transcript", output)

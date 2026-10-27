@@ -295,10 +295,28 @@ def _redact(iri: str, text: str) -> tuple[str | None, dict]:
     redacted copy) instead of being labelled redacted on the strength of a
     failure.
     """
-    from .redaction import redact_text
+    from .redaction import redact_text, residual_classes
 
     try:
         redacted, counts = redact_text(text)
+        # Running the redactor is not the same as having removed everything.
+        # likhit's detector is wider than its removers, so a labelled value whose
+        # shape no rule anchors is found and left: 67 of 883 charge sheets came
+        # back that way on the first corpus sweep. The gate lives at the ingest
+        # boundary for every other writer, and THIS path does not cross it — it
+        # writes the row directly — so it has to ask here or not at all.
+        #
+        # Treated as "could not redact" rather than as a new outcome, because the
+        # caller's branch for that is already exactly right: publish neither the
+        # redacted file nor the text field, log it, and let a re-upload retry.
+        residual = residual_classes(redacted)
+        if residual:
+            logger.error(
+                "material_convert %s: redaction left %s in the transcript",
+                iri,
+                dict(sorted(residual.items())),
+            )
+            return None, {}
     except Exception as exc:  # noqa: BLE001 - ANY failure means do not publish
         # Not just RedactionUnavailable. These are regexes over transcripts
         # averaging ~56,000 characters, so a re.error, a TypeError or a bug in

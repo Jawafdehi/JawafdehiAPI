@@ -163,7 +163,101 @@ def _redact_value(value: Any) -> tuple[Any, Counter, bool]:
     return value, Counter(), False
 
 
-def redact_jsonld(jsonld: dict) -> tuple[dict, str, Counter]:
+class RedactionIncomplete(RuntimeError):
+    """The redactor ran, and its own scanner still finds what it should have taken.
+
+    Not a crash and not a near-miss: likhit's detector is wider than its removers,
+    so a labelled value whose shape no rule anchors is *found and left*. Measured
+    on the live charge-sheet shelf, 67 of 883 documents came back this way —
+    mostly bank accounts, with some dates of birth and citizenship numbers.
+
+    It carries counts per class and never a value, so it is safe to log.
+    """
+
+    def __init__(self, residual: Counter):
+        self.residual = residual
+        super().__init__(
+            "redaction left personal data in the text: "
+            f"{dict(sorted(residual.items()))}"
+        )
+
+
+#: Which tier first removes each class likhit's scanner reports.
+#:
+#: Only the tier BOUNDARY lives here; whether the configured tier reaches it is
+#: asked of likhit (``mode.removes(minimum)``) rather than re-decided, so
+#: widening a tier upstream needs no edit here.
+#:
+#: ``phone_labelled`` is in this table and NOT exempt, which it was until the
+#: first corpus run proved otherwise: an English-labelled phone number
+#: (``Phone No.: 014234567``) is removed and journalled under that kind, 193
+#: times in a single charge-sheet sweep. Reading it as a diagnostic left residual
+#: English-labelled phone numbers ungated — on exactly the documents where the
+#: details were written in English.
+def _removal_tiers() -> dict:
+    from likhit.privacy import RedactionMode
+
+    return {
+        "citizenship": RedactionMode.IDENTIFIERS,
+        "date_of_birth": RedactionMode.IDENTIFIERS,
+        "mobile": RedactionMode.CONTACT,
+        "landline": RedactionMode.CONTACT,
+        "phone_labelled": RedactionMode.CONTACT,
+        "email": RedactionMode.CONTACT,
+        "bank_account": RedactionMode.STRICT,
+        "passport": RedactionMode.STRICT,
+    }
+
+
+#: Scanner keys no tier removes, and that therefore must never gate a write. A
+#: permanent account number identifies a *business*, is public by design, and is
+#: often the only handle tying a procurement finding to a registered contractor.
+NOT_REMOVED = frozenset({"pan"})
+
+
+def gated_classes() -> set:
+    """Classes the configured tier is expected to have zeroed out."""
+    _redact, mode = _redactor()
+    return {
+        kind
+        for kind, minimum in _removal_tiers().items()
+        if kind not in NOT_REMOVED and mode.removes(minimum)
+    }
+
+
+def residual_classes(value: Any) -> Counter:
+    """What the scanner still finds in already-redacted text, by class.
+
+    This is the check likhit's own ``redact_tree`` makes and its single-call
+    ``redact_text`` does not — which is why it has to live here, at the boundary
+    every writer crosses, rather than in whichever caller remembered.
+    """
+    from likhit.privacy import scan_text
+
+    gated = gated_classes()
+    found: Counter = Counter()
+    for chunk in _text_chunks(value):
+        detections, _name_signals = scan_text(chunk)
+        for kind, count in detections.items():
+            if count and kind in gated:
+                found[kind] += count
+    return found
+
+
+def _text_chunks(value: Any):
+    """Every non-empty string in a ``text`` value, whatever shape it arrived in."""
+    if isinstance(value, str):
+        if value.strip():
+            yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            if isinstance(item, str) and item.strip():
+                yield item
+
+
+def redact_jsonld(
+    jsonld: dict, *, on_residue: str = "withhold"
+) -> tuple[dict, str, Counter]:
     """``(document with redacted text, the text as it arrived, counts)``.
 
     **The one place a document's text is redacted**, called from the single
@@ -177,14 +271,78 @@ def redact_jsonld(jsonld: dict) -> tuple[dict, str, Counter]:
     Returns the original text ONLY when redaction changed something. For the
     overwhelming majority of the archive the two are identical, and keeping a
     second copy of bytes that answer no question is cost without a reader.
+
+    **The result is re-scanned before it is handed back**, because running the
+    redactor is not the same as having removed everything: on the live
+    charge-sheet shelf, 67 of 883 documents came back still carrying a class this
+    tier removes. ``on_residue`` says what to do about it, and the two callers
+    want opposite things:
+
+    * ``"withhold"`` (the write path) — drop ``text`` from the document entirely.
+      The material, its metadata and its PDF link still land, so the archive
+      keeps the record and the reader keeps the citation; what does not land is
+      an unsafe transcript in the field the search indexer reads. The text as it
+      arrived still goes to ``source_text``, behind ``materials.view_unredacted``,
+      so nothing is lost — it is unpublished, not destroyed.
+    * ``"raise"`` (the backfill) — refuse, so the sweep leaves an already-public
+      row exactly as it was and reports it. Removing a transcript the archive has
+      been serving is a decision for a human looking at a list, not a side effect
+      of a sweep.
+
+    Unattended writes fail closed; a supervised sweep stops and asks.
     """
+    if on_residue not in ("withhold", "raise"):
+        # Not a fallback. Every unrecognised value would behave as "withhold",
+        # so a typo in the one caller that wants to be TOLD about residue would
+        # silently turn its refusal into a quiet drop.
+        raise ValueError(
+            f"on_residue must be 'withhold' or 'raise', not {on_residue!r}"
+        )
     text = (jsonld or {}).get(TEXT_KEY)
     if text is None:
         return jsonld, "", Counter()
     redacted, counts, changed = _redact_value(text)
+
+    residual = residual_classes(redacted)
+    if residual:
+        if on_residue == "raise":
+            raise RedactionIncomplete(residual)
+        logger.error(
+            "redaction incomplete for %s: %s — text withheld from the document",
+            (jsonld or {}).get("@id"),
+            dict(sorted(residual.items())),
+        )
+        withheld = {k: v for k, v in jsonld.items() if k != TEXT_KEY}
+        return withheld, json.dumps(text, ensure_ascii=False), counts
+
     if not changed:
         return jsonld, "", counts
     return {**jsonld, TEXT_KEY: redacted}, json.dumps(text, ensure_ascii=False), counts
+
+
+def withheld_by_the_write_path():
+    """Rows whose transcript the gate withheld — holds an original, serves no text.
+
+    Withholding is deliberately **not** announced in the public payload. The
+    obvious honest move — a marker saying "we are not showing you this
+    transcript, it had three bank accounts in it" — is a map to unredacted
+    personal data for as long as the original PDF stays publicly fetchable, which
+    is exactly the state the archive is in until the PDF half of this work lands.
+    A reader gains a label; anyone harvesting gains a shortlist.
+
+    So the signal is kept where operators are: an ERROR log at the moment it
+    happens, and this query afterwards. It needs no new column, because the state
+    is already exact — an original kept outside ``data`` while ``data`` serves no
+    text is a combination nothing else produces.
+    """
+    from materials.models import Material
+
+    return (
+        Material.objects.using("ngm")
+        .filter(is_deleted=False)
+        .exclude(source_text="")
+        .exclude(data__has_key=TEXT_KEY)
+    )
 
 
 def original_text(source_text: str) -> Any:

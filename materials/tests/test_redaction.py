@@ -13,14 +13,16 @@ decode.
 from __future__ import annotations
 
 from collections import Counter
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from django.test import override_settings
 
 from materials.redaction import (
     REDACTED_SUFFIX,
+    RedactionIncomplete,
     RedactionUnavailable,
     redact_bundle,
+    redact_jsonld,
     redact_text,
 )
 from materials.extraction.bundle import ContentBundle, PageRecord, TableRecord
@@ -309,3 +311,72 @@ class RedactionVersusFidelityTests(TestCase):
         # published as a failed decode.
         self.assertEqual(_fidelity(annex, self._Analysis()), "repaired")
         self.assertEqual(_fidelity(redacted, self._Analysis()), "suspect")
+
+
+class ResidualGateTests(TestCase):
+    """Running the redactor is not the same as having removed everything.
+
+    likhit's detector is wider than its removers, so a labelled value whose shape
+    no rule anchors is found and left. Measured on the live charge-sheet shelf,
+    67 of 883 documents came back that way — and until this gate existed, every
+    one of them was stored and indexed as redacted with the data still in it.
+
+    The check is the one likhit's own ``redact_tree`` makes and its single-call
+    ``redact_text`` does not, which is why it lives at the boundary every writer
+    crosses rather than in whichever caller remembered.
+    """
+
+    SURVIVOR = Counter({"bank_account": 1})
+
+    def _doc(self, text):
+        return {"@id": "https://jawafdehi.org/material/probe/gate", "text": text}
+
+    def test_a_clean_document_passes_through_with_its_text(self):
+        doc, original, _counts = redact_jsonld(self._doc("नागरिकता नं. १२-०१-७५-०४५६७"))
+
+        self.assertIn("[REDACTED:CITIZENSHIP-NO]", doc["text"])
+        self.assertTrue(original)
+
+    def test_residue_withholds_the_text_rather_than_publishing_it(self):
+        """The write path's half: unattended, so it must not stop the ingest.
+
+        The document still lands — its metadata, its PDF link, its place in the
+        archive. What does not land is an unsafe transcript in the field the
+        search indexer reads.
+        """
+        with mock.patch(
+            "likhit.privacy.scan_text", return_value=(self.SURVIVOR, Counter())
+        ):
+            doc, original, _counts = redact_jsonld(self._doc("कुनै पाठ"))
+
+        self.assertNotIn("text", doc)
+        self.assertEqual(doc["@id"], "https://jawafdehi.org/material/probe/gate")
+        # Unpublished, not destroyed: the original still goes to source_text,
+        # which is behind materials.view_unredacted.
+        self.assertIn("कुनै पाठ", original)
+
+    def test_residue_raises_for_a_caller_that_asked_to_be_told(self):
+        """The sweep's half: a public row's transcript is a human's call."""
+        with mock.patch(
+            "likhit.privacy.scan_text", return_value=(self.SURVIVOR, Counter())
+        ):
+            with self.assertRaises(RedactionIncomplete) as caught:
+                redact_jsonld(self._doc("कुनै पाठ"), on_residue="raise")
+
+        self.assertEqual(caught.exception.residual["bank_account"], 1)
+        # Counts, never values — this gets logged.
+        self.assertNotIn("कुनै पाठ", str(caught.exception))
+
+    def test_a_pan_does_not_withhold_anything(self):
+        """The exemption has to hold at the gate, or PAN becomes un-publishable.
+
+        No tier removes a PAN, so one left in the text is the system working. If
+        the gate counted it, every procurement document carrying a contractor's
+        registration would lose its transcript.
+        """
+        doc, _original, _counts = redact_jsonld(
+            self._doc("स्थायी लेखा नम्बर (PAN): ६०१२३४५६७")
+        )
+
+        self.assertIn("text", doc)
+        self.assertIn("६०१२३४५६७", doc["text"])
