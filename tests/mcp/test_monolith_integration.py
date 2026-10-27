@@ -213,7 +213,16 @@ async def test_composite_asgi_serves_django_and_mcp(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_roleless_bearer_gets_catalog_but_django_rejects_write(monkeypatch):
+async def test_catalog_access_is_not_authorization(monkeypatch):
+    """The MCP catalog is a filter; Django is the boundary. Prove they differ.
+
+    The caller holds the Zitadel content role, so the MCP gate offers the write
+    tool and lets the call through — and the Django user behind the same bearer
+    is in no group, so the write is still refused with a 403. That gap is real:
+    the role-to-Group sync can fail, or a group can be revoked mid-token. If
+    this ever returns success, the catalog has quietly become the only gate.
+    """
+
     class EmptyGroups:
         def values_list(self, *args, **kwargs):
             return []
@@ -233,7 +242,8 @@ async def test_roleless_bearer_gets_catalog_but_django_rejects_write(monkeypatch
 
     async def resolve_identity(token):
         assert token == "verified-token"
-        return {"sub": "roleless", "roles": []}
+        # Content role at the IdP, no Group in Django — deliberately mismatched.
+        return {"sub": "roleless", "roles": ["caseworker"]}
 
     monkeypatch.setenv("JAWAFDEHI_API_BASE_URL", "http://testserver")
     monkeypatch.setenv("OIDC_RESOURCE", "https://api.example/mcp")

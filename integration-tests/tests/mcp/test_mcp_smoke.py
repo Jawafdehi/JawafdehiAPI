@@ -22,6 +22,22 @@ ANONYMOUS_TOOL_CATALOG = {
     "browse_court_data",
     "convert_date",
 }
+# Spelled out rather than imported: this suite talks to a deployed container over
+# HTTP and must be able to contradict the code, not restate it.
+CASEWORKER_TOOL_CATALOG = {
+    "create_jawafdehi_case",
+    "patch_jawafdehi_case",
+    "delete_jawafdehi_case",
+    "submit_nes_change",
+    "delete_nes_entity",
+    "upload_material_file",
+    "manage_material",
+    "manage_court_data",
+    "manage_case_update_proposals",
+    "manage_casework_reviews",
+    "manage_jobs",
+    "ngm_extract_case_data",
+}
 FULL_TOOL_CATALOG = {
     # Document reading — authenticated only, so these are deliberately absent
     # from ANONYMOUS_TOOL_CATALOG above.
@@ -137,7 +153,12 @@ def test_mcp_health_and_protocol(clients):
 
 @pytest.mark.live
 @pytest.mark.smoke
-def test_authenticated_mcp_catalog_and_forwarded_authorization(clients):
+def test_signed_in_without_the_content_role_gets_reads_only(clients):
+    """The E2E bearer is deliberately a no-group, scope-only principal.
+
+    So it exercises exactly the case most staff will be in: signed in, no
+    Caseworker role. It must see every read tool and no write tool.
+    """
     client = clients["platform"]
     headers = {
         **MCP_HEADERS,
@@ -151,7 +172,8 @@ def test_authenticated_mcp_catalog_and_forwarded_authorization(clients):
     )
     assert listed.status_code == 200, listed.text
     tool_names = {tool["name"] for tool in listed.json()["result"]["tools"]}
-    assert tool_names == FULL_TOOL_CATALOG
+    assert tool_names == FULL_TOOL_CATALOG - CASEWORKER_TOOL_CATALOG
+    assert "search_jawafdehi_cases" in tool_names
 
     query = client.post(
         "/mcp",
@@ -176,6 +198,8 @@ def test_authenticated_mcp_catalog_and_forwarded_authorization(clients):
     assert query_result["success"] is True, query_result
     assert query_result["data"]["row_count"] == 1
 
+    # Naming a tool that was never offered must still be refused — a client can
+    # hold a catalog cached from before a role changed.
     denied_write = client.post(
         "/mcp",
         headers=headers,
@@ -193,9 +217,8 @@ def test_authenticated_mcp_catalog_and_forwarded_authorization(clients):
         },
     )
     assert denied_write.status_code == 200, denied_write.text
-    assert denied_write.json()["result"]["isError"] is True
-    write_result = json.loads(
-        denied_write.json()["result"]["content"][0]["text"]
-    )
-    assert write_result["success"] is False
-    assert write_result["status_code"] == 401
+    payload = denied_write.json()
+    # Refused by the catalog gate before the tool runs, so this is a JSON-RPC
+    # error rather than a tool result carrying an API status code.
+    message = json.dumps(payload)
+    assert "Caseworker role" in message, message
