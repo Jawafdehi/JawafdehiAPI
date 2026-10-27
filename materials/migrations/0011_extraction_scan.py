@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('materials', '0009_view_unredacted_permission'),
+        ('materials', '0010_source_text'),
     ]
 
     operations = [
