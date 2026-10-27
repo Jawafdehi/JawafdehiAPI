@@ -29,11 +29,19 @@ corpus. That is the whole reason this is safe to run before the PDF half exists.
   (``redaction.redact_bundle``); sweeping them belongs with the extraction
   pipeline that writes them, not here.
 
+**The gate itself is not here** — it is ``redaction.redact_jsonld``, so the write
+path is held to it too. What this command chooses is only what to do when a
+document fails it: ``on_residue="raise"``, which leaves an already-public row
+exactly as it was and reports the IRI. The write path withholds the text instead,
+because nobody is watching an ingest, while removing a transcript the archive has
+been serving is a decision for a human reading a list.
+
 **Exit codes mirror likhit's**, because a partial run must not read as a complete
 one: ``0`` every document clean, ``1`` ran with skips, ``2`` at least one document
 refused. A refusal is a document whose redacted text still scans positive for a
 class the tier is supposed to remove — it is reported and left exactly as it was,
-never written half-redacted.
+never written half-redacted. On the first corpus run that was **67 of 883**
+charge sheets, almost all of them bank accounts.
 """
 
 from __future__ import annotations
@@ -47,42 +55,14 @@ from django.db import transaction
 from materials.models import Material
 from materials.redaction import (
     TEXT_KEY,
+    RedactionIncomplete,
     RedactionUnavailable,
+    gated_classes,
     redact_jsonld,
     redaction_summary,
+    withheld_by_the_write_path,
 )
 
-
-#: Which tier first removes each class the scanner reports. Only the tier
-#: BOUNDARY is recorded here; whether the configured tier reaches it is asked of
-#: likhit (``mode.removes(minimum)``) rather than re-decided here, so widening a
-#: tier upstream does not need an edit in this file.
-#:
-#: ``test_gate_covers_every_scanned_class`` fails if likhit starts reporting a
-#: class this table does not know, because an unknown class is silently ungated —
-#: which is the one failure mode a gate must not have.
-def _introduced_at() -> dict:
-    from likhit.privacy import RedactionMode
-
-    return {
-        "citizenship": RedactionMode.IDENTIFIERS,
-        "date_of_birth": RedactionMode.IDENTIFIERS,
-        "mobile": RedactionMode.CONTACT,
-        "landline": RedactionMode.CONTACT,
-        "email": RedactionMode.CONTACT,
-        "bank_account": RedactionMode.STRICT,
-        "passport": RedactionMode.STRICT,
-    }
-
-
-#: Scanner keys that no tier removes, and that therefore must never gate a write.
-#:
-#: ``pan`` is policy: a permanent account number identifies a *business*, is
-#: public by design, and is frequently the only handle tying a procurement
-#: finding to a registered contractor. ``phone_labelled`` is a shape diagnostic —
-#: it counts labels, not values, and a label is what we deliberately leave behind
-#: so a reader can see that something was removed.
-NOT_REMOVED = frozenset({"pan", "phone_labelled"})
 
 #: Sensitivity order for chunking, highest first. The September corpus scan put
 #: the personal data in charge sheets and court orders by a wide margin, and the
@@ -134,7 +114,7 @@ class Command(BaseCommand):
             raise CommandError("--limit must be at least 1.")
 
         mode = self._check_redactor()
-        gated = self._gated_classes(mode)
+        gated = gated_classes()
         self.stdout.write(
             f"tier={mode.value}  gate={','.join(sorted(gated)) or '(none)'}  "
             f"{'APPLYING' if apply_writes else 'dry run — nothing will be written'}"
@@ -151,7 +131,7 @@ class Command(BaseCommand):
                 if limit is not None and looked_at >= limit:
                     break
                 looked_at += 1
-                outcome, removed = self._one(material, gated, apply_writes)
+                outcome, removed = self._one(material, apply_writes)
                 counts[outcome] += 1
                 totals.update(removed)
                 if outcome == "refused":
@@ -181,7 +161,7 @@ class Command(BaseCommand):
 
     # -- the work ---------------------------------------------------------
 
-    def _one(self, material: Material, gated: set, apply_writes: bool):
+    def _one(self, material: Material, apply_writes: bool):
         """Redact one document. Returns ``(outcome, removed counts)``.
 
         The order here is the whole safety argument: redact into memory, GATE the
@@ -190,9 +170,22 @@ class Command(BaseCommand):
         survives only because ``source_text`` was written beside it. A crash
         between those two writes loses a transcript that cost an OCR run and is
         not reproducible byte-for-byte.
+
+        ``on_residue="raise"`` is what makes this a *sweep* rather than the write
+        path: the write path withholds the text and carries on, because nobody is
+        watching an ingest. Here a row is already public, so removing its
+        transcript is a decision for a human reading a list of IRIs.
         """
         try:
-            redacted_data, original_text, removed = redact_jsonld(material.data)
+            redacted_data, original_text, removed = redact_jsonld(
+                material.data, on_residue="raise"
+            )
+        except RedactionIncomplete as exc:
+            self.stderr.write(
+                f"  REFUSED {material.iri}: residual "
+                f"{dict(sorted(exc.residual.items()))}"
+            )
+            return "refused", Counter()
         except RedactionUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad document must not end the run
@@ -205,13 +198,6 @@ class Command(BaseCommand):
             # covers the already-redacted rows too, which is what makes re-running
             # this command a no-op rather than a second pass over its own output.
             return "clean", removed
-
-        residual = self._residual(redacted_data.get(TEXT_KEY), gated)
-        if residual:
-            self.stderr.write(
-                f"  REFUSED {material.iri}: residual {dict(sorted(residual.items()))}"
-            )
-            return "refused", Counter()
 
         if not apply_writes:
             return "would_redact", removed
@@ -246,23 +232,6 @@ class Command(BaseCommand):
             # command exists to close.
             fresh.save(using="ngm", update_fields=["data", "source_text"])
         return outcome, removed
-
-    def _residual(self, text_value, gated: set) -> Counter:
-        """Classes the tier should have removed that the scanner still sees.
-
-        This is the plan's staged gate. It runs on the redacted text BEFORE
-        anything is written, so a document whose redaction came out incomplete is
-        left exactly as it was rather than published as redacted.
-        """
-        from likhit.privacy import scan_text
-
-        found: Counter = Counter()
-        for chunk in _strings(text_value):
-            detections, _name_signals = scan_text(chunk)
-            for kind, count in detections.items():
-                if count and kind in gated:
-                    found[kind] += count
-        return found
 
     # -- selection --------------------------------------------------------
 
@@ -315,14 +284,6 @@ class Command(BaseCommand):
             raise CommandError("MATERIALS_REDACTION_MODE=none redacts nothing.", 2)
         return mode
 
-    def _gated_classes(self, mode) -> set:
-        """Scanner keys this tier is expected to zero out."""
-        return {
-            kind
-            for kind, minimum in _introduced_at().items()
-            if kind not in NOT_REMOVED and mode.removes(minimum)
-        }
-
     def _report(self, per_type, totals, refused, apply_writes, looked_at) -> None:
         self.stdout.write("")
         for material_type, counts in per_type.items():
@@ -341,6 +302,14 @@ class Command(BaseCommand):
             )
         elif apply_writes:
             self.stdout.write(self.style.SUCCESS("every document passed the gate"))
+        withheld = withheld_by_the_write_path().count()
+        if withheld:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"{withheld} document(s) are carrying a withheld transcript "
+                    "(the write path gated them); none of them are in the counts above"
+                )
+            )
 
     def _write_report(
         self, path, per_type, totals, refused, mode, apply_writes
@@ -358,14 +327,3 @@ class Command(BaseCommand):
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         self.stdout.write(f"report written to {path}")
-
-
-def _strings(value):
-    """Every string in a ``text`` value, whatever shape it arrived in."""
-    if isinstance(value, str):
-        if value.strip():
-            yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            if isinstance(item, str) and item.strip():
-                yield item

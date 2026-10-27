@@ -421,3 +421,40 @@ def test_the_transcript_does_not_stay_in_the_jobs_table():
     assert stored["source_url"] == "https://a/raw.pdf"
     assert len(stored["text_sha256"]) == 64
     assert stored["text_chars"] == len("नागरिकता नं. १२-०१-७५-०४५६७")
+
+
+# -- the convert path's own residual gate ------------------------------------
+#
+# ``apply_convert_result`` sets ``data["text"]`` and saves the row directly — it
+# does NOT go through ``upsert_single_source_material``, which is where every
+# other writer is gated. Without a check of its own it is the one remaining path
+# that can publish a transcript the redactor did not finish.
+
+
+def test_convert_does_not_store_a_transcript_with_residue():
+    from collections import Counter
+
+    from materials.conversion import _redact
+
+    with patch(
+        "likhit.privacy.scan_text",
+        return_value=(Counter({"bank_account": 1}), Counter()),
+    ):
+        redacted, counts = _redact("https://jawafdehi.org/material/probe/x", "कुनै पाठ")
+
+    # None is the caller's "do not publish" signal, the same one an unavailable
+    # redactor produces — not an empty string, which would store a blank
+    # transcript and look like a document that simply has no text.
+    assert redacted is None
+    assert counts == {}
+
+
+def test_convert_still_returns_a_clean_transcript():
+    from materials.conversion import _redact
+
+    redacted, _counts = _redact(
+        "https://jawafdehi.org/material/probe/y", "नागरिकता नं. १२-०१-७५-०४५६७"
+    )
+
+    assert redacted is not None
+    assert "[REDACTED:CITIZENSHIP-NO]" in redacted
