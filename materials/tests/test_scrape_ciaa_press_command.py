@@ -9,7 +9,10 @@ and stop after N consecutive 302s. The server-side upsert is exercised elsewhere
 
 from unittest.mock import patch
 
+import pytest
+
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import SimpleTestCase
 
 from materials.management.commands import scrape_ciaa_press_releases as C
@@ -115,11 +118,48 @@ class CiaaCommandTests(SimpleTestCase):
 
     def test_stops_after_consecutive_transient_no_infinite_loop(self):
         # Every fetch is a transient (status None) — this never yields a 302 to
-        # trip the missing-stop, so the transient bound must halt the run.
+        # trip the missing-stop, so the transient bound must halt the run. It
+        # also now FAILS the run: see the outage tests below.
         src = _FakeSource(pages={}, default=(None, ""))
         mat = _FakeMaterial()
-        self._run(src, mat, "--write", "--max-consecutive-transient", "3")
+        with pytest.raises(CommandError):
+            self._run(src, mat, "--write", "--max-consecutive-transient", "3")
         assert mat.puts == []
+
+    def test_an_unreachable_source_fails_the_run(self):
+        """A cron that fetched nothing because the site is down must go red.
+
+        ciaa.gov.np was unreachable from at least 25 to 27 October 2026 and all
+        three nightly Jobs reported success, because exiting 0 is what "scanned
+        the id range, ingested nothing" looked like. The Job's own status could
+        not tell that from a quiet day.
+        """
+        src = _FakeSource(pages={}, default=(None, ""))
+        mat = _FakeMaterial()
+
+        with pytest.raises(CommandError) as caught:
+            self._run(src, mat, "--write", "--max-consecutive-transient", "3")
+
+        assert "unreachable" in str(caught.value)
+
+    def test_allow_source_down_keeps_a_probe_run_green(self):
+        src = _FakeSource(pages={}, default=(None, ""))
+        mat = _FakeMaterial()
+
+        # No raise: an operator probing by hand asked for the no-op.
+        self._run(
+            src, mat, "--write", "--max-consecutive-transient", "3",
+            "--allow-source-down",
+        )
+
+    def test_a_partial_outage_after_real_work_does_not_fail(self):
+        """Half a shelf is still work; failing the Job would hide it behind a red."""
+        src = _FakeSource(pages={1: (200, _PAGE_HTML)}, default=(None, ""))
+        mat = _FakeMaterial()
+
+        self._run(src, mat, "--write", "--max-consecutive-transient", "3")
+
+        assert [p[0] for p in mat.puts] == ["1"]
 
     def test_limit_caps_new_ingests(self):
         src = _FakeSource(pages={1: (200, _PAGE_HTML), 2: (200, _PAGE_HTML), 3: (200, _PAGE_HTML)})
