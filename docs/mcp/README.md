@@ -42,33 +42,47 @@ The embedded server reads the platform's `OIDC_ISSUER`, `OIDC_AUDIENCE`, and
 derived JWKS/userinfo settings. JWKS network fetches use the shared
 `OIDC_JWKS_TIMEOUT` bound.
 
-One rule decides the catalog:
+**Every tool over HTTP requires a verified bearer.** A request without one is
+answered `401` with a `WWW-Authenticate` challenge naming the metadata document:
 
 | Caller | Catalog |
 |---|---|
-| Anonymous (no bearer) | the read-only `ANONYMOUS_TOOL_NAMES` set (13 tools) |
+| No bearer | none — `401` + `WWW-Authenticate` |
+| Malformed or invalid bearer | none — `401`, with `error="invalid_request"` / `error="invalid_token"` |
 | Any verified bearer, **any role including none** | all 26 tools |
 | stdio with `JAWAFDEHI_API_TOKEN` | all 26 (the service token is authentication) |
 
-An anonymous request is **not** challenged, because every anonymous tool wraps a
-REST route that is already `AllowAny` — `/api/entities`, `/api/search/`,
-`/api/materials/`, `/api/courts/`. Serving those through MCP grants nothing the
-API does not already serve without a token. A bearer that is *present but
-invalid* is still rejected with `401` and a `WWW-Authenticate` challenge; that is
-a broken caller, not an anonymous one.
+The challenge is not only a refusal, it is the trigger: **MCP clients begin an
+OAuth flow only on a `401`**. While this server answered unauthenticated callers
+with a catalog, no client was ever prompted to log in, and a user had no way to
+notice they were anonymous short of calling `get_current_user`. That is the
+behaviour this replaces.
 
-Two consequences of not challenging anonymous callers:
+A caller that sent no credential gets a bare `Bearer realm="OAuth"` challenge
+with no error code (RFC 6750 §3.1 reserves those for a credential that was
+supplied and failed), so a client can tell "you are not logged in" from "your
+Authorization header is malformed" and only walk the OAuth flow for the first.
 
-- MCP clients begin an OAuth flow only on a `401`, so an anonymous client is
-  never prompted to log in — it simply sees the smaller catalog.
-  `get_current_user` is how a caller tells which side it is on, and
-  `GET /.well-known/oauth-protected-resource/mcp` is how it discovers where to
-  authenticate. That metadata document is therefore always served, and
-  `OIDC_RESOURCE` is **required** — the endpoint returns `503` without it.
-- `convert_to_markdown` is excluded from the anonymous set. It is one of the few
-  tools with no `/api/` route behind it, so the catalog is its only gate — and
-  that gate is enforced on `tools/call`, not merely on `tools/list`. It needs
-  authentication but no particular role.
+Two endpoints stay open, both by necessity: `GET /mcp/health` (a kubelet probe)
+and `GET /.well-known/oauth-protected-resource/mcp`, which is where a challenged
+client learns *where* to authenticate. `OIDC_RESOURCE` is therefore **required** —
+the metadata endpoint returns `503` without it, and the challenge loses the
+`resource_metadata` pointer to it.
+
+### Reopening anonymous access
+
+`MCP_ALLOW_ANONYMOUS=1` restores the previous behaviour: no challenge, and an
+unauthenticated caller receives the read-only `ANONYMOUS_TOOL_NAMES` set (13
+tools). It exists so the change can be rolled back with a config edit and a
+restart rather than a release. Unset is closed, and so is every value other than
+`1`/`true`/`yes`/`on` — a typo fails in the recoverable direction.
+
+That catalog was defensible on its own terms: every tool in it wraps a REST route
+that is already `AllowAny` — `/api/entities`, `/api/search/`, `/api/materials/`,
+`/api/courts/` — so it granted nothing the API does not serve without a token.
+`convert_to_markdown` is excluded from it, being one of the few tools with no
+`/api/` route behind it; there the catalog is the only gate, enforced on
+`tools/call` and not merely on `tools/list`.
 
 Catalog visibility is not an authorization grant. Tools forward the caller's
 verified bearer to Django, whose API permissions remain the final boundary for
@@ -76,7 +90,7 @@ reads and writes — including the rules `docs/security/authz-model.md` pins on
 MCP as a principal: the `ngm.query` scope-only bypass and the service-account
 subject allowlist on `/api/caseworker/me`.
 
-`ngm_query_judicial` is the one anonymous tool that does not run as the caller:
+`ngm_query_judicial` is the one tool in that set that does not run as the caller:
 with no bearer to forward it authenticates with `MCP_QUERY_API_TOKEN`, a shared
 service account. Those requests therefore send `public_projection: true`, which
 forces the API's narrow public plane no matter what roles that account holds.
@@ -90,10 +104,10 @@ DNS names go in `MCP_ALLOWED_HOSTS` and browser origins in
 `MCP_ALLOWED_ORIGINS`.
 
 `GET /mcp/health` reports lifespan readiness only. A missing `OIDC_RESOURCE`
-does not make it unready: the anonymous read catalog still serves correctly, and
-failing the probe would remove a pod that is doing its job. That
-misconfiguration surfaces on the metadata endpoint and on every authenticated
-call instead.
+does not make it unready: token verification does not read it, so the pod still
+serves every authenticated call, and failing the probe would remove a pod over a
+fault that costs discovery rather than service. It surfaces on the metadata
+endpoint (`503`) and in the challenge, which loses its `resource_metadata` hint.
 
 `JAWAFDEHI_API_TOKEN` enables service-authenticated stdio use. It is not
 injected into the HTTP platform process, never authenticates or elevates an HTTP

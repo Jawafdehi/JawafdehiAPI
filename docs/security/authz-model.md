@@ -434,7 +434,8 @@ severity, not by change number.
 10. **MCP catalog visibility is authentication-based, not role-based.**
     Any verified bearer receives the full MCP tool catalog. Write tools forward
     that bearer to Django, so the API's role and object-level permissions remain
-    authoritative; anonymous callers retain a restricted catalog.
+    authoritative; unauthenticated callers get no catalog at all — the HTTP
+    transport challenges them with `401` (see `docs/mcp/README.md`).
 11. **`ReviewAssistant`→`JobPoller` MUST be a Group-row RENAME migration, not a
     mapping change.** The OIDC sync only *attaches existing* groups
     (`oidc.py:277`), never creates them. A mapping-only change would silently
