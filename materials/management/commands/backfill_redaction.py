@@ -231,20 +231,32 @@ class Command(BaseCommand):
             self.stderr.write(f"  unreadable {material.iri}: {exc}")
             return "unreadable", Counter()
 
-        if not original_text:
-            # redact_jsonld returns the original text ONLY when redaction changed
-            # something, so an empty one means there was nothing to remove. That
-            # covers the already-redacted rows too, which is what makes re-running
-            # this command a no-op rather than a second pass over its own output.
-            return "clean", removed
-
-        # The transcript half, BEFORE the lock: it fetches and uploads, and
-        # holding a row lock across two network round trips would block every
-        # other writer of this document for as long as they take.
+        # 🛑 **The transcript half runs even when the text needs nothing**, and that
+        # ordering is the whole point rather than a detail. `data["text"]` and the
+        # MARKDOWN artifact are not guaranteed to be the same bytes — which is the
+        # reason this command reads the artifact rather than the indexed text — so
+        # a row that is clean in one can carry values in the other. Returning on
+        # `clean` first also made the documented remedy a permanent no-op: a row an
+        # earlier text-only sweep already redacted is clean on every later run, and
+        # would never get the REDACTED_MARKDOWN that stops `is_withheld` publishing
+        # its original.
+        #
+        # It runs BEFORE the lock: it fetches and uploads, and holding a row lock
+        # across two network round trips would block every other writer of this
+        # document for as long as they take.
         transcript = None
         if not skip_transcript:
             transcript, note = self._transcript(material, apply_writes=apply_writes)
             self._transcript_notes[note] += 1
+
+        if not original_text:
+            # redact_jsonld returns the original text ONLY when redaction changed
+            # something, so an empty one means there was nothing to remove from the
+            # indexed text. The row still needs its transcript published, so that is
+            # all this writes.
+            if transcript is not None and apply_writes:
+                self._attach(material, transcript)
+            return "clean", removed
 
         if not apply_writes:
             return "would_redact", removed
@@ -262,12 +274,13 @@ class Command(BaseCommand):
             )
             if fresh is None:
                 return "vanished", Counter()
-            if (fresh.data or {}).get(TEXT_KEY) != (material.data or {}).get(TEXT_KEY):
+            if (fresh.data or {}) != (material.data or {}):
                 # Somebody wrote this document between the read and the lock. The
-                # re-read above exists to catch exactly this, and the assignment
-                # below is a whole-blob overwrite from the PRE-lock snapshot — so
-                # continuing would discard their write, text and all. Theirs went
-                # through the same gate ours did; leave it alone and report.
+                # assignment below is a whole-blob overwrite from the PRE-lock
+                # snapshot, so continuing would discard their write — and comparing
+                # only `text` would miss a writer that touched associatedMedia or
+                # provenance and clobber that instead. Theirs went through the same
+                # gate ours did; leave it alone and report.
                 return "changed_underfoot", Counter()
             fresh.data = redacted_data
             if transcript is not None:
@@ -355,9 +368,16 @@ class Command(BaseCommand):
         if not apply_writes:
             return None, "would_publish"
 
-        link = transcripts.store(
-            redacted, artifacts.REDACTED_TRANSCRIPT_ROLE, "material.redacted.md"
-        )
+        try:
+            link = transcripts.store(
+                redacted, artifacts.REDACTED_TRANSCRIPT_ROLE, "material.redacted.md"
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad upload must not end the run
+            # Outside the handler this was the one call in `_one` that could abort a
+            # corpus sweep on a single object-store hiccup, after an unknown number
+            # of documents had already been written.
+            self.stderr.write(f"  transcript upload failed {material.iri}: {exc}")
+            return None, "unreadable"
         return (
             transcripts.media(
                 link,
@@ -368,6 +388,29 @@ class Command(BaseCommand):
             ),
             "published",
         )
+
+    def _attach(self, material: Material, transcript: dict) -> None:
+        """Publish a transcript on a row whose indexed text needed no change.
+
+        Builds from the row read UNDER the lock rather than from a pre-lock
+        snapshot, so unlike the redacting path there is nothing here that can
+        discard a concurrent writer: the only field it sets is the one it owns.
+        """
+        with transaction.atomic(using="ngm"):
+            fresh = (
+                Material.objects.using("ngm")
+                .select_for_update()
+                .filter(pk=material.iri)
+                .first()
+            )
+            if fresh is None:
+                return
+            data = dict(fresh.data or {})
+            data["associatedMedia"] = transcripts.replace(
+                artifacts.media_list(data), [transcript]
+            )
+            fresh.data = data
+            fresh.save(using="ngm", update_fields=["data"])
 
     # -- selection --------------------------------------------------------
 

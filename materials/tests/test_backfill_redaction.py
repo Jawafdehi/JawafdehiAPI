@@ -484,3 +484,83 @@ class TranscriptRoleGuardTests(TestCase):
             [(mo["jawafdehi:linkRole"], mo["contentUrl"]) for mo in out],
             [("RAW", "a"), ("MARKDOWN", "b"), ("REDACTED_MARKDOWN", "new")],
         )
+
+
+class CleanRowsStillGetATranscriptTests(TestCase):
+    """🛑 A row clean in `data["text"]` can carry values in its MARKDOWN artifact.
+
+    That is the premise of this whole command — the two are not guaranteed to be
+    the same bytes, which is why the transcript is redacted from the artifact and
+    not from the indexed text. Returning early on `clean` therefore skipped
+    exactly the rows the distinction was drawn for, and made the documented
+    remedy a permanent no-op: a row an earlier text-only sweep already redacted
+    is clean on every later run.
+    """
+
+    databases = "__all__"
+
+    def _row(self, ident: str, *, indexed: str, stored: str):
+        material = _material(ident, indexed)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": f"https://s3.jawafdehi.org/case_uploads/{ident}.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+        return material
+
+    def _roles(self, material):
+        material.refresh_from_db()
+        return [
+            mo.get("jawafdehi:linkRole")
+            for mo in material.data.get("associatedMedia", [])
+        ]
+
+    def test_a_clean_row_with_a_dirty_transcript_is_published(self):
+        material = self._row("c1", indexed="कुनै पाठ", stored=WITH_CITIZENSHIP)
+
+        with mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        ):
+            output = _run("--apply")
+
+        assert "REDACTED_MARKDOWN" in self._roles(material)
+        assert "MARKDOWN" in self._roles(material)
+        self.assertIn("clean=1", output)
+
+    def test_a_second_run_over_an_already_redacted_row_still_publishes_one(self):
+        """The remedy the command documents has to actually work."""
+        material = self._row("c2", indexed=WITH_CITIZENSHIP, stored=WITH_CITIZENSHIP)
+        fetched = mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        )
+        with fetched:
+            _run("--apply", "--no-transcript")  # the text-only sweep that came first
+        assert "REDACTED_MARKDOWN" not in self._roles(material)
+
+        with fetched:
+            _run("--apply")
+
+        assert "REDACTED_MARKDOWN" in self._roles(material)
+
+    def test_an_upload_failure_does_not_end_the_sweep(self):
+        material = self._row("c3", indexed=WITH_CITIZENSHIP, stored=WITH_CITIZENSHIP)
+
+        with (
+            mock.patch(
+                "materials.extract.fetch_document",
+                return_value=WITH_CITIZENSHIP.encode("utf-8"),
+            ),
+            mock.patch(
+                "materials.transcripts.store", side_effect=OSError("R2 is having a day")
+            ),
+            self.assertRaises(CommandError),
+        ):
+            _run("--apply")
+
+        material.refresh_from_db()
+        self.assertNotIn(CITIZENSHIP_VALUE, str(material.data["text"]))
