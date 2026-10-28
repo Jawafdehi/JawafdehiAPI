@@ -215,6 +215,19 @@ def _removal_tiers() -> dict:
 NOT_REMOVED = frozenset({"pan"})
 
 
+def configured_mode():
+    """The tier every writer redacts at, as a likhit ``RedactionMode``.
+
+    Exposed because the PDF producer needs the tier itself rather than the
+    classes it removes — and reaching into ``_redactor`` from another module to
+    get it would put a second copy of "what do we do when likhit cannot give us
+    the tier" outside this file, which is the one place that question is
+    answered.
+    """
+    _redact, mode = _redactor()
+    return mode
+
+
 def gated_classes() -> set:
     """Classes the configured tier is expected to have zeroed out."""
     _redact, mode = _redactor()
