@@ -275,3 +275,212 @@ class WithheldVisibilityTests(TestCase):
         output = _run()
 
         self.assertIn("1 document(s) are carrying a withheld transcript", output)
+
+
+class TranscriptHalfTests(TestCase):
+    """The sweep publishes a redacted transcript, or says it did not.
+
+    🛑 **Why this half exists at all.** ``materials.artifacts.is_withheld``
+    withholds our original MARKDOWN only when a redacted counterpart exists. A
+    sweep that rewrites ``data["text"]`` and stops there therefore redacts the
+    search index and leaves the full transcript published one link away — the
+    exposure looks closed from every surface except the one a reader can click.
+    """
+
+    databases = "__all__"
+
+    def _with_transcript(self, ident, *, stored, indexed=None):
+        """A row whose MARKDOWN artifact says ``stored`` and whose text says ``indexed``.
+
+        The two differ on purpose in most of these tests: they are not the same
+        bytes in the archive either, and a redacted transcript built from the
+        indexed text would be a redaction of a document we do not serve.
+        """
+        material = _material(ident, indexed if indexed is not None else stored)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": f"https://s3.jawafdehi.org/case_uploads/{ident}.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+        return material
+
+    def _fetch(self, body: bytes):
+        return mock.patch(
+            "materials.extract.fetch_document", return_value=body
+        )
+
+    def _stored(self, material):
+        roles = {
+            mo.get("jawafdehi:linkRole"): mo
+            for mo in material.data.get("associatedMedia", [])
+        }
+        return roles
+
+    def test_a_redacted_transcript_is_published_beside_the_text(self):
+        material = self._with_transcript("t1", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(WITH_CITIZENSHIP.encode("utf-8")):
+            output = _run("--apply")
+
+        material.refresh_from_db()
+        roles = self._stored(material)
+        self.assertIn("REDACTED_MARKDOWN", roles)
+        self.assertIn("MARKDOWN", roles, "the original must survive, withheld")
+        self.assertIn("transcripts: published=1", output)
+
+    def test_the_transcript_is_redacted_from_the_artifact_not_the_index(self):
+        """The distinguishing test: the two inputs carry different values."""
+        other = "नागरिकता नं. ९९-९९-९९-९९९९९ को अर्को कागज"
+        material = self._with_transcript("t2", stored=other, indexed=WITH_CITIZENSHIP)
+
+        with self._fetch(other.encode("utf-8")) as fetch:
+            _run("--apply")
+
+        material.refresh_from_db()
+        fetch.assert_called_once()
+        self.assertEqual(
+            fetch.call_args[0][0],
+            "https://s3.jawafdehi.org/case_uploads/t2.md",
+            "it must read the stored MARKDOWN, not re-use data['text']",
+        )
+        self.assertIn("REDACTED_MARKDOWN", self._stored(material))
+
+    def test_a_document_with_no_transcript_still_gets_its_text_redacted(self):
+        material = _material("t3", WITH_CITIZENSHIP)
+
+        output = _run("--apply")
+
+        material.refresh_from_db()
+        self.assertNotIn(CITIZENSHIP_VALUE, str(material.data["text"]))
+        self.assertIn("no_transcript=1", output)
+
+    def test_an_empty_stored_object_is_reported_not_published(self):
+        """~7% of the AG shelf answers 200 with zero bytes."""
+        material = self._with_transcript("t4", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(b""), self.assertRaises(CommandError) as caught:
+            _run("--apply")
+
+        material.refresh_from_db()
+        self.assertNotIn(CITIZENSHIP_VALUE, str(material.data["text"]))
+        self.assertNotIn("REDACTED_MARKDOWN", self._stored(material))
+        self.assertEqual(caught.exception.returncode, 1)
+
+    def test_a_transcript_that_still_scans_positive_is_not_published(self):
+        material = self._with_transcript("t5", stored=WITH_CITIZENSHIP)
+        residual = redaction.Counter({"bank_account": 1})
+
+        with (
+            self._fetch(WITH_CITIZENSHIP.encode("utf-8")),
+            mock.patch(
+                "materials.management.commands.backfill_redaction.residual_classes",
+                return_value=residual,
+            ),
+            self.assertRaises(CommandError),
+        ):
+            _run("--apply")
+
+        material.refresh_from_db()
+        self.assertNotIn("REDACTED_MARKDOWN", self._stored(material))
+        self.assertNotIn(
+            CITIZENSHIP_VALUE,
+            str(material.data["text"]),
+            "the text half still goes ahead — strictly better than leaving both",
+        )
+
+    def test_running_twice_replaces_the_transcript_rather_than_adding_one(self):
+        material = self._with_transcript("t6", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(WITH_CITIZENSHIP.encode("utf-8")):
+            _run("--apply")
+            _run("--apply")
+
+        material.refresh_from_db()
+        roles = [
+            mo.get("jawafdehi:linkRole")
+            for mo in material.data.get("associatedMedia", [])
+        ]
+        self.assertEqual(roles.count("REDACTED_MARKDOWN"), 1)
+        self.assertEqual(roles.count("MARKDOWN"), 1)
+
+    def test_a_dry_run_fetches_but_stores_nothing(self):
+        material = self._with_transcript("t7", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(WITH_CITIZENSHIP.encode("utf-8")):
+            output = _run()
+
+        material.refresh_from_db()
+        self.assertNotIn("REDACTED_MARKDOWN", self._stored(material))
+        self.assertIn("would_publish=1", output)
+
+    def test_no_transcript_skips_the_half_entirely(self):
+        material = self._with_transcript("t8", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(WITH_CITIZENSHIP.encode("utf-8")) as fetch:
+            _run("--apply", "--no-transcript")
+
+        material.refresh_from_db()
+        fetch.assert_not_called()
+        self.assertNotIn("REDACTED_MARKDOWN", self._stored(material))
+
+
+class ConcurrentWriteTests(TestCase):
+    """A write that lands between the read and the lock is not clobbered.
+
+    The command re-reads under ``select_for_update`` and then assigns the blob it
+    built from the PRE-lock snapshot, so without this check the sweep would
+    overwrite a scraper's fresher document wholesale — text, media and all — on
+    its way to redacting text that is already redacted.
+    """
+
+    databases = "__all__"
+
+    def test_a_document_rewritten_under_the_lock_is_left_alone(self):
+        from collections import Counter
+
+        from materials.management.commands.backfill_redaction import Command
+
+        material = _material("race", WITH_CITIZENSHIP)
+        stale = Material.objects.using("ngm").get(pk=material.iri)
+        fresher = dict(stale.data)
+        fresher["text"] = {"ne": "कसैले बीचमा लेख्यो"}
+        Material.objects.using("ngm").filter(pk=material.iri).update(data=fresher)
+
+        command = Command()
+        command._transcript_notes = Counter()
+        outcome, _removed = command._one(stale, True, skip_transcript=True)
+
+        self.assertEqual(outcome, "changed_underfoot")
+        material.refresh_from_db()
+        self.assertEqual(material.data["text"], {"ne": "कसैले बीचमा लेख्यो"})
+
+
+class TranscriptRoleGuardTests(TestCase):
+    """``transcripts.replace`` will not touch a role it does not own."""
+
+    def test_a_non_transcript_role_is_refused(self):
+        from materials import transcripts
+
+        with self.assertRaises(ValueError):
+            transcripts.replace([], [{"jawafdehi:linkRole": "RAW"}])
+
+    def test_only_the_roles_being_written_are_replaced(self):
+        from materials import transcripts
+
+        existing = [
+            {"jawafdehi:linkRole": "RAW", "contentUrl": "a"},
+            {"jawafdehi:linkRole": "MARKDOWN", "contentUrl": "b"},
+            {"jawafdehi:linkRole": "REDACTED_MARKDOWN", "contentUrl": "old"},
+        ]
+
+        out = transcripts.replace(
+            existing, [{"jawafdehi:linkRole": "REDACTED_MARKDOWN", "contentUrl": "new"}]
+        )
+
+        self.assertEqual(
+            [(mo["jawafdehi:linkRole"], mo["contentUrl"]) for mo in out],
+            [("RAW", "a"), ("MARKDOWN", "b"), ("REDACTED_MARKDOWN", "new")],
+        )

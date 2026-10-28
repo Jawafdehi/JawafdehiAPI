@@ -16,14 +16,27 @@ caller holding ``materials.view_unredacted``. Nothing is deleted and no stored
 object is touched, so a wrong tier or a bad detector costs a re-run rather than a
 corpus. That is the whole reason this is safe to run before the PDF half exists.
 
+**Both halves, because one of them alone is not a redaction.** The row's text is
+one of two things a reader can reach: the other is the ``MARKDOWN`` artifact, our
+own transcript, linked from the public payload. ``artifacts.is_withheld``
+withholds that link only once a ``REDACTED_MARKDOWN`` exists to publish instead —
+so rewriting ``data["text"]`` and stopping there cleans the search index and
+leaves the full transcript one click away, which looks closed from every surface
+except the one a reader actually clicks. This command therefore fetches the
+stored transcript, redacts *that*, and publishes it beside the redacted text.
+
 **Three things it does NOT do**, stated because the gaps are the point:
 
-* **It does not make an original unreachable.** Our object storage serves any
-  caller holding the URL and the URL does not change, so a charge sheet someone
+* **It does not make an original unreachable.** Publishing the redacted
+  transcript stops us *linking* the original, but our object storage serves any
+  caller holding the URL and the URL does not change — so a charge sheet someone
   already has a link to stays exactly as fetchable as it was. Closing that means
-  moving or deleting stored objects — which breaks every link already in the
-  wild — and it is a separate and genuinely irreversible decision.
-* **It does not redact a PDF.** ``REDACTED_PDF`` has no producer in this repo.
+  moving or deleting stored objects, which breaks every link already in the wild,
+  and it is a separate and genuinely irreversible decision.
+* **It does not redact a PDF.** ``REDACTED_PDF`` has no producer in this repo, so
+  the original PDF stays published whatever this command does. For a scanned
+  document that is the whole exposure: the text pass removes the value from
+  search and leaves it legible in the file.
 * **It does not touch the page-level content plane.** ``DocumentPage`` and
   friends have their own writer and their own redactor
   (``redaction.redact_bundle``); sweeping them belongs with the extraction
@@ -52,6 +65,7 @@ from collections import Counter
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from materials import artifacts, transcripts
 from materials.models import Material
 from materials.redaction import (
     TEXT_KEY,
@@ -59,9 +73,15 @@ from materials.redaction import (
     RedactionUnavailable,
     gated_classes,
     redact_jsonld,
+    redact_text,
     redaction_summary,
+    residual_classes,
     withheld_by_the_write_path,
 )
+
+#: A transcript is markdown. 32 MiB is far above the largest one in the archive
+#: and far below anything that would be a PDF fetched by mistake.
+MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024
 
 
 #: Sensitivity order for chunking, highest first. The September corpus scan put
@@ -106,6 +126,15 @@ class Command(BaseCommand):
                 "names only — never a value, never a location."
             ),
         )
+        parser.add_argument(
+            "--no-transcript",
+            action="store_true",
+            help=(
+                "Skip the transcript half. Redacting data['text'] alone leaves "
+                "the MARKDOWN artifact published, so this is for measuring the "
+                "text pass quickly, not for a real run."
+            ),
+        )
 
     def handle(self, *args, **options):
         apply_writes = options["apply"]
@@ -121,6 +150,8 @@ class Command(BaseCommand):
         )
 
         totals: Counter = Counter()
+        #: What happened to each document's transcript half — see `_transcript`.
+        self._transcript_notes: Counter = Counter()
         per_type: dict[str, Counter] = {}
         refused: list[str] = []
         looked_at = 0
@@ -131,7 +162,9 @@ class Command(BaseCommand):
                 if limit is not None and looked_at >= limit:
                     break
                 looked_at += 1
-                outcome, removed = self._one(material, apply_writes)
+                outcome, removed = self._one(
+                    material, apply_writes, skip_transcript=options["no_transcript"]
+                )
                 counts[outcome] += 1
                 totals.update(removed)
                 if outcome == "refused":
@@ -153,15 +186,21 @@ class Command(BaseCommand):
                 returncode=2,
             )
         skipped = sum(c.get("unreadable", 0) for c in per_type.values())
+        # A transcript left unpublished is a skip, not a success: the row's text
+        # is redacted while its MARKDOWN artifact still serves the original.
+        skipped += self._transcript_notes["residue"]
+        skipped += self._transcript_notes["unreadable"]
+        skipped += sum(c.get("changed_underfoot", 0) for c in per_type.values())
         if skipped:
             raise CommandError(
-                f"{skipped} document(s) could not be read and were skipped.",
+                f"{skipped} document(s) were skipped or left half-published; "
+                "see the transcript counts above.",
                 returncode=1,
             )
 
     # -- the work ---------------------------------------------------------
 
-    def _one(self, material: Material, apply_writes: bool):
+    def _one(self, material: Material, apply_writes: bool, *, skip_transcript: bool = False):
         """Redact one document. Returns ``(outcome, removed counts)``.
 
         The order here is the whole safety argument: redact into memory, GATE the
@@ -199,6 +238,14 @@ class Command(BaseCommand):
             # this command a no-op rather than a second pass over its own output.
             return "clean", removed
 
+        # The transcript half, BEFORE the lock: it fetches and uploads, and
+        # holding a row lock across two network round trips would block every
+        # other writer of this document for as long as they take.
+        transcript = None
+        if not skip_transcript:
+            transcript, note = self._transcript(material, apply_writes=apply_writes)
+            self._transcript_notes[note] += 1
+
         if not apply_writes:
             return "would_redact", removed
 
@@ -215,7 +262,22 @@ class Command(BaseCommand):
             )
             if fresh is None:
                 return "vanished", Counter()
+            if (fresh.data or {}).get(TEXT_KEY) != (material.data or {}).get(TEXT_KEY):
+                # Somebody wrote this document between the read and the lock. The
+                # re-read above exists to catch exactly this, and the assignment
+                # below is a whole-blob overwrite from the PRE-lock snapshot — so
+                # continuing would discard their write, text and all. Theirs went
+                # through the same gate ours did; leave it alone and report.
+                return "changed_underfoot", Counter()
             fresh.data = redacted_data
+            if transcript is not None:
+                # Publish the redacted transcript beside the redacted text. Until
+                # one exists, materials.artifacts.is_withheld keeps publishing the
+                # ORIGINAL MARKDOWN — so a text-only sweep redacts the search index
+                # and leaves the unredacted transcript one link away.
+                fresh.data["associatedMedia"] = transcripts.replace(
+                    artifacts.media_list(fresh.data), [transcript]
+                )
             outcome = "redacted"
             if fresh.source_text:
                 # Redact the text, but KEEP the stored original. A non-empty
@@ -232,6 +294,80 @@ class Command(BaseCommand):
             # command exists to close.
             fresh.save(using="ngm", update_fields=["data", "source_text"])
         return outcome, removed
+
+    def _transcript(self, material, *, apply_writes: bool):
+        """``(MediaObject or None, note)`` — the redacted transcript for a row.
+
+        🛑 **Redacted from the stored MARKDOWN, never from ``data["text"]``.** The
+        two are usually the same bytes and are not guaranteed to be: the indexed
+        field is language-mapped and has the page markers stripped. A
+        ``REDACTED_MARKDOWN`` built from the indexed text would therefore be a
+        redaction of a *different document* from the ``MARKDOWN`` it replaces —
+        and ``is_withheld`` would start withholding the original on the strength
+        of it, so the mismatch would be invisible and permanent.
+
+        The notes are the reason this returns a string rather than raising:
+
+        ``published``
+            Stored and ready to publish.
+        ``no_transcript``
+            No MARKDOWN artifact. Nothing is being published, so nothing to do.
+        ``unreadable``
+            The artifact would not fetch or would not decode. ~7% of the AG shelf
+            answers 200 with zero bytes, and an empty object publishes nothing —
+            so this is not a failure to fix here.
+        ``residue``
+            The transcript still scans positive after redaction. The text half
+            still goes ahead: it shrinks the public surface from "anyone
+            searching" to "anyone holding the URL", which is strictly better than
+            leaving both. Reported so it is not mistaken for done.
+        """
+        from materials.extract import DocumentFetchError, fetch_document
+
+        source_url = None
+        url = None
+        for mo in artifacts.media_list(material.data or {}):
+            role = artifacts.role_of(mo)
+            if role == artifacts.ORIGINAL_TRANSCRIPT_ROLE:
+                url = mo.get("contentUrl")
+            elif role in artifacts.ORIGINAL_PDF_ROLES and source_url is None:
+                source_url = mo.get("contentUrl")
+        if not isinstance(url, str) or not url:
+            return None, "no_transcript"
+
+        try:
+            raw = fetch_document(url, max_bytes=MAX_TRANSCRIPT_BYTES)
+            text = raw.decode("utf-8")
+        except (DocumentFetchError, UnicodeDecodeError, OSError) as exc:
+            self.stderr.write(f"  transcript unreadable {material.iri}: {exc}")
+            return None, "unreadable"
+        if not text.strip():
+            return None, "unreadable"
+
+        redacted, _removed = redact_text(text)
+        residual = residual_classes(redacted)
+        if residual:
+            self.stderr.write(
+                f"  transcript residue {material.iri}: "
+                f"{dict(sorted(residual.items()))}"
+            )
+            return None, "residue"
+        if not apply_writes:
+            return None, "would_publish"
+
+        link = transcripts.store(
+            redacted, artifacts.REDACTED_TRANSCRIPT_ROLE, "material.redacted.md"
+        )
+        return (
+            transcripts.media(
+                link,
+                artifacts.REDACTED_TRANSCRIPT_ROLE,
+                redacted,
+                source_url,
+                derived=True,
+            ),
+            "published",
+        )
 
     # -- selection --------------------------------------------------------
 
@@ -296,6 +432,23 @@ class Command(BaseCommand):
         if totals:
             verb = "removed" if apply_writes else "would remove"
             self.stdout.write(f"{verb}: {redaction_summary(totals)}")
+        if self._transcript_notes:
+            line = "  ".join(
+                f"{k}={v}" for k, v in sorted(self._transcript_notes.items())
+            )
+            self.stdout.write(f"transcripts: {line}")
+            stranded = (
+                self._transcript_notes["residue"]
+                + self._transcript_notes["unreadable"]
+            )
+            if stranded:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"{stranded} document(s) got redacted text but NO redacted "
+                        "transcript — their MARKDOWN artifact still publishes the "
+                        "original"
+                    )
+                )
         if refused:
             self.stdout.write(
                 self.style.ERROR(f"refused: {len(refused)} document(s), listed above")
@@ -323,6 +476,7 @@ class Command(BaseCommand):
             # human has to look at, while anything from the text would put back
             # exactly what the run took out.
             "refused": sorted(refused),
+            "transcripts": dict(sorted(self._transcript_notes.items())),
         }
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
