@@ -223,6 +223,20 @@ def store_file_as_link(uploaded_file, role=DEFAULT_LINK_ROLE, *, content_hash=No
     at the call site instead of an obscure failure inside storage.
     """
     name = uploaded_file.name
+    # 🛑 **An empty object is worse than no object**, which is why this refuses rather
+    # than storing one. The link still lands in ``associatedMedia``, so the material goes
+    # on advertising ``pdf.original: true`` and the payload goes on publishing a URL that
+    # answers HTTP 200 with no bytes — a reader gets an empty file and no error, and
+    # nothing downstream can tell the difference between "we hold this document" and "we
+    # hold a zero-byte placeholder for it". Sampling 30 materials at random on 2026-10-28
+    # found 2 in that state.
+    #
+    # ⚠️ Checked by seeking rather than by reading ``size``: an UploadedFile's ``size`` is
+    # advisory and a streamed body may not have one at all.
+    uploaded_file.seek(0, os.SEEK_END)
+    if uploaded_file.tell() == 0:
+        raise ValueError(f"refusing to store an empty file as {role}: {name!r}")
+    uploaded_file.seek(0)
     if content_hash is not None:
         if not _SHA256_HEX.fullmatch(content_hash or ""):
             raise ValueError(
