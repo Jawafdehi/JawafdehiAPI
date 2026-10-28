@@ -35,9 +35,14 @@ from materials.models import Material
 
 #: Only our own copies. A publisher's link that 404s is their outage and their
 #: fix; ``is_our_copy`` is where that line already lives.
+#: 🛑 The REDACTED roles are in here too, and they are the ones that matter most:
+#: a redacted artifact is what `is_withheld` publishes INSTEAD of the original, so
+#: an empty one leaves a reader with nothing while the original is withheld on the
+#: strength of its existence.
 CHECKED_ROLES = artifacts.ORIGINAL_PDF_ROLES | {
     artifacts.ORIGINAL_TRANSCRIPT_ROLE,
     artifacts.REDACTED_TRANSCRIPT_ROLE,
+    artifacts.REDACTED_PDF_ROLE,
 }
 
 
@@ -53,6 +58,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        limit = options.get("limit")
+        if limit is not None and limit < 1:
+            raise CommandError("--limit must be at least 1.")
+
         import requests
 
         from review.jds_client import UA
@@ -63,8 +72,8 @@ class Command(BaseCommand):
         if options.get("source"):
             rows = rows.filter(source=options["source"])
         rows = rows.order_by("iri")
-        if options.get("limit"):
-            rows = rows[: options["limit"]]
+        if limit:
+            rows = rows[:limit]
 
         counts: Counter = Counter()
         findings: list[dict] = []

@@ -114,9 +114,29 @@ class AuditTests(TestCase):
         self.get.assert_not_called()
 
     def test_the_repair_route_is_reported_per_document(self):
-        """Re-fetchable and not-re-fetchable are different outcomes."""
+        """Re-fetchable and not-re-fetchable are different outcomes.
+
+        ⚠️ The report is read from the captured streams, not from inside the
+        `pytest.raises` block: an assert after the raising call never runs, which
+        is how an earlier version of this test passed while checking nothing.
+        """
         _material("empty2", [{"contentUrl": OURS, "jawafdehi:linkRole": "RAW"}])
 
+        out, err = StringIO(), StringIO()
+        with (
+            mock.patch("requests.Session.get", return_value=_Response(200, b"")),
+            pytest.raises(CommandError),
+        ):
+            call_command("audit_stored_artifacts", stdout=out, stderr=err)
+
+        assert "can be re-fetched from the publisher" in out.getvalue()
+
+    def test_an_empty_redacted_artifact_is_probed_too(self):
+        """The artifact that REPLACES a withheld original is the one that matters."""
+        _material(
+            "redacted-empty",
+            [{"contentUrl": OURS, "jawafdehi:linkRole": "REDACTED_MARKDOWN"}],
+        )
+
         with pytest.raises(CommandError):
-            output = self._run(body=b"")
-            assert "can be re-fetched from the publisher" in output
+            self._run(body=b"")
