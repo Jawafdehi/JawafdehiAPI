@@ -80,6 +80,7 @@ from ...extraction.bundle import (
     TableRecord,
 )
 from ...models import Material
+from ...redaction import redact_bundle, redaction_summary
 
 #: Parquet tables the command needs, by basename. ``documents`` carries one row
 #: per document; the rest are keyed to it by ``doc_id`` (tables/figures) or by
@@ -670,4 +671,17 @@ class Command(BaseCommand):
                 for row in figures
             ],
         )
+        # 🛑 **Redact before storing, exactly as `extraction.pdf` does.** This
+        # command was the one writer of the content plane that did not: it loads
+        # a corpus somebody else extracted, and loading it verbatim published
+        # every identifier that corpus carries through `…/content`, which serves
+        # pages and tables to anyone. The other writer has redacted since it was
+        # built, so the surface a reader reached depended only on which of the
+        # two had written the document.
+        #
+        # ⚠️ Rows ingested before this are still unredacted. Re-running the
+        # command over the same dataset fixes them — the writer is
+        # delete-then-insert per document, so a second pass replaces rather than
+        # appends.
+        bundle.redactions = redaction_summary(redact_bundle(bundle))
         return store_document_content(iri, bundle)
