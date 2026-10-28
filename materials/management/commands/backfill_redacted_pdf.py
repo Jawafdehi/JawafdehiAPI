@@ -72,6 +72,9 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         apply_writes = options["apply"]
+        limit = options.get("limit")
+        if limit is not None and limit < 1:
+            raise CommandError("--limit must be at least 1.")
         mode = self._mode()
         self.stdout.write(
             f"tier={mode.value}  "
@@ -80,19 +83,27 @@ class Command(BaseCommand):
 
         outcomes: Counter = Counter()
         blocked: Counter = Counter()
-        looked_at = 0
+        acted_on = 0
 
         for material in self._materials(options):
-            looked_at += 1
             outcome, detail = self._one(material, mode, apply_writes)
             outcomes[outcome] += 1
+            # 🛑 The limit counts documents this run DID something about, not rows
+            # it scanned. Slicing the queryset instead took the same first N IRIs
+            # every time, so the documented "run it as a Job with a --limit"
+            # procedure never advanced past the first batch: once those N carried
+            # a redacted PDF, every later run skipped exactly them and stopped.
+            if outcome not in ("already_published", "no_pdf"):
+                acted_on += 1
             if outcome == "blocked":
                 blocked.update(detail)
                 self.stderr.write(f"  blocked {material.iri}: {dict(detail)}")
             elif outcome in ("unreadable", "refused"):
                 self.stderr.write(f"  {outcome} {material.iri}: {detail}")
+            if limit is not None and acted_on >= limit:
+                break
 
-        self._report(outcomes, blocked, looked_at, apply_writes)
+        self._report(outcomes, blocked, acted_on, apply_writes)
         if options.get("report"):
             with open(options["report"], "w", encoding="utf-8") as handle:
                 json.dump(
@@ -156,14 +167,20 @@ class Command(BaseCommand):
             try:
                 report = redact_pdf(source, destination, mode=mode)
             except ValueError as exc:
-                # likhit refuses two different things through one exception: a
+                # likhit refuses two different things through one ValueError: a
                 # page class it cannot locate values on, and residue in its own
                 # output. Both mean no publishable derivative, and the message is
                 # the only thing that distinguishes them.
                 text = str(exc)
                 if "verification failed" in text:
                     return "refused", text
-                return "blocked", Counter({self._blocked_class(text): 1})
+                return "blocked", self._blocked_classes(text)
+            except Exception as exc:  # noqa: BLE001 - one bad file must not end the run
+                # 🛑 **Not every failure is a ValueError.** PyMuPDF raises
+                # `FileDataError`, which subclasses RuntimeError, for a body that
+                # is not a PDF at all — and one of those would otherwise abort an
+                # --apply run partway through, with the --report never written.
+                return "unreadable", f"{type(exc).__name__}: {exc}"
             redacted = destination.read_bytes()
 
         if not apply_writes:
@@ -171,11 +188,20 @@ class Command(BaseCommand):
         self._publish(material, redacted, url)
         return "published", report.values_removed
 
-    def _blocked_class(self, message: str) -> str:
-        for name in ("legacy", "scanned", "blank"):
-            if name in message:
-                return name
-        return "other"
+    def _blocked_classes(self, message: str) -> Counter:
+        """Every page class named in the refusal, not just the first.
+
+        A document mixing legacy and scanned pages is blocked by both, and
+        reporting one hides half of what the remaining work has to cover.
+        `blank` is deliberately absent: `PageClass.BLANK.needs_work` is False, so
+        it can never be the reason.
+        """
+        found = Counter(
+            {name: 1 for name in ("legacy", "scanned") if name in message}
+        )
+        # A ValueError that names no class is something else entirely — a
+        # password, a zero-page file, a destination that already exists.
+        return found or Counter({"other": 1})
 
     def _publish(self, material: Material, redacted: bytes, source_url: str) -> None:
         """Store the derivative and point the row at it, under a row lock."""
@@ -222,7 +248,11 @@ class Command(BaseCommand):
             media.append(mo)
             data["associatedMedia"] = media
             fresh.data = data
-            fresh.save(using="ngm", update_fields=["data"])
+            # `updated_at` is load-bearing in update_fields, not decoration: it is
+            # what materials/views.py derives the ETag from, so omitting it leaves
+            # a stale If-Match passing its precondition and clobbering the link
+            # this just published. Every sibling writer includes it.
+            fresh.save(using="ngm", update_fields=["data", "updated_at"])
 
     # -- selection --------------------------------------------------------
 
@@ -235,10 +265,14 @@ class Command(BaseCommand):
         """
         for media in artifacts.media_list(material.data or {}):
             url = media.get("contentUrl")
+            # ⚠️ No extension test. An object key's suffix comes from the
+            # client-supplied filename — the court scraper defaults to `.doc` —
+            # so filtering on `.pdf` silently skipped stored PDFs and reported
+            # them as `no_pdf`. Whether the bytes are a PDF is likhit's question,
+            # and it now answers it as `unreadable` rather than aborting.
             if (
                 artifacts.role_of(media) in artifacts.ORIGINAL_PDF_ROLES
                 and isinstance(url, str)
-                and url.lower().endswith(".pdf")
                 and artifacts.is_our_copy(url)
             ):
                 return url
@@ -258,14 +292,13 @@ class Command(BaseCommand):
             rows = rows.filter(material_type=options["material_type"])
         if options.get("source"):
             rows = rows.filter(source=options["source"])
-        rows = rows.order_by("iri")
-        if options.get("limit"):
-            rows = rows[: options["limit"]]
-        return rows.iterator(chunk_size=50)
+        return rows.order_by("iri").iterator(chunk_size=50)
 
-    def _report(self, outcomes, blocked, looked_at, apply_writes) -> None:
+    def _report(self, outcomes, blocked, acted_on, apply_writes) -> None:
         self.stdout.write("")
-        self.stdout.write(f"looked at {looked_at} document(s)")
+        # Not "looked at": the limit counts documents acted on, so this has to
+        # name the same thing the limit does or the two read as a contradiction.
+        self.stdout.write(f"acted on {acted_on} document(s)")
         if outcomes:
             self.stdout.write(
                 "  ".join(f"{k}={v}" for k, v in sorted(outcomes.items()))

@@ -143,16 +143,56 @@ class BackfillRedactedPdfTests(TestCase):
         assert caught.value.returncode == 1
 
     def test_residue_in_its_own_output_is_a_refusal_not_a_blocked_page(self):
-        """Two different failures reach us through one exception type."""
+        """Two different failures reach us through one exception type.
+
+        ⚠️ The output is captured and read AFTER the block. An assert placed
+        inside `pytest.raises` below the raising call never executes, which is
+        how an earlier version of this test passed while checking nothing — and
+        this split is the PR's headline behaviour.
+        """
         material = _material("p6", [_raw()])
 
         def unverified(src, dst, **kw):
             raise ValueError("verification failed: 1 value(s) of kind ['citizenship']")
 
-        with pytest.raises(CommandError):
+        output = ""
+        try:
             output = self._run("--apply", redact=unverified)
-            assert "refused=1" in output
+        except CommandError as exc:
+            output = str(exc)
+
+        assert "refused" in output
+        assert "blocked=1" not in output
         assert artifacts.REDACTED_PDF_ROLE not in self._roles(material)
+
+    def test_a_body_that_is_not_a_pdf_does_not_end_the_run(self):
+        """PyMuPDF raises FileDataError, which is a RuntimeError, not a ValueError."""
+        material = _material("p8", [_raw()])
+
+        def not_a_pdf(src, dst, **kw):
+            raise RuntimeError("cannot open broken document")
+
+        with pytest.raises(CommandError) as caught:
+            self._run("--apply", redact=not_a_pdf)
+
+        assert caught.value.returncode == 1
+        assert artifacts.REDACTED_PDF_ROLE not in self._roles(material)
+
+    def test_a_stored_pdf_whose_key_lacks_an_extension_is_still_read(self):
+        """An object key's suffix comes from the client-supplied filename."""
+        material = _material(
+            "p9",
+            [
+                {
+                    "contentUrl": "https://s3.jawafdehi.org/case_uploads/abc",
+                    "jawafdehi:linkRole": "RAW",
+                }
+            ],
+        )
+
+        self._run("--apply")
+
+        assert artifacts.REDACTED_PDF_ROLE in self._roles(material)
 
     def test_an_empty_stored_object_is_reported(self):
         material = _material("p7", [_raw()])
