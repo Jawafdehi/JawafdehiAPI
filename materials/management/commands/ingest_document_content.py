@@ -80,7 +80,7 @@ from ...extraction.bundle import (
     TableRecord,
 )
 from ...models import Material
-from ...redaction import redact_bundle, redaction_summary
+from ...redaction import redact_bundle
 
 #: Parquet tables the command needs, by basename. ``documents`` carries one row
 #: per document; the rest are keyed to it by ``doc_id`` (tables/figures) or by
@@ -683,5 +683,17 @@ class Command(BaseCommand):
         # command over the same dataset fixes them — the writer is
         # delete-then-insert per document, so a second pass replaces rather than
         # appends.
-        bundle.redactions = redaction_summary(redact_bundle(bundle))
+        # ⚠️ The counts are LOGGED, not stored. `extraction.pdf` assigns them to
+        # `bundle.redactions` because its caller lifts them onto the job result;
+        # this command has no job and `store_document_content` does not persist
+        # the field, so assigning it here would only look like a record. What an
+        # operator running a corpus ingest can read is `redact_bundle`'s own log
+        # line, which names classes and never values.
+        #
+        # 🛑 **Neither content-plane writer re-scans its output.** Every text
+        # writer has since #553 — `redact_jsonld` gates on `residual_classes` —
+        # and the page/table surface does not. Adding it to one writer only would
+        # trade this divergence for another; it belongs in `redact_bundle`, with
+        # its own measurement of how much of the loaded corpus it would withhold.
+        redact_bundle(bundle)
         return store_document_content(iri, bundle)
