@@ -341,8 +341,10 @@ class SearchDocumentTool(BaseTool):
             "list_document_contents only reaches a table through its caption, "
             "so it cannot find a paragraph by what it says. Matches "
             "phonetically as well as literally, so a Latin-keyboard query "
-            "reaches Devanagari text ('ghus' finds घुस); a bare number means "
-            "that exact printed page. Every hit carries 'match': 'literal' is "
+            "reaches Devanagari text ('ghus' finds घुस). A plain number "
+            "addresses a PAGE and is not looked for in the text: '31' returns "
+            "page 31, not every mention of 31, and 'ujuri 31' is that word on "
+            "page 31 only. Every hit carries 'match': 'literal' is "
             "the term as typed, 'phonetic' matched by SOUND and may be a "
             "different word, and 'folio' matched the page NUMBER and says "
             "nothing about the text — do not quote a phonetic or folio hit as "
@@ -405,11 +407,15 @@ class SearchDocumentTool(BaseTool):
     def _cited(self, result: dict[str, Any]) -> dict[str, Any]:
         """Attach the citation contract, and say when a result is partial.
 
-        No text ceiling is applied and none is needed: a snippet is bounded by
-        the API at ~190 characters and the hit count is bounded at
-        ``MAX_LIMIT``, so the whole response is a few thousand characters by
-        construction. ``read_document_part``'s budget exists because a single
-        table can be 170 KiB; nothing here can be.
+        No text ceiling is applied and none is needed: EVERY field on a hit is
+        bounded by the API — the snippet at ~190 characters, the caption and
+        title at ``MAX_LABEL_CHARS``, the hit count at ``MAX_LIMIT`` — so the
+        whole response is a few thousand characters by construction.
+        ``read_document_part``'s budget exists because a single table can be
+        170 KiB; nothing here can be. The bound on the labels is load-bearing
+        for that claim rather than incidental: ``DocumentTable.caption`` is a
+        ``TextField`` with an observed 1.3 kB, and 50 unbounded ones would be
+        65 kB.
 
         A snippet is a WINDOW, and that has to be said. Elided ends are marked
         with an ellipsis in the text, but a model quoting a snippet as a

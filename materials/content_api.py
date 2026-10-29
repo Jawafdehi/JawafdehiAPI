@@ -50,6 +50,7 @@ from jawafdehi_shared.search.transliterate import (
     matches_search,
     search_fold,
     search_key,
+    search_key_uncached,
 )
 
 from .models import (
@@ -453,6 +454,131 @@ PAGE_SCAN_CHUNK = 100
 #: mentions it before the table it is tabulated in.
 _KIND_ORDER = {"page": 0, "table": 1, "figure": 2}
 
+#: Longest ``caption``/``title`` carried alongside a hit. The field is
+#: unbounded in the model (``DocumentTable.caption`` records an observed 1.3 kB,
+#: though this corpus's largest is 88 characters), and the MCP tool declines a
+#: text ceiling on the grounds that a search response is small by construction.
+#: That is only true if everything on a hit is bounded, so it is bounded here
+#: rather than asserted there.
+MAX_LABEL_CHARS = SNIPPET_CONTEXT * 2
+
+
+def _label(text: str) -> str:
+    """A caption or title, clipped to ``MAX_LABEL_CHARS`` with the cut marked."""
+    body = (text or "").strip()
+    if len(body) <= MAX_LABEL_CHARS:
+        return body
+    return body[:MAX_LABEL_CHARS] + "…"
+
+
+class DocumentScan:
+    """One query, applied across one document's rows.
+
+    Built once per request rather than per row, for two reasons that are both
+    about the LONG fields — a page's transcript and a table's markdown, which
+    are a thousand times the size of the captions this matching was written for.
+
+    **It does not fold long text through the shared cache.**
+    ``search_key``'s ``lru_cache`` is bounded at 8192 ENTRIES, not bytes, and is
+    sized for short captions. Folding pages through it costs ~6 kB a slot, so
+    ~18 large documents fill it permanently — and it evicts the caption working
+    set the listing filter depends on. The walk below keeps its own ``dict``
+    instead, which holds one document's vocabulary of short words and is freed
+    with the request.
+
+    **It folds a word at a time, not the whole field.** Measured on 50 real
+    pages of the 35th CIAA report: ``matches_search`` over whole pages is 2.77 s
+    extrapolated to the full 446, the walk is 1.18 s, and the two agree on every
+    query tried. The win is that words repeat — 3,745 distinct across 50 pages —
+    so the transliteration is paid once each rather than once per page.
+
+    A query with no Latin in it never reaches any of this: ``search_fold`` of
+    pure Devanagari is empty, so there are no phonetic tokens and the literal
+    pass is the whole search (~0.01 s for the same 446 pages).
+    """
+
+    def __init__(self, query: str) -> None:
+        self.query = query.strip()
+        tokens = self.query.split()
+        # **An ASCII number is a page, not a string to find in the prose.**
+        # ``_matches`` says this about a LISTING and means it: a caption is a
+        # label, and "तालिका ४.२" carrying a number is part of the label. Page
+        # text is not a label — it is prose full of incidental digits, and
+        # ``q=31`` substring-matching "रु. 31,45,000" buries the page the
+        # reader asked for under every currency figure in the report. So on
+        # THIS route a number addresses a folio and nothing else.
+        #
+        # ASCII-only: ``str.isdigit()`` is true of १९४८८ too, and a Devanagari
+        # numeral can never equal ``str(page_no)``. Treating it as a folio
+        # would silently make the archive's own numerals unsearchable.
+        self.folios = {t for t in tokens if t.isascii() and t.isdigit()}
+        self.words = " ".join(t for t in tokens if t not in self.folios)
+        self.tokens = [t for t in search_fold(self.words).split() if t]
+        self._folds: dict[str, str] = {}
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.query
+
+    def _fold(self, word: str) -> str:
+        key = self._folds.get(word)
+        if key is None:
+            key = self._folds[word] = search_key_uncached(word)
+        return key
+
+    def _walk(self, haystack: str) -> Span | None:
+        """All query tokens present in SOME word, else None.
+
+        Token-AND like :func:`matches_search`, and order-free for the same
+        reason: "ujuri badhi" finding nothing while "badhi ujuri" found
+        eighteen rows reads to a reader as the archive not holding it.
+
+        The span is the FIRST word that answered, which is where a snippet
+        should be centred.
+        """
+        remaining = set(self.tokens)
+        first = None
+        for word in _WORDS.finditer(haystack):
+            key = self._fold(word.group())
+            hit = {token for token in remaining if token in key}
+            if not hit:
+                continue
+            if first is None:
+                first = word
+            remaining -= hit
+            if not remaining:
+                return Span("phonetic", first.start(), first.end())
+        return None
+
+    def _in_text(self, haystack: str) -> Span | None:
+        """``self.words`` located in ``haystack`` — literally, then by sound."""
+        located = _literal_span(haystack, self.words)
+        if located is not None:
+            return located
+        return self._walk(haystack) if self.tokens else None
+
+    def locate(self, text: str, page_no: int) -> Span | None:
+        """Where this query matches one row, or None.
+
+        Three shapes, and the folio rule decides between them:
+
+        * no number in the query → find the words in the text
+        * a number alone → that page, and nothing about its text
+        * words and a number → those words, on that page only
+
+        The third is the ``ujuri 31`` form, and here it means what it says. On
+        the listing filter it degrades to "either", because a caption listing
+        has nowhere else to put the constraint; on a search over prose,
+        "either" would return every page that happens to mention the word.
+        """
+        if self.is_empty:
+            return None
+        if self.folios:
+            if str(page_no) not in self.folios:
+                return None
+            return self._in_text(text or "") if self.words else Span("folio")
+        return self._in_text(text or "")
+
 
 def snippet_for(text: str, span: Span, context: int = SNIPPET_CONTEXT) -> str:
     """A short, single-line window of ``text`` around ``span``.
@@ -507,8 +633,8 @@ def _hit(kind: str, page_no: int, key: str | None, field: str, span: Span,
 
 
 def _first_hit(kind: str, page_no: int, key: str | None, fields: list[tuple[str, str]],
-               query: str, **extra) -> dict | None:
-    """The first of ``fields`` that answers to ``query``, as a hit.
+               scan: DocumentScan, **extra) -> dict | None:
+    """The first of ``fields`` that answers to ``scan``, as a hit.
 
     One hit per row, not one per field: a table whose caption and markdown both
     mention the term is one table, and reporting it twice would make a listing
@@ -517,13 +643,13 @@ def _first_hit(kind: str, page_no: int, key: str | None, fields: list[tuple[str,
     it introduces.
     """
     for name, text in fields:
-        span = locate_match(text, page_no, query)
+        span = scan.locate(text, page_no)
         if span is not None:
             return _hit(kind, page_no, key, name, span, text, **extra)
     return None
 
 
-def _page_hits(iri: str, query: str) -> list[dict]:
+def _page_hits(iri: str, scan: DocumentScan) -> list[dict]:
     """Every page whose TEXT answers to ``query``.
 
     This is the gap the endpoint exists to close: a caller could already find a
@@ -547,7 +673,7 @@ def _page_hits(iri: str, query: str) -> list[dict]:
             page.page_no,
             None,
             [("text", page.text)],
-            query,
+            scan,
             # Both ride along for the reason the page stub carries them: a hit
             # on a page read by a vision model is a weaker claim than one read
             # from the PDF's own text layer, and an empty-text page that
@@ -560,7 +686,7 @@ def _page_hits(iri: str, query: str) -> list[dict]:
     return hits
 
 
-def _table_hits(iri: str, query: str) -> list[dict]:
+def _table_hits(iri: str, scan: DocumentScan) -> list[dict]:
     """Every table whose caption OR markdown answers to ``query``.
 
     The markdown is searched, which is what puts a figure inside a table within
@@ -580,8 +706,8 @@ def _table_hits(iri: str, query: str) -> list[dict]:
             table.page_no,
             table.key,
             [("caption", table.caption), ("markdown", table.markdown)],
-            query,
-            caption=table.caption,
+            scan,
+            caption=_label(table.caption),
             fidelity=table.fidelity,
         )
         if hit is not None:
@@ -589,7 +715,7 @@ def _table_hits(iri: str, query: str) -> list[dict]:
     return hits
 
 
-def _figure_hits(iri: str, query: str) -> list[dict]:
+def _figure_hits(iri: str, scan: DocumentScan) -> list[dict]:
     """Every figure whose title OR notes answer to ``query``.
 
     Deliberately NOT ``_figures_queryset``: that one prefetches every point to
@@ -613,8 +739,8 @@ def _figure_hits(iri: str, query: str) -> list[dict]:
             figure.page_no,
             figure.key,
             [("title", figure.title), ("notes", figure.notes)],
-            query,
-            title=figure.title,
+            scan,
+            title=_label(figure.title),
         )
         if hit is not None:
             hits.append(hit)
@@ -647,7 +773,8 @@ def search_document(iri: str, query: str, *, limit: int = MAX_SEARCH_HITS) -> di
     search cannot surface an identifier that ``?type=page`` would not already
     have served.
     """
-    hits = _page_hits(iri, query) + _table_hits(iri, query) + _figure_hits(iri, query)
+    scan = DocumentScan(query)
+    hits = _page_hits(iri, scan) + _table_hits(iri, scan) + _figure_hits(iri, scan)
     hits.sort(key=lambda h: (h["page_no"], _KIND_ORDER[h["kind"]], h["key"] or ""))
     total = len(hits)
     return {

@@ -1560,13 +1560,20 @@ def _search_variant(request) -> str:
     ``?type=table`` listing was still fresh when it had asked for search hits.
     Every string here starts ``search|``, which that format can never produce.
 
-    ``q`` is casefolded and ``limit`` normalised to the number actually applied,
-    so two spellings of one question share a tag rather than minting two cache
-    entries for one body. The digest in ``version_token`` is what keeps the
-    Devanagari out of the header.
+    ``q`` is stripped but deliberately NOT casefolded, unlike the content
+    route's variant. There the body does not contain ``q``, so two spellings
+    really do produce one body and sharing a tag is free. Here the body ECHOES
+    ``q`` — that is what makes an empty result readable as "this document does
+    not say that" — so ``?q=Ghus`` and ``?q=ghus`` are different
+    representations, and collapsing them would hand a 304 to a caller whose
+    cached body disagrees with the request it just made. ``limit`` is
+    normalised to the number actually applied.
+
+    The digest in ``version_token`` is what keeps the Devanagari out of the
+    header.
     """
     params = request.query_params
-    query = (params.get("q") or "").strip().casefold()
+    query = (params.get("q") or "").strip()
     return f"search|q={query}|limit={_search_limit(request)[0]}"
 
 
@@ -1605,8 +1612,11 @@ SEARCH_PARAMETERS = [
             "What to look for inside this document. Searches page text, table "
             "captions and markdown, and figure titles and notes. Matches "
             "phonetically as well as literally, so a query typed on a Latin "
-            "keyboard reaches Devanagari text (`ghus` finds घुस). A bare number "
-            "is an exact page folio, and `ujuri 31` is a word on page 31."
+            "keyboard reaches Devanagari text (`ghus` finds घुस). A plain "
+            "number addresses a PAGE and is not looked for in the text, so "
+            "`31` returns page 31 rather than every mention of 31, and "
+            "`ujuri 31` is that word on page 31 only. Devanagari numerals are "
+            "ordinary text and are searched as such."
         ),
     ),
     OpenApiParameter(

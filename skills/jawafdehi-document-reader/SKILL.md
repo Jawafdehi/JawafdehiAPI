@@ -127,9 +127,11 @@ Search instead — `jawafdehi:search_document(iri=iri, q="घुस")`:
 The prose and the table that belongs to it, together, in page order. Then
 `jawafdehi:read_document_part(iri=iri, page=294)` or `(iri=iri, table="p0294-t1")`.
 
-Romanized queries work (`q="ghus"` finds घुस), and a bare number is an exact printed folio
-(`q="294"` returns everything on page 294) — but check `match` before quoting, per the rules
-below.
+Romanized queries work (`q="ghus"` finds घुस). A plain number addresses a **page** and is
+not looked for in the text — `q="294"` returns what is on page 294, not every mention of
+the digits 294 — and `q="ujuri 294"` is that word on page 294 only. Devanagari numerals
+(`q="१९४८८"`) are ordinary text and are searched as such. Check `match` before quoting,
+per the rules below.
 
 ## Rules you must not break
 
@@ -156,9 +158,9 @@ the same flag means you are seeing the first hits **by page order, not the best 
 **A search hit's `match` says how strong it is, and they are not interchangeable.**
 `literal` is the term as you typed it. `phonetic` matched by SOUND — a Latin-keyboard query
 reaching Devanagari (`ghus` → घुस) — and may well be a different word, so read the snippet
-before trusting it. `folio` matched the page NUMBER and says nothing whatever about the
-text. Quote only what the snippet actually shows, and never report a phonetic or folio hit
-as the document using that term.
+before trusting it. `folio` matched the page NUMBER — you asked for a page, so the snippet is just the opening
+of it and says nothing about whether your term appears. Quote only what the snippet
+actually shows, and never report a phonetic or folio hit as the document using that term.
 
 **A snippet is a window, not a sentence.** It is ~190 characters around the match, and an
 ellipsis marks each end that was cut. Fetch the page or key with

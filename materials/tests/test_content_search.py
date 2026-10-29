@@ -311,6 +311,26 @@ class MatchKindTests(APITestCase):
         self.assertEqual({hit["page_no"] for hit in body["hits"]}, {294})
         self.assertEqual({hit["match"] for hit in body["hits"]}, {"folio"})
 
+    def test_a_number_is_not_hunted_for_in_the_prose(self):
+        """`q=31` means page 31, not every currency figure containing 31.
+
+        Page text is prose full of incidental digits; substring-matching them
+        buries the page the reader asked for. This is deliberately NOT how the
+        caption listing behaves — see LegacyListingFilterTests.
+        """
+        page = DocumentPage.objects.get(content_id=IRI, page_no=294)
+        page.text = "यस वर्षको कुल बिगो रु. 31,45,000 रहेको छ।"
+        page.save(update_fields=["text"])
+        body = self.client.get(URL, {"q": "31"}).data
+        self.assertEqual({hit["page_no"] for hit in body["hits"]}, {31})
+
+    def test_a_devanagari_numeral_is_ordinary_text(self):
+        """१९४८८ can never be a folio, so treating it as one would make the
+        archive's own numerals unsearchable."""
+        body = self.client.get(URL, {"q": "१९४८८"}).data
+        self.assertTrue(body["hits"])
+        self.assertEqual({hit["page_no"] for hit in body["hits"]}, {31})
+
     def test_a_folio_query_reaches_a_page_we_could_not_read(self):
         """An unread page has no text to match; its number still addresses it."""
         body = self.client.get(URL, {"q": "295"}).data
@@ -447,6 +467,19 @@ class SearchCachingTests(APITestCase):
         first = self.client.get(URL, {"q": "घुस"})["ETag"]
         second = self.client.get(URL, {"q": "उजुरीको"})["ETag"]
         self.assertNotEqual(first, second)
+
+    def test_case_variants_do_not_share_a_tag_because_the_body_echoes_q(self):
+        """`?q=Ghus` and `?q=ghus` find the same hits but are different bodies.
+
+        Sharing a tag would 304 the second caller into a cached body whose `q`
+        contradicts the request it just made — and that echo is the whole
+        reason an empty result is readable.
+        """
+        upper = self.client.get(URL, {"q": "Ghus"})
+        lower = self.client.get(URL, {"q": "ghus"})
+        self.assertEqual(upper.data["q"], "Ghus")
+        self.assertEqual(lower.data["q"], "ghus")
+        self.assertNotEqual(upper["ETag"], lower["ETag"])
 
     def test_a_search_tag_never_matches_a_content_tag(self):
         """One document, one ``ingested_at`` — the variant is what keeps the two
@@ -626,6 +659,53 @@ class McpSearchToolTests(APITestCase):
         # and reports the document as holding nothing.
         _, result = self._run(iri="https://jawafdehi.org/material/ag/nope", q="घुस")
         self.assertTrue(result.is_error)
+
+
+class ScanCostTests(APITestCase):
+    """The scan must not fold page-sized text through the shared caption cache.
+
+    `search_key`'s `lru_cache` is bounded at 8192 ENTRIES, not bytes. Folding
+    pages through it costs ~6 kB a slot, so ~18 large documents fill it
+    permanently — and it evicts the captions the listing filter depends on.
+    """
+
+    databases = "__all__"
+
+    def setUp(self):
+        _seed()
+
+    def test_a_romanized_query_does_not_pollute_the_shared_cache(self):
+        from jawafdehi_shared.search.transliterate import search_key
+
+        search_key.cache_clear()
+        self.client.get(URL, {"q": "ghus"})
+        # The walk holds its own request-scoped dict, so the shared cache picks
+        # up nothing from the scan at all. Before this fix one request over the
+        # seeded pages left page-sized entries behind.
+        self.assertEqual(search_key.cache_info().currsize, 0)
+
+    def test_a_devanagari_query_never_reaches_the_phonetic_pass(self):
+        """`search_fold` of pure Devanagari is empty, so there are no tokens to
+        walk and the literal pass is the whole search. This is why the
+        acceptance query is cheap, and it is worth pinning."""
+        from materials.content_api import DocumentScan
+
+        self.assertEqual(DocumentScan("घुस").tokens, [])
+        self.assertEqual(DocumentScan("ghus").tokens, ["gus"])
+
+    def test_the_walk_agrees_with_the_whole_string_matcher(self):
+        """The walk is an optimisation, not a different question."""
+        from jawafdehi_shared.search.transliterate import matches_search
+        from materials.content_api import DocumentScan
+
+        for query in ("ghus", "ujuri", "anugaman", "zzzqqq"):
+            for text in (BRIBERY_PAGE, BRIBERY_TABLE, BRIBERY_CAPTION):
+                with self.subTest(q=query, text=text[:20]):
+                    scan = DocumentScan(query)
+                    self.assertEqual(
+                        scan.locate(text, 999) is not None,
+                        matches_search(text, query),
+                    )
 
 
 class SnippetTests(APITestCase):
