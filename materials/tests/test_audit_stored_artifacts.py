@@ -101,9 +101,19 @@ class AuditTests(TestCase):
                 call_command(
                     "audit_stored_artifacts", stdout=out, stderr=err, **kwargs
                 )
+                raised = False
+                raised = False
             except CommandError:
+                raised = True
                 if not expect_error:
                     raise
+        # ⚠️ Asserted, not merely tolerated. Swallowing the error without
+        # checking it fired means a regression that drops a bucket out of the
+        # final CommandError exits 0, these tests still pass, and the Job that
+        # keys on the exit code starts calling failed sweeps successful.
+        assert raised is expect_error, (
+            f"expected CommandError={expect_error}, got {raised}"
+        )
         self.get = get
         return out.getvalue() + err.getvalue()
 

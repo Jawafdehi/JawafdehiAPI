@@ -48,8 +48,15 @@ CHECKED_ROLES = artifacts.ORIGINAL_PDF_ROLES | {
 
 #: Roles we produce ourselves. An empty one is repaired by re-running the command
 #: that makes it, never by asking the publisher for a file they never had.
+#: ⚠️ MARKDOWN is in here too. It is written by the convert job from OCR, so the
+#: publisher never had that file either — the same argument that puts the two
+#: REDACTED roles here. Only the ORIGINAL PDF roles are genuinely re-fetchable.
 DERIVED_ROLES = frozenset(
-    {artifacts.REDACTED_PDF_ROLE, artifacts.REDACTED_TRANSCRIPT_ROLE}
+    {
+        artifacts.REDACTED_PDF_ROLE,
+        artifacts.REDACTED_TRANSCRIPT_ROLE,
+        artifacts.ORIGINAL_TRANSCRIPT_ROLE,
+    }
 )
 
 
@@ -163,8 +170,15 @@ class Command(BaseCommand):
         # from upstream" is never the answer for the class this command calls the
         # most important. Routing it there sent an operator triaging the report to
         # the wrong remedy for the highest-priority finding.
+        # One pass each, and on the role rather than on list membership: `f not
+        # in rederive` compared whole dicts, which is O(n^2) over a corpus-wide
+        # run and treats two value-equal findings as one.
         rederive = [f for f in findings if f["role"] in DERIVED_ROLES]
-        refetch = [f for f in findings if f not in rederive and f["upstream"]]
+        refetch = [
+            f
+            for f in findings
+            if f["role"] not in DERIVED_ROLES and f["upstream"]
+        ]
         reclaim = len(findings) - len(rederive) - len(refetch)
         if findings:
             self.stdout.write(
