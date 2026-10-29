@@ -88,12 +88,14 @@ class Command(BaseCommand):
         for material in self._materials(options):
             outcome, detail = self._one(material, mode, apply_writes)
             outcomes[outcome] += 1
-            # 🛑 The limit counts documents this run DID something about, not rows
-            # it scanned. Slicing the queryset instead took the same first N IRIs
-            # every time, so the documented "run it as a Job with a --limit"
-            # procedure never advanced past the first batch: once those N carried
-            # a redacted PDF, every later run skipped exactly them and stopped.
-            if outcome not in ("already_published", "no_pdf"):
+            # 🛑 The limit counts documents this run CHANGED, and nothing else.
+            # Slicing the queryset took the same first N IRIs every time, so a
+            # batched run never advanced past the first batch. Counting failures
+            # stalls it from the other side: 18 of 28 charge sheets are blocked
+            # for good (11 scanned, 7 legacy), nothing skips them on a later run,
+            # so the budget goes on the same permanent failures forever — and
+            # each one is re-downloaded and re-redacted to get there.
+            if outcome in ("published", "would_publish"):
                 acted_on += 1
             if outcome == "blocked":
                 blocked.update(detail)
@@ -218,6 +220,15 @@ class Command(BaseCommand):
                 .first()
             )
             if fresh is None:
+                return
+            if self._has_redacted(fresh):
+                # `_has_redacted` was consulted before the fetch and the redaction,
+                # which is two network round trips ago. Another run — or a re-run
+                # started while this one was still walking — may have published in
+                # that window, and the replace below would discard its link without
+                # a word, possibly one produced at a different tier since `_mode()`
+                # is read per process.
+                self.stderr.write(f"  changed_underfoot {material.iri}")
                 return
             data = dict(fresh.data or {})
             # Replace-or-append by role, the same rule materials.transcripts states

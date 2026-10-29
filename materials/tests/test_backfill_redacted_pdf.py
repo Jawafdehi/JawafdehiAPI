@@ -54,6 +54,14 @@ def _raw(url: str = OURS) -> dict:
     return {"contentUrl": url, "jawafdehi:linkRole": "RAW"}
 
 
+def _raw_for(ident: str) -> dict:
+    """A distinct stored URL per material, so a fetch mock can tell them apart."""
+    return {
+        "contentUrl": f"https://s3.jawafdehi.org/case_uploads/{ident[0]}.pdf",
+        "jawafdehi:linkRole": "RAW",
+    }
+
+
 @override_settings(JAWAFDEHI_S3_BASE="https://s3.jawafdehi.org")
 class BackfillRedactedPdfTests(TestCase):
     databases = "__all__"
@@ -145,24 +153,31 @@ class BackfillRedactedPdfTests(TestCase):
     def test_residue_in_its_own_output_is_a_refusal_not_a_blocked_page(self):
         """Two different failures reach us through one exception type.
 
-        ⚠️ The output is captured and read AFTER the block. An assert placed
-        inside `pytest.raises` below the raising call never executes, which is
-        how an earlier version of this test passed while checking nothing — and
-        this split is the PR's headline behaviour.
+        ⚠️ Read from the captured STDOUT, never from the CommandError. That
+        message names all three counts unconditionally ("… N were refused by
+        verification …"), so asserting `"refused" in str(exc)` passes for a
+        blocked document too — which is how two earlier versions of this test
+        passed while checking nothing. Invert the classifier in `_one` and this
+        assertion must fail.
         """
         material = _material("p6", [_raw()])
 
         def unverified(src, dst, **kw):
             raise ValueError("verification failed: 1 value(s) of kind ['citizenship']")
 
-        output = ""
-        try:
-            output = self._run("--apply", redact=unverified)
-        except CommandError as exc:
-            output = str(exc)
+        out, err = StringIO(), StringIO()
+        with (
+            mock.patch("materials.extract.fetch_document", return_value=b"%PDF"),
+            mock.patch("likhit.privacy.pdf.redact_pdf", side_effect=unverified),
+            pytest.raises(CommandError),
+        ):
+            call_command(
+                "backfill_redacted_pdf", "--apply", stdout=out, stderr=err
+            )
 
-        assert "refused" in output
-        assert "blocked=1" not in output
+        report = out.getvalue()
+        assert "refused=1" in report, report
+        assert "blocked=1" not in report, report
         assert artifacts.REDACTED_PDF_ROLE not in self._roles(material)
 
     def test_a_body_that_is_not_a_pdf_does_not_end_the_run(self):
@@ -201,3 +216,47 @@ class BackfillRedactedPdfTests(TestCase):
             self._run("--apply", fetched=b"")
 
         assert artifacts.REDACTED_PDF_ROLE not in self._roles(material)
+
+
+@override_settings(JAWAFDEHI_S3_BASE="https://s3.jawafdehi.org")
+class LimitCountsWorkDoneTests(TestCase):
+    """🛑 A permanently-blocked document must not consume the batch budget.
+
+    The command's own measurement says 18 of 28 charge sheets are blocked for
+    good — 11 scanned, 7 carrying legacy pages. If those count toward `--limit`,
+    a batched sweep spends its budget on them, and because they are skipped by
+    nothing on the next run it spends the same budget on the same documents
+    forever, re-downloading and re-redacting each one. That is the stall the
+    limit was changed to fix, reached from the other side.
+    """
+
+    databases = "__all__"
+
+    def test_blocked_documents_do_not_eat_the_budget(self):
+        for n in ("a-blocked", "b-blocked", "c-ok"):
+            _material(n, [_raw_for(n)])
+
+        def selective(src, dst, **kw):
+            if b"ok" in src.read_bytes():
+                dst.write_bytes(b"%PDF redacted")
+                return _Report()
+            raise ValueError("page 2 is scanned and cannot be redacted")
+
+        out, err = StringIO(), StringIO()
+        with (
+            mock.patch(
+                "materials.extract.fetch_document",
+                side_effect=lambda url, **kw: b"%PDF ok" if url.endswith("c.pdf")
+                else b"%PDF blocked",
+            ),
+            mock.patch("likhit.privacy.pdf.redact_pdf", side_effect=selective),
+            pytest.raises(CommandError),
+        ):
+            call_command(
+                "backfill_redacted_pdf", "--apply", "--limit", "1",
+                stdout=out, stderr=err,
+            )
+
+        # The two blocked documents come first alphabetically. If they counted,
+        # the run would stop before ever reaching the one it can publish.
+        assert "published=1" in out.getvalue(), out.getvalue()
