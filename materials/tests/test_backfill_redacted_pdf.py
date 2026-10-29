@@ -95,9 +95,18 @@ class BackfillRedactedPdfTests(TestCase):
                 call_command(
                     "backfill_redacted_pdf", *args, stdout=out, stderr=err, **kwargs
                 )
+                raised = False
             except CommandError:
+                raised = True
                 if not expect_error:
                     raise
+        # ⚠️ Asserted, not merely tolerated — see the note in
+        # test_audit_stored_artifacts._run. Swallowing it silently means a
+        # regression that drops an outcome bucket out of the final CommandError
+        # exits 0 and every one of these tests still passes.
+        assert raised is expect_error, (
+            f"expected CommandError={expect_error}, got {raised}"
+        )
         self.fetch = fetch
         return out.getvalue() + err.getvalue()
 

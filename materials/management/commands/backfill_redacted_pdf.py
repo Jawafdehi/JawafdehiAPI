@@ -85,12 +85,12 @@ class Command(BaseCommand):
             "--max-scanned",
             dest="max_scanned",
             type=int,
-            default=DEFAULT_MAX_SCANNED,
+            default=0,
             help=(
-                "Stop after looking at this many documents, whatever the "
-                f"outcome (default {DEFAULT_MAX_SCANNED}). --limit counts only "
-                "documents published, so without a scan ceiling a shelf where "
-                "everything is blocked walks the whole corpus."
+                "Stop after this many documents have been fetched and read, "
+                "whatever the outcome. 0 (the default) is unlimited. --limit "
+                "counts only documents published, so on a shelf where everything "
+                "is blocked this is the only thing that ends the run."
             ),
         )
         parser.add_argument("--report", help="Write the run's counts here as JSON.")
@@ -106,17 +106,27 @@ class Command(BaseCommand):
             f"{'APPLYING' if apply_writes else 'dry run — nothing will be written'}"
         )
 
-        max_scanned = options["max_scanned"]
-        if max_scanned is not None and max_scanned < 1:
-            raise CommandError("--max-scanned must be at least 1.")
+        # 0 is unlimited, not invalid: the previous default bounded every run at
+        # 500 with no way to ask for the old behaviour, and a truncated sweep that
+        # exits 0 reads to a Job exactly like a finished one.
+        max_scanned = options["max_scanned"] or None
+        if max_scanned is not None and max_scanned < 0:
+            raise CommandError("--max-scanned cannot be negative.")
         scanned = 0
+        truncated = False
         outcomes: Counter = Counter()
         blocked: Counter = Counter()
         acted_on = 0
 
         for material in self._materials(options):
-            scanned += 1
             outcome, detail = self._one(material, mode, apply_writes)
+            # 🛑 Only outcomes that PAID the cost this ceiling exists to bound —
+            # a fetch of up to MAX_PDF_BYTES and a redact_pdf. Counting the
+            # short-circuits instead stalls the sweep at the head of the corpus:
+            # once the first --max-scanned rows are published or blocked, every
+            # later run spends its whole ceiling re-reaching them and stops.
+            if outcome not in ("already_published", "no_pdf"):
+                scanned += 1
             outcomes[outcome] += 1
             # 🛑 The limit counts documents this run CHANGED, and nothing else.
             # Slicing the queryset took the same first N IRIs every time, so a
@@ -130,18 +140,16 @@ class Command(BaseCommand):
             if outcome == "blocked":
                 blocked.update(detail)
                 self.stderr.write(f"  blocked {material.iri}: {dict(detail)}")
-            elif outcome in ("unreadable", "refused"):
+            elif outcome in ("unreadable", "refused", "unlinkable"):
                 self.stderr.write(f"  {outcome} {material.iri}: {detail}")
             if limit is not None and acted_on >= limit:
                 break
             if max_scanned is not None and scanned >= max_scanned:
+                truncated = True
                 self.stdout.write(
                     self.style.WARNING(
-                        f"stopped after scanning {scanned} document(s) without "
-                        f"reaching the --limit of {limit}; raise --max-scanned to "
-                        "go further"
-                        if limit
-                        else f"stopped at the --max-scanned ceiling of {scanned}"
+                        f"stopped at the --max-scanned ceiling of {scanned}; the "
+                        "corpus has not been fully walked"
                     )
                 )
                 break
@@ -153,6 +161,8 @@ class Command(BaseCommand):
                     {
                         "tier": mode.value,
                         "applied": apply_writes,
+                        "scanned": scanned,
+                        "truncated": truncated,
                         "outcomes": dict(outcomes),
                         "blocked_by_page_class": dict(blocked),
                     },
@@ -160,11 +170,23 @@ class Command(BaseCommand):
                     ensure_ascii=False,
                     indent=2,
                 )
-        if outcomes["blocked"] or outcomes["refused"] or outcomes["unreadable"]:
+        if truncated:
+            raise CommandError(
+                f"stopped at the --max-scanned ceiling of {scanned}; this run did "
+                "not walk the corpus. Raise it, or re-run to continue.",
+                returncode=1,
+            )
+        if (
+            outcomes["blocked"]
+            or outcomes["refused"]
+            or outcomes["unreadable"]
+            or outcomes["unlinkable"]
+        ):
             raise CommandError(
                 f"{outcomes['blocked']} document(s) carry a page this build cannot "
-                f"redact, {outcomes['refused']} were refused by verification and "
-                f"{outcomes['unreadable']} could not be read.",
+                f"redact, {outcomes['refused']} were refused by verification, "
+                f"{outcomes['unreadable']} could not be read and "
+                f"{outcomes['unlinkable']} could not be linked.",
                 returncode=1,
             )
 
@@ -290,7 +312,11 @@ class Command(BaseCommand):
                 {"link": link["link"], "role": artifacts.REDACTED_PDF_ROLE}
             )
             if mo is None:
-                return "unreadable"
+                # Its own name: `unreadable` is the fetch-failure bucket, and
+                # reporting it here printed the values-removed Counter where a
+                # message belongs and sent an operator to `fetch_document` for a
+                # document that read fine and whose bytes are already stored.
+                return "unlinkable"
             # `fetch_method="redaction"`, never "ocr": this file was produced by
             # redacting a PDF we already held, not by reading the publisher's.
             # materials.transcripts makes the same distinction for the same
@@ -354,8 +380,8 @@ class Command(BaseCommand):
 
     def _report(self, outcomes, blocked, acted_on, apply_writes, scanned) -> None:
         self.stdout.write("")
-        # Not "looked at": the limit counts documents acted on, so this has to
-        # name the same thing the limit does or the two read as a contradiction.
+        # Both counts, because the two flags bound different things: --limit
+        # counts documents published, --max-scanned counts documents read.
         self.stdout.write(
             f"scanned {scanned} document(s), acted on {acted_on}"
         )
