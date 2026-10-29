@@ -122,10 +122,37 @@ What survives from that analysis is a real, smaller observation: all 50 sampled
 (`अख्तियार दुरुपयोग अनुसन्धान आयोग`) and **none** of the 24 `press_release` rows
 do, because the scraper's shaper sets a field the upload path does not.
 
-→ **Worth doing on its own:** backfill `publisher` on case-uploaded rows, so the
-two provenances describe their documents equally well. That is a data
-improvement with no IRI change, no redirect requirement and no case-evidence
-risk — unlike every merge in this document.
+→ **Worth doing on its own:** backfill `publisher` on those 24 rows, so the two
+provenances describe their documents equally well. No IRI change, no redirect
+requirement, no case-evidence risk — unlike every merge in this document.
+Implemented as `manage.py backfill_publisher --source press_release --from
+ciaa_press_release` (dry-run by default). The value is COPIED from a real
+sibling row rather than composed: a label's publisher is bilingual display text
+(`{"en", "ne"}`) while a material's is a schema.org node
+(`{"@type": …, "name": {…}}`), and consumers read `publisher.name`. Writing the
+label's shape would have left these rows looking fixed and still
+unattributed.
+
+**Corrected: this is ONE pair, not a general rule.** An earlier revision said
+"case uploads carry no publisher while the scraped ones do", generalising from
+the single pair sampled. Measured across tokens, publisher coverage follows
+which SHAPER sets the field, not how the document arrived:
+
+| token | rows with a publisher |
+|---|---|
+| `ciaa_press_release` | 100/100 |
+| `ciaa_annual_report` | 41/41 |
+| `official_report` | 100/100 |
+| `nkp` | 100/100 |
+| **`ag`** | **0/100** |
+| **`court_order`** | **0/100** |
+| `press_release`, `charge_sheet`, `chargesheet` | 0 |
+| `special_court_order`, `court_order_0133`, `court_filing` | 0 |
+
+So `press_release` is the only token with a sibling to copy from. `charge_sheet`
+has no backfill available: `ag`, its scraped counterpart, carries no publisher
+either — 99,750 charge sheets with no attribution in the document, which is a
+separate and much larger question than this one.
 
 ## 3. `court_order_0133` (1) → correct to `court_order`
 
