@@ -34,8 +34,7 @@ import re
 from typing import Any
 
 from . import artifacts
-from . import jsonld
-from . import provenance
+from . import transcripts
 
 logger = logging.getLogger("materials.conversion")
 
@@ -201,8 +200,8 @@ def apply_convert_result(job, result: dict) -> None:
         _scrub_job_result(job)
         return
 
-    link = _store(text, "MARKDOWN", "material.md")
-    redacted_link = _store(
+    link = transcripts.store(text, "MARKDOWN", "material.md")
+    redacted_link = transcripts.store(
         redacted_text, artifacts.REDACTED_TRANSCRIPT_ROLE, "material.redacted.md"
     )
 
@@ -229,29 +228,24 @@ def apply_convert_result(job, result: dict) -> None:
             )
             return
         data = dict(row.data or {})
-        # Replace-or-append the MARKDOWN MediaObject (idempotent re-run). MARKDOWN
-        # is our own singular derived output, so dedup is by role (drop any prior
-        # MARKDOWN, add the fresh one) — not by content hash.
-        ours = {"MARKDOWN", artifacts.REDACTED_TRANSCRIPT_ROLE}
-        media = [
-            mo
-            for mo in _media_list(data)
-            if (mo.get("jawafdehi:linkRole") or "RAW") not in ours
-        ]
+        # Replace-or-append both transcript MediaObjects (idempotent re-run);
+        # see materials.transcripts for why dedup is by role.
         source_url = (result or {}).get("source_url")
-        for mo in (
-            _media(link, "MARKDOWN", text, source_url, derived=False),
-            _media(
-                redacted_link,
-                artifacts.REDACTED_TRANSCRIPT_ROLE,
-                redacted_text,
-                source_url,
-                derived=True,
-            ),
-        ):
-            if mo is not None:
-                media.append(mo)
-        data["associatedMedia"] = media
+        data["associatedMedia"] = transcripts.replace(
+            _media_list(data),
+            [
+                transcripts.media(link, "MARKDOWN", text, source_url, derived=False),
+                transcripts.media(
+                    redacted_link,
+                    artifacts.REDACTED_TRANSCRIPT_ROLE,
+                    redacted_text,
+                    source_url,
+                    derived=True,
+                    # What it was made OF, as a digest — see transcripts.media.
+                    derived_from=link["link"],
+                ),
+            ],
+        )
         # The searchable full text (language-mapped, per MATERIAL_CONTEXT) — the
         # REDACTED transcript where we have one. The indexer reads this field, so
         # whatever is here is what a public search snippet can quote.
@@ -329,53 +323,6 @@ def _redact(iri: str, text: str) -> tuple[str | None, dict]:
     if counts:
         logger.info("material_convert %s: redacted %s", iri, dict(counts))
     return redacted, dict(counts)
-
-
-def _store(text: str, role: str, name: str):
-    """Put one transcript in object storage, keyed on its own bytes.
-
-    The key must follow the CONTENT, not the name: the name is a constant, and
-    the backend hashes it, so a per-role constant name once had every material's
-    transcript resolving to a single object that each conversion overwrote —
-    seventeen production materials shared one .md URL (measured 2026-09-30).
-    """
-    from django.core.files.base import ContentFile
-    from jawafdehi_shared.storage import store_file_as_link
-
-    raw = text.encode("utf-8")
-    return store_file_as_link(
-        ContentFile(raw, name=name),
-        role=role,
-        content_hash=hashlib.sha256(raw).hexdigest(),
-    )
-
-
-def _media(link, role: str, text: str, source_url, *, derived: bool):
-    """One stored transcript as a roled MediaObject carrying its provenance.
-
-    Both transcripts go through here so they cannot drift — the redacted one was
-    previously assembled by a near-copy of this block, which is how it ended up
-    stripped from associatedMedia unconditionally and re-added only
-    conditionally.
-
-    ``derived`` is the honest half: the redacted copy was not produced by OCR-ing
-    the publisher's file, it was produced by redacting our own transcript.
-    Stamping both ``fetch_method="ocr"`` would describe two artifacts as the same
-    kind of claim about the same source, differing only in a digest.
-    """
-    mo = jsonld._media_object({"link": link["link"], "role": role})
-    if mo is None:
-        return None
-    raw = text.encode("utf-8")
-    mo["encodingFormat"] = "text/markdown"
-    mo[provenance.PROVENANCE_KEY] = provenance.build_provenance(
-        sha256=hashlib.sha256(raw).hexdigest(),
-        fetch_method="redaction" if derived else "ocr",
-        source_url=source_url,
-        content_length=len(raw),
-        ocr_engine="likhit",
-    )
-    return mo
 
 
 def _without_markers(text: str) -> str:

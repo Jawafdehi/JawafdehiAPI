@@ -12,6 +12,9 @@ over the command's own output.
 
 from __future__ import annotations
 
+import hashlib
+
+import json
 from io import StringIO
 from unittest import mock
 
@@ -275,3 +278,583 @@ class WithheldVisibilityTests(TestCase):
         output = _run()
 
         self.assertIn("1 document(s) are carrying a withheld transcript", output)
+
+
+class TranscriptHalfTests(TestCase):
+    """The sweep publishes a redacted transcript, or says it did not.
+
+    🛑 **Why this half exists at all.** ``materials.artifacts.is_withheld``
+    withholds our original MARKDOWN only when a redacted counterpart exists. A
+    sweep that rewrites ``data["text"]`` and stops there therefore redacts the
+    search index and leaves the full transcript published one link away — the
+    exposure looks closed from every surface except the one a reader can click.
+    """
+
+    databases = "__all__"
+
+    def _with_transcript(self, ident, *, stored, indexed=None):
+        """A row whose MARKDOWN artifact says ``stored`` and whose text says ``indexed``.
+
+        The two differ on purpose in most of these tests: they are not the same
+        bytes in the archive either, and a redacted transcript built from the
+        indexed text would be a redaction of a document we do not serve.
+        """
+        material = _material(ident, indexed if indexed is not None else stored)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": f"https://s3.jawafdehi.org/case_uploads/{ident}.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+        return material
+
+    def _fetch(self, body: bytes):
+        return mock.patch(
+            "materials.extract.fetch_document", return_value=body
+        )
+
+    def _stored(self, material):
+        roles = {
+            mo.get("jawafdehi:linkRole"): mo
+            for mo in material.data.get("associatedMedia", [])
+        }
+        return roles
+
+    def test_a_redacted_transcript_is_published_beside_the_text(self):
+        material = self._with_transcript("t1", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(WITH_CITIZENSHIP.encode("utf-8")):
+            output = _run("--apply")
+
+        material.refresh_from_db()
+        roles = self._stored(material)
+        self.assertIn("REDACTED_MARKDOWN", roles)
+        self.assertIn("MARKDOWN", roles, "the original must survive, withheld")
+        self.assertIn("transcripts: published=1", output)
+
+    def test_the_transcript_is_redacted_from_the_artifact_not_the_index(self):
+        """The distinguishing test: the two inputs carry different values."""
+        other = "नागरिकता नं. ९९-९९-९९-९९९९९ को अर्को कागज"
+        material = self._with_transcript("t2", stored=other, indexed=WITH_CITIZENSHIP)
+
+        with self._fetch(other.encode("utf-8")) as fetch:
+            _run("--apply")
+
+        material.refresh_from_db()
+        fetch.assert_called_once()
+        self.assertEqual(
+            fetch.call_args[0][0],
+            "https://s3.jawafdehi.org/case_uploads/t2.md",
+            "it must read the stored MARKDOWN, not re-use data['text']",
+        )
+        self.assertIn("REDACTED_MARKDOWN", self._stored(material))
+
+    def test_a_document_with_no_transcript_still_gets_its_text_redacted(self):
+        material = _material("t3", WITH_CITIZENSHIP)
+
+        output = _run("--apply")
+
+        material.refresh_from_db()
+        self.assertNotIn(CITIZENSHIP_VALUE, str(material.data["text"]))
+        self.assertIn("no_transcript=1", output)
+
+    def test_an_empty_stored_object_is_reported_not_published(self):
+        """~7% of the AG shelf answers 200 with zero bytes."""
+        material = self._with_transcript("t4", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(b""), self.assertRaises(CommandError) as caught:
+            _run("--apply")
+
+        material.refresh_from_db()
+        self.assertNotIn(CITIZENSHIP_VALUE, str(material.data["text"]))
+        self.assertNotIn("REDACTED_MARKDOWN", self._stored(material))
+        self.assertEqual(caught.exception.returncode, 1)
+
+    def test_a_transcript_that_still_scans_positive_is_not_published(self):
+        material = self._with_transcript("t5", stored=WITH_CITIZENSHIP)
+        residual = redaction.Counter({"bank_account": 1})
+
+        with (
+            self._fetch(WITH_CITIZENSHIP.encode("utf-8")),
+            mock.patch(
+                "materials.management.commands.backfill_redaction.residual_classes",
+                return_value=residual,
+            ),
+            self.assertRaises(CommandError),
+        ):
+            _run("--apply")
+
+        material.refresh_from_db()
+        self.assertNotIn("REDACTED_MARKDOWN", self._stored(material))
+        self.assertNotIn(
+            CITIZENSHIP_VALUE,
+            str(material.data["text"]),
+            "the text half still goes ahead — strictly better than leaving both",
+        )
+
+    def test_running_twice_replaces_the_transcript_rather_than_adding_one(self):
+        material = self._with_transcript("t6", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(WITH_CITIZENSHIP.encode("utf-8")):
+            _run("--apply")
+            _run("--apply")
+
+        material.refresh_from_db()
+        roles = [
+            mo.get("jawafdehi:linkRole")
+            for mo in material.data.get("associatedMedia", [])
+        ]
+        self.assertEqual(roles.count("REDACTED_MARKDOWN"), 1)
+        self.assertEqual(roles.count("MARKDOWN"), 1)
+
+    def test_a_dry_run_fetches_but_stores_nothing(self):
+        material = self._with_transcript("t7", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(WITH_CITIZENSHIP.encode("utf-8")):
+            output = _run()
+
+        material.refresh_from_db()
+        self.assertNotIn("REDACTED_MARKDOWN", self._stored(material))
+        self.assertIn("would_publish=1", output)
+
+    def test_no_transcript_skips_the_half_entirely(self):
+        material = self._with_transcript("t8", stored=WITH_CITIZENSHIP)
+
+        with self._fetch(WITH_CITIZENSHIP.encode("utf-8")) as fetch:
+            _run("--apply", "--no-transcript")
+
+        material.refresh_from_db()
+        fetch.assert_not_called()
+        self.assertNotIn("REDACTED_MARKDOWN", self._stored(material))
+
+
+class ConcurrentWriteTests(TestCase):
+    """A write that lands between the read and the lock is not clobbered.
+
+    The command re-reads under ``select_for_update`` and then assigns the blob it
+    built from the PRE-lock snapshot, so without this check the sweep would
+    overwrite a scraper's fresher document wholesale — text, media and all — on
+    its way to redacting text that is already redacted.
+    """
+
+    databases = "__all__"
+
+    def test_a_document_rewritten_under_the_lock_is_left_alone(self):
+        from collections import Counter
+
+        from materials.management.commands.backfill_redaction import Command
+
+        material = _material("race", WITH_CITIZENSHIP)
+        stale = Material.objects.using("ngm").get(pk=material.iri)
+        fresher = dict(stale.data)
+        fresher["text"] = {"ne": "कसैले बीचमा लेख्यो"}
+        Material.objects.using("ngm").filter(pk=material.iri).update(data=fresher)
+
+        command = Command()
+        command._transcript_notes = Counter()
+        outcome, _removed = command._one(stale, True, skip_transcript=True)
+
+        self.assertEqual(outcome, "changed_underfoot")
+        material.refresh_from_db()
+        self.assertEqual(material.data["text"], {"ne": "कसैले बीचमा लेख्यो"})
+
+
+class TranscriptRoleGuardTests(TestCase):
+    """``transcripts.replace`` will not touch a role it does not own."""
+
+    def test_a_non_transcript_role_is_refused(self):
+        from materials import transcripts
+
+        with self.assertRaises(ValueError):
+            transcripts.replace([], [{"jawafdehi:linkRole": "RAW"}])
+
+    def test_only_the_roles_being_written_are_replaced(self):
+        from materials import transcripts
+
+        existing = [
+            {"jawafdehi:linkRole": "RAW", "contentUrl": "a"},
+            {"jawafdehi:linkRole": "MARKDOWN", "contentUrl": "b"},
+            {"jawafdehi:linkRole": "REDACTED_MARKDOWN", "contentUrl": "old"},
+        ]
+
+        out = transcripts.replace(
+            existing, [{"jawafdehi:linkRole": "REDACTED_MARKDOWN", "contentUrl": "new"}]
+        )
+
+        self.assertEqual(
+            [(mo["jawafdehi:linkRole"], mo["contentUrl"]) for mo in out],
+            [("RAW", "a"), ("MARKDOWN", "b"), ("REDACTED_MARKDOWN", "new")],
+        )
+
+
+class CleanRowsStillGetATranscriptTests(TestCase):
+    """🛑 A row clean in `data["text"]` can carry values in its MARKDOWN artifact.
+
+    That is the premise of this whole command — the two are not guaranteed to be
+    the same bytes, which is why the transcript is redacted from the artifact and
+    not from the indexed text. Returning early on `clean` therefore skipped
+    exactly the rows the distinction was drawn for, and made the documented
+    remedy a permanent no-op: a row an earlier text-only sweep already redacted
+    is clean on every later run.
+    """
+
+    databases = "__all__"
+
+    def _row(self, ident: str, *, indexed: str, stored: str):
+        material = _material(ident, indexed)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": f"https://s3.jawafdehi.org/case_uploads/{ident}.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+        return material
+
+    def _roles(self, material):
+        material.refresh_from_db()
+        return [
+            mo.get("jawafdehi:linkRole")
+            for mo in material.data.get("associatedMedia", [])
+        ]
+
+    def test_a_clean_row_with_a_dirty_transcript_is_published(self):
+        material = self._row("c1", indexed="कुनै पाठ", stored=WITH_CITIZENSHIP)
+
+        with mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        ):
+            output = _run("--apply")
+
+        assert "REDACTED_MARKDOWN" in self._roles(material)
+        assert "MARKDOWN" in self._roles(material)
+        self.assertIn("clean=1", output)
+
+    def test_a_second_run_over_an_already_redacted_row_still_publishes_one(self):
+        """The remedy the command documents has to actually work."""
+        material = self._row("c2", indexed=WITH_CITIZENSHIP, stored=WITH_CITIZENSHIP)
+        fetched = mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        )
+        with fetched:
+            _run("--apply", "--no-transcript")  # the text-only sweep that came first
+        assert "REDACTED_MARKDOWN" not in self._roles(material)
+
+        with fetched:
+            _run("--apply")
+
+        assert "REDACTED_MARKDOWN" in self._roles(material)
+
+    def test_an_upload_failure_does_not_end_the_sweep(self):
+        material = self._row("c3", indexed=WITH_CITIZENSHIP, stored=WITH_CITIZENSHIP)
+
+        with (
+            mock.patch(
+                "materials.extract.fetch_document",
+                return_value=WITH_CITIZENSHIP.encode("utf-8"),
+            ),
+            mock.patch(
+                "materials.transcripts.store", side_effect=OSError("R2 is having a day")
+            ),
+            self.assertRaises(CommandError),
+        ):
+            _run("--apply")
+
+        material.refresh_from_db()
+        self.assertNotIn(CITIZENSHIP_VALUE, str(material.data["text"]))
+
+
+class TheSweepIsIdempotentTests(TestCase):
+    """🛑 A second run over a finished archive must write nothing.
+
+    The command's docstring claims re-running is "a no-op rather than a second
+    pass over its own output", and the whole remediation story for every other
+    gap in this work is "re-run it". That claim stopped being true when the
+    transcript half moved ahead of the `clean` return: nothing checked whether a
+    REDACTED_MARKDOWN already existed, so every clean row re-fetched its
+    MARKDOWN, re-uploaded a derivative, and re-saved — and `post_save` re-indexes
+    the row, so a second sweep is a corpus-wide reindex on an estate that already
+    OOMs on those.
+
+    `provenance.build_provenance` stamps `captured_at = now()` when none is
+    passed, so the MediaObject differed every time and the write always stuck.
+    """
+
+    databases = "__all__"
+
+    def _row(self, ident: str, text: str):
+        material = _material(ident, text)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": f"https://s3.jawafdehi.org/case_uploads/{ident}.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+        return material
+
+    def test_a_second_run_fetches_nothing_and_writes_nothing(self):
+        material = self._row("idem", WITH_CITIZENSHIP)
+        fetch = mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        )
+        with fetch:
+            _run("--apply")
+        material.refresh_from_db()
+        first = (material.data, material.updated_at)
+
+        with fetch as second_fetch, mock.patch(
+            "materials.transcripts.store"
+        ) as second_store:
+            _run("--apply")
+
+        second_fetch.assert_not_called()
+        second_store.assert_not_called()
+        material.refresh_from_db()
+        self.assertEqual(material.data, first[0])
+        self.assertEqual(material.updated_at, first[1], "no write, so no reindex")
+
+
+class StalePairingTests(TestCase):
+    """A redaction of a transcript that was replaced mid-flight is not published.
+
+    🛑 The fetch and the redaction happen BEFORE the lock, by design — two
+    network round trips are not something to hold a row lock across. If a
+    scraper re-converts the document in that window, publishing our derivative
+    anyway makes `is_withheld` withhold the NEW original on the strength of a
+    redaction of the OLD one.
+    """
+
+    databases = "__all__"
+
+    def test_a_transcript_replaced_during_the_fetch_is_not_paired(self):
+        material = _material("race-md", WITH_CITIZENSHIP)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/old.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+
+        def swap_the_original(url, **kwargs):
+            """Stand in for a scraper re-converting while we are fetching."""
+            row = Material.objects.using("ngm").get(pk=material.iri)
+            row.data["associatedMedia"] = [
+                {
+                    "@type": "MediaObject",
+                    "contentUrl": "https://s3.jawafdehi.org/case_uploads/new.md",
+                    "jawafdehi:linkRole": "MARKDOWN",
+                }
+            ]
+            row.save(using="ngm")
+            return WITH_CITIZENSHIP.encode("utf-8")
+
+        # A changed pairing is a SKIP, not a success: the row is left exactly as
+        # it was and the run exits 1 so the count cannot be read as done.
+        with mock.patch(
+            "materials.extract.fetch_document", side_effect=swap_the_original
+        ), self.assertRaises(CommandError):
+            _run("--apply")
+
+        material.refresh_from_db()
+        roles = [
+            mo.get("jawafdehi:linkRole")
+            for mo in material.data.get("associatedMedia", [])
+        ]
+        self.assertNotIn("REDACTED_MARKDOWN", roles)
+
+
+class ConcurrentPublishTests(TestCase):
+    """A second sweep must not silently replace the first one's transcript.
+
+    Both runs see no REDACTED_MARKDOWN before the lock — the short-circuit is
+    pre-lock by design, since asking is free and fetching is not — so both fetch,
+    redact and upload. Without a locked re-check the second `transcripts.replace`
+    drops the first's link by role, possibly swapping a redaction made at a
+    different tier (the tier is resolved per process), and fires a second
+    `post_save` reindex.
+    """
+
+    databases = "__all__"
+
+    def test_a_publish_that_landed_first_is_not_overwritten(self):
+        material = _material("concurrent", "कुनै पाठ")
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/c.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+
+        def publish_first(text: str, *args, **kwargs):
+            """Stand in for another run taking the lock before this one."""
+            row = Material.objects.using("ngm").get(pk=material.iri)
+            row.data["associatedMedia"] = row.data["associatedMedia"] + [
+                {
+                    "@type": "MediaObject",
+                    "contentUrl": "https://s3.jawafdehi.org/case_uploads/theirs.md",
+                    "jawafdehi:linkRole": "REDACTED_MARKDOWN",
+                }
+            ]
+            row.save(using="ngm")
+            return {"link": "https://s3.jawafdehi.org/case_uploads/ours.md"}
+
+        with (
+            mock.patch(
+                "materials.extract.fetch_document",
+                return_value=WITH_CITIZENSHIP.encode("utf-8"),
+            ),
+            mock.patch("materials.transcripts.store", side_effect=publish_first),
+            self.assertRaises(CommandError),
+        ):
+            _run("--apply")
+
+        material.refresh_from_db()
+        urls = [
+            mo.get("contentUrl")
+            for mo in material.data.get("associatedMedia", [])
+            if mo.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
+        ]
+        self.assertEqual(urls, ["https://s3.jawafdehi.org/case_uploads/theirs.md"])
+
+
+class StalePairingAcrossRunsTests(TestCase):
+    """A redaction left behind when its original was replaced is repairable.
+
+    🛑 The short-circuit asks about the PAIRING, not about existence. If a writer
+    replaces the MARKDOWN alone — which `transcripts.replace` supports by design,
+    since its drop set comes from what is being written — the old redaction
+    survives beside the new original and `is_withheld` withholds the new one on
+    the strength of it. An existence check short-circuited every later run before
+    noticing, so the documented remedy could never repair the one state that most
+    needed it.
+    """
+
+    databases = "__all__"
+
+    def test_a_redaction_of_a_replaced_original_is_re_derived(self):
+        material = _material("stale-across", WITH_CITIZENSHIP)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/new.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            },
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/old-redacted.md",
+                "jawafdehi:linkRole": "REDACTED_MARKDOWN",
+                # made from an original this row no longer carries
+                "jawafdehi:provenance": {
+                    "fetch_method": "redaction",
+                    # a digest of an original this row no longer carries
+                    "derived_from": __import__("hashlib")
+                    .sha256(b"https://s3.jawafdehi.org/case_uploads/old.md")
+                    .hexdigest(),
+                },
+            },
+        ]
+        material.save()
+
+        with mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        ) as fetch:
+            _run("--apply")
+
+        fetch.assert_called_once()
+        self.assertEqual(
+            fetch.call_args[0][0], "https://s3.jawafdehi.org/case_uploads/new.md"
+        )
+        material.refresh_from_db()
+        redacted = [
+            mo
+            for mo in material.data["associatedMedia"]
+            if mo.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
+        ]
+        self.assertEqual(len(redacted), 1)
+        import hashlib
+
+        self.assertEqual(
+            redacted[0]["jawafdehi:provenance"]["derived_from"],
+            hashlib.sha256(
+                b"https://s3.jawafdehi.org/case_uploads/new.md"
+            ).hexdigest(),
+            "the fresh redaction records the original it was actually made of",
+        )
+        payload = json.dumps(material.data, ensure_ascii=False)
+        self.assertNotIn(
+            "case_uploads/new.md",
+            payload.split('"REDACTED_MARKDOWN"')[-1],
+            "the derived artifact must not carry the unredacted original's URL — "
+            "provenance is served to anonymous callers verbatim",
+        )
+
+
+class StalePairingOnACleanRowTests(TestCase):
+    """The repair has to work on the rows that actually need it.
+
+    🛑 Those rows are CLEAN: an earlier sweep already redacted their text, and
+    what they carry is a redaction paired with an original that has since been
+    replaced. So the repair runs down the clean path, through `_attach` — and
+    `_attach`'s concurrent-publish check asks whether ANY redacted transcript is
+    present, which on exactly this row is true because the stale one is still
+    there. Two guards added in different rounds, each right on its own, meeting
+    to make the repair impossible and leak an uploaded object on every run.
+    """
+
+    databases = "__all__"
+
+    def test_a_clean_row_with_a_stale_pairing_is_repaired(self):
+        material = _material("stale-clean", "कुनै पाठ")  # nothing to redact
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/new.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            },
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/stale.md",
+                "jawafdehi:linkRole": "REDACTED_MARKDOWN",
+                "jawafdehi:provenance": {
+                    "fetch_method": "redaction",
+                    "derived_from": hashlib.sha256(
+                        b"https://s3.jawafdehi.org/case_uploads/gone.md"
+                    ).hexdigest(),
+                },
+            },
+        ]
+        material.save()
+
+        with mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        ):
+            _run("--apply")
+
+        material.refresh_from_db()
+        redacted = [
+            mo
+            for mo in material.data["associatedMedia"]
+            if mo.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
+        ]
+        self.assertEqual(len(redacted), 1)
+        self.assertEqual(
+            redacted[0]["jawafdehi:provenance"]["derived_from"],
+            hashlib.sha256(
+                b"https://s3.jawafdehi.org/case_uploads/new.md"
+            ).hexdigest(),
+            "the stale redaction must be replaced, not left in place",
+        )
