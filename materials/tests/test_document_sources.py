@@ -36,7 +36,15 @@ MATERIALS = {
     "by_source": [
         {"source": "ag", "count": 99750},
         {"source": "official_report", "count": 223},
-        {"source": "dfmis", "count": 2117},
+        # `cib` is the standing unlabelled fixture. It is not a token that
+        # merely HAPPENS to be unnamed yet — it cannot be named: the
+        # authoritative source inventory uses "CIB" for both the Nepal Police
+        # Central Investigation Bureau and the Credit Information Bureau, and
+        # its rows are not publicly readable to break the tie. See the
+        # deliberately-unlabelled block in `materials/sources.py`. That makes it
+        # a stable fixture — unlike `dfmis`, which stood here until it was
+        # confirmed and labelled on 2026-10-29.
+        {"source": "cib", "count": 91},
     ],
     "by_dataset_bucket": [
         {"source": "official_report", "dataset_bucket": "report_annual-report", "count": 18},
@@ -76,13 +84,78 @@ class CatalogueShapeTests(APITestCase):
         # reader cannot tell an invented attribution from a checked one.
         from materials.sources import SOURCE_LABELS
 
-        unsourced = {"kanun_patrika", "court_order"}
+        # Three reasons a token carries no publisher, all of them deliberate:
+        # the records name none (`kanun_patrika`); the issuer varies per record
+        # and is on the record (`court_order`, `court_filing`, `news`,
+        # `document`, `legal_corpus`, `social_media`); or the records fix the
+        # government LEVEL but never name the office (`province/koshi`).
+        unsourced = {
+            "kanun_patrika",
+            "court_order",
+            "court_filing",
+            "news",
+            "document",
+            "legal_corpus",
+            "social_media",
+            "province/koshi",
+        }
         for token in unsourced:
             self.assertNotIn(
                 "publisher", SOURCE_LABELS[token], f"{token} has no citable publisher"
             )
         for token in ("ag", "official_report", "nkp", "ppmo", "bolpatra"):
             self.assertIsInstance(SOURCE_LABELS[token]["publisher"], dict)
+
+    def test_a_publisher_read_off_the_records_own_field_is_used_verbatim(self):
+        # The three US tokens are the only ones whose materials carry a
+        # populated schema.org `publisher`. That field is the strongest
+        # evidence class available, so the label must restate it rather than
+        # paraphrase it into something shorter and wrong.
+        from materials.sources import SOURCE_LABELS
+
+        self.assertEqual(
+            SOURCE_LABELS["us_court"]["publisher"]["en"],
+            "United States District Court for the District of Columbia",
+        )
+        self.assertEqual(
+            SOURCE_LABELS["us_sec"]["publisher"]["en"],
+            "United States Securities and Exchange Commission",
+        )
+        self.assertEqual(
+            SOURCE_LABELS["us_doj"]["publisher"]["en"],
+            "United States Department of Justice",
+        )
+
+    def test_a_publisher_known_only_from_the_attached_document_is_still_labelled(self):
+        # `news_shilaptra` names no outlet in any metadata field. It is labelled
+        # because its `associatedMedia` RAW link points at shilapatra.com, whose
+        # page title matches the record's own Nepali name. Metadata silence is
+        # not the end of the evidence — the attached document usually carries
+        # the original URL, and that domain names the publisher.
+        #
+        # The label follows the DOMAIN, not the token, which misspells it.
+        from materials.sources import SOURCE_LABELS
+
+        self.assertEqual(SOURCE_LABELS["news_shilaptra"]["publisher"]["en"], "Shilapatra")
+
+    def test_an_unexpanded_acronym_stays_unexpanded(self):
+        # `occrp`, `nrb`, `sebon` and `dmli` are named by their own records, but
+        # nothing in this repo, the sourcing README or the reviewed frontend
+        # registry spells the acronyms out. Recording the acronym fixes the
+        # token to a named body; expanding it here would be invention, which is
+        # the one thing this module must not do.
+        from materials.sources import SOURCE_LABELS
+
+        for token in ("occrp", "nrb", "sebon", "dmli"):
+            publisher = SOURCE_LABELS[token]["publisher"]["en"]
+            self.assertEqual(publisher, publisher.upper(), f"{token} publisher was expanded")
+
+    def test_every_label_carries_a_name_and_a_description(self):
+        from materials.sources import SOURCE_LABELS
+
+        for token, label in SOURCE_LABELS.items():
+            self.assertTrue(label.get("name", {}).get("en"), f"{token} has no English name")
+            self.assertTrue(label.get("description"), f"{token} has no description")
 
     def test_nkp_is_attributed_to_the_court_not_the_journal(self):
         # The materials' own publisher field says सर्वोच्च अदालत. The journal
@@ -111,15 +184,49 @@ class HonestyTests(APITestCase):
     databases = "__all__"
 
     def test_an_unlabelled_source_says_so_rather_than_guessing(self):
-        # `dfmis` has no confirmed label anywhere in the codebase. Inventing a
-        # plausible one on an accountability archive is worse than the raw
-        # token, because a reader cannot tell an invented label from a reviewed
-        # one.
+        # `cib` cannot be named from any evidence available (see the fixture
+        # note above). Inventing a plausible label on an accountability archive
+        # is worse than the raw token, because a reader cannot tell an invented
+        # label from a reviewed one.
         _snapshot(MATERIALS)
         rows = {r["source"]: r for r in self.client.get(URL).json()["sources"]}
-        self.assertFalse(rows["dfmis"]["labelled"])
-        self.assertIsNone(rows["dfmis"]["name"])
+        self.assertFalse(rows["cib"]["labelled"])
+        self.assertIsNone(rows["cib"]["name"])
         self.assertTrue(rows["ag"]["labelled"])
+
+    def test_a_pending_merge_token_is_labelled_and_says_it_is_pending(self):
+        # `chargesheet` misspells `charge_sheet` and `court_order_0133` let a
+        # case number leak in. They hold real documents, so they ARE labelled,
+        # but the description has to carry the pending merge or a tidy name
+        # quietly hides the defect it exists to fix.
+        #
+        # `charge_sheet` and `press_release` are deliberately NOT in this list:
+        # sourcing a case upload by its material_type is the documented
+        # convention (#344), so they are legitimate sources, not accidents.
+        from materials.sources import SOURCE_LABELS
+
+        for token in ("chargesheet", "court_order_0133"):
+            label = SOURCE_LABELS[token]
+            self.assertTrue(label["name"]["en"])
+            self.assertIn(
+                "pending",
+                label["description"].lower(),
+                f"{token} is labelled but does not disclose the pending merge",
+            )
+
+    def test_a_duplicate_token_reuses_the_reviewed_attribution(self):
+        # The point of labelling a duplicate is that it should be
+        # indistinguishable in CONTENT from the token it duplicates — same
+        # documents, same publisher. Re-deriving an attribution here is how the
+        # two drift apart and start making different claims about one shelf.
+        from materials.sources import SOURCE_LABELS as S
+
+        self.assertEqual(S["charge_sheet"]["publisher"], S["ag"]["publisher"])
+        self.assertEqual(S["chargesheet"]["publisher"], S["charge_sheet"]["publisher"])
+        self.assertEqual(S["press_release"]["publisher"], S["ciaa_press_release"]["publisher"])
+        self.assertEqual(
+            S["court_order_0133"]["publisher"], S["special_court_order"]["publisher"]
+        )
 
     def test_a_snapshot_without_readability_reports_unknown_not_zero(self):
         # An older snapshot predates the aggregate. Defaulting its absence to 0
