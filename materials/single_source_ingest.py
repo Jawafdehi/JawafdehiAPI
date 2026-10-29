@@ -39,9 +39,36 @@ import logging
 
 from .redaction import TEXT_KEY, keep_original, redact_jsonld
 
-from .models import Material
+from .models import Material, MaterialIdentHistory
 
 logger = logging.getLogger("materials.ingest")
+
+
+
+
+def _follow_retired_iri(jsonld: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite a write aimed at a RETIRED ``@id`` to the material's current one.
+
+    Without this, every rename is silently undone. A scraper or pipeline that
+    still knows a document by its old address re-ingests it there, and because
+    the upsert revives a soft-deleted row, the tombstone the move left behind is
+    republished as a live material — so the archive ends up serving BOTH
+    addresses, which is worse than never having renamed it.
+
+    Only rewrites when nothing lives at the requested ``@id``. A live material
+    always wins, exactly as on the read path: the history table may never
+    shadow a row that exists.
+    """
+    iri = jsonld.get("@id")
+    if not isinstance(iri, str) or not iri:
+        return jsonld
+    if Material.objects.using("ngm").filter(pk=iri).exists():
+        return jsonld
+    target = MaterialIdentHistory.resolve(iri)
+    if target is None:
+        return jsonld
+    logger.info("write to retired %s rewritten to %s", iri, target.iri)
+    return {**jsonld, "@id": target.iri}
 
 
 def upsert_single_source_material(
@@ -86,6 +113,7 @@ def upsert_single_source_material(
         # Counts only — a journal row names the value it replaced, which would
         # re-create the problem the redaction exists to solve.
         logger.info("redacted %s on ingest: %s", jsonld.get("@id"), dict(counts))
+    jsonld = _follow_retired_iri(jsonld)
     candidate = Material.from_jsonld(jsonld, material_type=material_type)
     # from_jsonld already set the source-based birth default; an explicit override
     # wins. Assign it BEFORE full_clean so an invalid policy is REJECTED by the

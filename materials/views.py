@@ -22,7 +22,7 @@ import mimetypes
 import jsonpatch
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.http import HttpResponseNotModified
+from django.http import HttpResponseNotModified, HttpResponsePermanentRedirect
 from django.utils.cache import patch_vary_headers
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -279,6 +279,37 @@ def _upsert_material(
     return material.data, code, None
 
 
+def _retired_iri_redirect(request, iri: str):
+    """301 a retired material IRI to its current address, or ``None`` for a 404.
+
+    Consulted ONLY after :func:`_resolve_material` has missed, so a live
+    material always wins and a retired address can never shadow one.
+
+    **Visibility is re-checked on the TARGET, with the requester's own
+    permissions.** A redirect is an existence claim: 301-ing to a PRIVATE
+    material would tell anyone who guessed a former address that the document
+    exists, which is precisely the leak the visibility gate prevents on the
+    direct URL. So a non-public target 404s for the public exactly as the
+    direct URL would, and only an authed caseworker is redirected to it.
+    """
+    from .models import PUBLIC_VISIBILITIES, MaterialIdentHistory
+
+    target = MaterialIdentHistory.resolve(iri)
+    if target is None:
+        return None
+    if not (_can_see_nonpublic(request) or target.visibility in PUBLIC_VISIBILITIES):
+        return None
+    # Preserve the query string: a retired address is most often reached from a
+    # citation or an index, and dropping its parameters would silently change
+    # the request rather than merely move it.
+    location = f"/api/materials/{target.source}/{target.ident}"
+    if request.META.get("QUERY_STRING"):
+        location = f"{location}?{request.META['QUERY_STRING']}"
+    resp = HttpResponsePermanentRedirect(location)
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
 def _material_read_response(request, iri: str) -> Response:
     """The shared GET tail for both material routes.
 
@@ -299,6 +330,9 @@ def _material_read_response(request, iri: str) -> Response:
         iri, include_nonpublic=_can_see_nonpublic(request), with_row=True
     )
     if data is None:
+        redirect = _retired_iri_redirect(request, iri)
+        if redirect is not None:
+            return redirect
         resp = Response(
             {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
         )

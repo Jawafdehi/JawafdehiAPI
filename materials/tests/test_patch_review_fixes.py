@@ -111,16 +111,55 @@ class TestReadPlaneEfficiency:
 
     def test_a_derived_court_material_does_not_query_for_an_etag(self):
         # _resolve_material already proved there is no stored row by taking the
-        # DoesNotExist branch; re-asking can never return anything.
+        # DoesNotExist branch; re-asking THE MATERIAL TABLE can never return
+        # anything.
+        #
+        # Counted against the material table specifically rather than "any
+        # table whose name contains materials". A read that misses also costs
+        # ONE lookup of the retired-IRI history (see _retired_iri_redirect) —
+        # a different table, a different question, and one that genuinely can
+        # return something. Folding it into this count would have made the
+        # budget read as a regression when it is the feature working; keeping
+        # the two apart is what lets this assertion still catch a real
+        # redundant re-query.
         iri = "https://jawafdehi.org/material/court/special.080-cr-9999"
         client = APIClient()
         with CaptureQueriesContext(connections["ngm"]) as ctx:
             client.get(f"/api/materials/?iri={iri}")
         selects = [
             q for q in ctx.captured_queries
-            if "materials" in q["sql"].lower() and q["sql"].lower().startswith("select")
+            if q["sql"].lower().startswith("select")
+            and '"materials"' in q["sql"].lower()
+            and "material_ident_history" not in q["sql"].lower()
         ]
         assert len(selects) == 1, [q["sql"] for q in selects]
+
+    def test_a_read_miss_costs_exactly_one_history_lookup(self):
+        # The redirect's price, pinned so it stays one indexed lookup on the
+        # MISS path only. A 404 on a public endpoint is high-volume (stale
+        # links, scanners), so a second query creeping in here would be paid
+        # by every one of them.
+        iri = "https://jawafdehi.org/material/court/special.080-cr-9999"
+        client = APIClient()
+        with CaptureQueriesContext(connections["ngm"]) as ctx:
+            client.get(f"/api/materials/?iri={iri}")
+        history = [
+            q for q in ctx.captured_queries if "material_ident_history" in q["sql"].lower()
+        ]
+        assert len(history) == 1, [q["sql"] for q in history]
+
+    def test_a_successful_read_costs_no_history_lookup(self):
+        # The hot path must not pay for the redirect at all: history is
+        # consulted only after the material lookup has already missed.
+        mat = _store("rev-021")
+        client = APIClient()
+        with CaptureQueriesContext(connections["ngm"]) as ctx:
+            resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 200
+        history = [
+            q for q in ctx.captured_queries if "material_ident_history" in q["sql"].lower()
+        ]
+        assert history == []
 
 
 class TestEtagDoesNotLeakTheAuthedRepresentation:
