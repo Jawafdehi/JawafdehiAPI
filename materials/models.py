@@ -618,6 +618,13 @@ class MaterialIdentHistory(models.Model):
             return
         if new_iri:
             cls.objects.using("ngm").filter(retired_iri=new_iri).delete()
+        # REPOINT THE CHAIN. After A→B then B→C, a row still reading "A → the
+        # material formerly at B" is dead: that material is a tombstone, so
+        # resolve() rejects it and A hard-404s — the one outcome this table
+        # exists to prevent. Every address that used to reach the moved
+        # material must now reach its destination, so the chain stays one hop
+        # however many times a document is corrected.
+        cls.objects.using("ngm").filter(material_id=old_iri).update(material=material)
         cls.objects.using("ngm").update_or_create(
             retired_iri=old_iri, defaults={"material": material, "reason": reason}
         )
@@ -630,9 +637,12 @@ class MaterialIdentHistory(models.Model):
         because a redirect that ignored it would confirm the existence of a
         PRIVATE document to anyone who guessed a former address.
         """
+        # No .using(): this runs on the public read path, so it must be
+        # replica-eligible like every other read there. Forcing the primary
+        # would put one extra query per 404 — a high-volume class on a public
+        # endpoint — onto the write database.
         row = (
-            cls.objects.using("ngm")
-            .select_related("material")
+            cls.objects.select_related("material")
             .filter(retired_iri=retired_iri)
             .first()
         )

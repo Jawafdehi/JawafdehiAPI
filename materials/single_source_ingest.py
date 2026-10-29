@@ -62,12 +62,29 @@ def _follow_retired_iri(jsonld: dict[str, Any]) -> dict[str, Any]:
     iri = jsonld.get("@id")
     if not isinstance(iri, str) or not iri:
         return jsonld
-    if Material.objects.using("ngm").filter(pk=iri).exists():
+    # `is_deleted=False` is load-bearing, not defensive. `move_source` leaves a
+    # SOFT-DELETED row at the old address, so an existence check that counted
+    # tombstones would find one on exactly the path this function exists for,
+    # skip the rewrite, and let the upsert's revive-on-write bring the old row
+    # back — leaving BOTH addresses live, which is the failure the rewrite is
+    # supposed to prevent. A live material wins; a tombstone does not.
+    if Material.objects.filter(pk=iri, is_deleted=False).exists():
         return jsonld
     target = MaterialIdentHistory.resolve(iri)
     if target is None:
         return jsonld
-    logger.info("write to retired %s rewritten to %s", iri, target.iri)
+    # WARNING, not info: the write still replaces the target's `data`
+    # wholesale, so a pipeline that has not learned the new address can undo a
+    # correction made at the time of the move (the publisher fix `move_source`
+    # exists to apply, for instance). Following the redirect is still better
+    # than reviving the old address, but it is not free, and the operator needs
+    # to see that a stale producer is still writing.
+    logger.warning(
+        "write to RETIRED %s rewritten to %s — the producer still uses the old "
+        "address and its payload will overwrite this document",
+        iri,
+        target.iri,
+    )
     return {**jsonld, "@id": target.iri}
 
 

@@ -22,6 +22,8 @@ import mimetypes
 import jsonpatch
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from urllib.parse import urlencode
+
 from django.http import HttpResponseNotModified, HttpResponsePermanentRedirect
 from django.utils.cache import patch_vary_headers
 from drf_spectacular.types import OpenApiTypes
@@ -279,6 +281,15 @@ def _upsert_material(
     return material.data, code, None
 
 
+def _is_retired_iri(iri: str) -> bool:
+    """Whether ``iri`` names no live material but is a recorded former address."""
+    from .models import Material, MaterialIdentHistory
+
+    if Material.objects.filter(pk=iri, is_deleted=False).exists():
+        return False
+    return MaterialIdentHistory.resolve(iri) is not None
+
+
 def _retired_iri_redirect(request, iri: str):
     """301 a retired material IRI to its current address, or ``None`` for a 404.
 
@@ -301,11 +312,25 @@ def _retired_iri_redirect(request, iri: str):
         return None
     # Preserve the query string: a retired address is most often reached from a
     # citation or an index, and dropping its parameters would silently change
-    # the request rather than merely move it.
+    # the request rather than merely move it. `iri` is the exception — it is
+    # how the OTHER route spells the address being requested, so forwarding it
+    # would carry the retired IRI into the new URL and point the redirect back
+    # at the document we just moved away from.
+    params = [
+        (k, v)
+        for k, v in request.GET.items()
+        if k != "iri"
+    ]
     location = f"/api/materials/{target.source}/{target.ident}"
-    if request.META.get("QUERY_STRING"):
-        location = f"{location}?{request.META['QUERY_STRING']}"
+    if params:
+        location = f"{location}?{urlencode(params)}"
     resp = HttpResponsePermanentRedirect(location)
+    # A bare 301 is cached by browsers INDEFINITELY and is not revalidated, so
+    # a document moved back later would leave those clients looping between the
+    # two addresses with no way to recover. A corpus correction has to stay
+    # reversible, so the redirect is revalidated daily rather than remembered
+    # forever.
+    resp["Cache-Control"] = "public, max-age=86400"
     patch_vary_headers(resp, ("Authorization",))
     return resp
 
@@ -835,6 +860,17 @@ def material_detail(request, source: str, ident: str):
         denied = _require_ngm_role(request)
         if denied is not None:
             return denied
+        # A retired address is NOT a write target. Letting the upsert's
+        # redirect-follow run here would accept a PUT at one URL, apply it to a
+        # different document, and report 201 for a row it did not create —
+        # while PATCH, DELETE, /content and /search all 404 on the same IRI.
+        # Silently relocating an explicit write is worse than refusing it, so
+        # this matches the other verbs; the ingestion path still follows,
+        # because a pipeline has no URL to correct.
+        if _is_retired_iri(iri):
+            return Response(
+                {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+            )
         body = request.data if isinstance(request.data, dict) else {}
         material_type = body.get("material_type") if isinstance(body, dict) else None
         doc = body.get("material") if isinstance(body, dict) and "material" in body else body

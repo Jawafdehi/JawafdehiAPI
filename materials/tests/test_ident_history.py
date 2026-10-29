@@ -14,7 +14,9 @@ worse than not having it:
 
 from __future__ import annotations
 
+from django.contrib.auth.models import Group, User
 from django.test import TestCase
+from rest_framework.test import APITestCase
 
 from materials.jsonld import MATERIAL_CONTEXT
 from materials.models import MaterialIdentHistory, Material, Policy, Visibility
@@ -172,3 +174,84 @@ class WritePathTests(TestCase):
         fresh = "https://jawafdehi.org/material/court_order/brand-new"
         written = upsert_single_source_material(doc(fresh), material_type="court_order")
         self.assertEqual(written.iri, fresh)
+
+
+class ReviewRegressionTests(APITestCase):
+    """Cases a reviewer reproduced that the original tests missed."""
+
+    databases = "__all__"
+
+    @classmethod
+    def setUpTestData(cls):
+        group, _ = Group.objects.get_or_create(name="Caseworker")  # NGM role
+        cls.writer = User.objects.create(username="oidc-ngm-writer")
+        cls.writer.groups.add(group)
+
+    def test_a_tombstone_at_the_old_address_does_not_block_the_rewrite(self):
+        # THE BLOCKER. `move_source` soft-deletes the old row, so the real
+        # post-move state has a tombstone at OLD. An existence check that
+        # counted it skipped the rewrite, the upsert revived the tombstone, and
+        # BOTH addresses went live — on exactly the path this feature exists
+        # for. The original test never created a row at OLD, so it passed.
+        new = seed(NEW)
+        Material.objects.create(
+            iri=OLD,
+            source="court_order_0133",
+            ident="2081",
+            material_type="court_order",
+            data=doc(OLD),
+            is_deleted=True,
+        )
+        MaterialIdentHistory.record(new, OLD)
+        written = upsert_single_source_material(
+            doc(OLD, name={"en": "re-ingested"}), material_type="court_order"
+        )
+        self.assertEqual(written.iri, NEW)
+        self.assertFalse(Material.objects.filter(pk=OLD, is_deleted=False).exists())
+
+    def test_a_chain_of_renames_stays_one_hop(self):
+        # A→B then B→C. Without repointing, A still named the material at B,
+        # which is now a tombstone, so A hard-404ed.
+        a = "https://jawafdehi.org/material/court_order_0133/2081"
+        b = "https://jawafdehi.org/material/court_order/0133"
+        c = "https://jawafdehi.org/material/special_court_order/0133"
+        mb = seed(b)
+        MaterialIdentHistory.record(mb, a)
+        Material.objects.filter(pk=b).update(is_deleted=True)
+        mc = seed(c)
+        MaterialIdentHistory.record(mc, b)
+        self.assertEqual(MaterialIdentHistory.resolve(a), mc)
+        self.assertEqual(MaterialIdentHistory.resolve(b), mc)
+
+    def test_the_redirect_is_revalidated_rather_than_cached_forever(self):
+        # A bare 301 is cached indefinitely and never revalidated, so a move
+        # BACK would leave those clients looping with no way to recover.
+        m = seed(NEW)
+        MaterialIdentHistory.record(m, OLD)
+        resp = self.client.get("/api/materials/court_order_0133/2081")
+        self.assertEqual(resp.status_code, 301)
+        self.assertIn("max-age", resp["Cache-Control"])
+
+    def test_the_stale_iri_parameter_is_not_forwarded(self):
+        # ?iri= is how the other route spells the address being requested;
+        # carrying it across would point the redirect back at the old document.
+        m = seed(NEW)
+        MaterialIdentHistory.record(m, OLD)
+        resp = self.client.get(f"/api/materials/?iri={OLD}")
+        self.assertEqual(resp.status_code, 301)
+        self.assertNotIn("court_order_0133", resp["Location"])
+
+    def test_a_put_to_a_retired_address_404s_like_every_other_verb(self):
+        # It used to write to the OTHER document and report 201. Authenticated,
+        # so the 404 proves the retired-address guard and not the role gate.
+        m = seed(NEW)
+        MaterialIdentHistory.record(m, OLD)
+        self.client.force_authenticate(user=self.writer)
+        resp = self.client.put(
+            "/api/materials/court_order_0133/2081",
+            data=doc(OLD, name={"en": "sneaky"}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 404)
+        m.refresh_from_db()
+        self.assertEqual(m.data["name"], {"en": "judgement"})
