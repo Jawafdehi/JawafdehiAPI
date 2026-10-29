@@ -25,7 +25,7 @@ from django.db import transaction
 from django.http import HttpResponseNotModified
 from django.utils.cache import patch_vary_headers
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.decorators import (
     api_view,
@@ -70,6 +70,11 @@ from .content_api import (
     search_document,
     table_payload,
     version_token,
+)
+from .content_schema import (
+    MaterialContentErrorSerializer,
+    MaterialContentResponse,
+    MaterialContentSearchSerializer,
 )
 from .models import Material, Policy
 from .patch_validation import (
@@ -1313,6 +1318,42 @@ CONTENT_PARAMETERS = [
 ]
 
 
+#: The two response headers both content routes always set.
+#:
+#: Declared because the conditional GET is the one part of this plane a client
+#: has to opt into, and it cannot opt into something it does not know is there.
+#: The ``ETag`` is also not the usual one — it identifies the REPRESENTATION,
+#: so a caller holding a tag has to send it back on the same query it came
+#: from, and a client that assumed otherwise is exactly the bug the variant
+#: digest was added to fix.
+CONTENT_RESPONSE_HEADERS = [
+    OpenApiParameter(
+        "ETag",
+        OpenApiTypes.STR,
+        OpenApiParameter.HEADER,
+        response=[200, 304],
+        description=(
+            "A weak validator for this exact representation — the document's "
+            "ingest time plus a digest of the arguments that shaped the body. "
+            "Echo it in `If-None-Match` on the SAME query to get a 304; a tag "
+            "from one `type` will not match another."
+        ),
+    ),
+    OpenApiParameter(
+        "Vary",
+        OpenApiTypes.STR,
+        OpenApiParameter.HEADER,
+        response=True,
+        description=(
+            "Always includes `Authorization`, on the errors as well as the "
+            "200s: whether this URL exists at all depends on the caller, since "
+            "a non-public material 404s for an anonymous reader and resolves "
+            "for a caseworker."
+        ),
+    ),
+]
+
+
 # `extend_schema` has to sit OUTSIDE `api_view`: spectacular reads the
 # annotation off the view object, and applied to the bare function underneath it
 # is lost when `api_view` wraps it — the parameters silently vanish from the
@@ -1320,7 +1361,19 @@ CONTENT_PARAMETERS = [
 # plain callable; every other `extend_schema` in this repo is on a class-based
 # APIView, which is why this is the first place it comes up.
 @extend_schema(  # ty: ignore[invalid-argument-type]
-    parameters=CONTENT_PARAMETERS,
+    parameters=CONTENT_PARAMETERS + CONTENT_RESPONSE_HEADERS,
+    responses={
+        200: MaterialContentResponse,
+        304: OpenApiResponse(
+            description=(
+                "The caller's `If-None-Match` still matches. The tag covers the "
+                "REPRESENTATION, not the document, so a tag from `?type=table` "
+                "will not 304 a `?type=figure` request."
+            )
+        ),
+        400: MaterialContentErrorSerializer,
+        404: MaterialContentErrorSerializer,
+    },
     summary="Pages, tables and charts read out of a document",
     tags=["materials"],
 )
@@ -1639,7 +1692,15 @@ SEARCH_PARAMETERS = [
 
 
 @extend_schema(  # ty: ignore[invalid-argument-type]
-    parameters=SEARCH_PARAMETERS,
+    parameters=SEARCH_PARAMETERS + CONTENT_RESPONSE_HEADERS,
+    responses={
+        200: MaterialContentSearchSerializer,
+        304: OpenApiResponse(
+            description="The caller's `If-None-Match` still matches this query."
+        ),
+        400: MaterialContentErrorSerializer,
+        404: MaterialContentErrorSerializer,
+    },
     summary="Search inside one document",
     tags=["materials"],
 )

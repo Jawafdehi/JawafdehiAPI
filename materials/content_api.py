@@ -294,6 +294,12 @@ def _matches(text: str, page_no: int, query: str | None) -> bool:
 # ── matching ─────────────────────────────────────────────────────────────────
 
 
+#: Every value :attr:`Span.how` can take, and therefore every value the ``match``
+#: field of a search hit can carry. Named here rather than in the schema module
+#: so the published enum is read off the matcher rather than restated beside it.
+MATCH_KINDS = ("literal", "phonetic", "folio")
+
+
 @dataclass(frozen=True)
 class Span:
     """Where in a string a query matched, and on what grounds.
