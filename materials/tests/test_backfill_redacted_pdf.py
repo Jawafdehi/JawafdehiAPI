@@ -260,3 +260,56 @@ class LimitCountsWorkDoneTests(TestCase):
         # The two blocked documents come first alphabetically. If they counted,
         # the run would stop before ever reaching the one it can publish.
         assert "published=1" in out.getvalue(), out.getvalue()
+
+
+@override_settings(JAWAFDEHI_S3_BASE="https://s3.jawafdehi.org")
+class PublishOutcomeTests(TestCase):
+    """A publish that did not happen must not be counted as one.
+
+    `_publish` returns early for a vanished row, a refused MediaObject, and a
+    concurrent publish found under the lock. While `_one` returned "published"
+    unconditionally, every one of those counted as a publish, consumed the
+    `--limit` budget, was serialised into `--report`, and left the object
+    uploaded before the lock referenced by nothing.
+    """
+
+    databases = "__all__"
+
+    def test_a_concurrent_publish_is_not_counted_as_ours(self):
+        material = _material("race-pdf", [_raw()])
+
+        def publish_first(uploaded, **kwargs):
+            row = Material.objects.using("ngm").get(pk=material.iri)
+            row.data["associatedMedia"] = row.data["associatedMedia"] + [
+                {
+                    "@type": "MediaObject",
+                    "contentUrl": "https://s3.jawafdehi.org/case_uploads/theirs.pdf",
+                    "jawafdehi:linkRole": artifacts.REDACTED_PDF_ROLE,
+                }
+            ]
+            row.save(using="ngm")
+            return {"link": "https://s3.jawafdehi.org/case_uploads/ours.pdf"}
+
+        out, err = StringIO(), StringIO()
+        with (
+            mock.patch("materials.extract.fetch_document", return_value=b"%PDF"),
+            mock.patch(
+                "likhit.privacy.pdf.redact_pdf",
+                side_effect=lambda src, dst, **kw: (
+                    dst.write_bytes(b"%PDF redacted"),
+                    _Report(),
+                )[1],
+            ),
+            mock.patch(
+                "materials.management.commands.backfill_redacted_pdf"
+                ".store_file_as_link",
+                side_effect=publish_first,
+            ),
+        ):
+            call_command(
+                "backfill_redacted_pdf", "--apply", stdout=out, stderr=err
+            )
+
+        report = out.getvalue()
+        assert "published=1" not in report, report
+        assert "changed_underfoot=1" in report, report

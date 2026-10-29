@@ -187,8 +187,13 @@ class Command(BaseCommand):
 
         if not apply_writes:
             return "would_publish", report.values_removed
-        self._publish(material, redacted, url)
-        return "published", report.values_removed
+        # 🛑 The outcome comes from `_publish`, not from reaching this line.
+        # `_publish` returns early for a vanished row, a MediaObject the JSON-LD
+        # layer refuses, and a concurrent publish found under the lock — and with
+        # a bare `return "published"` every one of those counted as a publish,
+        # consumed the `--limit` budget, was serialised into `--report`, and left
+        # the object uploaded at line 210 referenced by nothing.
+        return self._publish(material, redacted, url), report.values_removed
 
     def _blocked_classes(self, message: str) -> Counter:
         """Every page class named in the refusal, not just the first.
@@ -205,8 +210,8 @@ class Command(BaseCommand):
         # password, a zero-page file, a destination that already exists.
         return found or Counter({"other": 1})
 
-    def _publish(self, material: Material, redacted: bytes, source_url: str) -> None:
-        """Store the derivative and point the row at it, under a row lock."""
+    def _publish(self, material: Material, redacted: bytes, source_url: str) -> str:
+        """Store the derivative and point the row at it. Returns the outcome."""
         link = store_file_as_link(
             ContentFile(redacted, name="material.redacted.pdf"),
             role=artifacts.REDACTED_PDF_ROLE,
@@ -220,7 +225,7 @@ class Command(BaseCommand):
                 .first()
             )
             if fresh is None:
-                return
+                return "vanished"
             if self._has_redacted(fresh):
                 # `_has_redacted` was consulted before the fetch and the redaction,
                 # which is two network round trips ago. Another run — or a re-run
@@ -229,7 +234,7 @@ class Command(BaseCommand):
                 # a word, possibly one produced at a different tier since `_mode()`
                 # is read per process.
                 self.stderr.write(f"  changed_underfoot {material.iri}")
-                return
+                return "changed_underfoot"
             data = dict(fresh.data or {})
             # Replace-or-append by role, the same rule materials.transcripts states
             # for the transcript pair. Worth converging the two once both have
@@ -244,7 +249,7 @@ class Command(BaseCommand):
                 {"link": link["link"], "role": artifacts.REDACTED_PDF_ROLE}
             )
             if mo is None:
-                return
+                return "unreadable"
             # `fetch_method="redaction"`, never "ocr": this file was produced by
             # redacting a PDF we already held, not by reading the publisher's.
             # materials.transcripts makes the same distinction for the same
@@ -264,6 +269,7 @@ class Command(BaseCommand):
             # a stale If-Match passing its precondition and clobbering the link
             # this just published. Every sibling writer includes it.
             fresh.save(using="ngm", update_fields=["data", "updated_at"])
+        return "published"
 
     # -- selection --------------------------------------------------------
 
