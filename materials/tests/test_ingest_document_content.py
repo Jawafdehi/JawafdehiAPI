@@ -1008,3 +1008,81 @@ class IngestRevisionArgumentTests(TestCase):
                 revision="deadbeef",
             )
         self.assertIn("cannot be combined with --download", str(ctx.exception))
+
+
+class RedactsWhatItLoadsTests(TestCase):
+    """The parquet loader is a writer of the content plane, and it was not redacting.
+
+    🛑 ``…/content`` serves pages and tables to anyone. ``extraction.pdf`` has
+    redacted since it was built; this command loads a corpus somebody else
+    extracted and stored it verbatim — so whether a reader could see an
+    identifier depended only on which of the two writers happened to produce the
+    document.
+    """
+
+    databases = "__all__"
+
+    # The fixture setup is the base class's; only the page text differs per test.
+    setUp = IngestCommandTests.setUp
+    mk_tmp = IngestCommandTests.mk_tmp
+    _write_dataset = IngestCommandTests._write_dataset
+    _run = IngestCommandTests._run
+
+    def _page_with(self, text: str) -> None:
+        _write_parquet(
+            self.dir,
+            "pages",
+            PAGE_COLUMNS,
+            [
+                (
+                    f"{DOC_ID}#p0018",
+                    DOC_ID,
+                    18,
+                    text,
+                    "anchored",
+                    "tight",
+                    "",
+                    False,
+                    0,
+                    len(text),
+                )
+            ],
+        )
+
+    def test_a_page_is_redacted_before_it_is_stored(self):
+        self._page_with("नागरिकता नं. १२-०१-७५-०४५६७ भएका व्यक्ति")
+
+        self._run()
+
+        page = DocumentContent.objects.get(pk=self.iri).pages.get(page_no=18)
+        self.assertNotIn("१२-०१-७५-०४५६७", page.text)
+        self.assertIn("REDACTED", page.text)
+
+    def test_what_was_removed_is_reported_by_class(self):
+        """Counts, never values — the same disclosure the PDF extractor logs.
+
+        Neither writer persists these on the model; ``extraction.pdf`` carries
+        them on the job result and this command has no job, so the log is the
+        only record an operator running a corpus ingest can read.
+        """
+        self._page_with("नागरिकता नं. १२-०१-७५-०४५६७ भएका व्यक्ति")
+
+        with self.assertLogs("materials.extraction", level="INFO") as logged:
+            self._run()
+
+        self.assertTrue(
+            any("citizenship" in line for line in logged.output),
+            logged.output,
+        )
+        self.assertFalse(
+            any("०४५६७" in line for line in logged.output),
+            "a count names a class, never a value",
+        )
+
+    def test_a_page_with_nothing_to_remove_is_stored_unchanged(self):
+        self._page_with("आयोगमा दर्ता भएका उजुरी १९४८८")
+
+        self._run()
+
+        page = DocumentContent.objects.get(pk=self.iri).pages.get(page_no=18)
+        self.assertEqual(page.text, "आयोगमा दर्ता भएका उजुरी १९४८८")
