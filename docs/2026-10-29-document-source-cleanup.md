@@ -2,9 +2,24 @@
 
 *2026-10-29. Companion to the labelling pass in `materials/sources.py`.*
 
-Four of the 34 tokens in `/api/document-sources/` are not naming problems. They
-are ingest accidents: three duplicate a token that already exists, and one is
-malformed.
+**Corrected 2026-10-29, after this document first claimed otherwise.** An
+earlier revision called four tokens ingest accidents. Two of them are not.
+
+Sourcing a case upload by its `material_type` is a **deliberate, merged
+convention** — `default_policy_for` in `materials/models.py` says so outright
+("Case uploads are now sourced by their `material_type` (news → `news`, a misc
+upload → `document`, …)"), introduced by **#344 on 2026-07-16** to move case
+uploads off the legacy `jawafdehi` bucket.
+
+So `charge_sheet` (33) and `press_release` (24) are the **case-upload
+counterparts** of the scraped `ag` and `ciaa_press_release` corpora: same
+document class, genuinely different provenance. **Do not merge them** — it would
+erase a distinction the platform means to draw. They are labelled as case
+uploads, each pointing at its scraped sibling.
+
+Two tokens remain genuine accidents, and the convention is what proves it:
+`chargesheet` (2) misspells the convention's own token, and `court_order_0133`
+(1) let a case number leak into it.
 
 They **are** labelled in `materials/sources.py`, because they hold real
 documents — an unlabelled token with 33 charge sheets behind it helps nobody,
@@ -77,63 +92,58 @@ Rows in bold are the accidents. Sampling: all 33, 2, 24 and 1 rows respectively;
 
 ---
 
-## 1. `charge_sheet` (33) and `chargesheet` (2) → merge into `ag`
+## 1. `chargesheet` (2) → merge into `charge_sheet`
 
-**Three spellings of one thing.** All 33 `charge_sheet` rows are
-`jawafdehi:ChargeSheet` / `AG_ABHIYOG_PATRA` — byte-identical in class to the
-99,750 rows under `ag`. Their own names say what they are:
-`अभियोगपत्र`, `विशेष अदालतमा अख्तियारले दायर गरेको अभियोगपत्र`,
-`CIAA Charge Sheet – 081-CR-0090`.
+**A misspelling of the convention's token, not a variant of `ag`.** Both rows are
+case-uploaded CIAA charge sheets filed at the Special Court (Melamchi
+`080-CR-0106`, NTA MDMS `080-CR-0141`); one carries the `AG_ABHIYOG_PATRA`
+sourceType and the other carries none at all. Under the #344 convention a
+case-uploaded charge sheet belongs at `charge_sheet`, so that — not `ag` — is
+the merge target.
 
-Both `chargesheet` rows are CIAA charge sheets filed at the Special Court
-(Melamchi `080-CR-0106`, NTA MDMS `080-CR-0141`); one carries the
-`AG_ABHIYOG_PATRA` sourceType and the other carries none at all.
+**Proposed correction.** Re-token both rows to `charge_sheet`. Read
+"How to actually do the merges" below before running anything: `@id` is the
+canonical stored form, so this rewrites 2 IRIs, and **both rows are cited by
+cases.**
 
-**Confirmed from the document text, not just the metadata.** The transcript
-attached to `charge_sheet/20260324.60019b1d` carries YAML front-matter reading
-`source_type: "AG_ABHIYOG_PATRA"` and `title: "अभियाेग पत्र"`, and its body opens
-`श्री विशेष अदालत, काठमाडौं समक्ष पेश गरेको आरोपपत्र` — a charge sheet presented to
-the Special Court on the report of CIAA investigation officers, with नेपाल सरकार
-as वादी. That is the `ag` class, read off the document itself.
+## 2. ~~`press_release` (24) → merge into `ciaa_press_release`~~ — WITHDRAWN
 
-**Why it happened.** `ag` is minted by the scraper in `materials/sourcing/ag/`,
-which always writes the same token. These 35 are uploads, which do not go
-through that shaper — the uploader supplies the token, picking the type word
-(`charge_sheet`) or a spelling of their own (`chargesheet`). Nothing validates
-it against the existing set, so all three coexist.
+**This proposal was wrong and is withdrawn.** It rested on the claim that a
+token duplicating another token's document class must be an accident. The #344
+convention says otherwise: a case-uploaded press release belongs at
+`press_release` by design, and `ciaa_press_release` is the scraped corpus. They
+are two provenances of one document class, which is a distinction worth keeping.
 
-**Proposed correction.** Re-token all 35 rows to `ag`. The `@id` is the canonical
-stored form (`/material/<source>/<ident>`), so this rewrites 35 IRIs and needs
-the usual redirect-or-rewrite handling for anything referencing them — check
-case evidence links before running it.
+The same reasoning retires the `charge_sheet` → `ag` merge this document
+originally proposed.
 
-## 2. `press_release` (24) → merge into `ciaa_press_release`
+What survives from that analysis is a real, smaller observation: all 50 sampled
+`ciaa_press_release` rows carry a populated `publisher`
+(`अख्तियार दुरुपयोग अनुसन्धान आयोग`) and **none** of the 24 `press_release` rows
+do, because the scraper's shaper sets a field the upload path does not.
 
-Same shape, same cause. All 24 are `jawafdehi:PressRelease` /
-`CIAA_PRESS_RELEASE`, several naming themselves `अख्तियारको प्रेस विज्ञप्ति`.
+→ **Worth doing on its own:** backfill `publisher` on case-uploaded rows, so the
+two provenances describe their documents equally well. That is a data
+improvement with no IRI change, no redirect requirement and no case-evidence
+risk — unlike every merge in this document.
 
-One extra signal worth recording: all 50 sampled `ciaa_press_release` rows carry
-a populated `publisher` (`अख्तियार दुरुपयोग अनुसन्धान आयोग`), and **none** of the
-24 `press_release` rows carry one. That is the scraper's shaper setting a field
-the upload path does not — independent confirmation that these are the same
-documents arriving by a different door, and a reason to backfill `publisher`
-during the merge rather than only changing the token.
-
-**This one was not in the original brief.** It surfaced from the `sourceType`
-comparison, which is the argument for using that field rather than token
-spelling as the discriminator.
-
-## 3. `court_order_0133` (1) → correct to `special_court_order`
+## 3. `court_order_0133` (1) → correct to `court_order`
 
 A malformed token: the case number leaked into it. Its single row is
 `material/court_order_0133/2081`, named `Court Order - 080-CR-0133` /
 `अदालतको फैसलाः ०८०-cr-०१३३`.
 
-The fix is visible one token over. `special_court_order` holds exactly one row,
-`material/special_court_order/0066`, named `Court Order - 080-CR-0066` — the same
-kind of upload (a Special Court full-text judgement), same `COURT_ORDER`
-sourceType, but with the case number correctly in the **ident** rather than the
-source. So `court_order_0133/2081` should be `special_court_order/0133`.
+Under the #344 convention a case-uploaded court order belongs at `court_order`,
+so the correction is `court_order/0133` — with the case number in the **ident**,
+where it belongs, rather than in the source.
+
+`special_court_order` holds exactly one row,
+`material/special_court_order/0066`, which is the same kind of upload and is
+off-convention for the same reason. It is **not** proposed for merge here: it is
+a well-formed, defensible token rather than an obvious accident, and whether the
+convention should absorb it is a decision for whoever owns the shelf list. Note
+only that using it as `court_order_0133`'s target would move one off-convention
+token onto another.
 
 **Their attached documents settle it.** Both rows' `associatedMedia` RAW links
 point at the same host and the same upload path, with the same filename shape:
@@ -233,9 +243,21 @@ alternative is 60 permanent 404s.
 > charge sheet silently orphans the evidence link on every case citing it.
 
 That is worse than the 404, because a 404 is visible and this is not. The
-repoint has to happen in the same transaction as the move. **Check this before
-anything else:** if these 60 rows are cited by published cases, step 3 is not a
-tidying exercise, it is an edit to case evidence.
+repoint has to happen in the same transaction as the move. **This is not hypothetical — it is measured.** Every row in scope is cited by a
+case:
+
+| token | indexed | case-referenced |
+|---|---|---|
+| `charge_sheet` | 33 | **33** |
+| `press_release` | 24 | **24** |
+| `chargesheet` | 2 | **2** |
+| `court_order_0133` | 1 | **1** |
+
+(via `/api/search/?type=material&source=<t>&include_unreferenced=false`.)
+
+So any re-token here is an edit to case evidence, not a tidying exercise. With
+the two withdrawn merges the live scope is 3 rows rather than 60 — small enough
+to verify each link by hand, which is the right way to do it.
 
 ### There is no urgency
 

@@ -195,15 +195,17 @@ class HonestyTests(APITestCase):
         self.assertTrue(rows["ag"]["labelled"])
 
     def test_a_pending_merge_token_is_labelled_and_says_it_is_pending(self):
-        # `charge_sheet`/`chargesheet` duplicate `ag`, `press_release`
-        # duplicates `ciaa_press_release`, and `court_order_0133` is malformed.
-        # They hold real documents, so they ARE labelled — an unlabelled token
-        # with 33 charge sheets behind it helps nobody. The description has to
-        # carry the pending merge, or a tidy name quietly hides the duplication
-        # that the merge exists to fix.
+        # `chargesheet` misspells `charge_sheet` and `court_order_0133` let a
+        # case number leak in. They hold real documents, so they ARE labelled,
+        # but the description has to carry the pending merge or a tidy name
+        # quietly hides the defect it exists to fix.
+        #
+        # `charge_sheet` and `press_release` are deliberately NOT in this list:
+        # sourcing a case upload by its material_type is the documented
+        # convention (#344), so they are legitimate sources, not accidents.
         from materials.sources import SOURCE_LABELS
 
-        for token in ("charge_sheet", "chargesheet", "press_release", "court_order_0133"):
+        for token in ("chargesheet", "court_order_0133"):
             label = SOURCE_LABELS[token]
             self.assertTrue(label["name"]["en"])
             self.assertIn(
@@ -220,7 +222,7 @@ class HonestyTests(APITestCase):
         from materials.sources import SOURCE_LABELS as S
 
         self.assertEqual(S["charge_sheet"]["publisher"], S["ag"]["publisher"])
-        self.assertEqual(S["chargesheet"]["publisher"], S["ag"]["publisher"])
+        self.assertEqual(S["chargesheet"]["publisher"], S["charge_sheet"]["publisher"])
         self.assertEqual(S["press_release"]["publisher"], S["ciaa_press_release"]["publisher"])
         self.assertEqual(
             S["court_order_0133"]["publisher"], S["special_court_order"]["publisher"]

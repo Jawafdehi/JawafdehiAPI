@@ -389,84 +389,86 @@ SOURCE_LABELS: dict[str, dict[str, Any]] = {
             "announcing charge sheets filed at the Special Court."
         ),
     },
-    # --- Labelled, but PENDING A MERGE --------------------------------
-    # These four are ingest accidents, not sources: three duplicate a token
-    # that already exists and one is malformed (the case number leaked into
-    # it). They are labelled anyway, because they DO hold documents and an
-    # unlabelled token with 33 real charge sheets behind it helps nobody — a
-    # reader who lands on one still deserves to be told what it is.
+    # --- Case uploads: the type-as-source convention --------------------
+    # `charge_sheet` and `press_release` are NOT accidents, and an earlier
+    # revision of this file wrongly called them that. Sourcing a case upload by
+    # its ``material_type`` is a deliberate, merged convention — see
+    # ``default_policy_for`` in `materials/models.py` ("Case uploads are now
+    # sourced by their ``material_type``…"), introduced by #344 on 2026-07-16
+    # to move them off the legacy ``jawafdehi`` bucket.
     #
-    # Each label therefore does two jobs: it names the documents accurately,
-    # reusing the attribution already reviewed for the token it duplicates, and
-    # its description states the pending merge outright. The duplication stays
-    # visible in the payload rather than being smoothed over by a tidy name.
-    # The evidence and the proposed corrections are in
-    # `docs/2026-10-29-document-source-cleanup.md`.
-    #
-    # WHEN THE MERGE LANDS, DELETE THESE FOUR ENTRIES. A label outliving its
-    # token is worse than no label: it would advertise a shelf that is empty.
+    # So these two are the CASE-UPLOAD counterparts of the scraped corpora
+    # (`ag`, `ciaa_press_release`): same document class, genuinely different
+    # provenance. Merging them would erase a distinction the platform means to
+    # draw. They are labelled as what they are, and each points at its scraped
+    # sibling so a reader can tell the two apart.
     "charge_sheet": {
-        # Same documents as `ag`: all 33 rows are
+        # Same document class as `ag` — all 33 rows are
         # `additionalType: jawafdehi:ChargeSheet` + `sourceType:
-        # AG_ABHIYOG_PATRA`, identical to the 99,750 under `ag`. Confirmed from
-        # the document text too — the transcript on
+        # AG_ABHIYOG_PATRA`, and the transcript on
         # `charge_sheet/20260324.60019b1d` opens "श्री विशेष अदालत, काठमाडौं
-        # समक्ष पेश गरेको आरोपपत्र". Name and publisher are reused verbatim from
-        # the reviewed `ag` entry above rather than re-derived.
-        "name": {"en": "Charge sheets", "ne": "अभियोगपत्रहरू"},
+        # समक्ष पेश गरेको आरोपपत्र". Attribution reused from the reviewed `ag`
+        # entry; the DIFFERENCE is how the document arrived, not what it is.
+        "name": {"en": "Charge sheets (case uploads)", "ne": "अभियोगपत्रहरू"},
         "publisher": {"en": "Office of the Attorney General"},
         "description": (
             "Charge sheets filed at the Special Court in corruption cases, "
-            "from the Office of the Attorney General. Uploaded under the "
-            "material's TYPE as a free-text source token; pending merge into "
-            "`ag`, which holds the same documents."
-        ),
-    },
-    "chargesheet": {
-        # A third spelling of the same thing. Both rows are CIAA charge sheets
-        # filed at the Special Court (Melamchi 080-CR-0106, NTA MDMS
-        # 080-CR-0141); one carries `sourceType: AG_ABHIYOG_PATRA` and the other
-        # carries none at all. Attribution reused from `ag`, as above.
-        "name": {"en": "Charge sheets", "ne": "अभियोगपत्रहरू"},
-        "publisher": {"en": "Office of the Attorney General"},
-        "description": (
-            "Charge sheets filed at the Special Court in corruption cases, "
-            "from the Office of the Attorney General. A free-text spelling "
-            "variant; pending merge into `ag`."
+            "from the Office of the Attorney General. Uploaded as case "
+            "evidence rather than scraped — the scraped corpus is `ag`, which "
+            "holds the same kind of document."
         ),
     },
     "press_release": {
-        # Same documents as `ciaa_press_release`: all 24 rows are
+        # Same document class as `ciaa_press_release`: all 24 rows are
         # `additionalType: jawafdehi:PressRelease` + `sourceType:
-        # CIAA_PRESS_RELEASE`. Note these 24 carry NO `publisher` of their own
-        # while all sampled `ciaa_press_release` rows do — the scraper's shaper
-        # sets a field the upload path does not, which is itself evidence they
-        # are the same documents arriving by a different door. The bilingual
-        # publisher is reused from the reviewed `ciaa_press_release` entry.
-        "name": {"en": "CIAA press releases", "ne": "अख्तियारका प्रेस विज्ञप्ति"},
+        # CIAA_PRESS_RELEASE`. These 24 carry no `publisher` of their own while
+        # the scraped rows do — the shaper sets a field the upload path does
+        # not — so the bilingual publisher is reused from that reviewed entry.
+        "name": {"en": "CIAA press releases (case uploads)", "ne": "अख्तियारका प्रेस विज्ञप्ति"},
         "publisher": {
             "en": "Commission for the Investigation of Abuse of Authority",
             "ne": "अख्तियार दुरुपयोग अनुसन्धान आयोग",
         },
         "description": (
             "Press releases issued by the Commission for the Investigation of "
-            "Abuse of Authority. Uploaded under the material's TYPE as a "
-            "free-text source token; pending merge into `ciaa_press_release`."
+            "Abuse of Authority. Uploaded as case evidence rather than "
+            "scraped — the scraped corpus is `ciaa_press_release`."
+        ),
+    },
+    # --- Genuinely malformed: labelled, but PENDING A MERGE -------------
+    # These two ARE accidents, and the convention above is what proves it: one
+    # misspells the convention's own token, the other let a case number leak
+    # into it. Both are labelled, because they hold documents a reader can
+    # land on, and both state the pending merge so a tidy name does not hide
+    # the defect. DELETE THESE ENTRIES WHEN THE MERGE LANDS — a label
+    # outliving its token advertises an empty shelf. See
+    # `docs/2026-10-29-document-source-cleanup.md`.
+    "chargesheet": {
+        # A misspelling of `charge_sheet`, not a variant of `ag`: both rows are
+        # case-uploaded CIAA charge sheets (Melamchi 080-CR-0106, NTA MDMS
+        # 080-CR-0141), so the convention puts them at `charge_sheet`.
+        "name": {"en": "Charge sheets (case uploads)", "ne": "अभियोगपत्रहरू"},
+        "publisher": {"en": "Office of the Attorney General"},
+        "description": (
+            "Charge sheets filed at the Special Court in corruption cases, "
+            "from the Office of the Attorney General. The token misspells "
+            "`charge_sheet`; pending merge into it."
         ),
     },
     "court_order_0133": {
-        # A malformed token — the case number leaked into it. Its one row and
-        # the one row under `special_court_order` pull from the same host, the
-        # same path and the same filename convention
-        # (`supremecourt.gov.np/cp/assets/uploads/special_10248.doc` vs
-        # `special_9807.doc`), so they are two documents from one source
-        # wearing two tokens. Publisher reused from `special_court_order`.
+        # Malformed — the case number leaked into the token. Its document is a
+        # Special Court judgement
+        # (`supremecourt.gov.np/cp/assets/uploads/special_10248.doc`), and the
+        # convention sources a case-uploaded court order at `court_order`.
+        # NOTE: `special_court_order` is off-convention for the same reason and
+        # probably belongs at `court_order` too, but it predates this pass and
+        # is not obviously an accident, so it is left alone pending a decision.
         "name": {"en": "Special Court judgements", "ne": "विशेष अदालतका फैसला"},
         "publisher": {"en": "Special Court", "ne": "विशेष अदालत"},
         "description": (
             "Full-text judgements of the Special Court. The token is malformed "
-            "— the case number leaked into it — and is pending correction to "
-            "`special_court_order`."
+            "— the case number leaked into it — and is pending merge into "
+            "`court_order`."
         ),
     },
 }
