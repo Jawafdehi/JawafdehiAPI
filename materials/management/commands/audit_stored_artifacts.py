@@ -46,6 +46,13 @@ CHECKED_ROLES = artifacts.ORIGINAL_PDF_ROLES | {
 }
 
 
+#: Roles we produce ourselves. An empty one is repaired by re-running the command
+#: that makes it, never by asking the publisher for a file they never had.
+DERIVED_ROLES = frozenset(
+    {artifacts.REDACTED_PDF_ROLE, artifacts.REDACTED_TRANSCRIPT_ROLE}
+)
+
+
 class Command(BaseCommand):
     help = "Report materials whose stored artifact is empty or unreachable."
 
@@ -151,12 +158,20 @@ class Command(BaseCommand):
             f"present={counts['present']} empty={counts['empty']} "
             f"unreachable={counts['unreachable']}"
         )
-        repairable = sum(1 for f in findings if f["upstream"])
+        # 🛑 Three remedies, not two, and the role decides which. A REDACTED
+        # artifact is one WE derived — the publisher never had it, so "re-fetch
+        # from upstream" is never the answer for the class this command calls the
+        # most important. Routing it there sent an operator triaging the report to
+        # the wrong remedy for the highest-priority finding.
+        rederive = [f for f in findings if f["role"] in DERIVED_ROLES]
+        refetch = [f for f in findings if f not in rederive and f["upstream"]]
+        reclaim = len(findings) - len(rederive) - len(refetch)
         if findings:
             self.stdout.write(
                 self.style.WARNING(
-                    f"{repairable} of {len(findings)} can be re-fetched from the "
-                    "publisher; the rest have no upstream URL and need the CLAIM "
+                    f"{len(rederive)} need re-deriving (run the backfill that "
+                    f"produces them); {len(refetch)} can be re-fetched from the "
+                    f"publisher; {reclaim} have no upstream URL and need the CLAIM "
                     "corrected instead"
                 )
             )

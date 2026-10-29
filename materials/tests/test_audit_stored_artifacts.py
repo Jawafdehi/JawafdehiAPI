@@ -152,5 +152,10 @@ class AuditTests(TestCase):
         ):
             call_command("audit_stored_artifacts", stdout=out, stderr=err)
 
-        assert "checked 1 stored artifact(s)" in out.getvalue()
-        assert "empty=1" in out.getvalue()
+        report = out.getvalue()
+        assert "checked 1 stored artifact(s)" in report
+        assert "empty=1" in report
+        # 🛑 We derived this file; the publisher never had it. Routing it to
+        # "re-fetch from the publisher" is the wrong remedy for the class this
+        # command calls the most important.
+        assert "1 need re-deriving" in report, report
