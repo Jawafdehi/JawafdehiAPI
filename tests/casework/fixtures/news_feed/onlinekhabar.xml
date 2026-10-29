@@ -1,0 +1,48 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!--
+  OnlineKhabar RSS (https://www.onlinekhabar.com/feed), captured 2026-10-29.
+  Trimmed to three real items, with <content:encoded> (full article body) and
+  the namespaced WordPress fields removed. The last two items are synthetic edge
+  cases: one with no <link>, one with an unparseable <pubDate> and a tracked URL.
+-->
+<rss version="2.0">
+  <channel>
+    <title>Online Khabar</title>
+    <link>https://www.onlinekhabar.com</link>
+    <description>No 1 News Portal from Nepal in Nepali.</description>
+    <lastBuildDate>Thu, 29 Oct 2026 13:52:10 +0000</lastBuildDate>
+    <language>en-US</language>
+    <item>
+      <title>बाल्टिनमा डुबेरमा १७ महिनाको बालकको मृत्यु</title>
+      <link>https://www.onlinekhabar.com/2026/10/2046869/17-month-old-boy-dies-after-drowning-in-bucket</link>
+      <pubDate>Thu, 29 Oct 2026 13:52:06 +0000</pubDate>
+      <guid isPermaLink="false">https://www.onlinekhabar.com/?p=2046869</guid>
+      <description>१२ कात्तिक, काठमाडौं । प्युठानमा आफ्नै घरमा राखिएको बाल्टिनमा डुबेरमा १७ महिनाको बालकको मृत्यु भएको छ । [&amp;#8230;]</description>
+    </item>
+    <item>
+      <title>सडक यात्रामा सचेतना अपनाउन महासंघ आह्वान</title>
+      <link>https://www.onlinekhabar.com/2026/10/2046863/federation-calls-for-awareness-on-road-travel</link>
+      <pubDate>Thu, 29 Oct 2026 13:46:58 +0000</pubDate>
+      <guid isPermaLink="false">https://www.onlinekhabar.com/?p=2046863</guid>
+      <description>१२ कात्तिक रातिदेखि १३ र १४ कात्तिकसम्म कोशी, मधेस, बागमती, गण्डकी र लुम्बिनी प्रदेशमा वर्षाको सम्भावनाबारे सचेत गराउँदै महासंघले यस्तो आह्वान गरेको हो ।</description>
+    </item>
+    <item>
+      <title>बंगलादेशमा नेपाल प्रवर्द्धन</title>
+      <link>https://www.onlinekhabar.com/2026/10/2046860/promoting-nepal-in-bangladesh</link>
+      <pubDate>Thu, 29 Oct 2026 13:41:47 +0000</pubDate>
+      <guid isPermaLink="false">https://www.onlinekhabar.com/?p=2046860</guid>
+      <description>मेलाले पर्यटन व्यवसायीबीच व्यावसायिक सम्बन्ध विस्तारसँगै सम्भावित पर्यटकलाई नयाँ गन्तव्य छनोट गर्न प्रेरित गर्ने अपेक्षा गरिएको छ ।</description>
+    </item>
+    <item>
+      <title>लिंक नभएको समाचार</title>
+      <pubDate>Thu, 29 Oct 2026 13:30:00 +0000</pubDate>
+      <description>An item with no link cannot be cited, so the parser must skip it.</description>
+    </item>
+    <item>
+      <title>अख्तियारले मुद्दा दायर गर्‍यो</title>
+      <link>https://www.onlinekhabar.com/2026/10/2046850/ciaa-files-case/?utm_source=rss&amp;utm_medium=rss#comments</link>
+      <pubDate>sometime on Thursday</pubDate>
+      <description>Unparseable date and a tracked URL; the item must survive with no date.</description>
+    </item>
+  </channel>
+</rss>
