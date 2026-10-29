@@ -564,3 +564,107 @@ class CleanRowsStillGetATranscriptTests(TestCase):
 
         material.refresh_from_db()
         self.assertNotIn(CITIZENSHIP_VALUE, str(material.data["text"]))
+
+
+class TheSweepIsIdempotentTests(TestCase):
+    """🛑 A second run over a finished archive must write nothing.
+
+    The command's docstring claims re-running is "a no-op rather than a second
+    pass over its own output", and the whole remediation story for every other
+    gap in this work is "re-run it". That claim stopped being true when the
+    transcript half moved ahead of the `clean` return: nothing checked whether a
+    REDACTED_MARKDOWN already existed, so every clean row re-fetched its
+    MARKDOWN, re-uploaded a derivative, and re-saved — and `post_save` re-indexes
+    the row, so a second sweep is a corpus-wide reindex on an estate that already
+    OOMs on those.
+
+    `provenance.build_provenance` stamps `captured_at = now()` when none is
+    passed, so the MediaObject differed every time and the write always stuck.
+    """
+
+    databases = "__all__"
+
+    def _row(self, ident: str, text: str):
+        material = _material(ident, text)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": f"https://s3.jawafdehi.org/case_uploads/{ident}.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+        return material
+
+    def test_a_second_run_fetches_nothing_and_writes_nothing(self):
+        material = self._row("idem", WITH_CITIZENSHIP)
+        fetch = mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        )
+        with fetch:
+            _run("--apply")
+        material.refresh_from_db()
+        first = (material.data, material.updated_at)
+
+        with fetch as second_fetch, mock.patch(
+            "materials.transcripts.store"
+        ) as second_store:
+            _run("--apply")
+
+        second_fetch.assert_not_called()
+        second_store.assert_not_called()
+        material.refresh_from_db()
+        self.assertEqual(material.data, first[0])
+        self.assertEqual(material.updated_at, first[1], "no write, so no reindex")
+
+
+class StalePairingTests(TestCase):
+    """A redaction of a transcript that was replaced mid-flight is not published.
+
+    🛑 The fetch and the redaction happen BEFORE the lock, by design — two
+    network round trips are not something to hold a row lock across. If a
+    scraper re-converts the document in that window, publishing our derivative
+    anyway makes `is_withheld` withhold the NEW original on the strength of a
+    redaction of the OLD one.
+    """
+
+    databases = "__all__"
+
+    def test_a_transcript_replaced_during_the_fetch_is_not_paired(self):
+        material = _material("race-md", WITH_CITIZENSHIP)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/old.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+
+        def swap_the_original(url, **kwargs):
+            """Stand in for a scraper re-converting while we are fetching."""
+            row = Material.objects.using("ngm").get(pk=material.iri)
+            row.data["associatedMedia"] = [
+                {
+                    "@type": "MediaObject",
+                    "contentUrl": "https://s3.jawafdehi.org/case_uploads/new.md",
+                    "jawafdehi:linkRole": "MARKDOWN",
+                }
+            ]
+            row.save(using="ngm")
+            return WITH_CITIZENSHIP.encode("utf-8")
+
+        # A changed pairing is a SKIP, not a success: the row is left exactly as
+        # it was and the run exits 1 so the count cannot be read as done.
+        with mock.patch(
+            "materials.extract.fetch_document", side_effect=swap_the_original
+        ), self.assertRaises(CommandError):
+            _run("--apply")
+
+        material.refresh_from_db()
+        roles = [
+            mo.get("jawafdehi:linkRole")
+            for mo in material.data.get("associatedMedia", [])
+        ]
+        self.assertNotIn("REDACTED_MARKDOWN", roles)

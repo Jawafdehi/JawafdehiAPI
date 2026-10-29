@@ -245,8 +245,11 @@ class Command(BaseCommand):
         # across two network round trips would block every other writer of this
         # document for as long as they take.
         transcript = None
+        transcript_source = None
         if not skip_transcript:
-            transcript, note = self._transcript(material, apply_writes=apply_writes)
+            transcript, note, transcript_source = self._transcript(
+                material, apply_writes=apply_writes
+            )
             self._transcript_notes[note] += 1
 
         if not original_text:
@@ -255,7 +258,8 @@ class Command(BaseCommand):
             # indexed text. The row still needs its transcript published, so that is
             # all this writes.
             if transcript is not None and apply_writes:
-                self._attach(material, transcript)
+                if not self._attach(material, transcript, transcript_source):
+                    return "changed_underfoot", Counter()
             return "clean", removed
 
         if not apply_writes:
@@ -283,7 +287,9 @@ class Command(BaseCommand):
                 # gate ours did; leave it alone and report.
                 return "changed_underfoot", Counter()
             fresh.data = redacted_data
-            if transcript is not None:
+            if transcript is not None and self._still_paired(
+                fresh.data, transcript_source
+            ):
                 # Publish the redacted transcript beside the redacted text. Until
                 # one exists, materials.artifacts.is_withheld keeps publishing the
                 # ORIGINAL MARKDOWN — so a text-only sweep redacts the search index
@@ -305,11 +311,17 @@ class Command(BaseCommand):
             # save(), not queryset.update(): post_save is what re-indexes the row,
             # and an index still holding the unredacted body is the exposure this
             # command exists to close.
-            fresh.save(using="ngm", update_fields=["data", "source_text"])
+            # `updated_at` is load-bearing in update_fields: materials/views.py
+            # derives the material's ETag from it, so leaving it out lets a client
+            # holding a pre-sweep token pass its If-Match precondition and clobber
+            # what was just published. `auto_now` only fires for listed fields.
+            fresh.save(
+                using="ngm", update_fields=["data", "source_text", "updated_at"]
+            )
         return outcome, removed
 
     def _transcript(self, material, *, apply_writes: bool):
-        """``(MediaObject or None, note)`` — the redacted transcript for a row.
+        """``(MediaObject or None, note, the MARKDOWN url it read)`` for a row.
 
         🛑 **Redacted from the stored MARKDOWN, never from ``data["text"]``.** The
         two are usually the same bytes and are not guaranteed to be: the indexed
@@ -341,21 +353,32 @@ class Command(BaseCommand):
         url = None
         for mo in artifacts.media_list(material.data or {}):
             role = artifacts.role_of(mo)
+            if role == artifacts.REDACTED_TRANSCRIPT_ROLE:
+                # 🛑 **Asked FIRST, before any network call.** Without this the
+                # sweep is not idempotent: a finished row re-fetches its MARKDOWN,
+                # re-uploads a derivative and re-saves on every run — and
+                # `build_provenance` stamps `captured_at = now()`, so the
+                # MediaObject differs every time and the write always sticks. Each
+                # save re-indexes the row, which makes a second sweep a
+                # corpus-wide reindex. The command's own docstring promises
+                # re-running is a no-op, and every other gap in this work is
+                # remediated by re-running.
+                return None, "already_published", None
             if role == artifacts.ORIGINAL_TRANSCRIPT_ROLE:
                 url = mo.get("contentUrl")
             elif role in artifacts.ORIGINAL_PDF_ROLES and source_url is None:
                 source_url = mo.get("contentUrl")
         if not isinstance(url, str) or not url:
-            return None, "no_transcript"
+            return None, "no_transcript", None
 
         try:
             raw = fetch_document(url, max_bytes=MAX_TRANSCRIPT_BYTES)
             text = raw.decode("utf-8")
         except (DocumentFetchError, UnicodeDecodeError, OSError) as exc:
             self.stderr.write(f"  transcript unreadable {material.iri}: {exc}")
-            return None, "unreadable"
+            return None, "unreadable", None
         if not text.strip():
-            return None, "unreadable"
+            return None, "unreadable", None
 
         redacted, _removed = redact_text(text)
         residual = residual_classes(redacted)
@@ -364,9 +387,9 @@ class Command(BaseCommand):
                 f"  transcript residue {material.iri}: "
                 f"{dict(sorted(residual.items()))}"
             )
-            return None, "residue"
+            return None, "residue", None
         if not apply_writes:
-            return None, "would_publish"
+            return None, "would_publish", None
 
         try:
             link = transcripts.store(
@@ -377,7 +400,7 @@ class Command(BaseCommand):
             # corpus sweep on a single object-store hiccup, after an unknown number
             # of documents had already been written.
             self.stderr.write(f"  transcript upload failed {material.iri}: {exc}")
-            return None, "unreadable"
+            return None, "unreadable", None
         return (
             transcripts.media(
                 link,
@@ -387,9 +410,32 @@ class Command(BaseCommand):
                 derived=True,
             ),
             "published",
+            url,
         )
 
-    def _attach(self, material: Material, transcript: dict) -> None:
+    def _still_paired(self, data: dict, source_url: str | None) -> bool:
+        """Whether the row still carries the MARKDOWN this redaction was made from.
+
+        🛑 The transcript is fetched and redacted BEFORE the lock, by design —
+        two network round trips are not something to hold a row lock across. If a
+        scraper re-converts the document in that window, both the MARKDOWN object
+        and its link change, and publishing our derivative anyway would have
+        `artifacts.is_withheld` withhold the NEW original on the strength of a
+        redaction of the OLD one. ``materials.transcripts`` names that outcome
+        exactly: "a stale pairing publishes a redaction of a document we are no
+        longer serving".
+        """
+        if source_url is None:
+            return False
+        return any(
+            artifacts.role_of(mo) == artifacts.ORIGINAL_TRANSCRIPT_ROLE
+            and mo.get("contentUrl") == source_url
+            for mo in artifacts.media_list(data or {})
+        )
+
+    def _attach(
+        self, material: Material, transcript: dict, source_url: str | None
+    ) -> bool:
         """Publish a transcript on a row whose indexed text needed no change.
 
         Builds from the row read UNDER the lock rather than from a pre-lock
@@ -404,13 +450,16 @@ class Command(BaseCommand):
                 .first()
             )
             if fresh is None:
-                return
+                return False
+            if not self._still_paired(fresh.data, source_url):
+                return False
             data = dict(fresh.data or {})
             data["associatedMedia"] = transcripts.replace(
                 artifacts.media_list(data), [transcript]
             )
             fresh.data = data
-            fresh.save(using="ngm", update_fields=["data"])
+            fresh.save(using="ngm", update_fields=["data", "updated_at"])
+        return True
 
     # -- selection --------------------------------------------------------
 
