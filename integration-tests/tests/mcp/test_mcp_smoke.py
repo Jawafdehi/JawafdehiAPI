@@ -28,6 +28,7 @@ FULL_TOOL_CATALOG = {
     "list_document_sources",
     "get_document_overview",
     "list_document_contents",
+    "search_document",
     "read_document_part",
     "get_current_user",
     "search_control_plane",
