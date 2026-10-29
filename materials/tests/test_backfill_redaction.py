@@ -668,3 +668,59 @@ class StalePairingTests(TestCase):
             for mo in material.data.get("associatedMedia", [])
         ]
         self.assertNotIn("REDACTED_MARKDOWN", roles)
+
+
+class ConcurrentPublishTests(TestCase):
+    """A second sweep must not silently replace the first one's transcript.
+
+    Both runs see no REDACTED_MARKDOWN before the lock — the short-circuit is
+    pre-lock by design, since asking is free and fetching is not — so both fetch,
+    redact and upload. Without a locked re-check the second `transcripts.replace`
+    drops the first's link by role, possibly swapping a redaction made at a
+    different tier (the tier is resolved per process), and fires a second
+    `post_save` reindex.
+    """
+
+    databases = "__all__"
+
+    def test_a_publish_that_landed_first_is_not_overwritten(self):
+        material = _material("concurrent", "कुनै पाठ")
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/c.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            }
+        ]
+        material.save()
+
+        def publish_first(text: str, *args, **kwargs):
+            """Stand in for another run taking the lock before this one."""
+            row = Material.objects.using("ngm").get(pk=material.iri)
+            row.data["associatedMedia"] = row.data["associatedMedia"] + [
+                {
+                    "@type": "MediaObject",
+                    "contentUrl": "https://s3.jawafdehi.org/case_uploads/theirs.md",
+                    "jawafdehi:linkRole": "REDACTED_MARKDOWN",
+                }
+            ]
+            row.save(using="ngm")
+            return {"link": "https://s3.jawafdehi.org/case_uploads/ours.md"}
+
+        with (
+            mock.patch(
+                "materials.extract.fetch_document",
+                return_value=WITH_CITIZENSHIP.encode("utf-8"),
+            ),
+            mock.patch("materials.transcripts.store", side_effect=publish_first),
+            self.assertRaises(CommandError),
+        ):
+            _run("--apply")
+
+        material.refresh_from_db()
+        urls = [
+            mo.get("contentUrl")
+            for mo in material.data.get("associatedMedia", [])
+            if mo.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
+        ]
+        self.assertEqual(urls, ["https://s3.jawafdehi.org/case_uploads/theirs.md"])

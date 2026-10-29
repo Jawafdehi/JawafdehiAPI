@@ -258,8 +258,16 @@ class Command(BaseCommand):
             # indexed text. The row still needs its transcript published, so that is
             # all this writes.
             if transcript is not None and apply_writes:
-                if not self._attach(material, transcript, transcript_source):
-                    return "changed_underfoot", Counter()
+                # 🛑 The note is corrected from the WRITE's result, not left at what
+                # the upload reported. `_transcript` says "published" as soon as the
+                # object is stored, so a skipped attach used to leave the report
+                # claiming a transcript nobody can reach — and the run exited 0,
+                # because `stranded` counts only residue and unreadable.
+                outcome = self._attach(material, transcript, transcript_source)
+                if outcome != "published":
+                    self._transcript_notes["published"] -= 1
+                    self._transcript_notes[f"not_attached_{outcome}"] += 1
+                    return outcome, Counter()
             return "clean", removed
 
         if not apply_writes:
@@ -287,9 +295,14 @@ class Command(BaseCommand):
                 # gate ours did; leave it alone and report.
                 return "changed_underfoot", Counter()
             fresh.data = redacted_data
-            if transcript is not None and self._still_paired(
-                fresh.data, transcript_source
-            ):
+            # ⚠️ No `_still_paired` call here, and that is deliberate rather than an
+            # omission: the blob comparison above already returns on ANY change to
+            # this row, `associatedMedia` included, so by this line the locked row
+            # and the snapshot are identical. A pairing check here would re-read the
+            # very list `transcript_source` came from and be unconditionally true —
+            # which is what it was, until a review pointed out that this branch's
+            # own StalePairingTests passes on the blob check and not on the guard.
+            if transcript is not None:
                 # Publish the redacted transcript beside the redacted text. Until
                 # one exists, materials.artifacts.is_withheld keeps publishing the
                 # ORIGINAL MARKDOWN — so a text-only sweep redacts the search index
@@ -413,6 +426,12 @@ class Command(BaseCommand):
             url,
         )
 
+    def _has_redacted_transcript(self, data: dict) -> bool:
+        return any(
+            artifacts.role_of(mo) == artifacts.REDACTED_TRANSCRIPT_ROLE
+            for mo in artifacts.media_list(data or {})
+        )
+
     def _still_paired(self, data: dict, source_url: str | None) -> bool:
         """Whether the row still carries the MARKDOWN this redaction was made from.
 
@@ -435,8 +454,12 @@ class Command(BaseCommand):
 
     def _attach(
         self, material: Material, transcript: dict, source_url: str | None
-    ) -> bool:
+    ) -> str:
         """Publish a transcript on a row whose indexed text needed no change.
+
+        Returns the outcome so the caller can correct the note `_transcript`
+        recorded at upload time — `published`, `vanished`, or
+        `changed_underfoot`.
 
         Builds from the row read UNDER the lock rather than from a pre-lock
         snapshot, so unlike the redacting path there is nothing here that can
@@ -450,16 +473,27 @@ class Command(BaseCommand):
                 .first()
             )
             if fresh is None:
-                return False
+                # A deletion is not a competing write. The redacting path calls the
+                # same event `vanished` and exits 0 over it; reporting
+                # `changed_underfoot` here sent an operator looking for a writer
+                # that does not exist, and failed the run.
+                return "vanished"
+            if self._has_redacted_transcript(fresh.data):
+                # Another run published between the pre-lock check and this lock —
+                # two network round trips ago. `transcripts.replace` would drop its
+                # link by role without a word, possibly one made at a different
+                # tier, since the tier is resolved per process. The sibling command
+                # `backfill_redacted_pdf._publish` carries this same check.
+                return "changed_underfoot"
             if not self._still_paired(fresh.data, source_url):
-                return False
+                return "changed_underfoot"
             data = dict(fresh.data or {})
             data["associatedMedia"] = transcripts.replace(
                 artifacts.media_list(data), [transcript]
             )
             fresh.data = data
             fresh.save(using="ngm", update_fields=["data", "updated_at"])
-        return True
+        return "published"
 
     # -- selection --------------------------------------------------------
 
