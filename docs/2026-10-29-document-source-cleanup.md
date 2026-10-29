@@ -199,10 +199,60 @@ defendants.
 files uploaded under the same name collide on one object. The merges proposed
 above do **not** fix this and should not be taken to have fixed it.
 
-**Suggested next step:** sweep `associatedMedia` across the whole corpus for
-`contentUrl`s referenced by more than one material, then compare each
-transcript's case number against its parent's. The four above were found in a
-seven-token sample, so the real count is likely higher.
+### The sweep was run — results
+
+`manage.py find_shared_media` (added for this) is the repeatable version. It was
+also run ad hoc against the public API over **every token with ≤3,000 rows —
+3,245 materials, 1,755 distinct media urls**. Fifteen urls were shared by more
+than one material, and the split is the useful part:
+
+**Twelve shared EXTERNAL urls — all legitimate**, e.g. one Koshi red-book PDF
+behind ten budget-line materials, one CourtListener docket behind five US
+filings, a news article and its `web.archive.org` snapshot. The shared thing is
+somebody else's document that genuinely covers several of ours. This class is
+why the command hides external urls by default: reporting them beside a real
+collision teaches the reader to skim.
+
+**Three shared artifacts OF OURS — two are defects, one is not:**
+
+| artifact | materials | verdict |
+|---|---|---|
+| `185d4d1f…md` (MARKDOWN) | 4 | **DEFECT** — the case above |
+| `69ac1365…` (RAW) | 2 | **DEFECT** — see below |
+| `63bccd21…` (RAW) | 2 | not a defect — see below |
+
+**`69ac1365…`, a second confirmed mis-attribution.** Two Lumbini Development
+Trust procurement materials share one RAW object:
+`document/20260415.8aa3ccc9` is titled *"Bid Document no- 02/LDT/NCB/2077/78"*
+and `document/20260415.12ab8723` is titled *"Bid Addendum for
+02/LDT/NCB/2077/78"*. Their transcripts are distinct objects but identical in
+length (77,357 bytes) and **both open "Bid Addendum Report"**. So the material
+presenting itself as the bid document is serving the addendum's text. The bid
+document itself may not be in the archive at all.
+
+**`63bccd21…` is NOT a defect, and it matters that the sweep can say so.** Two
+materials titled `मन्त्री परिषदको निर्णय` share one RAW PDF of Council of
+Ministers decisions, but each cites a different decision inside it (one
+description reads `२२ नं हेर्नुहाेला` — "see no. 22"). Their transcripts are
+separate objects and both carry the correct text. This is the Koshi red-book
+pattern applied to our own stored copy: one source document, several materials.
+A detector that flagged this as a bug would be wrong.
+
+**So: 2 defects over 6 materials in the swept range, not a systemic failure.**
+
+**Coverage limit, stated plainly.** The sweep covered 3,245 of ~366k rows. The
+five large scraped corpora — `bolpatra` (205,826), `ag` (99,750), `court_order`
+(43,125), `nkp` (10,554), `ciaa_press_release` (3,556) — were **not** swept:
+paging 363k rows over the public API is slow and rude, and the API can only
+enumerate `LISTED` rows anyway, so every private and case-gated material is
+invisible to it. That is precisely what `find_shared_media` exists for. **Run it
+in-cluster before concluding anything about the whole corpus.**
+
+**Fixing a confirmed collision is manual, by design.** The command reports and
+never edits. The losing material needs its correct artifact re-uploaded, and
+that is a judgement call per row — the right transcript may no longer exist
+anywhere, in which case the honest repair is to drop the wrong one rather than
+keep serving it.
 
 ---
 
