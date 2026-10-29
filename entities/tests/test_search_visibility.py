@@ -35,6 +35,7 @@ from entities.search_visibility import (
     case_counts,
     clear_cache,
     entity_case_count,
+    entity_case_counts,
     entity_public_visible,
     referenced_iris,
 )
@@ -353,3 +354,165 @@ class MergeVisibilityTests(TestCase):
         }
         assert PERSON in touched, "survivor must be re-indexed: it just gained a citation"
         assert OTHER in touched, "retired IRI must be re-indexed: it just lost one"
+
+
+class BatchCaseCountTests(TestCase):
+    """``entity_case_counts`` — the batch form of the live path.
+
+    ``cases.signals._refresh_bound_entities`` called ``entity_case_count`` once
+    per bound IRI from inside a commit hook, which Sentry recorded on
+    ``/api/cases/{slug}/`` as an N+1 of 12 repeating
+    ``COUNT(*) ... WHERE nes_id = %s`` spans. The geography half of that same
+    loop was already batched; this is the matching half, so the two must agree
+    with the single-IRI function in every case the single one handles.
+    """
+
+    databases = "__all__"
+
+    def setUp(self):
+        cache.clear()
+        for target in (
+            "entities.search_index.index",
+            "entities.search_index.delete",
+            "entities.search_index.index_by_iri",
+            "cases.search_index.index",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_it_agrees_with_the_single_iri_function(self):
+        _entity(PERSON)
+        _entity(OTHER)
+        case = _case()
+        _bind(case, PERSON)
+        _bind(case, OTHER)
+        _bind(_case(title="second"), PERSON)
+
+        batch = entity_case_counts([PERSON, OTHER])
+        assert batch[PERSON] == entity_case_count(PERSON) == 2
+        assert batch[OTHER] == entity_case_count(OTHER) == 1
+
+    def test_an_uncited_iri_is_absent_not_zero(self):
+        """Callers read it with .get(iri, 0); absence is the 0."""
+        _entity(PERSON)
+        assert entity_case_counts([PERSON]) == {}
+
+    def test_a_draft_bind_does_not_count(self):
+        _entity(PERSON)
+        _bind(_case(state=CaseState.DRAFT), PERSON)
+        assert entity_case_counts([PERSON]) == {}
+
+    def test_it_counts_distinct_cases_not_binds(self):
+        """The same trap the bulk path documents: two roles, one case."""
+        _entity(PERSON)
+        case = _case()
+        _bind(case, PERSON, RelationshipType.ACCUSED)
+        _bind(case, PERSON, RelationshipType.RELATED)
+        assert entity_case_counts([PERSON]) == {PERSON: 1}
+
+    def test_it_only_answers_for_the_iris_asked_for(self):
+        """A scoped query, not the whole corpus filtered in Python."""
+        _entity(PERSON)
+        _entity(OTHER)
+        _bind(_case(), PERSON)
+        _bind(_case(title="other"), OTHER)
+        assert entity_case_counts([PERSON]) == {PERSON: 1}
+
+    def test_an_empty_list_asks_the_database_nothing(self):
+        with self.assertNumQueries(0):
+            assert entity_case_counts([]) == {}
+
+    def test_blank_iris_are_dropped(self):
+        assert entity_case_counts(["", None]) == {}
+
+    def test_the_whole_batch_is_one_query(self):
+        """The regression this exists to prevent."""
+        _entity(PERSON)
+        _entity(OTHER)
+        case = _case()
+        _bind(case, PERSON)
+        _bind(case, OTHER)
+        with self.assertNumQueries(1):
+            entity_case_counts([PERSON, OTHER, f"{IRI_BASE}/person/absent"])
+
+    def test_a_database_failure_degrades_to_empty_not_an_exception(self):
+        """The live path's posture: the reconcile repairs it, the write survives."""
+        with patch(
+            "entities.search_visibility._published_bind_queryset",
+            side_effect=RuntimeError("cases DB unreachable"),
+        ):
+            assert entity_case_counts([PERSON]) == {}
+
+
+class BoundEntityRefreshIsBatchedTests(TestCase):
+    """The N+1 itself, pinned end to end through the signal.
+
+    `_refresh_bound_entities` resolves geography for the whole list in one call
+    and used to resolve the case count one IRI at a time, from inside a commit
+    hook that production hands up to 26 IRIs. Sentry saw 12 repeating
+    `COUNT(*) ... WHERE nes_id = %s` spans on `/api/cases/{slug}/`.
+
+    Asserting on the call count rather than on query count: the commit hook
+    also writes the case, the binds and the index rows, so a raw query budget
+    here would be a brittle proxy for the thing that actually regressed.
+    """
+
+    databases = "__all__"
+
+    def setUp(self):
+        cache.clear()
+        for target in (
+            "entities.search_index.index",
+            "entities.search_index.delete",
+            "entities.search_index.index_by_iri",
+            "cases.search_index.index",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_the_signal_never_counts_one_entity_at_a_time(self):
+        """The regression guard. Reintroducing the loop fails here.
+
+        A whole-list bind rewrite is the shape that produced the N+1: it reaches
+        `_refresh_bound_entities` once with every bound IRI, which is where the
+        per-entity `entity_case_count` used to run.
+        """
+        iris = [f"{IRI_BASE}/person/batched-{n}" for n in range(8)]
+        for iri in iris:
+            _entity(iri)
+        case = _case()
+
+        with patch(
+            "entities.search_visibility.entity_case_count"
+        ) as per_entity, patch(
+            "entities.search_visibility.entity_case_counts", return_value={}
+        ) as batched:
+            with self.captureOnCommitCallbacks(execute=True):
+                for iri in iris:
+                    _bind(case, iri)
+
+        per_entity.assert_not_called()
+        assert batched.called
+        # Every IRI the hook was given is resolved in one call, not eight.
+        for call in batched.call_args_list:
+            assert len(call.args[0]) == len(set(call.args[0]))
+
+    def test_the_counts_are_still_correct_per_entity(self):
+        """Batching must not smear one entity's count across the others."""
+        cited_twice = f"{IRI_BASE}/person/batched-twice"
+        cited_once = f"{IRI_BASE}/person/batched-once"
+        _entity(cited_twice)
+        _entity(cited_once)
+
+        first, second = _case(title="first"), _case(title="second")
+        with self.captureOnCommitCallbacks(execute=True):
+            _bind(first, cited_twice)
+            _bind(first, cited_once)
+            _bind(second, cited_twice)
+
+        from entities.search_visibility import entity_case_counts
+
+        counts = entity_case_counts([cited_twice, cited_once])
+        assert counts == {cited_twice: 2, cited_once: 1}

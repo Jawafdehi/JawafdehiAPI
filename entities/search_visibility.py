@@ -142,6 +142,50 @@ def case_counts() -> dict[str, int]:
         ) from exc
 
 
+def entity_case_counts(iris: Iterable[str]) -> dict[str, int]:
+    """``{IRI: PUBLISHED case count}`` for ``iris``. The LIVE (batch) path.
+
+    One grouped query for the whole list, where calling :func:`entity_case_count`
+    in a loop issues one per entity. ``cases.signals._refresh_bound_entities``
+    can hand this 26 IRIs — the production maximum for a single case — from
+    inside a commit hook, and Sentry recorded it as an N+1 of 12 repeating
+    ``COUNT(*) ... WHERE nes_id = %s`` spans on ``/api/cases/{slug}/``.
+
+    The geography half of that same loop already resolves in one batch
+    (``entities.search_geography.locations_for_iris``) for exactly this reason;
+    this is the matching half.
+
+    Failure posture follows the LIVE path, not the bulk one: logs and returns an
+    empty mapping rather than raising, because the caller is best-effort
+    indexing from a commit hook. Blast radius is unchanged by batching — the
+    per-entity loop it replaces would have had every one of its calls fail the
+    same way, each returning 0 — and ``reconcile_entity_visibility`` repairs the
+    drift either way.
+
+    An IRI absent from the result has no published citation, so its count is 0.
+    Callers should read it with ``.get(iri, 0)``, which is also what makes the
+    failure case degrade identically to the old one.
+    """
+    targets = [iri for iri in iris if iri]
+    if not targets:
+        return {}
+    try:
+        rows = (
+            _published_bind_queryset()
+            .filter(nes_id__in=targets)
+            .values("nes_id")
+            .annotate(case_count=Count("case", distinct=True))
+        )
+        return {row["nes_id"]: row["case_count"] for row in rows}
+    except Exception:  # noqa: BLE001 — best-effort; reconcile repairs the drift.
+        logger.warning(
+            "entity_case_counts failed for %d IRI(s); indexing them as 0",
+            len(targets),
+            exc_info=True,
+        )
+        return {}
+
+
 def entity_case_count(iri: str | None) -> int:
     """PUBLISHED cases citing ``iri``. The LIVE (single-document) path.
 
