@@ -724,3 +724,62 @@ class ConcurrentPublishTests(TestCase):
             if mo.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
         ]
         self.assertEqual(urls, ["https://s3.jawafdehi.org/case_uploads/theirs.md"])
+
+
+class StalePairingAcrossRunsTests(TestCase):
+    """A redaction left behind when its original was replaced is repairable.
+
+    🛑 The short-circuit asks about the PAIRING, not about existence. If a writer
+    replaces the MARKDOWN alone — which `transcripts.replace` supports by design,
+    since its drop set comes from what is being written — the old redaction
+    survives beside the new original and `is_withheld` withholds the new one on
+    the strength of it. An existence check short-circuited every later run before
+    noticing, so the documented remedy could never repair the one state that most
+    needed it.
+    """
+
+    databases = "__all__"
+
+    def test_a_redaction_of_a_replaced_original_is_re_derived(self):
+        material = _material("stale-across", WITH_CITIZENSHIP)
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/new.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            },
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/old-redacted.md",
+                "jawafdehi:linkRole": "REDACTED_MARKDOWN",
+                # made from an original this row no longer carries
+                "jawafdehi:provenance": {
+                    "fetch_method": "redaction",
+                    "source_url": "https://s3.jawafdehi.org/case_uploads/old.md",
+                },
+            },
+        ]
+        material.save()
+
+        with mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        ) as fetch:
+            _run("--apply")
+
+        fetch.assert_called_once()
+        self.assertEqual(
+            fetch.call_args[0][0], "https://s3.jawafdehi.org/case_uploads/new.md"
+        )
+        material.refresh_from_db()
+        redacted = [
+            mo
+            for mo in material.data["associatedMedia"]
+            if mo.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
+        ]
+        self.assertEqual(len(redacted), 1)
+        self.assertEqual(
+            redacted[0]["jawafdehi:provenance"]["source_url"],
+            "https://s3.jawafdehi.org/case_uploads/new.md",
+            "the fresh redaction records the original it was actually made of",
+        )

@@ -54,6 +54,15 @@ def media(
     the publisher's file, it was produced by redacting our own transcript.
     Stamping both ``fetch_method="ocr"`` would describe two artifacts as the same
     kind of claim about the same source, differing only in a digest.
+
+    🛑 **For a derived artifact, ``source_url`` names what it was derived FROM —
+    our own MARKDOWN — not the publisher's PDF.** Both are "where it came from"
+    in some sense, and the publisher's is the wrong one: it is the original's
+    provenance, not the derivative's, and recording it leaves nothing anywhere
+    that says WHICH transcript a given redaction was made of. Without that, a
+    sweep cannot tell a redaction still paired with its original from one left
+    behind when the original was replaced — and `is_withheld` goes on withholding
+    the new original on the strength of a redaction of the old one.
     """
     mo = jsonld._media_object({"link": link["link"], "role": role})
     if mo is None:

@@ -61,11 +61,12 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from materials import artifacts, transcripts
+from materials import artifacts, provenance, transcripts
 from materials.models import Material
 from materials.redaction import (
     TEXT_KEY,
@@ -362,25 +363,32 @@ class Command(BaseCommand):
         """
         from materials.extract import DocumentFetchError, fetch_document
 
-        source_url = None
         url = None
+        published = None
         for mo in artifacts.media_list(material.data or {}):
             role = artifacts.role_of(mo)
-            if role == artifacts.REDACTED_TRANSCRIPT_ROLE:
-                # 🛑 **Asked FIRST, before any network call.** Without this the
-                # sweep is not idempotent: a finished row re-fetches its MARKDOWN,
-                # re-uploads a derivative and re-saves on every run — and
-                # `build_provenance` stamps `captured_at = now()`, so the
-                # MediaObject differs every time and the write always sticks. Each
-                # save re-indexes the row, which makes a second sweep a
-                # corpus-wide reindex. The command's own docstring promises
-                # re-running is a no-op, and every other gap in this work is
-                # remediated by re-running.
-                return None, "already_published", None
             if role == artifacts.ORIGINAL_TRANSCRIPT_ROLE:
                 url = mo.get("contentUrl")
-            elif role in artifacts.ORIGINAL_PDF_ROLES and source_url is None:
-                source_url = mo.get("contentUrl")
+            elif role == artifacts.REDACTED_TRANSCRIPT_ROLE:
+                published = mo
+
+        # 🛑 **Asked FIRST, before any network call, and it asks about the
+        # PAIRING rather than mere existence.** Without any check the sweep is
+        # not idempotent: a finished row re-fetches its MARKDOWN, re-uploads a
+        # derivative and re-saves every run, and `build_provenance` stamps
+        # `captured_at = now()`, so the write always sticks and `post_save`
+        # re-indexes — a second sweep becomes a corpus-wide reindex.
+        #
+        # ⚠️ But an EXISTENCE check is not enough. If a writer replaces the
+        # MARKDOWN alone — which `transcripts.replace` supports by design, since
+        # its drop set comes from what is being written — the old redaction
+        # survives beside the new original, `is_withheld` withholds the new one
+        # on the strength of it, and an existence check short-circuits every
+        # later run before noticing. The documented remedy, re-running, could
+        # never repair the one state it most needs to.
+        if published is not None and self._pairs_with(published, url):
+            return None, "already_published", None
+
         if not isinstance(url, str) or not url:
             return None, "no_transcript", None
 
@@ -419,12 +427,30 @@ class Command(BaseCommand):
                 link,
                 artifacts.REDACTED_TRANSCRIPT_ROLE,
                 redacted,
-                source_url,
+                # What this redaction was made OF, so a later sweep can tell a
+                # live pairing from one the original outgrew.
+                url,
                 derived=True,
             ),
             "published",
             url,
         )
+
+    def _pairs_with(self, published: dict, markdown_url: Any) -> bool:
+        """Whether ``published`` is a redaction OF the row's current MARKDOWN.
+
+        The pairing is read from the derived artifact's own provenance, where
+        :func:`materials.transcripts.media` records the url it was made from.
+
+        ⚠️ **A redaction written before that was recorded does not pair**, and
+        that is the safe direction: it re-derives once, on the first sweep after
+        this lands, and is stable from then on. The alternative — treating a
+        missing record as "paired" — would make every pre-existing mispairing
+        permanently invisible, which is the defect this exists to close.
+        """
+        prov = published.get(provenance.PROVENANCE_KEY) or {}
+        recorded = prov.get("source_url") if isinstance(prov, dict) else None
+        return bool(recorded) and recorded == markdown_url
 
     def _has_redacted_transcript(self, data: dict) -> bool:
         return any(

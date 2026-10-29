@@ -239,7 +239,8 @@ def apply_convert_result(job, result: dict) -> None:
                     redacted_link,
                     artifacts.REDACTED_TRANSCRIPT_ROLE,
                     redacted_text,
-                    source_url,
+                    # What this redaction was made OF — see transcripts.media.
+                    link["link"],
                     derived=True,
                 ),
             ],
