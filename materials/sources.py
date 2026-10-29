@@ -667,7 +667,19 @@ KNOWN_SOURCE_PREFIXES: tuple[str, ...] = ("province/",)
 
 def is_known_source(source: str) -> bool:
     """True iff ``source`` may be used to create a NEW material."""
-    return source in KNOWN_SOURCES or source.startswith(KNOWN_SOURCE_PREFIXES)
+    if source in KNOWN_SOURCES:
+        return True
+    # A namespace admits EXACTLY ONE more segment, and it must be non-empty.
+    # A bare `startswith` would have accepted `province/koshi/fy2083`, which is
+    # the same unreviewed-shelf mistake this gate exists to stop — just one
+    # level down.
+    for prefix in KNOWN_SOURCE_PREFIXES:
+        if not source.startswith(prefix):
+            continue
+        tail = source[len(prefix) :]
+        if tail and "/" not in tail:
+            return True
+    return False
 
 
 def unknown_source_error(source: str) -> str:
@@ -677,7 +689,13 @@ def unknown_source_error(source: str) -> str:
     payload, when the answer is either a typo on their side or a one-line
     addition here.
     """
-    near = sorted(k for k in KNOWN_SOURCES if _looks_like(k, source))
+    # MOST SPECIFIC match, not the alphabetically first. `court_order_0191`
+    # matches both `court` and `court_order`; sorting by name suggested
+    # "court", which is useless for precisely the shape this check advertises
+    # that it catches.
+    near = sorted(
+        (k for k in KNOWN_SOURCES if _looks_like(k, source)), key=len, reverse=True
+    )
     hint = f" Did you mean {near[0]!r}?" if near else ""
     return (
         f"Unknown material source {source!r}.{hint} A new source token creates a "

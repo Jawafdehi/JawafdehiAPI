@@ -63,11 +63,15 @@ class NewTokenTests(TestCase):
             write("courtorder", "1")
         self.assertIn("court_order", str(exc.value))
 
-    def test_a_token_with_an_identifier_glued_on_is_a_near_miss(self):
-        # The `court_order_0133` shape, caught prospectively.
+    def test_a_token_with_an_identifier_glued_on_names_the_SPECIFIC_near_miss(self):
+        # The `court_order_0133` shape, caught prospectively. It matches both
+        # `court` and `court_order`; the hint must name the longer one.
+        # Asserting "court_order appears in the message" was not enough — the
+        # message repeats the REJECTED token, so that passed while the hint
+        # itself said "Did you mean 'court'?".
         with pytest.raises(ValueError) as exc:
             write("court_order_0191", "2081")
-        self.assertIn("court_order", str(exc.value))
+        self.assertIn("Did you mean 'court_order'?", str(exc.value))
 
 
 class ExistingRowTests(TestCase):
@@ -122,6 +126,16 @@ class NamespaceTests(TestCase):
         with pytest.raises(ValueError):
             write("provinces/koshi", "1")
 
+    def test_the_namespace_admits_exactly_one_segment(self):
+        # `province/koshi/fy2083` is the same unreviewed-shelf mistake this
+        # gate exists to stop, one level down. A bare startswith accepted it.
+        with pytest.raises(ValueError):
+            write("province/koshi/fy2083", "1")
+
+    def test_the_namespace_rejects_an_empty_tail(self):
+        with pytest.raises(ValueError):
+            write("province/", "1")
+
 
 class ConsistencyTests(TestCase):
     databases = "__all__"
@@ -142,6 +156,15 @@ class ConsistencyTests(TestCase):
 
         for token in (COURT_SOURCE, COURT_ORDER_SOURCE, JAWAF_SOURCE):
             self.assertTrue(is_known_source(token), f"{token} is a live constant")
+
+    def test_the_paths_that_bypass_the_upsert_are_covered_too(self):
+        # Two writers create materials WITHOUT the upsert, so the gate never
+        # sees them: `move_source` (checks the token itself now) and
+        # `seed_dev` (whose fixture tokens must therefore be real).
+        from cases.management.commands.seed_dev import MATERIALS
+
+        for source, *_ in MATERIALS:
+            self.assertTrue(is_known_source(source), f"seed_dev mints unknown {source!r}")
 
     def test_the_allowlist_covers_the_scrapers(self):
         # If a scraper's token were dropped, ingestion would fail at 3am on a
