@@ -131,12 +131,26 @@ class AuditTests(TestCase):
 
         assert "can be re-fetched from the publisher" in out.getvalue()
 
-    def test_an_empty_redacted_artifact_is_probed_too(self):
-        """The artifact that REPLACES a withheld original is the one that matters."""
+    def test_an_empty_redacted_pdf_is_probed_too(self):
+        """The artifact that REPLACES a withheld original is the one that matters.
+
+        ⚠️ `REDACTED_PDF` specifically. An earlier version of this test used
+        `REDACTED_MARKDOWN`, which `CHECKED_ROLES` already contained — so it
+        passed against the unchanged set and gave the one line this commit
+        actually adds no coverage at all. Remove `REDACTED_PDF_ROLE` from
+        `CHECKED_ROLES` and this must fail.
+        """
         _material(
             "redacted-empty",
-            [{"contentUrl": OURS, "jawafdehi:linkRole": "REDACTED_MARKDOWN"}],
+            [{"contentUrl": OURS, "jawafdehi:linkRole": "REDACTED_PDF"}],
         )
 
-        with pytest.raises(CommandError):
-            self._run(body=b"")
+        out, err = StringIO(), StringIO()
+        with (
+            mock.patch("requests.Session.get", return_value=_Response(200, b"")),
+            pytest.raises(CommandError),
+        ):
+            call_command("audit_stored_artifacts", stdout=out, stderr=err)
+
+        assert "checked 1 stored artifact(s)" in out.getvalue()
+        assert "empty=1" in out.getvalue()
