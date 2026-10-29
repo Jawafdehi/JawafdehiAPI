@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 import structlog
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import INTERNAL_ERROR
 
 from .configuration import get_oidc_config
 from .identity import current_user_identity
@@ -213,6 +214,43 @@ def _protected_resource_metadata(base_url: str) -> dict:
         "bearer_methods_supported": ["header"],
         "scopes_supported": scopes,
     }
+
+
+class _ResponseGuard:
+    """Wrap ASGI ``send`` so an abandoned response can still be closed out.
+
+    ``StreamableHTTPSessionManager`` runs the MCP server in a task on the
+    session manager's task group and streams its output back over this ``send``.
+    If that task dies — the tool raised something the protocol layer did not
+    convert, or the task group was cancelled because the worker is shutting down
+    mid-rollout — the transport's write stream closes and ``handle_request``
+    returns *normally*, having started the response but never finished it.
+
+    uvicorn then logs ``ASGI callable returned without completing response`` at
+    ERROR and closes the socket. That message is what the client gets instead of
+    an error: no status, no JSON-RPC error body, nothing naming the tool. It was
+    the single largest real defect in the API's Sentry inbox (555 events across
+    `tools/call list_document_sources` and `ngm_query_judicial`), and it carried
+    no information, because by the time uvicorn notices, the context is gone.
+
+    This records what reached the client so the caller can finish the response
+    deliberately. It deliberately does not buffer or alter anything in flight.
+    """
+
+    __slots__ = ("_send", "started", "complete")
+
+    def __init__(self, send: Send) -> None:
+        self._send = send
+        self.started = False
+        self.complete = False
+
+    async def __call__(self, message: MutableMapping[str, Any]) -> None:
+        message_type = message.get("type")
+        if message_type == "http.response.start":
+            self.started = True
+        elif message_type == "http.response.body" and not message.get("more_body", False):
+            self.complete = True
+        await self._send(message)
 
 
 class JawafdehiMCPServer:
@@ -454,11 +492,68 @@ class JawafdehiMCPServer:
             identity_ctx = current_user_identity.set(identity)
 
         transport_ctx = current_transport.set("http")
+        guard = _ResponseGuard(send)
         try:
-            await self.session_manager.handle_request(scope, receive, send)
+            await self.session_manager.handle_request(scope, receive, guard)
+        except Exception as exc:  # noqa: BLE001 - see _finish_abandoned_response
+            # Deliberately not re-raised. Letting it reach uvicorn produces
+            # either a bare 500 with no MCP framing or, once the stream has
+            # started, a closed socket — in both cases the client is told
+            # nothing useful. Report it here, where the request is still in
+            # scope, and answer the caller properly below.
+            logger.exception(
+                "mcp_request_failed",
+                path=path,
+                method=method,
+                error=str(exc) or type(exc).__name__,
+            )
+            await self._finish_abandoned_response(guard, reason="handler raised")
+        else:
+            await self._finish_abandoned_response(guard, reason="handler returned early")
         finally:
             current_transport.reset(transport_ctx)
             if identity_ctx is not None:
                 current_user_identity.reset(identity_ctx)
             if token_ctx is not None:
                 jawafdehi_bearer_token.reset(token_ctx)
+
+    async def _finish_abandoned_response(
+        self,
+        guard: _ResponseGuard,
+        *,
+        reason: str,
+    ) -> None:
+        """Complete a response the MCP transport started but did not finish.
+
+        A no-op on the overwhelming majority of requests, which complete
+        normally. When it is not a no-op it converts an opaque uvicorn error and
+        a truncated stream into a JSON-RPC error the client can act on, and logs
+        the fact at WARNING with the reason — so the condition stays visible
+        without being an unactionable ERROR for every occurrence.
+        """
+        if guard.complete:
+            return
+
+        logger.warning("mcp_response_abandoned", reason=reason, started=guard.started)
+        if not guard.started:
+            # Nothing reached the client yet, so a complete JSON-RPC error can
+            # still be framed. id is null per JSON-RPC 2.0 for a request whose
+            # id could not be determined.
+            await self._send_json(
+                guard,
+                500,
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": INTERNAL_ERROR,
+                        "message": "MCP request failed before a response was produced.",
+                    },
+                },
+            )
+            return
+        # Headers are already on the wire, so the status cannot be changed. End
+        # the body cleanly rather than letting uvicorn drop the socket: a client
+        # reading a truncated stream cannot tell a server fault from a network
+        # one, and will often retry a call that already ran.
+        await guard({"type": "http.response.body", "body": b"", "more_body": False})
