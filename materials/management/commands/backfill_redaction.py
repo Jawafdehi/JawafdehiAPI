@@ -59,6 +59,7 @@ charge sheets, almost all of them bank accounts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from typing import Any
@@ -264,10 +265,14 @@ class Command(BaseCommand):
                 # object is stored, so a skipped attach used to leave the report
                 # claiming a transcript nobody can reach — and the run exited 0,
                 # because `stranded` counts only residue and unreadable.
-                outcome = self._attach(material, transcript, transcript_source)
+                outcome = self._attach(
+                    material,
+                    transcript,
+                    transcript_source,
+                    self._redacted_transcript_url(material.data),
+                )
                 if outcome != "published":
-                    self._transcript_notes["published"] -= 1
-                    self._transcript_notes[f"not_attached_{outcome}"] += 1
+                    self._note_not_attached(outcome)
                     return outcome, Counter()
             return "clean", removed
 
@@ -286,6 +291,8 @@ class Command(BaseCommand):
                 .first()
             )
             if fresh is None:
+                if transcript is not None:
+                    self._note_not_attached("vanished")
                 return "vanished", Counter()
             if (fresh.data or {}) != (material.data or {}):
                 # Somebody wrote this document between the read and the lock. The
@@ -294,6 +301,8 @@ class Command(BaseCommand):
                 # only `text` would miss a writer that touched associatedMedia or
                 # provenance and clobber that instead. Theirs went through the same
                 # gate ours did; leave it alone and report.
+                if transcript is not None:
+                    self._note_not_attached("changed_underfoot")
                 return "changed_underfoot", Counter()
             fresh.data = redacted_data
             # ⚠️ No `_still_paired` call here, and that is deliberate rather than an
@@ -364,6 +373,7 @@ class Command(BaseCommand):
         from materials.extract import DocumentFetchError, fetch_document
 
         url = None
+        source_url = None
         published = None
         for mo in artifacts.media_list(material.data or {}):
             role = artifacts.role_of(mo)
@@ -371,6 +381,11 @@ class Command(BaseCommand):
                 url = mo.get("contentUrl")
             elif role == artifacts.REDACTED_TRANSCRIPT_ROLE:
                 published = mo
+            elif role in artifacts.ORIGINAL_PDF_ROLES and source_url is None:
+                # The publisher's file, for `source_url` — the ORIGINAL's
+                # provenance. What this redaction was made OF rides separately as
+                # `derived_from`, because provenance is published verbatim.
+                source_url = mo.get("contentUrl")
 
         # 🛑 **Asked FIRST, before any network call, and it asks about the
         # PAIRING rather than mere existence.** Without any check the sweep is
@@ -427,10 +442,10 @@ class Command(BaseCommand):
                 link,
                 artifacts.REDACTED_TRANSCRIPT_ROLE,
                 redacted,
-                # What this redaction was made OF, so a later sweep can tell a
-                # live pairing from one the original outgrew.
-                url,
+                source_url,
                 derived=True,
+                # What it was made OF, as a digest a payload can carry safely.
+                derived_from=url,
             ),
             "published",
             url,
@@ -440,7 +455,9 @@ class Command(BaseCommand):
         """Whether ``published`` is a redaction OF the row's current MARKDOWN.
 
         The pairing is read from the derived artifact's own provenance, where
-        :func:`materials.transcripts.media` records the url it was made from.
+        :func:`materials.transcripts.media` records a DIGEST of the url it was
+        made from — never the url, which provenance would publish to anonymous
+        callers and so undo the withholding entirely.
 
         ⚠️ **A redaction written before that was recorded does not pair**, and
         that is the safe direction: it re-derives once, on the first sweep after
@@ -449,14 +466,29 @@ class Command(BaseCommand):
         permanently invisible, which is the defect this exists to close.
         """
         prov = published.get(provenance.PROVENANCE_KEY) or {}
-        recorded = prov.get("source_url") if isinstance(prov, dict) else None
-        return bool(recorded) and recorded == markdown_url
+        recorded = prov.get("derived_from") if isinstance(prov, dict) else None
+        if not recorded or not isinstance(markdown_url, str):
+            return False
+        return recorded == hashlib.sha256(markdown_url.encode("utf-8")).hexdigest()
 
-    def _has_redacted_transcript(self, data: dict) -> bool:
-        return any(
-            artifacts.role_of(mo) == artifacts.REDACTED_TRANSCRIPT_ROLE
-            for mo in artifacts.media_list(data or {})
-        )
+    def _note_not_attached(self, outcome: str) -> None:
+        """Correct the note `_transcript` recorded when the object was stored.
+
+        🛑 Both write paths need this, not just the clean one. `_transcript` says
+        "published" as soon as the upload succeeds, so a redacting-path row that
+        then returns `vanished` or `changed_underfoot` left the report — and the
+        `--report` JSON — claiming a transcript nobody can reach, with the run
+        exiting 0 because `stranded` counts only residue and unreadable.
+        """
+        self._transcript_notes["published"] -= 1
+        self._transcript_notes[f"not_attached_{outcome}"] += 1
+
+    def _redacted_transcript_url(self, data: dict) -> Any:
+        """The row's current redacted transcript link, or None."""
+        for mo in artifacts.media_list(data or {}):
+            if artifacts.role_of(mo) == artifacts.REDACTED_TRANSCRIPT_ROLE:
+                return mo.get("contentUrl")
+        return None
 
     def _still_paired(self, data: dict, source_url: str | None) -> bool:
         """Whether the row still carries the MARKDOWN this redaction was made from.
@@ -479,7 +511,11 @@ class Command(BaseCommand):
         )
 
     def _attach(
-        self, material: Material, transcript: dict, source_url: str | None
+        self,
+        material: Material,
+        transcript: dict,
+        source_url: str | None,
+        expected_existing: Any = None,
     ) -> str:
         """Publish a transcript on a row whose indexed text needed no change.
 
@@ -504,12 +540,16 @@ class Command(BaseCommand):
                 # `changed_underfoot` here sent an operator looking for a writer
                 # that does not exist, and failed the run.
                 return "vanished"
-            if self._has_redacted_transcript(fresh.data):
-                # Another run published between the pre-lock check and this lock —
-                # two network round trips ago. `transcripts.replace` would drop its
-                # link by role without a word, possibly one made at a different
-                # tier, since the tier is resolved per process. The sibling command
-                # `backfill_redacted_pdf._publish` carries this same check.
+            if self._redacted_transcript_url(fresh.data) != expected_existing:
+                # 🛑 **Not "is one present" — "is it the one we came to replace".**
+                # A row being REPAIRED carries a stale redaction by definition, so
+                # an existence check refuses the repair it was asked to perform,
+                # leaks the object uploaded before the lock, and does it again on
+                # every run. What this has to catch is a DIFFERENT artifact
+                # appearing: another run publishing in the two network round trips
+                # since the pre-lock read, whose link `transcripts.replace` would
+                # otherwise drop by role without a word — possibly one made at a
+                # different tier, since the tier is resolved per process.
                 return "changed_underfoot"
             if not self._still_paired(fresh.data, source_url):
                 return "changed_underfoot"
@@ -589,9 +629,10 @@ class Command(BaseCommand):
                 f"{k}={v}" for k, v in sorted(self._transcript_notes.items())
             )
             self.stdout.write(f"transcripts: {line}")
-            stranded = (
-                self._transcript_notes["residue"]
-                + self._transcript_notes["unreadable"]
+            stranded = sum(
+                n
+                for k, n in self._transcript_notes.items()
+                if k in ("residue", "unreadable") or k.startswith("not_attached_")
             )
             if stranded:
                 self.stdout.write(

@@ -46,7 +46,13 @@ def store(text: str, role: str, name: str) -> dict:
 
 
 def media(
-    link: dict, role: str, text: str, source_url: Any, *, derived: bool
+    link: dict,
+    role: str,
+    text: str,
+    source_url: Any,
+    *,
+    derived: bool,
+    derived_from: str | None = None,
 ) -> dict | None:
     """One stored transcript as a roled MediaObject carrying its provenance.
 
@@ -55,27 +61,37 @@ def media(
     Stamping both ``fetch_method="ocr"`` would describe two artifacts as the same
     kind of claim about the same source, differing only in a digest.
 
-    🛑 **For a derived artifact, ``source_url`` names what it was derived FROM —
-    our own MARKDOWN — not the publisher's PDF.** Both are "where it came from"
-    in some sense, and the publisher's is the wrong one: it is the original's
-    provenance, not the derivative's, and recording it leaves nothing anywhere
-    that says WHICH transcript a given redaction was made of. Without that, a
-    sweep cannot tell a redaction still paired with its original from one left
-    behind when the original was replaced — and `is_withheld` goes on withholding
-    the new original on the strength of a redaction of the old one.
+    🛑 **``derived_from`` is a DIGEST of the original's url, never the url.** A
+    sweep has to be able to tell a redaction still paired with its original from
+    one left behind when the original was replaced, so something must record
+    which transcript a redaction was made of. It cannot be the url: provenance is
+    served to anonymous callers verbatim — nothing strips it — and the whole
+    point of `artifacts.is_withheld` dropping the MARKDOWN MediaObject is to stop
+    publishing that location. Putting it on the derived artifact instead hands it
+    straight back.
+    
+    ⚠️ A sha256 of the CONTENT would leak it just as badly, because
+    `store_file_as_link` makes the object key the content hash — the url *is* the
+    digest. Hashing the url is what breaks that: same original gives the same
+    value, and the value is not a locator.
     """
     mo = jsonld._media_object({"link": link["link"], "role": role})
     if mo is None:
         return None
     raw = text.encode("utf-8")
     mo["encodingFormat"] = "text/markdown"
-    mo[provenance.PROVENANCE_KEY] = provenance.build_provenance(
+    prov = provenance.build_provenance(
         sha256=hashlib.sha256(raw).hexdigest(),
         fetch_method="redaction" if derived else "ocr",
         source_url=source_url,
         content_length=len(raw),
         ocr_engine="likhit",
     )
+    if derived and derived_from:
+        prov["derived_from"] = hashlib.sha256(
+            derived_from.encode("utf-8")
+        ).hexdigest()
+    mo[provenance.PROVENANCE_KEY] = prov
     return mo
 
 

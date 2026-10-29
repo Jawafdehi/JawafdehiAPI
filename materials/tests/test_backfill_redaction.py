@@ -12,6 +12,9 @@ over the command's own output.
 
 from __future__ import annotations
 
+import hashlib
+
+import json
 from io import StringIO
 from unittest import mock
 
@@ -755,7 +758,10 @@ class StalePairingAcrossRunsTests(TestCase):
                 # made from an original this row no longer carries
                 "jawafdehi:provenance": {
                     "fetch_method": "redaction",
-                    "source_url": "https://s3.jawafdehi.org/case_uploads/old.md",
+                    # a digest of an original this row no longer carries
+                    "derived_from": __import__("hashlib")
+                    .sha256(b"https://s3.jawafdehi.org/case_uploads/old.md")
+                    .hexdigest(),
                 },
             },
         ]
@@ -778,8 +784,77 @@ class StalePairingAcrossRunsTests(TestCase):
             if mo.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
         ]
         self.assertEqual(len(redacted), 1)
+        import hashlib
+
         self.assertEqual(
-            redacted[0]["jawafdehi:provenance"]["source_url"],
-            "https://s3.jawafdehi.org/case_uploads/new.md",
+            redacted[0]["jawafdehi:provenance"]["derived_from"],
+            hashlib.sha256(
+                b"https://s3.jawafdehi.org/case_uploads/new.md"
+            ).hexdigest(),
             "the fresh redaction records the original it was actually made of",
+        )
+        payload = json.dumps(material.data, ensure_ascii=False)
+        self.assertNotIn(
+            "case_uploads/new.md",
+            payload.split('"REDACTED_MARKDOWN"')[-1],
+            "the derived artifact must not carry the unredacted original's URL — "
+            "provenance is served to anonymous callers verbatim",
+        )
+
+
+class StalePairingOnACleanRowTests(TestCase):
+    """The repair has to work on the rows that actually need it.
+
+    🛑 Those rows are CLEAN: an earlier sweep already redacted their text, and
+    what they carry is a redaction paired with an original that has since been
+    replaced. So the repair runs down the clean path, through `_attach` — and
+    `_attach`'s concurrent-publish check asks whether ANY redacted transcript is
+    present, which on exactly this row is true because the stale one is still
+    there. Two guards added in different rounds, each right on its own, meeting
+    to make the repair impossible and leak an uploaded object on every run.
+    """
+
+    databases = "__all__"
+
+    def test_a_clean_row_with_a_stale_pairing_is_repaired(self):
+        material = _material("stale-clean", "कुनै पाठ")  # nothing to redact
+        material.data["associatedMedia"] = [
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/new.md",
+                "jawafdehi:linkRole": "MARKDOWN",
+            },
+            {
+                "@type": "MediaObject",
+                "contentUrl": "https://s3.jawafdehi.org/case_uploads/stale.md",
+                "jawafdehi:linkRole": "REDACTED_MARKDOWN",
+                "jawafdehi:provenance": {
+                    "fetch_method": "redaction",
+                    "derived_from": hashlib.sha256(
+                        b"https://s3.jawafdehi.org/case_uploads/gone.md"
+                    ).hexdigest(),
+                },
+            },
+        ]
+        material.save()
+
+        with mock.patch(
+            "materials.extract.fetch_document",
+            return_value=WITH_CITIZENSHIP.encode("utf-8"),
+        ):
+            _run("--apply")
+
+        material.refresh_from_db()
+        redacted = [
+            mo
+            for mo in material.data["associatedMedia"]
+            if mo.get("jawafdehi:linkRole") == "REDACTED_MARKDOWN"
+        ]
+        self.assertEqual(len(redacted), 1)
+        self.assertEqual(
+            redacted[0]["jawafdehi:provenance"]["derived_from"],
+            hashlib.sha256(
+                b"https://s3.jawafdehi.org/case_uploads/new.md"
+            ).hexdigest(),
+            "the stale redaction must be replaced, not left in place",
         )
