@@ -919,7 +919,14 @@ def material_file_upload(request, source: str, ident: str):
     # uploads sharing a name would otherwise land on one key and the second would
     # silently overwrite the first (see store_file_as_link). The digest is already
     # in hand from the provenance capture above.
-    link = store_file_as_link(uploaded, role=role, content_hash=sha256)
+    try:
+        link = store_file_as_link(uploaded, role=role, content_hash=sha256)
+    except ValueError as exc:
+        # An empty upload is the client's mistake, so it reads as one. Without
+        # this the refusal added in jawafdehi_shared.storage escapes DRF, which
+        # has no custom EXCEPTION_HANDLER here, and a zero-byte multipart body
+        # answers 500 where it used to answer 201 with a useless object.
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     encoding, _ = mimetypes.guess_type(uploaded.name)
     provenance.attach_media_object(
         doc,
