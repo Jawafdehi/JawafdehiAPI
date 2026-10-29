@@ -172,6 +172,8 @@ class _Bus:
     async def _connect(self):
         import nats
 
+        from case_events.nats_logging import error_cb
+
         nc = await nats.connect(
             settings.NATS_URL,
             name="jawafdehi-platform",
@@ -180,6 +182,10 @@ class _Bus:
             # broker restart, and a permanently-detached publisher that still
             # looks healthy is worse than one that keeps trying.
             max_reconnect_attempts=-1,
+            # See case_events.nats_logging: keeps shutdown drain timeouts out of
+            # Sentry without hiding them, and makes distinct async failures
+            # group distinctly.
+            error_cb=error_cb,
         )
         # Deliberately does NOT assert the stream topology. Doing that here would
         # require every publishing process to hold JetStream stream-CREATE

@@ -74,12 +74,18 @@ async def connect():
     """
     import nats
 
+    from case_events.nats_logging import error_cb
+
     nc = await nats.connect(
         settings.NATS_URL,
         name="jawafdehi-consumers",
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
         # Bounded, for the reason above.
         max_reconnect_attempts=10,
+        # Replaces nats-py's default, which logs every async error at ERROR
+        # under one message — so a drain timeout on shutdown looked exactly like
+        # a real failure, and both grouped into one uninformative Sentry issue.
+        error_cb=error_cb,
     )
     return nc, nc.jetstream()
 
