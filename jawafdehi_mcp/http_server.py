@@ -237,12 +237,36 @@ class _ResponseGuard:
     deliberately. It deliberately does not buffer or alter anything in flight.
     """
 
-    __slots__ = ("_send", "started", "complete")
+    __slots__ = ("_send", "_receive", "started", "complete", "disconnected")
 
-    def __init__(self, send: Send) -> None:
+    def __init__(self, send: Send, receive: Receive) -> None:
         self._send = send
+        self._receive = receive
         self.started = False
         self.complete = False
+        self.disconnected = False
+
+    async def receive(self) -> MutableMapping[str, Any]:
+        """Watch for the client hanging up.
+
+        This is not bookkeeping for its own sake — it is the difference between
+        a defect and a normal event. The MCP transport answers over
+        ``EventSourceResponse``, whose ``_listen_for_disconnect`` cancels the
+        streaming task when the peer goes away, *skipping* the closing
+        ``more_body: False``. Without this, every client-initiated SSE close and
+        every open stream on a pod rollout would look exactly like an abandoned
+        response and be reported as one.
+
+        uvicorn draws the same line: its "returned without completing response"
+        error is guarded by ``and not self.disconnected`` precisely so a
+        disconnect is not an error. A replacement that fires on a strictly
+        larger set of conditions than the message it replaces would be a
+        regression dressed as a fix.
+        """
+        message = await self._receive()
+        if message.get("type") == "http.disconnect":
+            self.disconnected = True
+        return message
 
     async def __call__(self, message: MutableMapping[str, Any]) -> None:
         # Record only what actually went out. Setting the flags before the await
@@ -496,9 +520,9 @@ class JawafdehiMCPServer:
             identity_ctx = current_user_identity.set(identity)
 
         transport_ctx = current_transport.set("http")
-        guard = _ResponseGuard(send)
+        guard = _ResponseGuard(send, receive)
         try:
-            await self.session_manager.handle_request(scope, receive, guard)
+            await self.session_manager.handle_request(scope, guard.receive, guard)
         except Exception as exc:  # noqa: BLE001 - see _finish_abandoned_response
             # Deliberately not re-raised. Letting it reach uvicorn produces
             # either a bare 500 with no MCP framing or, once the stream has
@@ -512,7 +536,14 @@ class JawafdehiMCPServer:
                 error=str(exc) or type(exc).__name__,
             )
             await self._finish_abandoned_response(
-                guard, reason="handler raised", path=path, method=method
+                guard,
+                reason="handler raised",
+                path=path,
+                method=method,
+                # The log above already reported this at ERROR with the
+                # traceback. A second ERROR here would open a second Sentry
+                # issue for one failure and split its history across both.
+                already_reported=True,
             )
         else:
             await self._finish_abandoned_response(
@@ -532,6 +563,7 @@ class JawafdehiMCPServer:
         reason: str,
         path: str = "",
         method: str = "",
+        already_reported: bool = False,
     ) -> None:
         """Complete a response the MCP transport started but did not finish.
 
@@ -553,6 +585,17 @@ class JawafdehiMCPServer:
         if guard.complete:
             return
 
+        if guard.disconnected:
+            # The client hung up. Not a defect, and nothing left to send to.
+            # Same rule uvicorn applies to its own version of this message.
+            logger.debug(
+                "mcp_response_client_disconnected",
+                reason=reason,
+                path=path,
+                method=method,
+            )
+            return
+
         # ERROR, not WARNING, and that is load-bearing: sentry_sdk's
         # LoggingIntegration reports at `logging.ERROR` and turns anything
         # lower into a breadcrumb. The dominant production signature takes the
@@ -560,7 +603,8 @@ class JawafdehiMCPServer:
         # so this log IS the whole signal. Downgrading it would close the
         # 555-event issue by making the condition invisible rather than by
         # fixing it — which is the opposite of the point.
-        logger.error(
+        log = logger.debug if already_reported else logger.error
+        log(
             "mcp_response_abandoned",
             reason=reason,
             started=guard.started,
@@ -597,6 +641,15 @@ class JawafdehiMCPServer:
             # End the body cleanly rather than letting uvicorn drop the socket:
             # a client reading a truncated stream cannot tell a server fault
             # from a network one, and will often retry a call that already ran.
+            #
+            # Known cost, accepted deliberately: the proxy now records a 200
+            # for this request where uvicorn's dropped socket produced a 502.
+            # So a post-headers crash no longer shows in the /mcp 5xx rate —
+            # which is part of how this defect was originally found. HTTP gives
+            # no way to have both once the status line has gone out, and a
+            # correct client beats a convenient metric. The ERROR log above is
+            # the replacement signal; alert on `mcp_response_abandoned`, not on
+            # the 5xx rate, once this ships.
             await guard({"type": "http.response.body", "body": b"", "more_body": False})
         except Exception as exc:  # noqa: BLE001 - the peer is gone; nothing left to do
             logger.warning(

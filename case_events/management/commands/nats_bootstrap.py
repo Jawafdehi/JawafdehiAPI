@@ -65,11 +65,17 @@ class Command(BaseCommand):
 async def _bootstrap() -> list[str]:
     import nats
 
+    from case_events.nats_logging import error_cb
+
     nc = await nats.connect(
         settings.NATS_URL,
         name="jawafdehi-nats-bootstrap",
         connect_timeout=bus.STARTUP_TIMEOUT_SECONDS,
         max_reconnect_attempts=CONNECT_ATTEMPTS,
+        # The third connect site. This one drains on every run (see the
+        # `finally` below), so without it a bootstrap would keep reporting
+        # drain timeouts at ERROR under nats-py's untyped default.
+        error_cb=error_cb,
     )
     try:
         return await ensure_streams(nc.jetstream())

@@ -367,15 +367,19 @@ class EntityMergeService:
             return 0
         try:
             from entities import search_index as entity_search
-            from entities.search_visibility import clear_cache, entity_case_count
+            from entities.search_visibility import clear_cache, entity_case_counts
         except Exception:  # noqa: BLE001 — opensearch stack optional in some contexts
             return 0
         # The published-bind set moved between two IRIs → drop the cached copy.
         clear_cache()
+        # One grouped query for the whole merge, not one COUNT(*) per entity.
+        # Same N+1 shape as cases.signals._refresh_bound_entities had, and a
+        # merge can carry a survivor plus many duplicates.
+        case_counts = entity_case_counts(iris)
         stale = 0
         for iri in iris:
             try:
-                entity_search.index_by_iri(iri, case_count=entity_case_count(iri))
+                entity_search.index_by_iri(iri, case_count=case_counts.get(iri, 0))
             except Exception:
                 logger.exception(
                     "merge %s could not re-index entity %s", merge_id, iri

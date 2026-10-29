@@ -102,6 +102,15 @@ def drop_transport_noise(event, hint):
     """Drop benign disconnect noise and rate-limit unauthenticated host probes."""
     signatures = _exception_signatures(event, hint)
 
+    # NOTE the asymmetry with the DisallowedHost branch below, which matches
+    # only the raised exception. This one matches anywhere in the chain, and
+    # that is left as it was found rather than quietly tightened: a disconnect
+    # genuinely does arrive as a cause here, wrapped by anyio/starlette task
+    # groups, so restricting it to the raised exception would reintroduce the
+    # noise these signatures were added to suppress. The cost is real though —
+    # an unrelated error whose __context__ happens to be a ClientDisconnect is
+    # dropped — and narrowing it wants its own change, with the disconnect
+    # shapes measured first.
     for exc_type, exc_value in signatures:
         text = f"{exc_type}: {exc_value}"
         if any(sig in text for sig in _IGNORED_TRANSPORT_ERROR_SIGNATURES):

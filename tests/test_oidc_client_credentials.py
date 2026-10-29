@@ -300,8 +300,9 @@ def test_read_timeout_is_a_transport_error(monkeypatch):
         _provider().get_token()
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404])
-def test_client_error_is_a_configuration_error(monkeypatch, status):
+@pytest.mark.parametrize("status", [400, 401])
+def test_a_credential_verdict_is_a_configuration_error(monkeypatch, status):
+    """RFC 6749 5.2 defines exactly these two for the token endpoint."""
     calls = []
 
     def fake_post(url, data=None, headers=None, timeout=None):
@@ -316,8 +317,14 @@ def test_client_error_is_a_configuration_error(monkeypatch, status):
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
-def test_server_error_is_a_transport_error(monkeypatch, status):
+@pytest.mark.parametrize("status", [403, 404, 405, 408, 429, 500, 502, 503, 504])
+def test_anything_that_is_not_a_verdict_is_a_transport_error(monkeypatch, status):
+    """403 is a WAF, 404 is an ingress whose issuer route is not published yet.
+
+    Neither is the token endpoint refusing the credential, and treating them as
+    fatal is the same mistake this split exists to end — just moved one hop in
+    front of the issuer.
+    """
     def fake_post(url, data=None, headers=None, timeout=None):
         return FakeResponse(status_code=status, text="upstream unavailable")
 

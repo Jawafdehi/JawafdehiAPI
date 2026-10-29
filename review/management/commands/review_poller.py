@@ -64,13 +64,21 @@ from case_proposals.job_handlers import HANDLERS as _PROPOSAL_HANDLERS
 HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS, **_PROPOSAL_HANDLERS}
 
 
-#: Consecutive failed claims before a continuously-polling consumer gives up and
-#: exits non-zero. A transport failure is no longer fatal on the first occurrence
-#: (that was the bug this command had), but it must not become *never* fatal
-#: either: a pod that spins forever against a dead API is invisible, where one
-#: that exits is a visible CrashLoopBackOff. Same reasoning as
+#: How long claims may keep failing before the consumer gives up and exits
+#: non-zero. A transport failure must not be fatal on the first occurrence —
+#: that was this command's bug — but it must not be *never* fatal either: a pod
+#: spinning forever against a dead API is invisible, where one that exits is a
+#: visible CrashLoopBackOff. Same reasoning as
 #: ``case_events.consumers.runner.connect``.
-_MAX_CONSECUTIVE_CLAIM_FAILURES = 10
+#:
+#: Expressed in SECONDS, not in a count of attempts, and that matters. A count
+#: is silently a function of ``--poll``: ten attempts at the 3s default is 30
+#: seconds of tolerance, which is shorter than the API outages this estate
+#: actually has — a Keel deploy that ships before its migration runs produces
+#: 10-14 minute windows of 500s, and four of those shipped in one day. A budget
+#: that cannot ride out the known outage is a budget that turns a recoverable
+#: blip into a failed run.
+_FAILURE_BUDGET_SECONDS = 900.0
 
 
 class PollerError(Exception):
@@ -183,6 +191,26 @@ class Command(BaseCommand):
         except (requests.RequestException, OIDCTransportError) as exc:
             raise PollerError(f"{method} {url} failed: {exc}") from exc
 
+    @staticmethod
+    def _json(response):
+        """Decode a response body, as a ``PollerError`` on failure.
+
+        ``requests.exceptions.JSONDecodeError`` is itself a ``RequestException``,
+        so calling ``.json()`` at the call site re-opened the very hole
+        ``_request`` exists to close: an ingress answering 200 with an HTML
+        error page would raise past the loop's ``except PollerError`` and end
+        the run.
+        """
+        try:
+            return response.json()
+        except ValueError as exc:  # JSONDecodeError subclasses ValueError
+            body = (response.text or "")[:200]
+            raise PollerError(
+                f"{response.request.method if response.request else 'request'} "
+                f"{response.url} returned HTTP {response.status_code} with a "
+                f"non-JSON body: {body}"
+            ) from exc
+
     def _post_jobs(self, path, payload, timeout=60):
         return self._request(
             "POST", self._jobs_url(path), json=payload, timeout=timeout
@@ -207,7 +235,7 @@ class Command(BaseCommand):
         r = self._get_jobs("/?status=queued&limit=1000")
         if r.status_code != 200:
             raise PollerError(f"list failed: HTTP {r.status_code} {r.text[:200]}")
-        rows = r.json()
+        rows = self._json(r)
         mine = [row for row in rows if row.get("kind") in set(kinds)]
         self.stdout.write(
             f"queue: {len(mine)} queued job(s) for kinds={sorted(set(kinds))} "
@@ -229,7 +257,7 @@ class Command(BaseCommand):
             return None
         if r.status_code != 200:
             raise PollerError(f"claim failed: HTTP {r.status_code} {r.text[:200]}")
-        return r.json()
+        return self._json(r)
 
     def _report_stage(self, job_id, stage):
         try:
@@ -372,31 +400,34 @@ class Command(BaseCommand):
             )
         )
 
-        consecutive_failures = 0
+        failing_since = None
         while True:
             try:
                 job = self._claim(kinds)
             except PollerError as e:
-                # Absorbing this is the point — one blip must not end the run.
-                # But `once` means "drain what is there and exit", and a claim
-                # that cannot be made has nothing to drain: without this the
-                # command spins forever and a CronJob with no
-                # activeDeadlineSeconds accumulates overlapping pods instead of
-                # failing fast. A continuous consumer gets a budget instead of a
-                # single strike, then exits so the failure is visible.
-                consecutive_failures += 1
+                # Absorbing this is the point — one blip must not end the run,
+                # and that applies to `--once` too: a CronJob drain that dies on
+                # the first reset connection is the exact production failure
+                # this command had. `--once` means "drain what is there and
+                # exit", not "exit at the first sign of weather".
+                #
+                # It must still terminate, though, so the same wall-clock budget
+                # bounds both shapes. A pod that keeps retrying past it exits
+                # non-zero, which is visible; one that spins forever is not.
+                now = time.monotonic()
+                if failing_since is None:
+                    failing_since = now
                 self.stderr.write(f"claim error: {e}")
-                if once:
-                    raise
-                if consecutive_failures >= _MAX_CONSECUTIVE_CLAIM_FAILURES:
+                elapsed = now - failing_since
+                if elapsed >= _FAILURE_BUDGET_SECONDS:
                     raise PollerError(
-                        f"giving up after {consecutive_failures} consecutive failed "
-                        f"claims; last error: {e}"
+                        f"giving up after {elapsed:.0f}s of failed claims; "
+                        f"last error: {e}"
                     ) from e
                 time.sleep(poll)
                 continue
 
-            consecutive_failures = 0
+            failing_since = None
 
             if job is None:
                 if once:

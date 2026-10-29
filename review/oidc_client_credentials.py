@@ -180,13 +180,24 @@ class ClientCredentialsTokenProvider:
             ) from exc
 
         if resp.status_code != 200:
-            # 5xx is the issuer (or a proxy in front of it) failing to answer;
-            # 429 is it asking us to come back later. Neither is a verdict on
-            # the credential. Everything else in 4xx is: invalid_client,
-            # unauthorized_client, invalid_scope — retrying cannot fix any of
-            # them, and 400 is what Zitadel returns for a bad secret.
-            retryable = resp.status_code >= 500 or resp.status_code == 429
-            error_class = OIDCTransportError if retryable else OIDCConfigurationError
+            # Only 400 and 401 are verdicts on the credential. RFC 6749 §5.2
+            # defines exactly those two for the token endpoint: 400 carries
+            # invalid_request / invalid_client / invalid_grant /
+            # unauthorized_client / invalid_scope, and 401 is invalid_client
+            # with a WWW-Authenticate challenge. Zitadel returns 400 for a bad
+            # secret.
+            #
+            # Anything else that comes back is something OTHER than the token
+            # endpoint answering — a WAF returning 403, an ingress returning
+            # 404 because the issuer pod is mid-redeploy and the route is not
+            # published yet, a 502 from its proxy. Treating those as a refused
+            # credential is the same "transport weather read as a verdict"
+            # mistake this split exists to end, just moved one hop in front of
+            # the issuer.
+            is_credential_verdict = resp.status_code in (400, 401)
+            error_class = (
+                OIDCConfigurationError if is_credential_verdict else OIDCTransportError
+            )
             raise error_class(
                 f"OIDC token request to {self.token_endpoint} returned "
                 f"HTTP {resp.status_code}: {resp.text[:300]}"

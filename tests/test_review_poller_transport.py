@@ -17,6 +17,7 @@ Both are about the same thing: telling "this will never work" apart from "this
 did not work just now".
 """
 
+import itertools
 from unittest import mock
 
 import pytest
@@ -176,90 +177,156 @@ class TestStartupTokenCheck:
 
 
 class TestTheRunStillEnds:
-    """Absorbing a transport failure must not mean never giving up.
+    """Absorbing a transport failure must not mean never giving up — and must
+    not mean giving up on the first strike either.
 
-    Converting `requests.ConnectionError` into `PollerError` made the loop's
-    `except PollerError: sleep; continue` catch it — and that handler never
-    consulted `once`. So `--apply --once` against a persistently unreachable
-    jobs API spun forever where it used to exit non-zero, and a CronJob with no
-    `activeDeadlineSeconds` would accumulate overlapping pods instead of
-    failing fast. Found in review, with a live repro; these pin it shut.
+    Round one of this PR converted `requests.ConnectionError` into
+    `PollerError`, which the loop's `except PollerError: sleep; continue`
+    caught — and that handler never consulted `once`, so `--apply --once`
+    against a dead API spun forever. Round one's fix made `once` re-raise
+    immediately, which re-created the ORIGINAL production bug for the CronJob
+    drain shape: one `ConnectionResetError(104)` ends the run.
+
+    Both shapes now share one wall-clock budget: blips are absorbed, and the
+    run always terminates.
     """
 
     @staticmethod
-    def _apply_run(monkeypatch, *, once, claim_error=True):
+    def _run(monkeypatch, *, once, claim):
         provider = mock.Mock()
         provider.get_token.return_value = "tok"
         monkeypatch.setattr(rp, "get_provider", lambda: provider)
         monkeypatch.setattr(rp.settings, "CASEWORK_POLLER_TOKEN", "", raising=False)
         monkeypatch.setattr(rp.time, "sleep", lambda _s: None)
-        if claim_error:
-            monkeypatch.setattr(
-                rp.Command,
-                "_claim",
-                lambda self, kinds: (_ for _ in ()).throw(rp.PollerError("unreachable")),
-            )
-        cmd = rp.Command()
-        return cmd.handle(
+        monkeypatch.setattr(rp.Command, "_claim", claim)
+        return rp.Command().handle(
             apply=True, once=once, poll=0.0, kinds=["case_review"]
         )
 
-    def test_once_exits_instead_of_spinning(self, monkeypatch):
-        """The regression. Without the fix this never returns."""
-        with pytest.raises(rp.PollerError):
-            self._apply_run(monkeypatch, once=True)
-
-    def test_a_continuous_consumer_gives_up_after_a_budget(self, monkeypatch):
-        """A pod that spins forever against a dead API is invisible; one that
-        exits is a visible CrashLoopBackOff."""
-        with pytest.raises(rp.PollerError) as exc:
-            self._apply_run(monkeypatch, once=False)
-        assert "consecutive failed claims" in str(exc.value)
-
-    def test_the_budget_is_bounded_and_counted(self, monkeypatch):
+    def test_once_absorbs_a_blip_instead_of_dying_on_it(self, monkeypatch):
+        """The original production bug, for the documented CronJob drain mode."""
         calls = []
 
-        def failing_claim(self, kinds):
+        def flaky(self, kinds):
             calls.append(1)
+            if len(calls) == 1:
+                raise rp.PollerError("connection reset by peer")
+            return None  # queue empty -> `once` exits cleanly
+
+        self._run(monkeypatch, once=True, claim=flaky)
+        assert len(calls) == 2
+
+    def test_once_still_terminates_when_it_never_recovers(self, monkeypatch):
+        """The regression round one introduced: it must not spin forever."""
+        # Steps of 100s, so the 900s budget is crossed in a handful of ticks.
+        clock = itertools.count(0.0, 100.0)
+        monkeypatch.setattr(rp.time, "monotonic", lambda: next(clock))
+
+        def always_fails(self, kinds):
             raise rp.PollerError("unreachable")
 
-        monkeypatch.setattr(rp.Command, "_claim", failing_claim)
-        with pytest.raises(rp.PollerError):
-            self._apply_run(monkeypatch, once=False, claim_error=False)
-        assert len(calls) == rp._MAX_CONSECUTIVE_CLAIM_FAILURES
+        with pytest.raises(rp.PollerError) as exc:
+            self._run(monkeypatch, once=True, claim=always_fails)
+        assert "giving up after" in str(exc.value)
+
+    def test_a_continuous_consumer_also_gives_up(self, monkeypatch):
+        """A pod spinning forever against a dead API is invisible; one that
+        exits is a visible CrashLoopBackOff."""
+        clock = itertools.count(0.0, 100.0)
+        monkeypatch.setattr(rp.time, "monotonic", lambda: next(clock))
+
+        def always_fails(self, kinds):
+            raise rp.PollerError("unreachable")
+
+        with pytest.raises(rp.PollerError) as exc:
+            self._run(monkeypatch, once=False, claim=always_fails)
+        assert "giving up after" in str(exc.value)
+
+    def test_the_budget_outlasts_a_keel_migration_window(self):
+        """Sized against the outage this estate actually has.
+
+        A Keel deploy that ships before its migration runs produces 10-14
+        minute windows of 500s, and four shipped in one day. A budget
+        expressed as a COUNT would be `attempts x --poll` — ten attempts at
+        the 3s default is 30 seconds, which cannot ride that out.
+        """
+        assert rp._FAILURE_BUDGET_SECONDS >= 14 * 60
 
     def test_a_success_resets_the_budget(self, monkeypatch):
-        """A blip every few polls must not accumulate into a false give-up.
-
-        9 failures, one successful (empty) claim, then 9 more. Cumulatively
-        that is 18 — well past the budget of 10 — so if the counter did not
-        reset, the loop would raise "consecutive failed claims" before reaching
-        the sentinel. Reaching the sentinel is the proof.
-        """
+        """A blip every few polls must not accumulate into a false give-up."""
 
         class _Sentinel(Exception):
             """Not a PollerError, so it ends the loop rather than being absorbed."""
 
+        # Each failure run is well inside the budget, separated by a success.
         outcomes = (
-            [rp.PollerError("blip")] * 9 + [None] + [rp.PollerError("blip")] * 9 + [_Sentinel()]
+            [rp.PollerError("blip")] * 3
+            + [None]
+            + [rp.PollerError("blip")] * 3
+            + [_Sentinel()]
         )
         seen = []
 
-        def flaky_claim(self, kinds):
+        def flaky(self, kinds):
             item = outcomes[len(seen)]
             seen.append(item)
             if isinstance(item, Exception):
                 raise item
-            return None  # empty queue, but a successful claim call
+            return None
 
-        monkeypatch.setattr(rp.Command, "_claim", flaky_claim)
-        provider = mock.Mock()
-        provider.get_token.return_value = "tok"
-        monkeypatch.setattr(rp, "get_provider", lambda: provider)
-        monkeypatch.setattr(rp.settings, "CASEWORK_POLLER_TOKEN", "", raising=False)
-        monkeypatch.setattr(rp.time, "sleep", lambda _s: None)
-
-        cmd = rp.Command()
         with pytest.raises(_Sentinel):
-            cmd.handle(apply=True, once=False, poll=0.0, kinds=["case_review"])
+            self._run(monkeypatch, once=False, claim=flaky)
         assert len(seen) == len(outcomes)
+
+
+class TestANonJsonBodyDoesNotEndTheRun:
+    """`requests.exceptions.JSONDecodeError` IS a `RequestException`.
+
+    So calling `.json()` at the call site re-opened the hole `_request` exists
+    to close: an ingress answering 200 with an HTML error page raised past the
+    loop's `except PollerError` and killed the run.
+    """
+
+    @pytest.fixture
+    def command(self, monkeypatch):
+        cmd = rp.Command()
+        cmd.token_provider = mock.Mock()
+        cmd.token_provider.get_token.return_value = "tok"
+        monkeypatch.setattr(
+            rp.settings, "JOBS_API_BASE", "https://api.test/api/jobs", raising=False
+        )
+        return cmd
+
+    @staticmethod
+    def _html_response():
+        response = mock.Mock(
+            status_code=200,
+            url="https://api.test/api/jobs/claim/",
+            text="<html>502 Bad Gateway</html>",
+        )
+        response.json.side_effect = ValueError("Expecting value")
+        response.request = mock.Mock(method="POST")
+        return response
+
+    def test_claim_reports_it_as_a_poller_error(self, command):
+        with mock.patch.object(
+            rp.requests, "request", return_value=self._html_response()
+        ):
+            with pytest.raises(rp.PollerError) as exc:
+                command._claim(["case_review"])
+        assert "non-JSON body" in str(exc.value)
+
+    def test_the_body_is_quoted_so_the_cause_is_visible(self, command):
+        with mock.patch.object(
+            rp.requests, "request", return_value=self._html_response()
+        ):
+            with pytest.raises(rp.PollerError) as exc:
+                command._claim(["case_review"])
+        assert "502 Bad Gateway" in str(exc.value)
+
+    def test_listing_has_the_same_protection(self, command):
+        with mock.patch.object(
+            rp.requests, "request", return_value=self._html_response()
+        ):
+            with pytest.raises(rp.PollerError):
+                command._list_queued(["case_review"])

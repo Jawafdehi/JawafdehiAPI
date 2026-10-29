@@ -33,20 +33,20 @@ class TestResponseGuard:
     """The bookkeeping, in isolation."""
 
     async def test_a_fresh_guard_has_seen_nothing(self):
-        guard = _ResponseGuard(_SendRecorder())
+        guard = _ResponseGuard(_SendRecorder(), _dummy_receive)
         assert not guard.started
         assert not guard.complete
 
     async def test_start_then_body_is_a_complete_response(self):
         recorder = _SendRecorder()
-        guard = _ResponseGuard(recorder)
+        guard = _ResponseGuard(recorder, _dummy_receive)
         await guard({"type": "http.response.start", "status": 200, "headers": []})
         assert guard.started and not guard.complete
         await guard({"type": "http.response.body", "body": b"{}"})
         assert guard.complete
 
     async def test_a_streamed_body_is_incomplete_until_the_last_chunk(self):
-        guard = _ResponseGuard(_SendRecorder())
+        guard = _ResponseGuard(_SendRecorder(), _dummy_receive)
         await guard({"type": "http.response.start", "status": 200, "headers": []})
         await guard({"type": "http.response.body", "body": b"a", "more_body": True})
         assert not guard.complete
@@ -56,7 +56,7 @@ class TestResponseGuard:
     async def test_it_forwards_every_message_untouched(self):
         """It observes the stream; it must not buffer or rewrite it."""
         recorder = _SendRecorder()
-        guard = _ResponseGuard(recorder)
+        guard = _ResponseGuard(recorder, _dummy_receive)
         sent = [
             {"type": "http.response.start", "status": 207, "headers": [(b"x", b"y")]},
             {"type": "http.response.body", "body": b"chunk", "more_body": True},
@@ -239,7 +239,7 @@ class TestTheFinisherCannotMakeThingsWorse:
             async def __call__(self, message):
                 raise OSError("peer gone")
 
-        guard = _ResponseGuard(_Failing())
+        guard = _ResponseGuard(_Failing(), _dummy_receive)
         with pytest.raises(OSError):
             await guard({"type": "http.response.body", "body": b"{}"})
         assert not guard.complete
@@ -299,3 +299,131 @@ class TestTheConditionStaysVisible:
         with caplog.at_level(logging.DEBUG):
             await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
         assert "mcp_response_abandoned" not in caplog.text
+
+
+class TestAClientHangingUpIsNotADefect:
+    """Found in the second review round, and it would have made things worse.
+
+    The MCP transport answers over `EventSourceResponse`, whose
+    `_listen_for_disconnect` cancels the streaming task when the peer goes
+    away — skipping the closing `more_body: False`. Without disconnect
+    awareness, every client-initiated SSE close and every open stream on a pod
+    rollout looks exactly like an abandoned response.
+
+    uvicorn draws the same line: its own "returned without completing
+    response" is guarded by `and not self.disconnected`. A replacement that
+    fired on a strictly larger set of conditions than the message it replaces
+    would be a regression dressed as a fix.
+    """
+
+    @staticmethod
+    def _server_with(monkeypatch, handler):
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", handler)
+        return server
+
+    async def test_the_guard_notices_the_disconnect(self):
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        guard = _ResponseGuard(_SendRecorder(), receive)
+        assert not guard.disconnected
+        await guard.receive()
+        assert guard.disconnected
+
+    async def test_an_ordinary_message_is_not_a_disconnect(self):
+        async def receive():
+            return {"type": "http.request", "body": b"{}"}
+
+        guard = _ResponseGuard(_SendRecorder(), receive)
+        await guard.receive()
+        assert not guard.disconnected
+
+    async def test_receive_still_forwards_the_message(self):
+        async def receive():
+            return {"type": "http.request", "body": b"payload"}
+
+        guard = _ResponseGuard(_SendRecorder(), receive)
+        assert await guard.receive() == {"type": "http.request", "body": b"payload"}
+
+    async def test_a_half_stream_after_a_disconnect_logs_no_error(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        async def streams_then_peer_leaves(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"x", "more_body": True})
+            await receive()  # the disconnect arrives here
+
+        server = self._server_with(monkeypatch, streams_then_peer_leaves)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(
+                _make_scope([]), _dummy_receive, _SendRecorder()
+            )
+
+        assert "mcp_response_abandoned" not in caplog.text
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert not errors, "a client hanging up must not be reported as a defect"
+
+    async def test_nothing_is_sent_to_a_departed_client(self, monkeypatch):
+        async def streams_then_peer_leaves(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"x", "more_body": True})
+            await receive()
+
+        server = self._server_with(monkeypatch, streams_then_peer_leaves)
+        send = _SendRecorder()
+        await server._handle_http(_make_scope([]), _dummy_receive, send)
+        # Two messages from the handler, and no finishing chunk appended.
+        assert len(send.messages) == 2
+
+    async def test_a_genuine_abandonment_is_still_reported(self, monkeypatch, caplog):
+        """The disconnect check must not swallow the real case."""
+        import logging
+
+        async def dies_mid_stream(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"x", "more_body": True})
+
+        server = self._server_with(monkeypatch, dies_mid_stream)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+        assert "mcp_response_abandoned" in caplog.text
+
+
+class TestOneFailureIsOneIssue:
+    """Found in review: the raised path logged two ERRORs for one event."""
+
+    @staticmethod
+    def _server_with(monkeypatch, handler):
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", handler)
+        return server
+
+    async def test_a_raised_handler_produces_exactly_one_error_record(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        async def explodes(scope, receive, send):
+            raise RuntimeError("tool blew up")
+
+        server = self._server_with(monkeypatch, explodes)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        assert "mcp_request_failed" in errors[0].getMessage()
+
+    async def test_the_client_still_gets_its_framed_error(self, monkeypatch):
+        """Quieter logging must not change what the caller receives."""
+
+        async def explodes(scope, receive, send):
+            raise RuntimeError("tool blew up")
+
+        server = self._server_with(monkeypatch, explodes)
+        send = _SendRecorder()
+        await server._handle_http(_make_scope([]), _dummy_receive, send)
+        assert send.status == 500
