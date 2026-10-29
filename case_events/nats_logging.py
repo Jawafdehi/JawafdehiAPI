@@ -1,28 +1,39 @@
 """Async-error reporting for the NATS clients.
 
-nats-py reports every asynchronous error through one callback, and its default
-is ``logger.error("nats: encountered error", exc_info=ex)``. With the Sentry
+nats-py reports asynchronous errors through one callback whose default is
+``logger.error("nats: encountered error", exc_info=ex)``. With the Sentry
 logging integration attached, that makes an issue out of each one — including
 ``DrainTimeoutError``, which this estate raises on *every* pod shutdown whose
-drain does not finish inside the client's 30s budget.
+drain does not finish inside the client's 30s budget. 86 Sentry events across
+five ReplicaSet generations of ``platform-bus-consumers``: once per rollout, by
+construction, all under a single title that named no exception.
 
-That accounted for 86 Sentry events across five ReplicaSet generations of
-``platform-bus-consumers``: once per rollout, by construction. All of it
-grouped under a single title (``nats: encountered error``) that says nothing
-about which error it was, so a genuine async failure — a stale credential, a
-broken subscription — would land in the same bucket as the shutdown noise and
-be invisible.
+Two things this does NOT do, recorded because both were claimed in an earlier
+version of this file and are false:
 
-The split here keeps every error in the logs at full detail, and reserves
-ERROR (and therefore Sentry) for the ones that are not an expected consequence
-of the process going away.
+* **It does not retire the ``nats: encountered error`` bucket.** nats-py logs
+  that exact message from a second site — ``Client._read_loop`` calls
+  ``_logger.error(...)`` directly, not through ``_error_cb`` — so a read-loop
+  failure still lands there. Only the paths that go through the callback
+  (drain, flusher, subscription errors) are covered here. A falling issue count
+  is not evidence the condition stopped.
+* **It does not group distinctly by exception class.** The log event name is a
+  constant; the class rides in ``error_type`` and in the captured exception.
+
+Uses **stdlib logging, not structlog**, and that is load-bearing. structlog's
+configured chain runs ``format_exc_info``, which consumes ``exc_info`` into a
+rendered string before the ``LogRecord`` is built — leaving
+``record.exc_info is None``. Sentry's ``LoggingIntegration`` builds an
+exception event only from ``record.exc_info``, so a structlog call here would
+produce a message-only issue with no exception type and no frames: strictly
+worse than the nats-py default it replaces. stdlib keeps the real exception.
 """
 
 from __future__ import annotations
 
-import structlog
+import logging
 
-logger = structlog.get_logger()
+logger = logging.getLogger(__name__)
 
 #: Errors that are an expected part of an orderly shutdown. A drain timeout
 #: means in-flight work outlived the client's drain budget while the process was
@@ -41,22 +52,17 @@ def is_shutdown_noise(exc: BaseException) -> bool:
 async def error_cb(exc: Exception) -> None:
     """``error_cb`` for ``nats.connect``.
 
-    Replaces nats-py's default, which logs everything at ERROR under one
-    message. Note the event name carries the exception class, so distinct
-    failures group distinctly instead of collapsing into one issue.
+    Shutdown-class errors log at WARNING (visible, not alertable); everything
+    else keeps the ERROR level and the exception that nats-py's default would
+    have given Sentry.
     """
-    detail = {
-        "error_type": type(exc).__name__,
-        "error": str(exc) or type(exc).__name__,
-        # nats-py's default passes `exc_info=ex`, and dropping it would cost the
-        # traceback in both the console and Sentry — structlog's chain has
-        # `format_exc_info` precisely to render it, and without it a real
-        # failure arrives as a message with no frames and no way to tell which
-        # subscription raised. Keep it on BOTH paths: the shutdown one is only
-        # quieter, not less detailed.
-        "exc_info": exc,
-    }
-    if is_shutdown_noise(exc):
-        logger.warning("case_events.nats_shutdown_error", **detail)
-    else:
-        logger.error("case_events.nats_error", **detail)
+    level = logging.WARNING if is_shutdown_noise(exc) else logging.ERROR
+    logger.log(
+        level,
+        "nats async error (%s): %s",
+        type(exc).__name__,
+        exc or type(exc).__name__,
+        # The whole reason this is stdlib and not structlog — see module docstring.
+        exc_info=exc,
+        extra={"error_type": type(exc).__name__},
+    )

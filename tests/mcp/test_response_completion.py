@@ -417,6 +417,30 @@ class TestOneFailureIsOneIssue:
         assert len(errors) == 1
         assert "mcp_request_failed" in errors[0].getMessage()
 
+    async def test_that_record_carries_the_exception_for_sentry(
+        self, monkeypatch, caplog
+    ):
+        """Sentry builds an exception event ONLY from record.exc_info.
+
+        structlog's chain runs `format_exc_info`, which renders the traceback
+        to a string and nulls `exc_info` before the LogRecord exists — so a
+        structlog call here would produce a message-only issue with no type
+        and no frames. MCP traffic bypasses DjangoIntegration entirely, so
+        this is the only chance to report it properly.
+        """
+        import logging
+
+        async def explodes(scope, receive, send):
+            raise RuntimeError("tool blew up")
+
+        server = self._server_with(monkeypatch, explodes)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors[0].exc_info is not None
+        assert errors[0].exc_info[0] is RuntimeError
+
     async def test_the_client_still_gets_its_framed_error(self, monkeypatch):
         """Quieter logging must not change what the caller receives."""
 
@@ -427,3 +451,85 @@ class TestOneFailureIsOneIssue:
         send = _SendRecorder()
         await server._handle_http(_make_scope([]), _dummy_receive, send)
         assert send.status == 500
+
+
+class TestADeadPeerIsNeverADefect:
+    """Round three: two paths still reported a client hang-up as an error.
+
+    1. `mcp_request_failed` was logged at ERROR *before* consulting
+       `guard.disconnected`, so a disconnect surfacing as an exception on the
+       next write (anyio ClosedResourceError, uvicorn's OSError) opened a
+       Sentry issue. None of those types are in the noise filter either.
+    2. Disconnect detection only fired if something called `receive()` again —
+       which the json_response POST path never does after reading the body. A
+       client that walks away mid-POST was therefore an "abandoned response".
+
+    Both matter more than usual because the PR asks operators to alert on
+    `mcp_response_abandoned` instead of the /mcp 5xx rate.
+    """
+
+    @staticmethod
+    def _server_with(monkeypatch, handler):
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", handler)
+        return server
+
+    class _DeadPeer:
+        async def __call__(self, message):
+            raise OSError("Cannot write to a closing transport")
+
+    async def test_a_failed_write_marks_the_peer_as_gone(self):
+        guard = _ResponseGuard(self._DeadPeer(), _dummy_receive)
+        with pytest.raises(OSError):
+            await guard({"type": "http.response.start", "status": 200, "headers": []})
+        assert guard.disconnected
+
+    async def test_a_post_whose_client_walked_away_is_not_an_error(
+        self, monkeypatch, caplog
+    ):
+        """The json_response path, which never polls receive again."""
+        import logging
+
+        async def writes_to_a_dead_peer(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+
+        server = self._server_with(monkeypatch, writes_to_a_dead_peer)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(
+                _make_scope([]), _dummy_receive, self._DeadPeer()
+            )
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert not errors, "a client hanging up mid-POST is not a defect"
+
+    async def test_a_disconnect_that_surfaces_as_an_exception_is_not_an_error(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        async def dies_writing(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"x", "more_body": True})
+
+        server = self._server_with(monkeypatch, dies_writing)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(
+                _make_scope([]), _dummy_receive, self._DeadPeer()
+            )
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert not errors
+
+    async def test_a_genuine_crash_is_still_an_error(self, monkeypatch, caplog):
+        """The disconnect checks must not swallow a real failure."""
+        import logging
+
+        async def explodes(scope, receive, send):
+            raise RuntimeError("the tool itself broke")
+
+        server = self._server_with(monkeypatch, explodes)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1

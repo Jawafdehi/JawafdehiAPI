@@ -8,6 +8,7 @@ transport is hosted only by ``config.asgi:application``.
 """
 
 import json
+import logging
 import os
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
 from typing import Any
@@ -25,6 +26,14 @@ from .request_context import current_transport, jawafdehi_bearer_token
 from .server import app as mcp_app
 
 logger = structlog.get_logger()
+
+#: For the one thing structlog cannot do here: carry an exception all the way
+#: into a LogRecord. Its configured chain runs ``format_exc_info``, which
+#: renders ``exc_info`` to a string and leaves ``record.exc_info is None`` —
+#: and Sentry's LoggingIntegration builds an exception event only from
+#: ``record.exc_info``. Every other log in this module is message-only and
+#: stays on structlog.
+_stdlib_logger = logging.getLogger(__name__)
 
 # The three ASGI plumbing types, spelled out rather than imported from
 # ``starlette.types``. mcp pulls starlette in transitively, but no first-party
@@ -273,7 +282,18 @@ class _ResponseGuard:
         # would mark a response complete that the send then failed to deliver
         # (a disconnected peer raises here), and the finisher's early-exit would
         # skip precisely the case it exists to catch.
-        await self._send(message)
+        try:
+            await self._send(message)
+        except Exception:
+            # A failed write IS the disconnect signal on the paths where
+            # nothing reads `receive` again. The json_response POST path is
+            # exactly that shape: the transport reads the body once and never
+            # polls again, so a client that walks away is only discoverable
+            # here. Without this it would be reported as an abandoned
+            # response — a false positive baked into the very signal this
+            # change asks operators to alert on.
+            self.disconnected = True
+            raise
         message_type = message.get("type")
         if message_type == "http.response.start":
             self.started = True
@@ -529,12 +549,37 @@ class JawafdehiMCPServer:
             # started, a closed socket — in both cases the client is told
             # nothing useful. Report it here, where the request is still in
             # scope, and answer the caller properly below.
-            logger.exception(
-                "mcp_request_failed",
-                path=path,
-                method=method,
-                error=str(exc) or type(exc).__name__,
-            )
+            #
+            # The disconnect check comes FIRST. A peer that hangs up mid-stream
+            # surfaces as an exception on the next write (anyio
+            # ClosedResourceError, uvicorn's OSError), and reporting that as a
+            # defect is the exact asymmetry the disconnect guard exists to
+            # prevent — none of those types are in the Sentry noise filter
+            # either, so nothing downstream would catch it.
+            if guard.disconnected:
+                _stdlib_logger.debug(
+                    "mcp request ended because the client disconnected (%s %s)",
+                    method,
+                    path,
+                    exc_info=exc,
+                )
+            else:
+                # stdlib, not structlog: structlog's configured chain runs
+                # `format_exc_info`, which consumes `exc_info` into a rendered
+                # string before the LogRecord exists, leaving
+                # `record.exc_info is None`. Sentry builds an exception event
+                # ONLY from `record.exc_info`, so a structlog call here yields
+                # a message-only issue with no type and no frames — and MCP
+                # traffic bypasses DjangoIntegration entirely (see
+                # config/asgi.py), so this is the only chance to report it
+                # properly.
+                _stdlib_logger.error(
+                    "mcp_request_failed (%s %s): %s",
+                    method,
+                    path,
+                    exc or type(exc).__name__,
+                    exc_info=exc,
+                )
             await self._finish_abandoned_response(
                 guard,
                 reason="handler raised",

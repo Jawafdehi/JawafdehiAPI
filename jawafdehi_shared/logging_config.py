@@ -1,4 +1,5 @@
 import os
+import re
 import time
 
 import structlog
@@ -47,12 +48,27 @@ _DISALLOWED_HOST_TYPE = "DisallowedHost"
 _DISALLOWED_HOST_WINDOW_ENV = "SENTRY_DISALLOWED_HOST_WINDOW_SECONDS"
 _DEFAULT_DISALLOWED_HOST_WINDOW = 86400.0
 
-#: Monotonic timestamp of the last DisallowedHost event allowed through, per
-#: process. Deliberately process-local and lock-free: ``before_send`` runs on
-#: the reporting thread, the value is a single float, and the worst case from a
-#: race is one extra event — which is cheaper than serialising every event in
-#: every worker behind a lock.
-_last_disallowed_host_report = [float("-inf")]
+#: ``{rejected host: monotonic timestamp of its last reported event}``.
+#:
+#: Keyed BY HOST, which is the whole point. A single global slot would be spent
+#: by whichever DisallowedHost arrived first in the window — and with a scanner
+#: contributing ~160 events a day against one genuine misconfiguration, that is
+#: essentially never the one worth seeing. The real event would be dropped for
+#: a day, and the heartbeat that did get through would name the scanner's host.
+#: Per-host, a hostname nobody has seen before always reports immediately.
+#:
+#: Bounded so a scanner rotating Host headers cannot grow it without limit;
+#: when full it is cleared rather than evicted one-by-one, which costs at most
+#: one extra event per host and keeps this allocation-free on the hot path.
+#:
+#: Process-local and lock-free: ``before_send`` runs on the reporting thread,
+#: and the worst case from a race is one duplicate event — cheaper than
+#: serialising every event in every worker behind a lock.
+_MAX_TRACKED_HOSTS = 512
+_disallowed_host_last_reported: dict[str, float] = {}
+
+#: ``Invalid HTTP_HOST header: 'evil.example'. You may need to add ...``
+_DISALLOWED_HOST_PATTERN = re.compile(r"Invalid HTTP_HOST header: '([^']*)'")
 
 
 def _disallowed_host_window():
@@ -65,15 +81,25 @@ def _disallowed_host_window():
     return max(0.0, window)
 
 
-def _allow_disallowed_host_report(now=None):
-    """Whether this DisallowedHost event is the one to report this window."""
+def _rejected_host(exc_value):
+    """The host Django rejected, or "" when the message does not carry one."""
+    match = _DISALLOWED_HOST_PATTERN.search(exc_value or "")
+    return match.group(1) if match else ""
+
+
+def _allow_disallowed_host_report(host, now=None):
+    """Whether this host's DisallowedHost is the one to report this window."""
     window = _disallowed_host_window()
     if window <= 0:
         return True  # rate limiting switched off
     current = time.monotonic() if now is None else now
-    if current - _last_disallowed_host_report[0] < window:
+    last = _disallowed_host_last_reported.get(host)
+    if last is not None and current - last < window:
         return False
-    _last_disallowed_host_report[0] = current
+    if len(_disallowed_host_last_reported) >= _MAX_TRACKED_HOSTS:
+        # A scanner rotating Host headers must not grow this without limit.
+        _disallowed_host_last_reported.clear()
+    _disallowed_host_last_reported[host] = current
     return True
 
 
@@ -83,7 +109,15 @@ def add_service_name(_, __, event_dict):
 
 
 def _exception_signatures(event, hint):
-    """``(type, value)`` for every exception this event names, oldest first.
+    """``(type, value)`` for every exception this event names.
+
+    NOT simply oldest-first: when ``hint["exc_info"]`` is present — the normal
+    shape for the Django logging integration — the RAISED exception is
+    prepended, so the list reads ``[raised, cause, ..., raised]``. What callers
+    may rely on is the tail: ``signatures[-1]`` is always the raised exception,
+    because Sentry serialises ``values`` oldest-cause-first. The DisallowedHost
+    branch depends on exactly that, so do not reorder this without revisiting
+    it, and do not read ``signatures[0]`` expecting a root cause.
 
     One traversal with its None-guards in one place: the same
     ``(event.get("exception") or {}).get("values") or []`` expression was
@@ -121,7 +155,7 @@ def drop_transport_noise(event, hint):
     # anywhere in the list would silently swallow an unrelated error that
     # merely happens to wrap a DisallowedHost.
     if signatures and signatures[-1][0] == _DISALLOWED_HOST_TYPE:
-        if not _allow_disallowed_host_report():
+        if not _allow_disallowed_host_report(_rejected_host(signatures[-1][1])):
             return None
 
     return event

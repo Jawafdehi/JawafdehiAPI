@@ -52,8 +52,14 @@ class OIDCConfigurationError(OIDCTokenError):
     """The credentials are missing, malformed, or rejected by the issuer.
 
     Fatal: retrying cannot help, and a caller that keeps going will do so
-    unauthenticated. Covers missing settings and any 4xx from the token
-    endpoint — the issuer looked at the credential and said no.
+    unauthenticated.
+
+    Covers missing settings, a token-endpoint **400 or 401**, and a 200 whose
+    body declines to mint a token. Only those two statuses — RFC 6749 §5.2
+    defines exactly them for the token endpoint, and nothing else that comes
+    back is the endpoint itself judging the credential. A 403 from a WAF or a
+    404 from an ingress mid-redeploy is ``OIDCTransportError``; see its
+    docstring.
     """
 
 

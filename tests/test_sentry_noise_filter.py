@@ -28,7 +28,11 @@ from jawafdehi_shared.logging_config import drop_transport_noise
 @pytest.fixture(autouse=True)
 def fresh_window(monkeypatch):
     """Each test starts with the rate limiter having reported nothing."""
-    monkeypatch.setattr(logging_config, "_last_disallowed_host_report", [float("-inf")])
+    monkeypatch.setattr(logging_config, "_disallowed_host_last_reported", {})
+
+
+def _host_event(host):
+    return _event(("DisallowedHost", f"Invalid HTTP_HOST header: '{host}'."))
 
 
 def _event(*types_and_values):
@@ -52,10 +56,10 @@ class TestDisallowedHostIsRateLimited:
         assert drop_transport_noise(event, {}) is event
 
     def test_the_flood_behind_it_does_not(self):
-        first = _event(("DisallowedHost", "scan 1"))
+        first = _host_event("mcp.jawafdehi.org")
         assert drop_transport_noise(first, {}) is first
-        for n in range(500):
-            assert drop_transport_noise(_event(("DisallowedHost", f"scan {n}")), {}) is None
+        for _ in range(500):
+            assert drop_transport_noise(_host_event("mcp.jawafdehi.org"), {}) is None
 
     def test_a_later_window_reports_again(self, monkeypatch):
         """So an ongoing misconfiguration keeps nagging rather than going quiet."""
@@ -64,7 +68,7 @@ class TestDisallowedHostIsRateLimited:
         assert drop_transport_noise(first, {}) is first
         assert drop_transport_noise(_event(("DisallowedHost", "b")), {}) is None
 
-        monkeypatch.setattr(logging_config, "_last_disallowed_host_report", [-1000.0])
+        monkeypatch.setattr(logging_config, "_disallowed_host_last_reported", {})
         third = _event(("DisallowedHost", "c"))
         assert drop_transport_noise(third, {}) is third
 
@@ -199,3 +203,51 @@ class TestTheWindowIsSizedAgainstProcessesNotPods:
         for _ in range(3):
             event = _event(("DisallowedHost", "x"))
             assert drop_transport_noise(event, {}) is event
+
+
+class TestTheWindowIsPerHost:
+    """Round three: a single global slot defeats the whole justification.
+
+    The scanner contributes ~160 events a day; a genuine ALLOWED_HOSTS
+    misconfiguration contributes one. With one shared slot, the event that
+    gets through is essentially never the one worth seeing — and it names the
+    scanner's host, so even the heartbeat points at the wrong thing.
+    """
+
+    def test_a_new_host_reports_even_while_a_scanner_is_running(self):
+        scanner = _host_event("mcp.jawafdehi.org")
+        assert drop_transport_noise(scanner, {}) is scanner
+        for _ in range(50):
+            drop_transport_noise(_host_event("mcp.jawafdehi.org"), {})
+
+        # The real one: a public hostname missing from ALLOWED_HOSTS.
+        genuine = _host_event("www.jawafdehi.org")
+        assert drop_transport_noise(genuine, {}) is genuine
+
+    def test_each_host_is_limited_independently(self):
+        for host in ("a.example", "b.example", "c.example"):
+            first = _host_event(host)
+            assert drop_transport_noise(first, {}) is first
+            assert drop_transport_noise(_host_event(host), {}) is None
+
+    def test_the_host_is_parsed_out_of_djangos_message(self):
+        assert (
+            logging_config._rejected_host(
+                "Invalid HTTP_HOST header: 'evil.example'. You may need to add..."
+            )
+            == "evil.example"
+        )
+
+    def test_an_unparseable_message_still_rate_limits_under_one_key(self):
+        """Degrades to the old global behaviour rather than reporting forever."""
+        first = _event(("DisallowedHost", "something unexpected"))
+        assert drop_transport_noise(first, {}) is first
+        assert drop_transport_noise(_event(("DisallowedHost", "also odd")), {}) is None
+
+    def test_a_rotating_host_header_cannot_grow_the_map_without_limit(self):
+        for n in range(logging_config._MAX_TRACKED_HOSTS + 50):
+            drop_transport_noise(_host_event(f"h{n}.example"), {})
+        assert (
+            len(logging_config._disallowed_host_last_reported)
+            <= logging_config._MAX_TRACKED_HOSTS
+        )

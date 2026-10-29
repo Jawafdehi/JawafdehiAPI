@@ -34,8 +34,16 @@ from jawafdehi_shared.search.opensearch import ENTITY_INDEX
 from jawafdehi_shared.search.reindex import reindex, summary
 from entities import search_index
 from entities.models import StoredEntity
-from entities.search_geography import case_locations, entity_locations
-from entities.search_visibility import case_counts, entity_case_count
+from entities.search_geography import (
+    case_locations,
+    entity_locations,
+    locations_for_iris,
+)
+from entities.search_visibility import (
+    case_counts,
+    entity_case_count,
+    entity_case_counts,
+)
 
 
 class Command(BaseCommand):
@@ -127,11 +135,20 @@ class Command(BaseCommand):
                 _refresh_derived(counts, locations, e.iri)
                 yield e.iri, (None if e.is_deleted else e)
 
-            for iri in _iris_touched_since(since):
-                if iri in seen:
-                    continue
+            # Resolved in ONE pair of queries for the whole set, not two per
+            # IRI. `_iris_touched_since` is unbounded — a single location bind
+            # drags in every sibling bind of its case — so the per-entity shape
+            # here was the same N+1 this change removes from the signal and the
+            # merge path.
+            #
+            # The loop above stays per-entity on purpose: it streams an
+            # `.iterator()` whose whole point is not to materialise, and
+            # batching it would mean buffering the stream. This set is already
+            # materialised, so there is nothing to trade.
+            touched = [iri for iri in _iris_touched_since(since) if iri not in seen]
+            _prefill_derived(counts, locations, touched)
+            for iri in touched:
                 seen.add(iri)
-                _refresh_derived(counts, locations, iri)
                 entity = StoredEntity.objects.filter(iri=iri).first()
                 yield iri, (None if (entity is None or entity.is_deleted) else entity)
 
@@ -166,6 +183,30 @@ def _refresh_derived(
     """
     counts[iri] = entity_case_count(iri)
     locations[iri] = entity_locations(iri)
+
+
+def _prefill_derived(
+    counts: dict[str, int],
+    locations: dict[str, tuple[list[str], list[str]]],
+    iris: list[str],
+) -> None:
+    """The batch form of :func:`_refresh_derived`, for a materialised set.
+
+    Two queries for the whole list instead of two per IRI. Absent means "no
+    published citation", which is 0 and ``([], [])`` — not "unknown" — so the
+    defaults here are the answer, matching what both batch helpers document.
+
+    Same best-effort posture as the single-IRI version: both helpers degrade to
+    an empty mapping rather than raising, and the catchup is a narrowing of an
+    already-complete pass.
+    """
+    if not iris:
+        return
+    resolved_counts = entity_case_counts(iris)
+    resolved_locations = locations_for_iris(iris)
+    for iri in iris:
+        counts[iri] = resolved_counts.get(iri, 0)
+        locations[iri] = resolved_locations.get(iri, ([], []))
 
 
 def _iris_touched_since(since) -> set[str]:

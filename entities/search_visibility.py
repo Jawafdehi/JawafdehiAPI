@@ -116,6 +116,29 @@ def referenced_iris(*, refresh: bool = False) -> frozenset[str]:
     return iris
 
 
+def _grouped_case_counts(iris: list[str] | None = None) -> dict[str, int]:
+    """``{IRI: DISTINCT published case count}``, optionally scoped to ``iris``.
+
+    The one place the counting rule is written down. The three public spellings
+    above and below differ ONLY in scope and in failure posture, and each used
+    to carry its own copy of this query — so a change to the rule (the module
+    docstring already anticipates one: counting NGM courtcase parties once the
+    resolver runs) had to be made in three places, and missing one would make
+    the bulk reindex and the live path disagree about who is publicly visible.
+
+    DISTINCT cases, not binds: a case naming the same person as both
+    ``accused`` and ``related`` cites them once, and "in 2 cases" must mean two
+    cases.
+
+    Raises whatever the DB raises; each caller applies its own posture.
+    """
+    queryset = _published_bind_queryset()
+    if iris is not None:
+        queryset = queryset.filter(nes_id__in=iris)
+    rows = queryset.values("nes_id").annotate(case_count=Count("case", distinct=True))
+    return {row["nes_id"]: row["case_count"] for row in rows}
+
+
 def case_counts() -> dict[str, int]:
     """``{entity IRI: number of PUBLISHED cases citing it}`` for every cited IRI.
 
@@ -130,12 +153,7 @@ def case_counts() -> dict[str, int]:
     Raises :class:`ReferenceLookupError` if the cases DB cannot be read.
     """
     try:
-        rows = (
-            _published_bind_queryset()
-            .values("nes_id")
-            .annotate(case_count=Count("case", distinct=True))
-        )
-        return {row["nes_id"]: row["case_count"] for row in rows}
+        return _grouped_case_counts()
     except Exception as exc:  # noqa: BLE001 — re-raised as a typed error below.
         raise ReferenceLookupError(
             "could not read published entity-bind counts from the cases DB"
@@ -170,23 +188,23 @@ def entity_case_counts(iris: Iterable[str]) -> dict[str, int]:
     if not targets:
         return {}
     try:
-        rows = (
-            _published_bind_queryset()
-            .filter(nes_id__in=targets)
-            .values("nes_id")
-            .annotate(case_count=Count("case", distinct=True))
-        )
-        return {row["nes_id"]: row["case_count"] for row in rows}
+        return _grouped_case_counts(targets)
     except Exception:  # noqa: BLE001 — best-effort; reconcile repairs the drift.
         # Name them. The per-entity version this replaces logged one line per
         # IRI, and without that an operator cannot tell which documents were
         # indexed as 0 — i.e. which entities just vanished from public search
         # until the hourly reconcile. Bounded at 26 by the caller (the
         # production maximum of binds on one case), so this cannot flood.
+        # `%s` on the list rather than `", ".join(targets)`: the join would run
+        # INSIDE this handler and raise TypeError on a non-string nes_id,
+        # escaping a function whose entire contract is to degrade quietly —
+        # and taking the case write's commit hook with it, which is the exact
+        # outcome the swallow exists to prevent. Logging defers formatting to
+        # the handler, so even that cannot fire here.
         logger.warning(
             "entity_case_counts failed for %d IRI(s); indexing them as 0: %s",
             len(targets),
-            ", ".join(targets),
+            targets,
             exc_info=True,
         )
         return {}
@@ -203,13 +221,7 @@ def entity_case_count(iri: str | None) -> int:
     if not iri:
         return 0
     try:
-        return (
-            _published_bind_queryset()
-            .filter(nes_id=iri)
-            .values("case")
-            .distinct()
-            .count()
-        )
+        return _grouped_case_counts([iri]).get(iri, 0)
     except Exception:  # noqa: BLE001 — best-effort; reconcile repairs the drift.
         logger.warning("entity_case_count failed for %s; indexing as 0", iri, exc_info=True)
         return 0

@@ -64,55 +64,35 @@ class TestCallback:
         record = caplog.records[-1]
         assert record.levelno == logging.ERROR
 
-    async def test_the_exception_class_rides_along(self, caplog):
-        """So distinct failures group distinctly instead of collapsing."""
-        with caplog.at_level(logging.DEBUG):
-            await nats_logging.error_cb(_FakeAuthError("violation"))
-        assert "AuthorizationError" in caplog.text
 
-    async def test_an_exception_with_no_message_still_says_something(self, caplog):
-        with caplog.at_level(logging.DEBUG):
-            await nats_logging.error_cb(_FakeDrainTimeoutError())
-        assert "DrainTimeoutError" in caplog.text
+class TestSentryGetsARealException:
+    """The traceback must reach Sentry as an EXCEPTION, not as text.
 
-
-class TestTracebacksSurvive:
-    """Found in review: the first version dropped `exc_info`.
-
-    nats-py's default is `logger.error(..., exc_info=ex)`, and
-    `configure_structlog()` carries `format_exc_info` specifically to render
-    it. Without it a real failure reaches Sentry as a message-only event with
-    no frames, so there is no way to tell which subscription or connection
-    raised. Quieter must not mean thinner.
+    Round two of this PR passed `exc_info` to structlog, and the test here
+    asserted on the rendered `exception` string — which passed while being
+    cosmetic. structlog's `format_exc_info` consumes `exc_info` before the
+    LogRecord is built, leaving `record.exc_info is None`, and Sentry's
+    LoggingIntegration builds an exception event ONLY from `record.exc_info`.
+    The result was a message-only issue with no type and no frames: strictly
+    worse than the nats-py default it replaced.
     """
 
     pytestmark = pytest.mark.asyncio(loop_scope="function")
 
-    @staticmethod
-    def _rendered(record):
-        """structlog consumes `exc_info` and renders it into an `exception` key.
-
-        So asserting on `record.exc_info` would pass vacuously (it is always
-        None here); the traceback lands in the event dict instead.
-        """
-        return record.msg if isinstance(record.msg, dict) else {}
-
-    async def test_a_real_error_keeps_its_traceback(self, caplog):
+    async def test_the_record_carries_the_exception_itself(self, caplog):
         try:
             raise _FakeAuthError("authorization violation")
         except _FakeAuthError as exc:
             with caplog.at_level(logging.DEBUG):
                 await nats_logging.error_cb(exc)
 
-        rendered = self._rendered(caplog.records[-1])
-        assert "exception" in rendered, "the traceback must survive the callback"
-        assert "Traceback" in rendered["exception"]
-        assert "authorization violation" in rendered["exception"]
-        # The rendered traceback shows the real class; `error_type` is what
-        # carries the name used for grouping.
-        assert rendered["error_type"] == "AuthorizationError"
+        record = caplog.records[-1]
+        assert record.exc_info is not None, (
+            "Sentry builds an exception event only from record.exc_info"
+        )
+        assert record.exc_info[0] is _FakeAuthError
 
-    async def test_the_shutdown_path_keeps_it_too(self, caplog):
+    async def test_the_shutdown_path_keeps_the_exception_too(self, caplog):
         """Downgraded to WARNING, not stripped of detail."""
         try:
             raise _FakeDrainTimeoutError("drain timed out")
@@ -122,4 +102,15 @@ class TestTracebacksSurvive:
 
         record = caplog.records[-1]
         assert record.levelno == logging.WARNING
-        assert "Traceback" in self._rendered(record).get("exception", "")
+        assert record.exc_info is not None
+        assert record.exc_info[0] is _FakeDrainTimeoutError
+
+    async def test_the_message_names_the_class(self, caplog):
+        with caplog.at_level(logging.DEBUG):
+            await nats_logging.error_cb(_FakeAuthError("violation"))
+        assert "AuthorizationError" in caplog.records[-1].getMessage()
+
+    async def test_an_exception_with_no_message_still_says_something(self, caplog):
+        with caplog.at_level(logging.DEBUG):
+            await nats_logging.error_cb(_FakeDrainTimeoutError())
+        assert "DrainTimeoutError" in caplog.records[-1].getMessage()
