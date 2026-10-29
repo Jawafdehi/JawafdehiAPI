@@ -497,8 +497,10 @@ class TestSearchDocument:
                     "material": IRI,
                     "total": 212,
                     "count": 50,
+                    "offset": 0,
                     "truncated": True,
-                    "hits": [],
+                    "pages": [10, 15, 294],
+                    "hits": [{"page_no": 10}, {"page_no": 15}],
                 }
             }
         )
@@ -507,13 +509,20 @@ class TestSearchDocument:
         warning = body["data"]["citation"]["warning"]
         # Page order, not relevance order — a model told these are the "best"
         # 50 of 212 would summarise the document from an arbitrary prefix.
-        assert "212" in warning and "NOT the best" in warning
+        assert "212" in warning and "PAGE ORDER" in warning
+        # And it must NAME the pages left out, not merely say there are some:
+        # this is the production failure (घुस hit page 294 of the CIAA report,
+        # outside the first window) reduced to a unit test.
+        assert "294" in warning and "10" not in warning.split("outside it:")[1]
 
     @pytest.mark.asyncio
     async def test_an_untruncated_result_carries_no_warning(self):
         caller = AsyncMock(
             return_value={
-                "data": {"material": IRI, "total": 3, "count": 3, "truncated": False, "hits": []}
+                "data": {
+                    "material": IRI, "total": 3, "count": 3, "offset": 0,
+                    "truncated": False, "pages": [1], "hits": [],
+                }
             }
         )
         with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
@@ -531,3 +540,36 @@ class TestSearchDocument:
 
     def test_the_read_tool_points_at_search_first(self):
         assert "search_document" in ReadDocumentPartTool().description
+
+
+class TestSearchOffset:
+    """Walking past the first window — the fix for a hit the cap hid."""
+
+    @pytest.mark.asyncio
+    async def test_offset_is_forwarded(self):
+        caller = AsyncMock(return_value={"data": {}})
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            await SearchDocumentTool().execute({"iri": IRI, "q": "घुस", "offset": 50})
+        assert caller.await_args.kwargs["params"] == {"q": "घुस", "offset": 50}
+
+    @pytest.mark.asyncio
+    async def test_offset_is_omitted_when_not_given(self):
+        caller = AsyncMock(return_value={"data": {}})
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            await SearchDocumentTool().execute({"iri": IRI, "q": "घुस"})
+        assert "offset" not in caller.await_args.kwargs["params"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("offset", [-1, "ten", True, 1.5])
+    async def test_a_bad_offset_is_refused_before_any_request(self, offset):
+        caller = AsyncMock()
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            result = await SearchDocumentTool().execute(
+                {"iri": IRI, "q": "घुस", "offset": offset}
+            )
+        assert result.is_error
+        caller.assert_not_awaited()
+
+    def test_the_description_warns_that_order_is_not_relevance(self):
+        d = SearchDocumentTool().description
+        assert "PAGE ORDER" in d and "pages" in d and "offset" in d

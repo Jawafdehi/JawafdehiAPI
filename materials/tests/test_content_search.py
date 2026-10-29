@@ -434,6 +434,11 @@ class SearchArgumentTests(APITestCase):
                 response = self.client.get(URL, {"q": "घुस", "limit": bad})
                 self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_an_offset_past_the_end_still_reports_the_true_total(self):
+        body = self.client.get(URL, {"q": "घुस", "offset": 500}).data
+        self.assertEqual(body["count"], 0)
+        self.assertGreater(body["total"], 0)
+
     def test_the_published_schema_documents_the_arguments(self):
         # Hand-written OpenApiParameters on a plain @api_view, same as the
         # content route: nothing but this notices them drifting from the view.
@@ -442,7 +447,7 @@ class SearchArgumentTests(APITestCase):
         schema = SchemaGenerator().get_schema(request=None, public=True)
         operation = schema["paths"]["/api/materials/{source}/{ident}/search/"]["get"]
         documented = {p["name"] for p in operation["parameters"]}
-        self.assertEqual(documented, {"source", "ident", "q", "limit"})
+        self.assertEqual(documented, {"source", "ident", "q", "limit", "offset"})
 
 
 class SearchCachingTests(APITestCase):
@@ -652,13 +657,112 @@ class McpSearchToolTests(APITestCase):
         self.assertEqual(seen["params"], {"q": "संख्या", "limit": 1})
         data = json.loads(result[0].text)["data"]
         self.assertTrue(data["truncated"])
-        self.assertIn("narrow the query", data["citation"]["warning"])
+        warning = data["citation"]["warning"]
+        self.assertIn("PAGE ORDER", warning)
+        # The warning must NAME the pages it left out. "there is more" sends a
+        # model back to narrowing its query; "page 294 also matched" sends it
+        # to the answer.
+        self.assertIn("294", warning)
+        self.assertIn("read_document_part", warning)
 
     def test_a_404_reaches_the_model_as_an_error_not_as_data(self):
         # Otherwise the model treats "Material not found." as a search result
         # and reports the document as holding nothing.
         _, result = self._run(iri="https://jawafdehi.org/material/ag/nope", q="घुस")
         self.assertTrue(result.is_error)
+
+
+class TailReachabilityTests(APITestCase):
+    """A hit past the cap must still be findable.
+
+    This is the production failure, reduced. Searching घुस in the 35th CIAA
+    report matches 81 times; hits are in page order and capped at 50, so the
+    response covered pages 10-265 and page 294 — the one worth reading — was
+    not in it, with nothing to say where it had gone. `total: 81` was honest
+    and useless.
+
+    The seeded document uses a cap of 3 to make the same shape small.
+    """
+
+    databases = "__all__"
+
+    def setUp(self):
+        material = _seed()
+        content = DocumentContent.objects.get(pk=material.iri)
+        # Early pages that all match, so the first window is the front of the
+        # document and the interesting page 294 sits past it.
+        for page_no in (10, 15, 50, 51, 52):
+            DocumentPage.objects.create(
+                content=content,
+                page_no=page_no,
+                uid=f"ciaa-2081-82#p{page_no:04d}",
+                text="घुस सम्बन्धी प्रारम्भिक चर्चा यहाँ छ।",
+                coverage_state="anchored",
+                chars=36,
+            )
+
+    def test_the_first_window_does_not_reach_the_late_page(self):
+        body = self.client.get(URL, {"q": "घुस", "limit": 3}).data
+        self.assertTrue(body["truncated"])
+        self.assertNotIn(294, {hit["page_no"] for hit in body["hits"]})
+
+    def test_the_page_roster_names_it_anyway(self):
+        """One call, and the caller can see page 294 is in the document."""
+        body = self.client.get(URL, {"q": "घुस", "limit": 3}).data
+        self.assertIn(294, body["pages"])
+        self.assertEqual(body["pages"], sorted(body["pages"]))
+
+    def test_the_roster_is_not_truncated_with_the_hits(self):
+        narrow = self.client.get(URL, {"q": "घुस", "limit": 1}).data
+        wide = self.client.get(URL, {"q": "घुस"}).data
+        self.assertEqual(narrow["pages"], wide["pages"])
+        self.assertEqual(narrow["total"], wide["total"])
+
+    def test_offset_walks_to_the_late_page(self):
+        total = self.client.get(URL, {"q": "घुस"}).data["total"]
+        seen = set()
+        for offset in range(0, total, 3):
+            window = self.client.get(URL, {"q": "घुस", "limit": 3, "offset": offset}).data
+            self.assertEqual(window["offset"], offset)
+            seen.update(hit["page_no"] for hit in window["hits"])
+        self.assertIn(294, seen)
+
+    def test_the_last_window_of_a_walk_is_not_truncated(self):
+        """`truncated` means hits remain AFTER this window, not that the
+        document holds more than one window's worth."""
+        total = self.client.get(URL, {"q": "घुस"}).data["total"]
+        last = self.client.get(URL, {"q": "घुस", "limit": 3, "offset": total - 1}).data
+        self.assertEqual(last["count"], 1)
+        self.assertFalse(last["truncated"])
+
+    def test_an_offset_past_the_end_is_empty_not_an_error(self):
+        body = self.client.get(URL, {"q": "घुस", "offset": 9999})
+        self.assertEqual(body.status_code, status.HTTP_200_OK)
+        self.assertEqual(body.data["hits"], [])
+        # Still truthful about the document, so a caller that walked too far
+        # learns it overshot rather than that the term is absent.
+        self.assertGreater(body.data["total"], 0)
+        self.assertFalse(body.data["truncated"])
+
+    def test_a_negative_offset_is_refused(self):
+        # Python would slice from the END and hand back the last hits while
+        # the caller believed it had asked for the first.
+        response = self.client.get(URL, {"q": "घुस", "offset": -1})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_nonsense_offset_is_refused(self):
+        response = self.client.get(URL, {"q": "घुस", "offset": "back"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_offset_is_part_of_the_representation(self):
+        first = self.client.get(URL, {"q": "घुस", "limit": 3})
+        second = self.client.get(URL, {"q": "घुस", "limit": 3, "offset": 3})
+        self.assertNotEqual(first["ETag"], second["ETag"])
+        # And the tag the first window handed out must not 304 the second.
+        again = self.client.get(
+            URL, {"q": "घुस", "limit": 3, "offset": 3}, HTTP_IF_NONE_MATCH=first["ETag"]
+        )
+        self.assertEqual(again.status_code, status.HTTP_200_OK)
 
 
 class ScanCostTests(APITestCase):

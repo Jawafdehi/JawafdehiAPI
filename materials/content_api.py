@@ -753,7 +753,9 @@ def _figure_hits(iri: str, scan: DocumentScan) -> list[dict]:
     return hits
 
 
-def search_document(iri: str, query: str, *, limit: int = MAX_SEARCH_HITS) -> dict:
+def search_document(
+    iri: str, query: str, *, limit: int = MAX_SEARCH_HITS, offset: int = 0
+) -> dict:
     """Search one document's own content. Mixed hits, in document order.
 
     Pages, tables and figures come back TOGETHER rather than as three listings,
@@ -767,10 +769,19 @@ def search_document(iri: str, query: str, *, limit: int = MAX_SEARCH_HITS) -> di
     reader can check against the printed PDF, and it puts a hit and the table
     that belongs to it next to each other.
 
-    Counted BEFORE truncation. ``total`` is how many hits the document really
-    holds and ``hits`` is at most ``limit`` of them — a truncated result that
-    reported the truncated count would tell a caller searching a common term
-    that it is rare.
+    **Page order plus a cap hides the tail, so the tail is reachable two ways.**
+    This was a real defect, found against the live corpus and not by the tests:
+    ``घुस`` matches 81 times in the 35th CIAA report, and the first 50 in page
+    order run 10–265 — so page 294, the one worth reading, was not in the
+    response and nothing in it said where to look. ``total`` was honest and
+    useless. Now ``offset`` walks the whole set, and ``pages`` lists EVERY page
+    carrying a hit whether or not its hit is in this window. The roster is the
+    cheaper of the two for a reader: ~4 bytes a hit, and it answers "where in
+    this document" in one call instead of three.
+
+    Counted BEFORE the window. ``total`` is how many hits the document really
+    holds — a result that reported the windowed count would tell a caller
+    searching a common term that it is rare.
 
     **The redacted text is what is searched**, and there is nothing to opt out
     of: ``DocumentPage.text`` and ``DocumentTable.markdown`` ARE the stored,
@@ -783,11 +794,19 @@ def search_document(iri: str, query: str, *, limit: int = MAX_SEARCH_HITS) -> di
     hits = _page_hits(iri, scan) + _table_hits(iri, scan) + _figure_hits(iri, scan)
     hits.sort(key=lambda h: (h["page_no"], _KIND_ORDER[h["kind"]], h["key"] or ""))
     total = len(hits)
+    window = hits[offset : offset + limit]
     return {
         "total": total,
-        "truncated": total > limit,
-        "count": min(total, limit),
-        "hits": hits[:limit],
+        "offset": offset,
+        "count": len(window),
+        # True when hits remain AFTER this window, not merely when the document
+        # holds more than one window's worth — otherwise the last page of a
+        # walk would still claim there is more to come.
+        "truncated": offset + len(window) < total,
+        # Untruncated, and that is the point: a caller that cannot afford to
+        # page through 81 hits can still see that page 294 is among them.
+        "pages": sorted({hit["page_no"] for hit in hits}),
+        "hits": window,
     }
 
 

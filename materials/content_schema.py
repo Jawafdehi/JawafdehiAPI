@@ -543,10 +543,30 @@ MaterialContentSearchSerializer = inline_serializer(
             )
         ),
         "truncated": serializers.BooleanField(
-            help_text="`total` exceeded the limit, so `hits` is a prefix of it."
+            help_text=(
+                "Hits remain AFTER this window — raise `offset` to walk them, "
+                "or read `pages` for where they are. False on the last window "
+                "of a walk, which is why this is not simply "
+                "`total > limit`."
+            )
+        ),
+        "offset": serializers.IntegerField(
+            help_text="Where this window starts in the result set, 0-based."
         ),
         "count": serializers.IntegerField(
             help_text=f"Length of `hits`; at most {MAX_SEARCH_HITS}."
+        ),
+        "pages": serializers.ListField(
+            child=serializers.IntegerField(),
+            help_text=(
+                "Every printed page carrying a hit, ascending — including "
+                "pages whose hits fall outside this window. Hits are in PAGE "
+                "order rather than ranked, so on a common term the window is "
+                "the front of the document and the page worth reading can sit "
+                "past its edge; this says where they all are for ~4 bytes "
+                "each, so a caller never has to page through the set just to "
+                "find out."
+            ),
         ),
         "hits": DocumentSearchHits,
     },
