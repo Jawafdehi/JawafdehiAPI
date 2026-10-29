@@ -896,6 +896,18 @@ SPECTACULAR_SETTINGS = {
     "SERVERS": None,
     "ENUM_NAME_OVERRIDES": {
         "CaseTypeEnum": "cases.models.CaseType",
+        # The material content read plane pins each response envelope's ``type``
+        # — and each search hit's ``kind`` — to one constant, which is what makes
+        # the 7-way ``oneOf`` on ``…/content`` discriminable. That is the one
+        # shape drf-spectacular cannot name by itself: a one-value choice set
+        # reached through TWO differently-named properties in several components,
+        # so it can neither use the property name nor prefix with a component
+        # name. Without these it falls back to a hash (``Type8d9Enum``) and warns
+        # three times per value. Kept in step with ``CONTENT_TYPES`` by
+        # ``materials/tests/test_content_schema.py``.
+        "MaterialContentPageEnum": ["page"],
+        "MaterialContentTableEnum": ["table"],
+        "MaterialContentFigureEnum": ["figure"],
     },
 }
 
