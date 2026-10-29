@@ -1,151 +1,169 @@
-"""Find media objects referenced by more than one Material.
+"""Find media objects shared by more than one Material, and say which are wrong.
 
-A ``Material`` carries its files in ``data["associatedMedia"]`` as roled
-``MediaObject`` entries (``RAW`` the original, ``MARKDOWN`` our transcript, and
-so on). Two materials pointing at the SAME ``contentUrl`` is not automatically
-wrong, and the distinction is the whole point of this command:
+Two materials pointing at one ``contentUrl`` is frequently CORRECT, and telling
+the legitimate cases from the damaged ones is this command's whole job — a
+report that mixes them trains the reader to skim past it.
 
-* **An EXTERNAL url shared is usually correct.** One Koshi red-book PDF backs
+Three classes, reported apart:
+
+* **An EXTERNAL url shared is normal provenance.** One Koshi red-book PDF backs
   ten budget-line materials; one CourtListener docket backs five US filings; a
   news article and its ``web.archive.org`` snapshot are cited by two materials.
-  Nothing is wrong there — the shared thing is somebody else's document that
-  genuinely covers several of ours.
+  The shared thing is somebody else's document that genuinely covers several of
+  ours. Hidden unless ``--all``.
 
-* **One of OUR OWN stored artifacts shared is a smell**, and a shared
-  ``MARKDOWN`` is close to a defect by construction. Uploads are keyed on
-  filename rather than content, so two files uploaded under one name collide on
-  a single object and the second silently wins. The material then serves text
-  that belongs to a different document, with nothing in the payload saying so.
+* **A shared TRANSCRIPT whose parents hold the same text is also correct.**
+  Transcripts are stored content-addressed (see ``materials/conversion.py``), so
+  two documents whose text is byte-identical legitimately share one object.
 
-So the command splits the two and reports them apart. ``--ours-only`` (the
-default) suppresses the external class, because reporting it trains the reader
-to skim past the output.
+* **A shared transcript whose parents hold DIFFERENT text is damage.** That is
+  the filename-keyed collision: the second upload won, and a material now links
+  to another document's transcript. ``conversion.py`` calls this out as
+  forward-only — rows damaged before the switch still carry the wrong link.
 
-**This is READ-ONLY.** It reports; it never edits. The fix for a real collision
-is to re-upload the correct artifact for the losing material, which is a
-judgement call per row — a transcript cannot be reattached mechanically because
-the right one may no longer exist anywhere.
+The verdict therefore comes from each parent's own ``data["text"]``, which is
+per-row and correct even when the stored artifact is not. That is also what
+makes repair cheap: a backfill can re-store the transcript from the database
+without re-running OCR.
 
-Why a command rather than a script against the public API: the API can only
-enumerate ``LISTED`` rows, which silently omits every private and case-gated
-material, and paging 366k rows over HTTP is rude and slow. The duplicate check
-is a group-by; it belongs next to the data.
+**READ-ONLY.** It reports; it never edits.
 
     manage.py find_shared_media                      # our artifacts only
     manage.py find_shared_media --all                # include external urls
-    manage.py find_shared_media --role MARKDOWN      # the likeliest defects
-    manage.py find_shared_media --source charge_sheet --source ag
+    manage.py find_shared_media --role MARKDOWN      # transcripts only
+    manage.py find_shared_media --source charge_sheet
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from typing import Any
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
+from materials.artifacts import is_our_copy, media_list, role_of
 from materials.models import Material
 
-#: Host of our own object store. A ``contentUrl`` here is an artifact WE wrote,
-#: so two materials sharing one is a collision rather than shared provenance.
-OURS = "s3.jawafdehi.org"
+TEXT_KEY = "text"
 
 
-def _media(data: Any) -> list[dict[str, Any]]:
-    """The material's ``associatedMedia`` entries, tolerating a malformed doc.
+def _text_fingerprint(data: Any) -> str:
+    """A stable digest of the material's own transcript, or ``""`` if it has none.
 
-    ``data`` is a free-form ``JSONField``; a row written before the current
-    shape, or by hand, may carry a string or null here. A sweep that exists to
-    find data defects must not itself fall over on one.
+    ``data["text"]`` is a language-mapped container, so it is hashed as a whole
+    rather than by picking a language — two rows differing only in which
+    language they carry are still different text.
     """
-    media = data.get("associatedMedia") if isinstance(data, dict) else None
-    if not isinstance(media, list):
-        return []
-    return [m for m in media if isinstance(m, dict)]
+    if not isinstance(data, dict):
+        return ""
+    text = data.get(TEXT_KEY)
+    if not text:
+        return ""
+    return hashlib.sha256(repr(sorted(text.items()) if isinstance(text, dict) else text)
+                          .encode("utf-8")).hexdigest()[:16]
 
 
 class Command(BaseCommand):
     help = "Report media objects referenced by more than one Material."
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            "--all",
-            action="store_true",
-            help="Also report shared EXTERNAL urls, which are usually legitimate.",
-        )
-        parser.add_argument(
-            "--role",
-            action="append",
-            default=[],
-            help="Only consider links with this jawafdehi:linkRole (repeatable).",
-        )
-        parser.add_argument(
-            "--source",
-            action="append",
-            default=[],
-            help="Limit to these source tokens (repeatable). Default: every source.",
-        )
+        parser.add_argument("--all", action="store_true", help="Also report external urls.")
+        parser.add_argument("--role", action="append", default=[], help="Filter by linkRole.")
+        parser.add_argument("--source", action="append", default=[], help="Limit to sources.")
 
     def handle(self, *args, **options):
-        roles = set(options["role"])
+        roles = {r.strip().upper() for r in options["role"]}
         sources = options["source"]
+
+        if sources:
+            # A mistyped token used to produce a confident empty report, which
+            # reads exactly like "nothing is wrong".
+            known = set(
+                Material.objects.filter(source__in=sources)
+                .values_list("source", flat=True)
+                .distinct()
+            )
+            missing = sorted(set(sources) - known)
+            if missing:
+                raise CommandError(f"no materials for --source {missing}")
 
         rows = Material.objects.filter(is_deleted=False).only("iri", "data")
         if sources:
             rows = rows.filter(source__in=sources)
 
-        by_url: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        # Keyed by url → {iri: role}. A DICT, not a list: one material holding
+        # the same url under two roles (RAW and ALTERNATE, say) is one
+        # material, and counting links reported it as "shared by 2" — a false
+        # positive on a perfectly ordinary document.
+        refs: dict[str, dict[str, str]] = defaultdict(dict)
+        texts: dict[str, str] = {}
         scanned = 0
         for material in rows.iterator(chunk_size=2000):
             scanned += 1
-            for link in _media(material.data):
-                url = (link.get("contentUrl") or "").strip()
-                if not url:
-                    # An empty contentUrl is its own (separate) data defect, and
-                    # bucketing every one of them together under "" would
-                    # report a single enormous fake collision.
+            texts[material.iri] = _text_fingerprint(material.data)
+            for link in media_list(material.data):
+                url = link.get("contentUrl")
+                # Not a string ⇒ not a url. `.strip()` on a list or an int out
+                # of free-form JSONB would crash the sweep, and a sweep whose
+                # purpose is finding bad data must survive bad data.
+                if not isinstance(url, str) or not url.strip():
                     continue
-                role = link.get("jawafdehi:linkRole") or "?"
+                role = role_of(link)
                 if roles and role not in roles:
                     continue
-                by_url[url].append((material.iri, role))
+                refs[url.strip()].setdefault(material.iri, role)
 
-        shared = {u: refs for u, refs in by_url.items() if len(refs) > 1}
-        ours = {u: r for u, r in shared.items() if OURS in u}
-        external = {u: r for u, r in shared.items() if OURS not in u}
+        shared = {u: r for u, r in refs.items() if len(r) > 1}
+        ours = {u: r for u, r in shared.items() if is_our_copy(u)}
+        external = {u: r for u, r in shared.items() if not is_our_copy(u)}
+
+        damaged, benign = {}, {}
+        for url, parents in ours.items():
+            fingerprints = {texts.get(iri, "") for iri in parents}
+            (damaged if len(fingerprints) > 1 else benign)[url] = parents
 
         self.stdout.write(
-            f"scanned {scanned} materials, {len(by_url)} distinct media urls, "
+            f"scanned {scanned} materials, {len(refs)} distinct media urls, "
             f"{len(shared)} shared ({len(ours)} ours, {len(external)} external)"
         )
-
-        self._report("OUR OWN ARTIFACTS — investigate each", ours, warn=True)
+        self._report(
+            "DAMAGED — parents hold DIFFERENT text, so at least one links to "
+            "another document's transcript",
+            damaged,
+            texts,
+            warn=True,
+        )
+        self._report(
+            "shared but consistent — parents hold the same text, which "
+            "content-addressed storage makes correct",
+            benign,
+            texts,
+            warn=False,
+        )
         if options["all"]:
-            self._report("EXTERNAL urls — usually legitimate", external, warn=False)
+            self._report("EXTERNAL urls — normal provenance", external, texts, warn=False)
         elif external:
-            self.stdout.write(
-                f"\n{len(external)} shared external url(s) hidden; pass --all to see them."
-            )
+            self.stdout.write(f"\n{len(external)} shared external url(s) hidden; pass --all.")
 
-        if ours:
-            # Non-zero-ish signal for a human reading a cron log, without
-            # failing the command — this is a report, not a gate.
+        if damaged:
             self.stdout.write(
                 self.style.WARNING(
-                    f"\n{len(ours)} shared artifact(s) need a decision. A shared MARKDOWN "
-                    "means a material may be serving another document's text."
+                    f"\n{len(damaged)} damaged artifact(s). Each parent's own data['text'] "
+                    "is correct, so a backfill can re-store from the DB without OCR."
                 )
             )
         else:
-            self.stdout.write(self.style.SUCCESS("\nno shared artifacts of our own"))
+            self.stdout.write(self.style.SUCCESS("\nno damaged artifacts"))
 
-    def _report(self, title: str, groups: dict[str, list[tuple[str, str]]], *, warn: bool) -> None:
+    def _report(self, title, groups, texts, *, warn):
         if not groups:
             return
         self.stdout.write(f"\n=== {title}: {len(groups)} ===")
-        for url, refs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
-            roles = sorted({role for _, role in refs})
-            line = f"\n  {url}\n    shared by {len(refs)} materials, roles={roles}"
+        # Sorted by size then url: a report that reorders between runs cannot
+        # be diffed against the previous one.
+        for url, parents in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            line = f"\n  {url}\n    shared by {len(parents)} materials"
             self.stdout.write(self.style.WARNING(line) if warn else line)
-            for iri, role in sorted(refs):
-                self.stdout.write(f"      {role:10} {iri}")
+            for iri, role in sorted(parents.items()):
+                self.stdout.write(f"      {role:10} text={texts.get(iri) or '-':16} {iri}")

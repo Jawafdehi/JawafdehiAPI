@@ -195,9 +195,27 @@ document classes, so a charge sheet resolves to a judgement. On an
 accountability archive that is a mis-attribution of court text to the wrong
 defendants.
 
-**Likely cause:** uploads are keyed on filename rather than content, so two
-files uploaded under the same name collide on one object. The merges proposed
-above do **not** fix this and should not be taken to have fixed it.
+**Cause, and it is already half-fixed.** Uploads were keyed on filename rather
+than content, so two files uploaded under one name collided and the second won.
+`materials/conversion.py` has since switched transcripts to content-addressed
+storage and says so explicitly — *"forward-only: the materials already damaged
+still link to another document's transcript"*.
+
+Two consequences, both of which the detector had to be rewritten for:
+
+1. **A shared transcript is no longer a defect by itself.** Two documents whose
+   text is byte-identical now legitimately share one object. An earlier
+   revision of this document called a shared `MARKDOWN` "close to a defect by
+   construction"; that is out of date, and acting on it would bury the real
+   cases under correct ones.
+2. **The verdict comes from each parent's own `data["text"]`**, which is
+   per-row and correct even when the stored artifact is not. Parents holding
+   DIFFERENT text ⇒ damage; the same text ⇒ correct sharing.
+
+That is also why repair is cheap: a backfill can re-store the transcript from
+the database without re-running OCR.
+
+The merges proposed above do **not** fix this and should not be taken to have.
 
 ### The sweep was run — results
 
@@ -238,7 +256,14 @@ separate objects and both carry the correct text. This is the Koshi red-book
 pattern applied to our own stored copy: one source document, several materials.
 A detector that flagged this as a bug would be wrong.
 
-**So: 2 defects over 6 materials in the swept range, not a systemic failure.**
+**The sweep above predates the corrected detector and should be re-run.** It
+counted LINKS rather than materials (so one document holding a file under two
+roles looked shared), matched "ours" by substring (so an archive.org snapshot
+of our file counted as ours), and had no text comparison, so it could not tell
+content-addressed sharing from damage. Its headline finding — the `185d4d1f`
+transcript matching none of its four parents — stands, because that was
+verified by reading the document. The counts around it should not be quoted
+until `find_shared_media` has been run in-cluster.
 
 **Coverage limit, stated plainly.** The sweep covered 3,245 of ~366k rows. The
 five large scraped corpora — `bolpatra` (205,826), `ag` (99,750), `court_order`

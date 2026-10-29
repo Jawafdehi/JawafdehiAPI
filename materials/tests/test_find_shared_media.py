@@ -21,7 +21,7 @@ OURS = "https://s3.jawafdehi.org/case_uploads"
 EXTERNAL = "https://supremecourt.gov.np/cp/assets/uploads"
 
 
-def seed(source: str, ident: str, media: list[dict], **extra) -> Material:
+def seed(source: str, ident: str, media, **extra) -> Material:
     iri = f"https://jawafdehi.org/material/{source}/{ident}"
     data = {
         "@context": MATERIAL_CONTEXT,
@@ -50,10 +50,10 @@ class SharedMediaTests(TestCase):
     databases = "__all__"
 
     def test_an_artifact_of_ours_shared_by_two_materials_is_reported(self):
-        seed("document", "a", [link(f"{OURS}/collide.md", "MARKDOWN")])
-        seed("document", "b", [link(f"{OURS}/collide.md", "MARKDOWN")])
+        seed("document", "a", [link(f"{OURS}/collide.md", "MARKDOWN")], text={"en": "A"})
+        seed("document", "b", [link(f"{OURS}/collide.md", "MARKDOWN")], text={"en": "B"})
         out = run()
-        self.assertIn("OUR OWN ARTIFACTS", out)
+        self.assertIn("DAMAGED", out)
         self.assertIn("collide.md", out)
         self.assertIn("/material/document/a", out)
         self.assertIn("/material/document/b", out)
@@ -67,7 +67,7 @@ class SharedMediaTests(TestCase):
         out = run()
         self.assertNotIn("special_1.doc", out)
         self.assertIn("pass --all", out)
-        self.assertIn("no shared artifacts of our own", out)
+        self.assertIn("no damaged artifacts", out)
 
     def test_all_surfaces_the_external_class_separately(self):
         seed("document", "a", [link(f"{EXTERNAL}/special_1.doc")])
@@ -78,7 +78,7 @@ class SharedMediaTests(TestCase):
 
     def test_a_url_used_once_is_not_reported(self):
         seed("document", "a", [link(f"{OURS}/alone.pdf")])
-        self.assertIn("no shared artifacts of our own", run())
+        self.assertIn("no damaged artifacts", run())
 
     def test_role_filter_narrows_to_the_likeliest_defect(self):
         # The same two materials share a RAW (plausible: one source PDF) and
@@ -86,7 +86,7 @@ class SharedMediaTests(TestCase):
         seed("document", "a", [link(f"{OURS}/src.pdf"), link(f"{OURS}/a.md", "MARKDOWN")])
         seed("document", "b", [link(f"{OURS}/src.pdf"), link(f"{OURS}/b.md", "MARKDOWN")])
         self.assertIn("src.pdf", run())
-        self.assertIn("no shared artifacts of our own", run("--role", "MARKDOWN"))
+        self.assertIn("no damaged artifacts", run("--role", "MARKDOWN"))
 
     def test_empty_content_urls_do_not_bucket_together(self):
         # A blank contentUrl is its own data defect; grouping every one under ""
@@ -94,7 +94,7 @@ class SharedMediaTests(TestCase):
         seed("document", "a", [link("", "RAW")])
         seed("document", "b", [link("", "RAW")])
         seed("document", "c", [link("   ", "RAW")])
-        self.assertIn("no shared artifacts of our own", run())
+        self.assertIn("no damaged artifacts", run())
 
     def test_a_malformed_associatedMedia_does_not_crash_the_sweep(self):
         # A sweep whose whole purpose is finding bad data must survive bad data.
@@ -116,7 +116,7 @@ class SharedMediaTests(TestCase):
         dead = seed("document", "b", [link(f"{OURS}/shared.pdf")])
         dead.is_deleted = True
         dead.save(update_fields=["is_deleted"])
-        self.assertIn("no shared artifacts of our own", run())
+        self.assertIn("no damaged artifacts", run())
 
     def test_source_filter_limits_the_scan(self):
         seed("charge_sheet", "a", [link(f"{OURS}/one.pdf")])
@@ -131,3 +131,81 @@ class SharedMediaTests(TestCase):
         a.refresh_from_db()
         b.refresh_from_db()
         self.assertEqual((a.data, b.data, Material.objects.count()), before)
+
+
+class ReviewRegressionTests(TestCase):
+    """Cases the review reproduced that the original command got wrong."""
+
+    databases = "__all__"
+
+    def test_one_material_holding_a_url_twice_is_not_shared(self):
+        # It counted LINKS. A single document carrying the same file under two
+        # roles was reported as "shared by 2" — a false positive on an entirely
+        # ordinary row.
+        seed(
+            "document",
+            "a",
+            [link(f"{OURS}/f.pdf", "RAW"), link(f"{OURS}/f.pdf", "ALTERNATE")],
+        )
+        self.assertIn("no damaged artifacts", run())
+
+    def test_an_archive_snapshot_of_our_file_is_not_ours(self):
+        # A substring test on the host matched any url merely CONTAINING our
+        # domain, so an archive.org snapshot of our own file counted as ours.
+        snap = "https://web.archive.org/web/2026/https://s3.jawafdehi.org/case_uploads/x.pdf"
+        seed("document", "a", [link(snap)])
+        seed("document", "b", [link(snap)])
+        out = run()
+        self.assertIn("no damaged artifacts", out)
+        self.assertIn("pass --all", out)
+
+    def test_a_non_string_content_url_does_not_crash_the_sweep(self):
+        seed("document", "a", [link(f"{OURS}/ok.pdf")], text={"en": "A"})
+        broken = seed("document", "b", [])
+        broken.data["associatedMedia"] = [{"contentUrl": ["not", "a", "string"]}]
+        broken.save(update_fields=["data"])
+        self.assertIn("scanned 2 materials", run())
+
+    def test_a_single_object_associated_media_is_not_skipped(self):
+        # associatedMedia may legitimately be ONE dict rather than a list;
+        # those materials were silently invisible to the sweep.
+        a = seed("document", "a", [], text={"en": "A"})
+        a.data["associatedMedia"] = {"contentUrl": f"{OURS}/solo.md",
+                                     "jawafdehi:linkRole": "MARKDOWN"}
+        a.save(update_fields=["data"])
+        b = seed("document", "b", [], text={"en": "B"})
+        b.data["associatedMedia"] = {"contentUrl": f"{OURS}/solo.md",
+                                     "jawafdehi:linkRole": "MARKDOWN"}
+        b.save(update_fields=["data"])
+        self.assertIn("DAMAGED", run())
+
+    def test_a_role_given_as_a_list_does_not_crash(self):
+        a = seed("document", "a", [])
+        a.data["associatedMedia"] = [{"contentUrl": f"{OURS}/x.md",
+                                      "jawafdehi:linkRole": ["MARKDOWN"]}]
+        a.save(update_fields=["data"])
+        self.assertIn("scanned 1 materials", run())
+
+    def test_identical_text_sharing_one_transcript_is_correct_not_damage(self):
+        # Transcripts are content-addressed now (materials/conversion.py), so
+        # two documents whose text is byte-identical SHOULD share one object.
+        # Calling that a defect would bury the real ones.
+        seed("document", "a", [link(f"{OURS}/same.md", "MARKDOWN")], text={"en": "same"})
+        seed("document", "b", [link(f"{OURS}/same.md", "MARKDOWN")], text={"en": "same"})
+        out = run()
+        self.assertIn("no damaged artifacts", out)
+        self.assertIn("shared but consistent", out)
+
+    def test_a_mistyped_source_errors_instead_of_reporting_nothing(self):
+        # A confident empty report reads exactly like "nothing is wrong".
+        import pytest
+        from django.core.management.base import CommandError
+
+        with pytest.raises(CommandError):
+            run("--source", "no_such_source")
+
+    def test_the_report_order_is_deterministic(self):
+        for i in range(4):
+            seed("document", f"a{i}", [link(f"{OURS}/s{i}.md", "MARKDOWN")], text={"en": f"{i}"})
+            seed("document", f"b{i}", [link(f"{OURS}/s{i}.md", "MARKDOWN")], text={"en": f"x{i}"})
+        self.assertEqual(run(), run())
