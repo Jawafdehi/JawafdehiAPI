@@ -10,6 +10,8 @@ here, once, rather than re-implemented (and drifting) per call site.
 Behavior:
 - ``from_jsonld`` derives ``source``/``ident`` from the ``@id`` and validates the
   doc; ``full_clean`` checks iri/source/ident/data agreement.
+- a NEW row's ``source`` must be in ``sources.KNOWN_SOURCES`` — a new token is a
+  new public shelf, so it costs a reviewed change. Updates are never gated.
 - Upsert-by-``@id`` via ``update_or_create`` (NOT a fresh-instance ``save()``,
   which would write ``created_at=NULL`` over an existing row on UPDATE, since
   ``auto_now_add`` fires only on INSERT). Only the mutable columns are written,
@@ -40,6 +42,7 @@ import logging
 from .redaction import TEXT_KEY, keep_original, redact_jsonld
 
 from .models import Material
+from .sources import is_known_source, unknown_source_error
 
 logger = logging.getLogger("materials.ingest")
 
@@ -123,6 +126,18 @@ def upsert_single_source_material(
             .values("data", "source_text")
             .first()
         )
+        if existing is None and not is_known_source(candidate.source):
+            # INSERT ONLY, and that is the whole design. A new token mints a new
+            # public shelf in /api/document-sources/, so it costs a reviewed
+            # one-line change — the same price as a label. An UPDATE to a row
+            # that already exists always passes, including a revive of a
+            # soft-deleted one (the lookup above is deliberately not filtered on
+            # is_deleted), so nothing already in the archive can be made
+            # unwritable by tightening this list.
+            #
+            # Free to check here: `existing` is already in hand for the
+            # keep_original decision, so this adds no query.
+            raise ValueError(unknown_source_error(candidate.source))
         candidate.source_text = keep_original(
             incoming=source_text,
             stored=(existing or {}).get("source_text") or "",

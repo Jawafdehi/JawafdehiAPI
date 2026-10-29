@@ -578,3 +578,122 @@ def build_catalogue(materials: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return catalogue
+
+
+# ======================================================================
+# The write-path allowlist.
+#
+# Separate from the labels above, and deliberately in the same file: a new
+# source token is a new SHELF in a public archive, so it should cost the same
+# one-line reviewed change that a new label costs. Nothing else in the codebase
+# constrains the token — ``source`` is derived from the ``@id`` the caller
+# builds, and ``is_valid_material_iri`` only checks a regex, the host and a
+# length cap. That freedom is how `chargesheet` (a misspelling of
+# `charge_sheet`) and `court_order_0133` (a case number that leaked into the
+# token) both became permanent public shelves.
+# ======================================================================
+
+#: Every source token that may be used to create a NEW material.
+#:
+#: Seeded 2026-10-29 from the live catalogue — all 34 tokens then in
+#: ``/api/document-sources/``, INCLUDING the two known-bad ones. They are listed
+#: because their rows exist and must stay writable; see the pending merges in
+#: ``docs/2026-10-29-document-source-cleanup.md`` and delete them from here when
+#: those land.
+KNOWN_SOURCES: frozenset[str] = frozenset(
+    {
+        # Scraped corpora (one subpackage each under materials/sourcing/).
+        "bolpatra",
+        "ag",
+        "court_order",
+        "nkp",
+        "ciaa_press_release",
+        "ciaa_annual_report",
+        "kanun_patrika",
+        "official_report",
+        "ppmo",
+        "ppmo_blacklist",
+        "dfmis",
+        "cib",
+        # Case uploads sourced by their material_type — the #344 convention.
+        "news",
+        "document",
+        "charge_sheet",
+        "press_release",
+        "legal_corpus",
+        "social_media",
+        # Named one-off and small sources.
+        "court_filing",
+        "special_court_order",
+        "us_court",
+        "us_sec",
+        "us_doj",
+        "occrp",
+        "nrb",
+        "nia",
+        "sebon",
+        "dmli",
+        "ratopati",
+        "news_setopati",
+        "news_shilaptra",
+        # Internal/legacy namespaces with no public rows today. Both are live
+        # CONSTANTS in the codebase, so omitting them would turn a quiet corner
+        # of ingestion into a 3am CronJob failure rather than a CI one:
+        #   `court`     — materials.jsonld.COURT_SOURCE, the court-case
+        #                 projection (`court_case_to_jsonld`).
+        #   `jawafdehi` — jawafdehi_shared.entities.ids.JAWAF_SOURCE, the legacy
+        #                 case-upload bucket that #344 moved uploads OFF.
+        #                 `default_policy_for` still special-cases it for
+        #                 residual rows, so it has to stay writable.
+        # Neither appears in /api/document-sources/ (0 public rows), which is
+        # exactly why a list seeded only from the live catalogue would miss them.
+        "court",
+        "jawafdehi",
+        # KNOWN BAD — listed only so existing rows stay writable. Remove when
+        # the merges land; `chargesheet` → `charge_sheet`,
+        # `court_order_0133` → `court_order`.
+        "chargesheet",
+        "court_order_0133",
+    }
+)
+
+#: Namespaces where a token is minted per instance rather than enumerated.
+#: ``province/<name>`` is the only one: Koshi is live and the other six
+#: provinces are an expected, mechanical expansion, so blocking them would be
+#: friction with no review value — the editorial decision was made once, for
+#: the namespace.
+KNOWN_SOURCE_PREFIXES: tuple[str, ...] = ("province/",)
+
+
+def is_known_source(source: str) -> bool:
+    """True iff ``source`` may be used to create a NEW material."""
+    return source in KNOWN_SOURCES or source.startswith(KNOWN_SOURCE_PREFIXES)
+
+
+def unknown_source_error(source: str) -> str:
+    """The message a rejected token gets. It must say what to DO.
+
+    A bare "invalid source" would send the reader looking for a bug in their
+    payload, when the answer is either a typo on their side or a one-line
+    addition here.
+    """
+    near = sorted(k for k in KNOWN_SOURCES if _looks_like(k, source))
+    hint = f" Did you mean {near[0]!r}?" if near else ""
+    return (
+        f"Unknown material source {source!r}.{hint} A new source token creates a "
+        f"new public shelf, so it must be added to KNOWN_SOURCES in "
+        f"materials/sources.py (with a label, if one can be confirmed) in a "
+        f"reviewed change. Existing materials are unaffected — this check runs "
+        f"only when creating a new one."
+    )
+
+
+def _looks_like(known: str, candidate: str) -> bool:
+    """Cheap near-miss test, aimed at the two shapes we have actually seen.
+
+    `chargesheet` vs `charge_sheet` differ only by separators; `court_order_0133`
+    is a known token with an identifier glued on. Both are caught by comparing
+    the separator-stripped forms and by prefix.
+    """
+    flat = candidate.replace("_", "").replace("-", "").lower()
+    return known.replace("_", "") == flat or candidate.startswith(f"{known}_")
