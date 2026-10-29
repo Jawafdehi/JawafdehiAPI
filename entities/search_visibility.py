@@ -178,9 +178,15 @@ def entity_case_counts(iris: Iterable[str]) -> dict[str, int]:
         )
         return {row["nes_id"]: row["case_count"] for row in rows}
     except Exception:  # noqa: BLE001 — best-effort; reconcile repairs the drift.
+        # Name them. The per-entity version this replaces logged one line per
+        # IRI, and without that an operator cannot tell which documents were
+        # indexed as 0 — i.e. which entities just vanished from public search
+        # until the hourly reconcile. Bounded at 26 by the caller (the
+        # production maximum of binds on one case), so this cannot flood.
         logger.warning(
-            "entity_case_counts failed for %d IRI(s); indexing them as 0",
+            "entity_case_counts failed for %d IRI(s); indexing them as 0: %s",
             len(targets),
+            ", ".join(targets),
             exc_info=True,
         )
         return {}

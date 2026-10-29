@@ -39,14 +39,6 @@ _EXPIRY_SKEW_SECONDS = 60
 _DEFAULT_LIFETIME_SECONDS = 3600
 
 
-#: Transport failures are retried this many times before the error is raised.
-#: Small on purpose: the callers that matter (the poller loop, the scraper
-#: crons) have their own outer retry, so this only has to cover the single-digit
-#: seconds of a broker/proxy blip rather than a real outage.
-_TRANSPORT_RETRIES = 3
-_TRANSPORT_BACKOFF_SECONDS = 0.5
-
-
 class OIDCTokenError(Exception):
     """Raised when a service-account access token cannot be obtained.
 
@@ -121,8 +113,8 @@ class ClientCredentialsTokenProvider:
 
         Raises ``OIDCConfigurationError`` when the provider is not configured or
         the issuer rejects the credentials, and ``OIDCTransportError`` when the
-        token endpoint could not be reached after ``_TRANSPORT_RETRIES``
-        attempts. Both derive from ``OIDCTokenError``.
+        token endpoint could not be reached. Both derive from ``OIDCTokenError``,
+        so an existing ``except OIDCTokenError`` is unaffected.
         """
         if not self._configured():
             raise OIDCConfigurationError(
@@ -139,24 +131,20 @@ class ClientCredentialsTokenProvider:
                 and time.monotonic() < self._expires_at
             ):
                 return self._access_token
-            # Retry only the transport failures. A rejected credential is raised
-            # on the first attempt — hammering the issuer with a secret it has
-            # already refused invites a lockout and delays the real error.
+            # One attempt, deliberately. Retrying here is tempting and wrong:
+            # `_refresh_locked` holds `self._lock` for the whole call, so a
+            # retry loop multiplies every caller's worst case by the retry count
+            # AND serialises every other thread behind it. `review/ngm_client`
+            # and `review/jds_client` both do
+            # `try: bearer_header() except OIDCTokenError: pass` on each
+            # outbound read — they are built to degrade to an unauthenticated
+            # call, and making them wait 3x the timeout first would stall the
+            # worker pool to no purpose.
             #
-            # The sleep happens with the lock held, on purpose: concurrent
-            # callers queue behind one in-flight refresh instead of each opening
-            # its own connection to an endpoint that is already struggling.
-            for attempt in range(_TRANSPORT_RETRIES):
-                try:
-                    return self._refresh_locked()
-                except OIDCTransportError:
-                    if attempt == _TRANSPORT_RETRIES - 1:
-                        raise
-                    time.sleep(_TRANSPORT_BACKOFF_SECONDS * (2**attempt))
-            # Unreachable: the loop either returns or raises on the last pass.
-            raise OIDCTransportError(  # pragma: no cover
-                f"OIDC token request to {self.token_endpoint} failed and was not retried."
-            )
+            # What actually fixed the reported bug is the classification above,
+            # not a retry: callers that can wait now know this failure is worth
+            # waiting on, and retry at their own cadence.
+            return self._refresh_locked()
 
     def _refresh_locked(self) -> str:
         data = {

@@ -280,13 +280,7 @@ def test_bearer_header_returns_bearer_scheme(settings, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def no_backoff(monkeypatch):
-    """Keep the retry behaviour, drop the wall-clock cost of it."""
-    monkeypatch.setattr(cc, "_TRANSPORT_BACKOFF_SECONDS", 0)
-
-
-def test_network_error_is_a_transport_error(monkeypatch, no_backoff):
+def test_network_error_is_a_transport_error(monkeypatch):
     def fake_post(url, data=None, headers=None, timeout=None):
         raise requests.ConnectionError("refused")
 
@@ -295,7 +289,7 @@ def test_network_error_is_a_transport_error(monkeypatch, no_backoff):
         _provider().get_token()
 
 
-def test_read_timeout_is_a_transport_error(monkeypatch, no_backoff):
+def test_read_timeout_is_a_transport_error(monkeypatch):
     """The exact shape that killed the poller in production."""
 
     def fake_post(url, data=None, headers=None, timeout=None):
@@ -307,7 +301,7 @@ def test_read_timeout_is_a_transport_error(monkeypatch, no_backoff):
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404])
-def test_client_error_is_a_configuration_error(monkeypatch, status, no_backoff):
+def test_client_error_is_a_configuration_error(monkeypatch, status):
     calls = []
 
     def fake_post(url, data=None, headers=None, timeout=None):
@@ -323,7 +317,7 @@ def test_client_error_is_a_configuration_error(monkeypatch, status, no_backoff):
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
-def test_server_error_is_a_transport_error(monkeypatch, status, no_backoff):
+def test_server_error_is_a_transport_error(monkeypatch, status):
     def fake_post(url, data=None, headers=None, timeout=None):
         return FakeResponse(status_code=status, text="upstream unavailable")
 
@@ -337,7 +331,7 @@ def test_unconfigured_is_a_configuration_error():
         _provider(client_id="", client_secret="").get_token()
 
 
-def test_non_json_200_is_a_transport_error(monkeypatch, no_backoff):
+def test_non_json_200_is_a_transport_error(monkeypatch):
     """A 200 of HTML is a proxy talking, not the issuer."""
 
     def fake_post(url, data=None, headers=None, timeout=None):
@@ -348,7 +342,7 @@ def test_non_json_200_is_a_transport_error(monkeypatch, no_backoff):
         _provider().get_token()
 
 
-def test_200_without_access_token_is_a_configuration_error(monkeypatch, no_backoff):
+def test_200_without_access_token_is_a_configuration_error(monkeypatch):
     """Well-formed JSON means the issuer answered, and declined."""
 
     def fake_post(url, data=None, headers=None, timeout=None):
@@ -359,7 +353,18 @@ def test_200_without_access_token_is_a_configuration_error(monkeypatch, no_backo
         _provider().get_token()
 
 
-def test_transport_failure_is_retried_then_raised(monkeypatch, no_backoff):
+def test_the_token_endpoint_is_called_exactly_once(monkeypatch):
+    """No retry here, on purpose.
+
+    `_refresh_locked` runs under `self._lock`, so a retry loop multiplies every
+    caller's worst case by the retry count AND serialises every other thread
+    behind it. `review/ngm_client` and `review/jds_client` both do
+    `try: bearer_header() except OIDCTokenError: pass` on each outbound read —
+    they degrade to an unauthenticated call by design, and making them wait 3x
+    the timeout first would stall the worker pool to no purpose. Callers that
+    can afford to wait retry at their own cadence; the classification is what
+    tells them it is worth waiting on.
+    """
     calls = []
 
     def fake_post(url, data=None, headers=None, timeout=None):
@@ -369,25 +374,10 @@ def test_transport_failure_is_retried_then_raised(monkeypatch, no_backoff):
     monkeypatch.setattr(requests, "post", fake_post)
     with pytest.raises(cc.OIDCTransportError):
         _provider().get_token()
-    assert len(calls) == cc._TRANSPORT_RETRIES
+    assert len(calls) == 1
 
 
-def test_transport_failure_that_clears_returns_a_token(monkeypatch, no_backoff):
-    """The case the retry exists for: one blip, then the issuer answers."""
-    calls = []
-
-    def fake_post(url, data=None, headers=None, timeout=None):
-        calls.append(url)
-        if len(calls) == 1:
-            raise requests.ReadTimeout("read timeout")
-        return FakeResponse(json_body={"access_token": "tok-after-retry", "expires_in": 3600})
-
-    monkeypatch.setattr(requests, "post", fake_post)
-    assert _provider().get_token() == "tok-after-retry"
-    assert len(calls) == 2
-
-
-def test_both_subclasses_remain_catchable_as_the_base_error(monkeypatch, no_backoff):
+def test_both_subclasses_remain_catchable_as_the_base_error(monkeypatch):
     """Existing `except OIDCTokenError` handlers must keep working."""
     assert issubclass(cc.OIDCTransportError, cc.OIDCTokenError)
     assert issubclass(cc.OIDCConfigurationError, cc.OIDCTokenError)

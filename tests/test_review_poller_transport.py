@@ -27,11 +27,6 @@ from review.management.commands import review_poller as rp
 
 
 @pytest.fixture
-def no_backoff(monkeypatch):
-    monkeypatch.setattr(rp, "_TRANSPORT_BACKOFF_SECONDS", 0)
-
-
-@pytest.fixture
 def command(monkeypatch):
     """A Command with a token provider that hands out a token for free."""
     cmd = rp.Command()
@@ -45,7 +40,7 @@ def command(monkeypatch):
 
 
 class TestOutboundCallsSurviveABlip:
-    def test_a_reset_connection_becomes_a_poller_error(self, command, no_backoff):
+    def test_a_reset_connection_becomes_a_poller_error(self, command):
         """Not a bare requests exception — the loop only catches PollerError."""
         with mock.patch.object(
             rp.requests,
@@ -56,25 +51,33 @@ class TestOutboundCallsSurviveABlip:
         ):
             with pytest.raises(rp.PollerError) as exc:
                 command._claim(["case_review"])
-        assert "after 3 attempts" in str(exc.value)
+        assert "ConnectionResetError" in str(exc.value)
 
-    def test_a_blip_that_clears_is_invisible_to_the_caller(self, command, no_backoff):
-        responses = [
-            requests.ConnectionError("reset"),
-            mock.Mock(status_code=200, json=lambda: {"id": 7, "kind": "case_review"}),
-        ]
+    def test_a_non_idempotent_post_is_never_retried(self, command):
+        """A retried /claim/ claims a SECOND job.
 
-        def flaky(*args, **kwargs):
-            item = responses.pop(0)
-            if isinstance(item, Exception):
-                raise item
-            return item
+        `requests.RequestException` includes `ReadTimeout`, which fires after
+        the server has already acted. Retrying it leaves job A RUNNING and
+        unworked until its lease expires while the consumer works job B — and
+        a retried `/{id}/result/` submits the same result twice. The poll loop
+        re-claims on the next tick anyway, so the retry bought nothing.
+        """
+        with mock.patch.object(
+            rp.requests, "request", side_effect=requests.ReadTimeout("read timeout")
+        ) as req:
+            with pytest.raises(rp.PollerError):
+                command._claim(["case_review"])
+        assert req.call_count == 1
 
-        with mock.patch.object(rp.requests, "request", side_effect=flaky):
-            job = command._claim(["case_review"])
-        assert job == {"id": 7, "kind": "case_review"}
+    def test_a_result_submission_is_never_retried_either(self, command):
+        with mock.patch.object(
+            rp.requests, "request", side_effect=requests.ReadTimeout("read timeout")
+        ) as req:
+            with pytest.raises(rp.PollerError):
+                command._submit(7, {"status": "done"})
+        assert req.call_count == 1
 
-    def test_an_empty_queue_still_reads_as_empty(self, command, no_backoff):
+    def test_an_empty_queue_still_reads_as_empty(self, command):
         """204 is the hot path; the retry wrapper must not disturb it."""
         with mock.patch.object(
             rp.requests, "request", return_value=mock.Mock(status_code=204)
@@ -82,7 +85,7 @@ class TestOutboundCallsSurviveABlip:
             assert command._claim(["case_review"]) is None
 
     def test_a_transport_failure_fetching_the_token_is_retried_too(
-        self, command, no_backoff
+        self, command
     ):
         """`_headers()` calls the issuer, so it can fail the same way."""
         command.token_provider.get_token.side_effect = cc.OIDCTransportError("read timeout")
@@ -91,7 +94,7 @@ class TestOutboundCallsSurviveABlip:
                 command._claim(["case_review"])
         assert req.call_count == 0
 
-    def test_a_bad_credential_is_not_retried_and_stays_fatal(self, command, no_backoff):
+    def test_a_bad_credential_is_not_retried_and_stays_fatal(self, command):
         """A configuration error must not be absorbed into the loop's retry."""
         command.token_provider.get_token.side_effect = cc.OIDCConfigurationError(
             "invalid_client"
@@ -99,7 +102,7 @@ class TestOutboundCallsSurviveABlip:
         with pytest.raises(cc.OIDCConfigurationError):
             command._claim(["case_review"])
 
-    def test_every_outbound_helper_goes_through_the_retry(self, command, no_backoff):
+    def test_every_outbound_helper_goes_through_the_retry(self, command):
         """A helper added later that calls requests directly would regress this."""
         with mock.patch.object(
             rp.requests, "request", return_value=mock.Mock(status_code=200, json=dict)
@@ -170,3 +173,93 @@ class TestStartupTokenCheck:
         cmd = rp.Command()
         with pytest.raises(rp.PollerError):
             self._run(cmd)
+
+
+class TestTheRunStillEnds:
+    """Absorbing a transport failure must not mean never giving up.
+
+    Converting `requests.ConnectionError` into `PollerError` made the loop's
+    `except PollerError: sleep; continue` catch it — and that handler never
+    consulted `once`. So `--apply --once` against a persistently unreachable
+    jobs API spun forever where it used to exit non-zero, and a CronJob with no
+    `activeDeadlineSeconds` would accumulate overlapping pods instead of
+    failing fast. Found in review, with a live repro; these pin it shut.
+    """
+
+    @staticmethod
+    def _apply_run(monkeypatch, *, once, claim_error=True):
+        provider = mock.Mock()
+        provider.get_token.return_value = "tok"
+        monkeypatch.setattr(rp, "get_provider", lambda: provider)
+        monkeypatch.setattr(rp.settings, "CASEWORK_POLLER_TOKEN", "", raising=False)
+        monkeypatch.setattr(rp.time, "sleep", lambda _s: None)
+        if claim_error:
+            monkeypatch.setattr(
+                rp.Command,
+                "_claim",
+                lambda self, kinds: (_ for _ in ()).throw(rp.PollerError("unreachable")),
+            )
+        cmd = rp.Command()
+        return cmd.handle(
+            apply=True, once=once, poll=0.0, kinds=["case_review"]
+        )
+
+    def test_once_exits_instead_of_spinning(self, monkeypatch):
+        """The regression. Without the fix this never returns."""
+        with pytest.raises(rp.PollerError):
+            self._apply_run(monkeypatch, once=True)
+
+    def test_a_continuous_consumer_gives_up_after_a_budget(self, monkeypatch):
+        """A pod that spins forever against a dead API is invisible; one that
+        exits is a visible CrashLoopBackOff."""
+        with pytest.raises(rp.PollerError) as exc:
+            self._apply_run(monkeypatch, once=False)
+        assert "consecutive failed claims" in str(exc.value)
+
+    def test_the_budget_is_bounded_and_counted(self, monkeypatch):
+        calls = []
+
+        def failing_claim(self, kinds):
+            calls.append(1)
+            raise rp.PollerError("unreachable")
+
+        monkeypatch.setattr(rp.Command, "_claim", failing_claim)
+        with pytest.raises(rp.PollerError):
+            self._apply_run(monkeypatch, once=False, claim_error=False)
+        assert len(calls) == rp._MAX_CONSECUTIVE_CLAIM_FAILURES
+
+    def test_a_success_resets_the_budget(self, monkeypatch):
+        """A blip every few polls must not accumulate into a false give-up.
+
+        9 failures, one successful (empty) claim, then 9 more. Cumulatively
+        that is 18 — well past the budget of 10 — so if the counter did not
+        reset, the loop would raise "consecutive failed claims" before reaching
+        the sentinel. Reaching the sentinel is the proof.
+        """
+
+        class _Sentinel(Exception):
+            """Not a PollerError, so it ends the loop rather than being absorbed."""
+
+        outcomes = (
+            [rp.PollerError("blip")] * 9 + [None] + [rp.PollerError("blip")] * 9 + [_Sentinel()]
+        )
+        seen = []
+
+        def flaky_claim(self, kinds):
+            item = outcomes[len(seen)]
+            seen.append(item)
+            if isinstance(item, Exception):
+                raise item
+            return None  # empty queue, but a successful claim call
+
+        monkeypatch.setattr(rp.Command, "_claim", flaky_claim)
+        provider = mock.Mock()
+        provider.get_token.return_value = "tok"
+        monkeypatch.setattr(rp, "get_provider", lambda: provider)
+        monkeypatch.setattr(rp.settings, "CASEWORK_POLLER_TOKEN", "", raising=False)
+        monkeypatch.setattr(rp.time, "sleep", lambda _s: None)
+
+        cmd = rp.Command()
+        with pytest.raises(_Sentinel):
+            cmd.handle(apply=True, once=False, poll=0.0, kinds=["case_review"])
+        assert len(seen) == len(outcomes)

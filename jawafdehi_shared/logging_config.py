@@ -1,4 +1,5 @@
 import os
+import time
 
 import structlog
 
@@ -16,29 +17,64 @@ _IGNORED_TRANSPORT_ERROR_SIGNATURES = (
 )
 
 #: ``DisallowedHost`` is a client error, not a server fault: Django has already
-#: rejected the request with a 400 before any of our code runs. Reporting it
-#: makes the busiest issue in the project a log of other people's port scans —
-#: 25,293 events on one issue, 77% of all event volume across the org, 10 out of
-#: 10 sampled requests probing for leaked cloud credentials
+#: rejected the request with a 400 before any of our code runs. It was also the
+#: busiest issue in the org — 25,293 events on one issue, 77% of all event
+#: volume, 10 of 10 sampled requests probing for leaked cloud credentials
 #: (``/gcp-key.json``, ``/service-account.json``,
 #: ``/.config/gcloud/application_default_credentials.json``, ``phpinfo.php``).
 #:
-#: Dropping it costs one signal: an ALLOWED_HOSTS misconfiguration after a
-#: deploy would no longer page. That is covered better elsewhere and earlier —
-#: `manage.py check --deploy` runs in CI, and a host that is genuinely ours but
-#: missing from the allowlist fails its readiness probe rather than quietly
-#: serving. Set ``SENTRY_REPORT_DISALLOWED_HOST=true`` to put it back while
-#: investigating one.
+#: RATE-LIMITED, NOT DROPPED. An earlier version dropped it outright and
+#: justified that with two compensating controls that do not exist in this
+#: repo: ``manage.py check --deploy`` is nowhere in ``.github/``, and the
+#: readiness probe cannot catch a bad ``ALLOWED_HOSTS`` because
+#: ``config/settings.py`` appends ``POD_IP`` to it — the kubelet probes by pod
+#: IP, so it passes while every public request 400s.
+#:
+#: What makes rate-limiting sufficient rather than merely softer: Django logs
+#: EVERY occurrence through ``django.security.DisallowedHost``, independently
+#: of Sentry, and that lands in VictoriaLogs with 90d retention (verified:
+#: 275 records in 24h). So the per-occurrence signal is not Sentry's to carry.
+#: Sentry only needs a low-rate heartbeat that the condition exists.
+#:
+#: The window has to be sized against processes, not pods — the Dockerfile runs
+#: ``--workers 2`` and the limiter is process-local, so the ceiling is
+#: ``replicas x 2 / window``. At one hour that ceiling sits ABOVE the observed
+#: ~160 events/day and the limiter would almost never bind; a day brings it to
+#: single digits. An ongoing misconfiguration still re-reports daily rather
+#: than going silent, and shows up immediately in the logs and in the 400 rate
+#: at the proxy.
 _DISALLOWED_HOST_TYPE = "DisallowedHost"
+_DISALLOWED_HOST_WINDOW_ENV = "SENTRY_DISALLOWED_HOST_WINDOW_SECONDS"
+_DEFAULT_DISALLOWED_HOST_WINDOW = 86400.0
+
+#: Monotonic timestamp of the last DisallowedHost event allowed through, per
+#: process. Deliberately process-local and lock-free: ``before_send`` runs on
+#: the reporting thread, the value is a single float, and the worst case from a
+#: race is one extra event — which is cheaper than serialising every event in
+#: every worker behind a lock.
+_last_disallowed_host_report = [float("-inf")]
 
 
-def _report_disallowed_host():
-    return os.getenv("SENTRY_REPORT_DISALLOWED_HOST", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+def _disallowed_host_window():
+    try:
+        window = float(
+            os.getenv(_DISALLOWED_HOST_WINDOW_ENV, _DEFAULT_DISALLOWED_HOST_WINDOW)
+        )
+    except (TypeError, ValueError):
+        return _DEFAULT_DISALLOWED_HOST_WINDOW
+    return max(0.0, window)
+
+
+def _allow_disallowed_host_report(now=None):
+    """Whether this DisallowedHost event is the one to report this window."""
+    window = _disallowed_host_window()
+    if window <= 0:
+        return True  # rate limiting switched off
+    current = time.monotonic() if now is None else now
+    if current - _last_disallowed_host_report[0] < window:
+        return False
+    _last_disallowed_host_report[0] = current
+    return True
 
 
 def add_service_name(_, __, event_dict):
@@ -46,33 +82,39 @@ def add_service_name(_, __, event_dict):
     return event_dict
 
 
-def _exception_types(event, hint):
-    """Every exception class named by this event, from either source."""
-    types = []
+def _exception_signatures(event, hint):
+    """``(type, value)`` for every exception this event names, oldest first.
+
+    One traversal with its None-guards in one place: the same
+    ``(event.get("exception") or {}).get("values") or []`` expression was
+    written out three times in this module.
+    """
+    signatures = []
     exc_info = hint.get("exc_info") if hint else None
     if exc_info and exc_info[0] is not None:
-        types.append(exc_info[0].__name__)
+        signatures.append((exc_info[0].__name__, str(exc_info[1])))
     for value in (event.get("exception") or {}).get("values") or []:
-        if value.get("type"):
-            types.append(value["type"])
-    return types
+        signatures.append((value.get("type") or "", value.get("value") or ""))
+    return signatures
 
 
 def drop_transport_noise(event, hint):
-    """Drop benign disconnect noise and unauthenticated host probes from Sentry."""
-    exc_info = hint.get("exc_info") if hint else None
-    if exc_info and exc_info[0] is not None:
-        text = f"{exc_info[0].__name__}: {exc_info[1]}"
+    """Drop benign disconnect noise and rate-limit unauthenticated host probes."""
+    signatures = _exception_signatures(event, hint)
+
+    for exc_type, exc_value in signatures:
+        text = f"{exc_type}: {exc_value}"
         if any(sig in text for sig in _IGNORED_TRANSPORT_ERROR_SIGNATURES):
             return None
-    for value in (event.get("exception") or {}).get("values") or []:
-        signature = f"{value.get('type', '')}: {value.get('value', '')}"
-        if any(sig in signature for sig in _IGNORED_TRANSPORT_ERROR_SIGNATURES):
+
+    # Only the RAISED exception counts, not its causes. Sentry serialises a
+    # `raise ... from exc` chain into `values` oldest-first, so matching
+    # anywhere in the list would silently swallow an unrelated error that
+    # merely happens to wrap a DisallowedHost.
+    if signatures and signatures[-1][0] == _DISALLOWED_HOST_TYPE:
+        if not _allow_disallowed_host_report():
             return None
-    if not _report_disallowed_host() and _DISALLOWED_HOST_TYPE in _exception_types(
-        event, hint
-    ):
-        return None
+
     return event
 
 

@@ -48,6 +48,13 @@ async def error_cb(exc: Exception) -> None:
     detail = {
         "error_type": type(exc).__name__,
         "error": str(exc) or type(exc).__name__,
+        # nats-py's default passes `exc_info=ex`, and dropping it would cost the
+        # traceback in both the console and Sentry — structlog's chain has
+        # `format_exc_info` precisely to render it, and without it a real
+        # failure arrives as a message with no frames and no way to tell which
+        # subscription raised. Keep it on BOTH paths: the shutdown one is only
+        # quieter, not less detailed.
+        "exc_info": exc,
     }
     if is_shutdown_noise(exc):
         logger.warning("case_events.nats_shutdown_error", **detail)

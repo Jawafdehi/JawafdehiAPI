@@ -64,12 +64,13 @@ from case_proposals.job_handlers import HANDLERS as _PROPOSAL_HANDLERS
 HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS, **_PROPOSAL_HANDLERS}
 
 
-#: How many times one outbound HTTP call is attempted before it is reported as
-#: a ``PollerError``. The queue's own lease/retry model is the real safety net —
-#: this only has to ride out the seconds-long blips (a rolling API deploy, a
-#: reset keepalive) that were previously ending whole runs.
-_TRANSPORT_RETRIES = 3
-_TRANSPORT_BACKOFF_SECONDS = 0.5
+#: Consecutive failed claims before a continuously-polling consumer gives up and
+#: exits non-zero. A transport failure is no longer fatal on the first occurrence
+#: (that was the bug this command had), but it must not become *never* fatal
+#: either: a pod that spins forever against a dead API is invisible, where one
+#: that exits is a visible CrashLoopBackOff. Same reasoning as
+#: ``case_events.consumers.runner.connect``.
+_MAX_CONSECUTIVE_CLAIM_FAILURES = 10
 
 
 class PollerError(Exception):
@@ -155,7 +156,7 @@ class Command(BaseCommand):
         return f"{settings.JOBS_API_BASE.rstrip('/')}{path}"
 
     def _request(self, method, url, *, timeout, **kwargs):
-        """One HTTP call to the platform, with transport failures retried.
+        """One HTTP call to the platform, with transport failures typed.
 
         Every call out of this command goes through here so that a reset
         connection, a read timeout or an unreachable issuer surfaces as a
@@ -166,20 +167,21 @@ class Command(BaseCommand):
         That escape was real: ``_claim`` is called inside ``except PollerError``,
         which never matched ``requests.exceptions.ConnectionError``, so one
         ``ConnectionResetError(104)`` from the API ended the run.
+
+        Deliberately does NOT retry. ``requests.RequestException`` includes
+        ``ReadTimeout``, which fires *after* the server has acted, and every POST
+        here is non-idempotent: a retried ``/claim/`` claims a second job while
+        the first stays RUNNING and unworked until its lease expires, and a
+        retried ``/{id}/result/`` submits the result twice. Retrying is also
+        redundant — the poll loop re-claims on the next tick, and the queue's
+        lease/retry model is the real safety net. One attempt, typed clearly.
         """
-        last = None
-        for attempt in range(_TRANSPORT_RETRIES):
-            try:
-                return requests.request(
-                    method, url, headers=self._headers(), timeout=timeout, **kwargs
-                )
-            except (requests.RequestException, OIDCTransportError) as exc:
-                last = exc
-                if attempt < _TRANSPORT_RETRIES - 1:
-                    time.sleep(_TRANSPORT_BACKOFF_SECONDS * (2**attempt))
-        raise PollerError(
-            f"{method} {url} failed after {_TRANSPORT_RETRIES} attempts: {last}"
-        ) from last
+        try:
+            return requests.request(
+                method, url, headers=self._headers(), timeout=timeout, **kwargs
+            )
+        except (requests.RequestException, OIDCTransportError) as exc:
+            raise PollerError(f"{method} {url} failed: {exc}") from exc
 
     def _post_jobs(self, path, payload, timeout=60):
         return self._request(
@@ -370,13 +372,31 @@ class Command(BaseCommand):
             )
         )
 
+        consecutive_failures = 0
         while True:
             try:
                 job = self._claim(kinds)
             except PollerError as e:
+                # Absorbing this is the point — one blip must not end the run.
+                # But `once` means "drain what is there and exit", and a claim
+                # that cannot be made has nothing to drain: without this the
+                # command spins forever and a CronJob with no
+                # activeDeadlineSeconds accumulates overlapping pods instead of
+                # failing fast. A continuous consumer gets a budget instead of a
+                # single strike, then exits so the failure is visible.
+                consecutive_failures += 1
                 self.stderr.write(f"claim error: {e}")
+                if once:
+                    raise
+                if consecutive_failures >= _MAX_CONSECUTIVE_CLAIM_FAILURES:
+                    raise PollerError(
+                        f"giving up after {consecutive_failures} consecutive failed "
+                        f"claims; last error: {e}"
+                    ) from e
                 time.sleep(poll)
                 continue
+
+            consecutive_failures = 0
 
             if job is None:
                 if once:

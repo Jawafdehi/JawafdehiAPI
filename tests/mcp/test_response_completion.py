@@ -175,3 +175,127 @@ class TestAbandonedResponses:
         server = self._server_with(monkeypatch, cancelled)
         with pytest.raises(asyncio.CancelledError):
             await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+
+
+class TestTheFinisherCannotMakeThingsWorse:
+    """Found in review: both halves of the finisher could themselves fail.
+
+    The peer being gone is one of the reasons a response gets abandoned, so the
+    finishing send is exactly the send most likely to raise. If it escapes, the
+    original failure is replaced by an opaque "Exception in ASGI application" —
+    the outcome this whole mechanism exists to prevent.
+    """
+
+    @staticmethod
+    def _server_with(monkeypatch, handler):
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", handler)
+        return server
+
+    class _DisconnectedSend:
+        """Raises like uvicorn does once the peer is gone."""
+
+        def __init__(self, fail_after=0):
+            self.calls = 0
+            self.fail_after = fail_after
+
+        async def __call__(self, message):
+            self.calls += 1
+            if self.calls > self.fail_after:
+                raise OSError("Cannot write to a closing transport")
+
+    async def test_a_dead_peer_during_the_framed_error_does_not_escape(
+        self, monkeypatch
+    ):
+        async def sends_nothing(scope, receive, send):
+            return
+
+        server = self._server_with(monkeypatch, sends_nothing)
+        await server._handle_http(
+            _make_scope([]), _dummy_receive, self._DisconnectedSend()
+        )
+
+    async def test_a_dead_peer_during_the_body_close_does_not_escape(
+        self, monkeypatch
+    ):
+        send = self._DisconnectedSend(fail_after=2)
+
+        async def dies_mid_stream(scope, receive, send_):
+            await send_({"type": "http.response.start", "status": 200, "headers": []})
+            await send_({"type": "http.response.body", "body": b"x", "more_body": True})
+
+        server = self._server_with(monkeypatch, dies_mid_stream)
+        await server._handle_http(_make_scope([]), _dummy_receive, send)
+
+    async def test_a_send_that_fails_does_not_count_as_a_completed_response(self):
+        """The guard records what went out, not what was attempted.
+
+        Flagging before the await marks a response complete that the send then
+        failed to deliver, and the finisher's `if guard.complete` early-exit
+        then skips precisely the case it exists to catch.
+        """
+
+        class _Failing:
+            async def __call__(self, message):
+                raise OSError("peer gone")
+
+        guard = _ResponseGuard(_Failing())
+        with pytest.raises(OSError):
+            await guard({"type": "http.response.body", "body": b"{}"})
+        assert not guard.complete
+
+
+class TestTheConditionStaysVisible:
+    """Found in review: WARNING would have hidden the issue, not fixed it.
+
+    sentry_sdk's LoggingIntegration reports at `logging.ERROR` and turns
+    anything lower into a breadcrumb. The dominant production signature takes
+    the "handler returned early" path, where there is no exception to report —
+    so this log IS the whole signal, and at WARNING a tool that kept dying
+    would produce zero Sentry events.
+    """
+
+    @staticmethod
+    def _server_with(monkeypatch, handler):
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", handler)
+        return server
+
+    async def test_an_abandoned_response_logs_at_error(self, monkeypatch, caplog):
+        import logging
+
+        async def sends_nothing(scope, receive, send):
+            return
+
+        server = self._server_with(monkeypatch, sends_nothing)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+
+        abandoned = [r for r in caplog.records if "mcp_response_abandoned" in r.getMessage()]
+        assert abandoned, "the abandoned-response condition must be logged"
+        assert all(r.levelno >= logging.ERROR for r in abandoned)
+
+    async def test_the_log_names_the_endpoint(self, monkeypatch, caplog):
+        import logging
+
+        async def sends_nothing(scope, receive, send):
+            return
+
+        server = self._server_with(monkeypatch, sends_nothing)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(
+                _make_scope([], path="/", method="POST"), _dummy_receive, _SendRecorder()
+            )
+        assert "POST" in caplog.text
+
+    async def test_a_normal_response_logs_nothing(self, monkeypatch, caplog):
+        import logging
+
+        async def responds(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        server = self._server_with(monkeypatch, responds)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+        assert "mcp_response_abandoned" not in caplog.text

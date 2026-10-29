@@ -444,6 +444,21 @@ class BatchCaseCountTests(TestCase):
         ):
             assert entity_case_counts([PERSON]) == {}
 
+    def test_the_failure_log_names_the_affected_entities(self):
+        """Otherwise nobody can tell which documents were zeroed.
+
+        The per-entity version logged one line per IRI. Losing that means an
+        operator sees "26 IRIs failed" and cannot act on it.
+        """
+        with patch(
+            "entities.search_visibility._published_bind_queryset",
+            side_effect=RuntimeError("cases DB unreachable"),
+        ):
+            with self.assertLogs("entities.search_visibility", level="WARNING") as logs:
+                entity_case_counts([PERSON, OTHER])
+        assert PERSON in logs.output[0]
+        assert OTHER in logs.output[0]
+
 
 class BoundEntityRefreshIsBatchedTests(TestCase):
     """The N+1 itself, pinned end to end through the signal.
