@@ -204,6 +204,38 @@ def _search_fold(text: str) -> str:
     return " ".join(folded.split())
 
 
+def search_fold(text: str) -> str:
+    """The query side of :func:`matches_search`, for callers that need the tokens.
+
+    :func:`matches_search` answers *whether* a string matches; a caller that has
+    to say *where* — to cut a snippet around the matching span — needs the same
+    folded tokens it compares against ``search_key``. Exposed rather than
+    reimplemented so the two can never drift: a second fold would quietly accept
+    or reject different strings than the matcher that decided there was a hit at
+    all. See ``materials.content_api._phonetic_span``.
+    """
+    return _search_fold(text)
+
+
+def search_key_uncached(text: str) -> str:
+    """:func:`search_key` without touching the shared cache.
+
+    For callers that fold strings from a corpus rather than from a fixed
+    working set, and hold their own request-scoped cache instead. The shared
+    cache below is sized for a few hundred short captions; a caller pushing one
+    document's whole vocabulary through it would evict that working set on
+    every request and keep the replacement resident forever. See
+    ``materials.content_api.DocumentScan``.
+    """
+    from .indexing import has_devanagari
+
+    cleaned = _clean_for_search(text)
+    parts = [_search_fold(cleaned)]
+    if has_devanagari(cleaned):
+        parts.append(_search_fold(to_roman_colloquial(cleaned)))
+    return " ".join(p for p in parts if p)
+
+
 @lru_cache(maxsize=8192)
 def search_key(text: str) -> str:
     """The form both a stored string and a typed query are reduced to.
@@ -218,14 +250,12 @@ def search_key(text: str) -> str:
     captions cost ~23 ms uncached and effectively nothing on the second pass.
     Bounded at 8192 entries — captions are short, and the working set is one
     document's worth.
-    """
-    from .indexing import has_devanagari
 
-    cleaned = _clean_for_search(text)
-    parts = [_search_fold(cleaned)]
-    if has_devanagari(cleaned):
-        parts.append(_search_fold(to_roman_colloquial(cleaned)))
-    return " ".join(p for p in parts if p)
+    **Pass short strings.** The bound is on entry COUNT, not bytes, so folding
+    page-sized text here costs ~6 kB per slot and 8192 of them stay resident
+    for the life of the process. Use :func:`search_key_uncached` for that.
+    """
+    return search_key_uncached(text)
 
 
 def matches_search(haystack: str, query: str) -> bool:

@@ -18,7 +18,7 @@ description: Reads documents in the Jawafdehi archive — CIAA and Auditor Gener
 
 ## Call order and workflow
 
-Four tools, in this order. Everything before the last step is cheap; only
+Five tools, in this order. Everything before the last step is cheap; only
 `jawafdehi:read_document_part` returns document text.
 
 | Tool | Returns |
@@ -26,6 +26,7 @@ Four tools, in this order. Everything before the last step is cheap; only
 | `jawafdehi:list_document_sources` | every source, its size, and how much has been read |
 | `jawafdehi:get_document_overview` | one document: counts, readability, provenance, PDF links |
 | `jawafdehi:list_document_contents` | its page map or table captions — no page text, no table markdown |
+| `jawafdehi:search_document` | where a term appears inside it: mixed page/table/figure hits with snippets |
 | `jawafdehi:read_document_part` | one slice: a page range, one table, or one figure |
 
 **Never request a whole document.** The largest are a few hundred pages of Devanagari —
@@ -38,13 +39,22 @@ Document lookup:
 - [ ] 1. Identify the source  (jawafdehi:list_document_sources)
 - [ ] 2. Get the document IRI (jawafdehi:search_control_plane)
 - [ ] 3. Check it is readable (jawafdehi:get_document_overview)
-- [ ] 4. Find the right part  (jawafdehi:list_document_contents)
+- [ ] 4. Find the right part  (jawafdehi:search_document — or
+         jawafdehi:list_document_contents to browse the index)
 - [ ] 5. Read ONE part        (jawafdehi:read_document_part)
 - [ ] 6. Verify any figure against the source PDF before quoting it
 ```
 
-A question about a number is almost always answered by **a table**, not by prose. Scan
-captions at step 4 rather than reading pages.
+**Step 4 has two doors, and picking the wrong one wastes calls.** Use
+`jawafdehi:search_document` when you know *what you are looking for* — it searches the page
+text, the table captions AND their rows, and the figure titles and notes, and hands back the
+page number and key to read next. Use `jawafdehi:list_document_contents` when you want to
+*browse* — to see the shape of a document, or to scan all 145 captions at once.
+
+A question about a number is almost always answered by **a table**, not by prose. But the
+index reaches a table only through its CAPTION, so if the subject sits in the rows — or in a
+paragraph — searching finds it and scanning captions does not. Never page through a long
+report hunting for a term; that is what step 4's search is for.
 
 ## Worked example
 
@@ -96,6 +106,33 @@ stating either number.
 
 Five calls, under 20 KB, one citable table.
 
+### The other door: when the caption will not help
+
+**Question:** "What does the 2081/82 report say about bribery?"
+
+No caption contains that. Scanning 145 of them finds nothing, and the report is 446 pages.
+Search instead — `jawafdehi:search_document(iri=iri, q="घुस")`:
+
+```json
+{"total": 7, "count": 7, "truncated": false,
+ "hits": [
+   {"kind": "page",  "page_no": 294, "key": null, "field": "text",
+    "match": "literal", "coverage_state": "anchored",
+    "snippet": "…३.५.१ घुस (रिसवत) सम्बन्धी मुद्दा आयोगले आर्थिक वर्ष…"},
+   {"kind": "table", "page_no": 294, "key": "p0294-t1", "field": "caption",
+    "match": "literal",
+    "snippet": "घुस (रिसवत) सम्बन्धी मुद्दाका प्रतिवादीको विवरण"}]}
+```
+
+The prose and the table that belongs to it, together, in page order. Then
+`jawafdehi:read_document_part(iri=iri, page=294)` or `(iri=iri, table="p0294-t1")`.
+
+Romanized queries work (`q="ghus"` finds घुस). A plain number addresses a **page** and is
+not looked for in the text — `q="294"` returns what is on page 294, not every mention of
+the digits 294 — and `q="ujuri 294"` is that word on page 294 only. Devanagari numerals
+(`q="१९४८८"`) are ordinary text and are searched as such. Check `match` before quoting,
+per the rules below.
+
 ## Rules you must not break
 
 **Address tables and figures by `key`, never by `ordinal`.** A key (`p0030-t1` = page 30,
@@ -114,7 +151,20 @@ one cell (`10,245 27.67`). The quality fields describe whether we *read* the pag
 whether the digits are right.
 
 **`truncated: true` means your answer is incomplete.** Narrow the range or fetch one item
-at a time. Never summarise a clipped payload as though it were whole.
+at a time. Never summarise a clipped payload as though it were whole. On a search result
+the same flag means you are seeing the first hits **by page order, not the best ones** —
+`total` is how many the document really holds.
+
+**A search hit's `match` says how strong it is, and they are not interchangeable.**
+`literal` is the term as you typed it. `phonetic` matched by SOUND — a Latin-keyboard query
+reaching Devanagari (`ghus` → घुस) — and may well be a different word, so read the snippet
+before trusting it. `folio` matched the page NUMBER — you asked for a page, so the snippet is just the opening
+of it and says nothing about whether your term appears. Quote only what the snippet
+actually shows, and never report a phonetic or folio hit as the document using that term.
+
+**A snippet is a window, not a sentence.** It is ~190 characters around the match, and an
+ellipsis marks each end that was cut. Fetch the page or key with
+`jawafdehi:read_document_part` before quoting anything from it.
 
 **On a chart, `estimated: true` means the value was read off the image**, not from a
 printed number. Never present it as equivalent to a printed figure.
@@ -175,10 +225,14 @@ The upstream also counts `ocr_vision` (read by a vision model: has text, weaker 
 response. A page range covering more than 50 pages is refused outright rather than silently
 cut.
 
+`jawafdehi:search_document` returns at most 50 hits per call and needs no character cap —
+every hit is a short snippet, so a search of the largest report in the archive is a few
+thousand characters. `total` always reports the true count, whatever `limit` you pass.
+
 ## If the tools are missing
 
 The MCP serves unauthenticated callers a small read-only catalogue and never prompts for
-login, so these four will simply be absent. Call `jawafdehi:get_current_user`: "No
+login, so these five will simply be absent. Call `jawafdehi:get_current_user`: "No
 authenticated user; public read-only access" means you are anonymous. Reconnecting does not
 fix it — see `docs/mcp/README.md`.
 
