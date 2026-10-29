@@ -125,8 +125,13 @@ do, because the scraper's shaper sets a field the upload path does not.
 → **Worth doing on its own:** backfill `publisher` on those 24 rows, so the two
 provenances describe their documents equally well. No IRI change, no redirect
 requirement, no case-evidence risk — unlike every merge in this document.
-Implemented as `manage.py backfill_publisher --source press_release`
-(dry-run by default).
+Implemented as `manage.py backfill_publisher --source press_release --from
+ciaa_press_release` (dry-run by default). The value is COPIED from a real
+sibling row rather than composed: a label's publisher is bilingual display text
+(`{"en", "ne"}`) while a material's is a schema.org node
+(`{"@type": …, "name": {…}}`), and consumers read `publisher.name`. Writing the
+label's shape would have left these rows looking fixed and still
+unattributed.
 
 **Corrected: this is ONE pair, not a general rule.** An earlier revision said
 "case uploads carry no publisher while the scraped ones do", generalising from

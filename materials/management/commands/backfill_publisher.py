@@ -1,121 +1,162 @@
-"""Write a reviewed publisher onto materials that carry none.
+"""Copy a source's publisher onto sibling materials that carry none.
 
 Some shapers set ``publisher`` and some do not. The `ciaa` scraper stamps
 ``अख्तियार दुरुपयोग अनुसन्धान आयोग`` on all 3,556 of its press releases, while
 the 24 case-uploaded ones under ``press_release`` carry nothing — the same
-documents, one with an attribution and one without. This command closes that
-gap for a source whose publisher is already REVIEWED.
+documents, one attributed and one not.
 
-**The allowed set is not a list in this file — it is ``SOURCE_LABELS``.** A
-source carries a publisher there only when one could be confirmed from evidence
-(the materials' own field, a scraper, or the frontend's editorial registry), and
-sources whose attribution varies per record deliberately carry none:
-``news`` (the outlet differs per article), ``document``, ``legal_corpus``,
-``social_media``, ``court_filing``, ``province/koshi``. So "refuse a source with
-no label publisher" is the same rule as "refuse a source where a single
-publisher would be a lie", already decided once and reviewed. That is why this
-command reads the labels instead of taking a value on the command line: a
-``--publisher`` flag would let an operator stamp an unreviewed attribution onto
-a public archive in one line.
+**The value is copied from a real sibling row, never composed here.** An earlier
+version wrote the publisher out of ``SOURCE_LABELS``, which is the wrong SHAPE:
+a label's publisher is bilingual display text (``{"en": …, "ne": …}``), while a
+material's is a schema.org node (``{"@type": "GovernmentOrganization", "name":
+{…}}``). Consumers read ``publisher.name`` — the MCP document tool does — so
+those rows would have stayed effectively unattributed while looking fixed, which
+is worse than the gap. Copying an existing document's own value cannot get the
+shape wrong, and it means this command can only ever propagate an attribution
+the archive already makes somewhere else.
 
-Two further guards, both about not overwriting a truth we did not establish:
+That also bounds the blast radius without a second rule. ``--from`` must be a
+source whose rows actually carry a publisher, so ``--from ag`` is refused: `ag`
+has none either, and the earlier label-driven version would happily have stamped
+one generic name onto all 99,750 charge sheets.
 
-* a row that ALREADY has a ``publisher`` is never touched, whatever it says;
-* ``--source`` is required and takes no default, so the blast radius is always
-  named explicitly.
+Guards, all about not overwriting a truth we did not establish:
 
-Dry-run by default: it reports what it would write and writes nothing.
+* the donor's publisher must be UNANIMOUS across the rows sampled — a source
+  with two different values has no single answer to copy;
+* a row that already has one is never touched, whatever it says;
+* rows are locked and re-read inside the transaction, so a concurrent edit is
+  not silently undone;
+* ``--source`` and ``--from`` are both required and take no default.
 
-    manage.py backfill_publisher --source press_release
-    manage.py backfill_publisher --source press_release --write
+Dry-run by default.
+
+    manage.py backfill_publisher --source press_release --from ciaa_press_release
+    manage.py backfill_publisher --source press_release --from ciaa_press_release --write
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from materials.models import Material
-from materials.sources import SOURCE_LABELS
+
+#: How many donor rows to inspect when establishing the value. The question is
+#: "does this source speak with one voice", which a sample answers; reading
+#: 99,750 rows to find the second distinct value would not change the verdict.
+DONOR_SAMPLE = 200
 
 
 def needs_publisher(data: Any) -> bool:
     """True iff the doc carries no usable ``publisher``.
 
-    Treats an empty dict/string as absent — a falsy publisher is not an
-    attribution, and leaving it in place would mean the gap is never closed.
+    An empty dict or string counts as ABSENT — a falsy publisher is not an
+    attribution, and treating it as present would mean the gap never closes.
     """
-    if not isinstance(data, dict):
-        return False
-    return not data.get("publisher")
+    return isinstance(data, dict) and not data.get("publisher")
+
+
+def donor_publisher(source: str) -> dict[str, Any]:
+    """The one publisher node ``source`` uses, or raise if there isn't exactly one."""
+    rows = (
+        Material.objects.filter(source=source, is_deleted=False)
+        .values_list("data", flat=True)[:DONOR_SAMPLE]
+    )
+    seen = {
+        json.dumps(d["publisher"], sort_keys=True, ensure_ascii=False)
+        for d in rows
+        if isinstance(d, dict) and d.get("publisher")
+    }
+    if not seen:
+        raise CommandError(
+            f"--from {source!r} carries no publisher on any of its rows, so there is "
+            f"nothing to copy. (This is why `ag` cannot be used as a donor: its "
+            f"99,750 charge sheets have no attribution either.)"
+        )
+    if len(seen) > 1:
+        raise CommandError(
+            f"--from {source!r} uses {len(seen)} different publishers, so there is no "
+            f"single value to copy: {sorted(seen)[:3]}"
+        )
+    return json.loads(seen.pop())
 
 
 class Command(BaseCommand):
-    help = "Write a source's reviewed publisher onto its materials that carry none."
+    help = "Copy a source's publisher onto sibling materials that carry none."
 
     def add_arguments(self, parser):
+        parser.add_argument("--source", required=True, help="Token to backfill.")
         parser.add_argument(
-            "--source",
+            "--from",
+            dest="donor",
             required=True,
-            help="The source token to backfill. Must carry a publisher in SOURCE_LABELS.",
+            help="Token to copy the publisher FROM. Must carry one, unanimously.",
         )
-        parser.add_argument(
-            "--write",
-            action="store_true",
-            help="Apply the change. Without it the command reports and writes nothing.",
-        )
+        parser.add_argument("--write", action="store_true", help="Apply the change.")
         parser.add_argument(
             "--limit", type=int, default=0, help="Stop after N rows (0 = no limit)."
         )
 
     def handle(self, *args, **options):
-        source = options["source"]
-        label = SOURCE_LABELS.get(source)
-        if label is None:
-            raise CommandError(
-                f"{source!r} has no entry in SOURCE_LABELS, so there is no reviewed "
-                f"publisher to write. Label it first (materials/sources.py)."
-            )
-        publisher = label.get("publisher")
-        if not publisher:
-            raise CommandError(
-                f"{source!r} is labelled but deliberately carries NO publisher — its "
-                f"attribution varies per record, so a single value would be false for "
-                f"most of the shelf. Nothing to backfill."
-            )
+        source, donor = options["source"], options["donor"]
+        limit = options["limit"]
+        if limit < 0:
+            raise CommandError("--limit cannot be negative.")
+        if source == donor:
+            raise CommandError("--source and --from must differ.")
 
-        rows = Material.objects.filter(source=source, is_deleted=False).only("iri", "data")
-        todo = [m for m in rows.iterator(chunk_size=500) if needs_publisher(m.data)]
-        if options["limit"]:
-            todo = todo[: options["limit"]]
+        publisher = donor_publisher(donor)
+        targets = [
+            iri
+            for iri, data in Material.objects.filter(
+                source=source, is_deleted=False
+            ).values_list("iri", "data")
+            if needs_publisher(data)
+        ]
+        if limit:
+            targets = targets[:limit]
 
-        total = rows.count()
         self.stdout.write(
-            f"{source}: {total} live materials, {len(todo)} without a publisher\n"
-            f"publisher to write: {publisher}"
+            f"{source}: {len(targets)} row(s) without a publisher\n"
+            f"copying from {donor}: "
+            f"{json.dumps(publisher, ensure_ascii=False, sort_keys=True)}"
         )
-        for m in todo[:10]:
-            self.stdout.write(f"  {m.iri}")
-        if len(todo) > 10:
-            self.stdout.write(f"  … and {len(todo) - 10} more")
+        # Every IRI, not a head: an operator approving a write to a public
+        # archive should be able to see each row it will touch, and a truncated
+        # list is exactly where an unintended one hides.
+        for iri in targets:
+            self.stdout.write(f"  {iri}")
 
-        if not todo:
+        if not targets:
             self.stdout.write(self.style.SUCCESS("nothing to do"))
             return
         if not options["write"]:
             self.stdout.write(
-                self.style.WARNING(f"\nDRY RUN — pass --write to update {len(todo)} row(s)")
+                self.style.WARNING(f"\nDRY RUN — pass --write to update {len(targets)} row(s)")
             )
             return
 
-        # Saved one row at a time inside a transaction rather than bulk_update:
-        # Material.save() is what fires the search reindex (materials/signals.py),
-        # and a bulk_update would leave the index serving documents whose stored
-        # attribution no longer matches.
+        written = 0
         with transaction.atomic(using="ngm"):
-            for m in todo:
-                m.data = {**m.data, "publisher": publisher}
-                m.save(update_fields=["data", "updated_at"])
-        self.stdout.write(self.style.SUCCESS(f"\nwrote publisher to {len(todo)} row(s)"))
+            # Locked and RE-READ inside the transaction. The scan above ran
+            # outside it, so a caseworker edit landing in between would be
+            # silently undone by writing back the stale document we had in
+            # hand — this command adds one key, it does not replay a snapshot.
+            for row in (
+                Material.objects.using("ngm")
+                .select_for_update()
+                .filter(iri__in=targets, is_deleted=False)
+            ):
+                if not needs_publisher(row.data):
+                    continue
+                row.data = {**row.data, "publisher": publisher}
+                row.save(update_fields=["data", "updated_at"])
+                written += 1
+        skipped = len(targets) - written
+        self.stdout.write(self.style.SUCCESS(f"\nwrote publisher to {written} row(s)"))
+        if skipped:
+            self.stdout.write(f"{skipped} row(s) changed under us and were left alone")
