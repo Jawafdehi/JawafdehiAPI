@@ -22,6 +22,7 @@ import json
 
 import pytest
 
+from jawafdehi_mcp import http_server
 from jawafdehi_mcp.http_server import JawafdehiMCPServer, _ResponseGuard
 
 from .test_http_integration import _dummy_receive, _make_scope, _SendRecorder
@@ -415,7 +416,11 @@ class TestOneFailureIsOneIssue:
 
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert len(errors) == 1
-        assert "mcp_request_failed" in errors[0].getMessage()
+        # One record, under the name operators are told to alert on. An
+        # earlier version logged `mcp_request_failed` here and demoted
+        # `mcp_response_abandoned` to DEBUG, which left a post-headers crash
+        # missing from the very signal the alert watches.
+        assert "mcp_response_abandoned" in errors[0].getMessage()
 
     async def test_that_record_carries_the_exception_for_sentry(
         self, monkeypatch, caplog
@@ -533,3 +538,100 @@ class TestADeadPeerIsNeverADefect:
 
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert len(errors) == 1
+
+
+class TestTheGuardCoversTheWholeRequest:
+    """Round four: the prologue was outside it.
+
+    The guard used to be installed only around
+    `session_manager.handle_request`, leaving the authentication prologue
+    uncovered. Anything other than `OIDCError` raised while resolving a bearer
+    escaped with no response and nothing reported — reproducing the original
+    555-event signature in the one place the fix did not reach.
+    """
+
+    async def test_a_crash_resolving_the_bearer_still_answers(self, monkeypatch):
+        async def explode(token):
+            raise AttributeError("OIDC_OP_JWKS_ENDPOINT was renamed")
+
+        monkeypatch.setattr(http_server, "resolve_bearer_identity", explode)
+        server = JawafdehiMCPServer()
+        send = _SendRecorder()
+        await server._handle_http(
+            _make_scope([(b"authorization", b"Bearer tok")]), _dummy_receive, send
+        )
+        assert send.status == 500
+        assert json.loads(send.body)["error"]["code"] == -32603
+
+    async def test_that_crash_is_reported_with_its_exception(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        async def explode(token):
+            raise AttributeError("OIDC_OP_JWKS_ENDPOINT was renamed")
+
+        monkeypatch.setattr(http_server, "resolve_bearer_identity", explode)
+        server = JawafdehiMCPServer()
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(
+                _make_scope([(b"authorization", b"Bearer tok")]),
+                _dummy_receive,
+                _SendRecorder(),
+            )
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        assert errors[0].exc_info[0] is AttributeError
+
+
+class TestOnlyARealHangUpCountsAsOne:
+    """Round four: any send failure was being read as a disconnect.
+
+    Treating every send exception that way demotes genuine ASGI faults —
+    uvicorn's "Unexpected ASGI message after response already completed",
+    "Response content shorter than Content-Length", a TypeError on a malformed
+    message — to a benign hang-up, producing zero Sentry events and a
+    truncated response.
+    """
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ConnectionResetError("reset by peer"),
+            BrokenPipeError("broken pipe"),
+            OSError("Cannot write to a closing transport"),
+        ],
+    )
+    async def test_a_real_hang_up_is_recognised(self, exc):
+        assert http_server.is_client_gone(exc)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            RuntimeError("Unexpected ASGI message after response already completed"),
+            RuntimeError("Response content shorter than Content-Length"),
+            TypeError("malformed ASGI message"),
+            ValueError("something else entirely"),
+            OSError("No space left on device"),
+        ],
+    )
+    async def test_a_server_fault_is_not(self, exc):
+        assert not http_server.is_client_gone(exc)
+
+    async def test_a_server_fault_during_send_is_still_reported(self, monkeypatch, caplog):
+        import logging
+
+        class _BrokenSend:
+            async def __call__(self, message):
+                raise RuntimeError("Unexpected ASGI message")
+
+        async def writes(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", writes)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _BrokenSend())
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors, "a genuine ASGI fault must not be demoted to a hang-up"

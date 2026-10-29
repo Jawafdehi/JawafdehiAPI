@@ -67,6 +67,14 @@ _DEFAULT_DISALLOWED_HOST_WINDOW = 86400.0
 _MAX_TRACKED_HOSTS = 512
 _disallowed_host_last_reported: dict[str, float] = {}
 
+#: Total DisallowedHost events reported per window per process, across all
+#: hosts. The per-host map alone is not a limit against a scanner that rotates
+#: its Host header — every request would look like a new host and report. This
+#: is the ceiling that makes the volume bounded no matter what the client does.
+_MAX_REPORTS_PER_WINDOW = 10
+_window_started_at = float("-inf")
+_reports_this_window = 0
+
 #: ``Invalid HTTP_HOST header: 'evil.example'. You may need to add ...``
 _DISALLOWED_HOST_PATTERN = re.compile(r"Invalid HTTP_HOST header: '([^']*)'")
 
@@ -88,17 +96,46 @@ def _rejected_host(exc_value):
 
 
 def _allow_disallowed_host_report(host, now=None):
-    """Whether this host's DisallowedHost is the one to report this window."""
+    """Whether this host's DisallowedHost is the one to report this window.
+
+    Two limits, because per-host alone is not a limit at all against this
+    adversary: a scanner that rotates its Host header gets a fresh slot every
+    request, and the one already observed here uses two hostnames. So a global
+    ceiling bounds the total while the per-host map keeps a hostname nobody has
+    seen before reporting promptly.
+
+    Losing a genuine event to the global ceiling is survivable, and that is
+    what makes the ceiling acceptable: Django logs EVERY occurrence through
+    ``django.security.DisallowedHost`` into VictoriaLogs (90d), so the
+    authoritative signal is the log. Sentry is only the bounded heartbeat.
+    """
     window = _disallowed_host_window()
     if window <= 0:
         return True  # rate limiting switched off
     current = time.monotonic() if now is None else now
+
     last = _disallowed_host_last_reported.get(host)
     if last is not None and current - last < window:
         return False
+
+    # Global ceiling, reset once per window.
+    global _window_started_at, _reports_this_window
+    if current - _window_started_at >= window:
+        _window_started_at = current
+        _reports_this_window = 0
+    if _reports_this_window >= _MAX_REPORTS_PER_WINDOW:
+        return False
+    _reports_this_window += 1
+
     if len(_disallowed_host_last_reported) >= _MAX_TRACKED_HOSTS:
-        # A scanner rotating Host headers must not grow this without limit.
-        _disallowed_host_last_reported.clear()
+        # Evict the OLDEST, never clear: clearing drops the timestamp of the
+        # host that is actually flooding, which then reports again on its next
+        # request — so overflow would make the limiter looser, not tighter.
+        oldest = min(
+            _disallowed_host_last_reported,
+            key=lambda name: _disallowed_host_last_reported[name],
+        )
+        del _disallowed_host_last_reported[oldest]
     _disallowed_host_last_reported[host] = current
     return True
 

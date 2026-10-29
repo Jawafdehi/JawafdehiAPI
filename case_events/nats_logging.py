@@ -39,13 +39,35 @@ logger = logging.getLogger(__name__)
 #: means in-flight work outlived the client's drain budget while the process was
 #: already on its way out — worth seeing in the logs, not worth an alert.
 #:
-#: Matched by class *name* rather than by import: the exception lives in
-#: ``nats.errors``, and this module is imported from Django settings-adjacent
-#: code paths that must not require nats-py to be installed.
 _SHUTDOWN_ERROR_NAMES = frozenset({"DrainTimeoutError", "ConnectionDrainingError"})
 
 
+def _shutdown_error_classes() -> tuple[type[BaseException], ...]:
+    """The real ``nats.errors`` classes, when they can be imported.
+
+    Prefer classes to names. Name matching alone silently downgrades any
+    unrelated exception that happens to be called ``DrainTimeoutError``, and
+    silently STOPS downgrading if nats-py renames one or starts raising a
+    subclass — which would bring the 86-events-per-rollout regression back at
+    ERROR with nothing to indicate why.
+
+    The name fallback below is kept only for the import-less case; every
+    current caller imports ``nats`` on the line above its
+    ``from case_events.nats_logging import error_cb``, so in practice the
+    classes are always available.
+    """
+    try:
+        from nats import errors
+    except Exception:  # noqa: BLE001 - nats-py genuinely optional in some trees
+        return ()
+    found = [getattr(errors, name, None) for name in _SHUTDOWN_ERROR_NAMES]
+    return tuple(cls for cls in found if isinstance(cls, type))
+
+
 def is_shutdown_noise(exc: BaseException) -> bool:
+    classes = _shutdown_error_classes()
+    if classes and isinstance(exc, classes):
+        return True
     return type(exc).__name__ in _SHUTDOWN_ERROR_NAMES
 
 
@@ -61,7 +83,7 @@ async def error_cb(exc: Exception) -> None:
         level,
         "nats async error (%s): %s",
         type(exc).__name__,
-        exc or type(exc).__name__,
+        str(exc) or type(exc).__name__,
         # The whole reason this is stdlib and not structlog — see module docstring.
         exc_info=exc,
         extra={"error_type": type(exc).__name__},

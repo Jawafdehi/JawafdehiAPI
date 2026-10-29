@@ -29,6 +29,8 @@ from jawafdehi_shared.logging_config import drop_transport_noise
 def fresh_window(monkeypatch):
     """Each test starts with the rate limiter having reported nothing."""
     monkeypatch.setattr(logging_config, "_disallowed_host_last_reported", {})
+    monkeypatch.setattr(logging_config, "_window_started_at", float("-inf"))
+    monkeypatch.setattr(logging_config, "_reports_this_window", 0)
 
 
 def _host_event(host):
@@ -251,3 +253,39 @@ class TestTheWindowIsPerHost:
             len(logging_config._disallowed_host_last_reported)
             <= logging_config._MAX_TRACKED_HOSTS
         )
+
+    def test_a_rotating_host_header_is_actually_rate_limited(self):
+        """Per-host alone is no limit at all: every request looks new.
+
+        The observed adversary already uses two hostnames, so rotating is a
+        trivial change for it. The global ceiling is what bounds the volume.
+        """
+        reported = sum(
+            drop_transport_noise(_host_event(f"h{n}.example"), {}) is not None
+            for n in range(5000)
+        )
+        assert reported <= logging_config._MAX_REPORTS_PER_WINDOW
+
+    def test_overflow_evicts_the_oldest_rather_than_clearing(self, monkeypatch):
+        """Clearing would drop the flooding host's timestamp too, so it would
+        report again on its next request — overflow making the limiter looser."""
+        monkeypatch.setattr(logging_config, "_MAX_REPORTS_PER_WINDOW", 10**9)
+        drop_transport_noise(_host_event("flooder.example"), {})
+        for n in range(logging_config._MAX_TRACKED_HOSTS + 10):
+            drop_transport_noise(_host_event(f"h{n}.example"), {})
+        # The flooder was the oldest, so it may have been evicted — what must
+        # NOT happen is the map being wiped wholesale.
+        assert (
+            len(logging_config._disallowed_host_last_reported)
+            >= logging_config._MAX_TRACKED_HOSTS - 1
+        )
+
+    def test_the_window_resets_the_global_ceiling(self, monkeypatch):
+        monkeypatch.setenv("SENTRY_DISALLOWED_HOST_WINDOW_SECONDS", "60")
+        for n in range(50):
+            drop_transport_noise(_host_event(f"a{n}.example"), {})
+        # Exhausted; now move past the window.
+        monkeypatch.setattr(logging_config, "_window_started_at", float("-inf"))
+        monkeypatch.setattr(logging_config, "_reports_this_window", 0)
+        fresh = _host_event("later.example")
+        assert drop_transport_noise(fresh, {}) is fresh

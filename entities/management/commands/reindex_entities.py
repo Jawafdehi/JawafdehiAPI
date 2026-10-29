@@ -185,6 +185,24 @@ def _refresh_derived(
     locations[iri] = entity_locations(iri)
 
 
+#: Chunk size for the catchup's batch resolution.
+#:
+#: `_iris_touched_since` is UNBOUNDED — a single location bind drags in every
+#: sibling bind of its case — while both batch helpers are documented for a
+#: small, known set: `locations_for_iris` says "SMALL" outright, and
+#: `entity_case_counts`' failure log names every IRI it was given. Handing
+#: either the whole set would build an unbounded `IN (...)` (on sqlite, past
+#: SQLITE_MAX_VARIABLE_NUMBER) and, on a DB failure, emit one WARNING of
+#: hundreds of KB. 500 keeps the query shape sane and the log line readable
+#: while still being ~500x better than one query per IRI.
+_DERIVED_BATCH_SIZE = 500
+
+
+def _chunked(items: list[str], size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
 def _prefill_derived(
     counts: dict[str, int],
     locations: dict[str, tuple[list[str], list[str]]],
@@ -200,13 +218,12 @@ def _prefill_derived(
     an empty mapping rather than raising, and the catchup is a narrowing of an
     already-complete pass.
     """
-    if not iris:
-        return
-    resolved_counts = entity_case_counts(iris)
-    resolved_locations = locations_for_iris(iris)
-    for iri in iris:
-        counts[iri] = resolved_counts.get(iri, 0)
-        locations[iri] = resolved_locations.get(iri, ([], []))
+    for chunk in _chunked(iris, _DERIVED_BATCH_SIZE):
+        resolved_counts = entity_case_counts(chunk)
+        resolved_locations = locations_for_iris(chunk)
+        for iri in chunk:
+            counts[iri] = resolved_counts.get(iri, 0)
+            locations[iri] = resolved_locations.get(iri, ([], []))
 
 
 def _iris_touched_since(since) -> set[str]:

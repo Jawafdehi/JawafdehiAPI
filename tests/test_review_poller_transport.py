@@ -151,6 +151,21 @@ class TestStartupTokenCheck:
         self._run(cmd)
         assert "could not reach the OIDC token endpoint" in capsys.readouterr().err
 
+    def test_a_bare_base_class_error_still_aborts_cleanly(self, monkeypatch):
+        """`OIDCTokenError` is still public and still raised by name elsewhere.
+
+        Catching only the two subclasses let it escape as a raw traceback
+        instead of the PollerError this command contracts to raise.
+        """
+        provider = mock.Mock()
+        provider.get_token.side_effect = cc.OIDCTokenError("something unclassified")
+        monkeypatch.setattr(rp, "get_provider", lambda: provider)
+        monkeypatch.setattr(rp.settings, "CASEWORK_POLLER_TOKEN", "", raising=False)
+
+        cmd = rp.Command()
+        with pytest.raises(rp.PollerError):
+            self._run(cmd)
+
     def test_a_bad_credential_still_aborts_the_run(self, monkeypatch):
         """The guard's original purpose, which must survive the split."""
         provider = mock.Mock()
@@ -330,3 +345,98 @@ class TestANonJsonBodyDoesNotEndTheRun:
         ):
             with pytest.raises(rp.PollerError):
                 command._list_queued(["case_review"])
+
+
+class TestBackoffAndEscapes:
+    """Round four: two holes left in the failure handling."""
+
+    @staticmethod
+    def _run(monkeypatch, *, once, claim, poll=3.0, sleeps=None):
+        provider = mock.Mock()
+        provider.get_token.return_value = "tok"
+        monkeypatch.setattr(rp, "get_provider", lambda: provider)
+        monkeypatch.setattr(rp.settings, "CASEWORK_POLLER_TOKEN", "", raising=False)
+        monkeypatch.setattr(
+            rp.time, "sleep", (sleeps.append if sleeps is not None else (lambda _s: None))
+        )
+        monkeypatch.setattr(rp.Command, "_claim", claim)
+        return rp.Command().handle(
+            apply=True, once=once, poll=poll, kinds=["case_review"]
+        )
+
+    def test_the_retry_backs_off_instead_of_hammering(self, monkeypatch):
+        """A flat `poll` sleep means ~300 claims per pod across the budget,
+        each with a token fetch, against a service that is already failing."""
+        clock = itertools.count(0.0, 100.0)
+        monkeypatch.setattr(rp.time, "monotonic", lambda: next(clock))
+        sleeps = []
+
+        def always_fails(self, kinds):
+            raise rp.PollerError("unreachable")
+
+        with pytest.raises(rp.PollerError):
+            self._run(monkeypatch, once=False, claim=always_fails, sleeps=sleeps)
+
+        assert sleeps == sorted(sleeps), "backoff must be non-decreasing"
+        assert sleeps[-1] > sleeps[0], "it must actually grow"
+        assert max(sleeps) <= rp._MAX_FAILURE_SLEEP_SECONDS
+
+    def test_poll_zero_cannot_hot_spin(self, monkeypatch):
+        """`--poll 0` would otherwise be a busy loop for the whole budget."""
+        clock = itertools.count(0.0, 100.0)
+        monkeypatch.setattr(rp.time, "monotonic", lambda: next(clock))
+        sleeps = []
+
+        def always_fails(self, kinds):
+            raise rp.PollerError("unreachable")
+
+        with pytest.raises(rp.PollerError):
+            self._run(monkeypatch, once=False, claim=always_fails, poll=0.0, sleeps=sleeps)
+        assert min(sleeps) >= rp._MIN_FAILURE_SLEEP_SECONDS
+
+    def test_a_success_clears_the_backoff_too(self, monkeypatch):
+        """Otherwise a long-lived consumer that saw a blip stays slow forever."""
+
+        class _Sentinel(Exception):
+            pass
+
+        outcomes = [rp.PollerError("x")] * 4 + [None] + [rp.PollerError("x"), _Sentinel()]
+        seen = []
+        sleeps = []
+
+        def flaky(self, kinds):
+            item = outcomes[len(seen)]
+            seen.append(item)
+            if isinstance(item, Exception):
+                raise item
+            return None
+
+        with pytest.raises(_Sentinel):
+            self._run(monkeypatch, once=False, claim=flaky, sleeps=sleeps)
+        # The sleep after the post-success failure is back at the floor.
+        assert sleeps[-1] == sleeps[0]
+
+
+class TestSubmitFailuresDoNotEndTheRun:
+    """`_process_job`'s unknown-kind branch calls `_submit` outside any try.
+
+    `_submit` now raises PollerError on a transport failure, and the loop's
+    `except PollerError` wraps only `_claim` — so a reset there propagated out
+    and ended the run, the exact escape the budget exists to bound.
+    """
+
+    @pytest.fixture
+    def command(self, monkeypatch):
+        cmd = rp.Command()
+        cmd.token_provider = mock.Mock()
+        cmd.token_provider.get_token.return_value = "tok"
+        monkeypatch.setattr(
+            rp.settings, "JOBS_API_BASE", "https://api.test/api/jobs", raising=False
+        )
+        return cmd
+
+    def test_an_unknown_kind_whose_report_fails_does_not_raise(self, command):
+        with mock.patch.object(
+            rp.requests, "request", side_effect=requests.ConnectionError("reset")
+        ):
+            command._process_job({"id": 9, "kind": "a_kind_with_no_handler"})

@@ -44,7 +44,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from review.oidc_client_credentials import (
-    OIDCConfigurationError,
+    OIDCTokenError,
     OIDCTransportError,
     get_provider,
 )
@@ -79,6 +79,12 @@ HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS, **_PROPOSAL_HANDLERS}
 #: that cannot ride out the known outage is a budget that turns a recoverable
 #: blip into a failed run.
 _FAILURE_BUDGET_SECONDS = 900.0
+
+#: Floor and ceiling for the exponential backoff between failed claims, so a
+#: `--poll 0` consumer cannot hot-spin and a long outage does not sleep past
+#: the budget it is being measured against.
+_MIN_FAILURE_SLEEP_SECONDS = 1.0
+_MAX_FAILURE_SLEEP_SECONDS = 60.0
 
 
 class PollerError(Exception):
@@ -282,9 +288,20 @@ class Command(BaseCommand):
         if handler is None:
             # We claimed a kind we can't handle (shouldn't happen — we only claim
             # our --kinds). Report it as a failure so it isn't stuck RUNNING.
-            self._submit(
-                job_id, {"status": "failed", "error": f"no handler for kind {kind!r}"}
-            )
+            #
+            # Guarded because `_submit` now raises `PollerError` on a transport
+            # failure, and this call sits outside `_process_job`'s try. An
+            # unguarded reset here would propagate past the loop's
+            # `except PollerError` (which wraps only `_claim`) and end the run —
+            # the exact escape the budget exists to bound. The job stays
+            # RUNNING until its lease expires, which the queue already handles.
+            try:
+                self._submit(
+                    job_id,
+                    {"status": "failed", "error": f"no handler for kind {kind!r}"},
+                )
+            except PollerError as e:
+                self.stderr.write(f"  could not report unknown kind for {job_id}: {e}")
             self.stderr.write(f"  job {job_id}: no handler for kind {kind!r}")
             return
 
@@ -375,13 +392,17 @@ class Command(BaseCommand):
         # having given the issuer a chance to come back.
         try:
             self.token_provider.get_token()
-        except OIDCConfigurationError as e:
-            raise PollerError(str(e)) from e
         except OIDCTransportError as e:
             self.stderr.write(
                 f"warning: could not reach the OIDC token endpoint at startup ({e}); "
                 "continuing — the poll loop will retry."
             )
+        except OIDCTokenError as e:
+            # Configuration errors AND the bare base class. Catching only the
+            # two subclasses let a plain `OIDCTokenError` — still public, still
+            # raised by name elsewhere in the tree — escape as a raw traceback
+            # instead of the clean PollerError this command contracts to raise.
+            raise PollerError(str(e)) from e
 
         # Read-only by default: just report the queued jobs and exit.
         if not apply:
@@ -401,6 +422,7 @@ class Command(BaseCommand):
         )
 
         failing_since = None
+        consecutive_failures = 0
         while True:
             try:
                 job = self._claim(kinds)
@@ -424,10 +446,22 @@ class Command(BaseCommand):
                         f"giving up after {elapsed:.0f}s of failed claims; "
                         f"last error: {e}"
                     ) from e
-                time.sleep(poll)
+                # Back off while it is down. A flat `poll` sleep means ~300
+                # claims per pod across a 900s budget — against a service that
+                # is already failing, and each one costs a token fetch too.
+                # With `--poll 0` it would be a hot spin for the whole window.
+                consecutive_failures += 1
+                time.sleep(
+                    min(
+                        max(poll, _MIN_FAILURE_SLEEP_SECONDS)
+                        * (2 ** min(consecutive_failures - 1, 6)),
+                        _MAX_FAILURE_SLEEP_SECONDS,
+                    )
+                )
                 continue
 
             failing_since = None
+            consecutive_failures = 0
 
             if job is None:
                 if once:

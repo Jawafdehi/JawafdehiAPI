@@ -193,8 +193,12 @@ def entity_case_counts(iris: Iterable[str]) -> dict[str, int]:
         # Name them. The per-entity version this replaces logged one line per
         # IRI, and without that an operator cannot tell which documents were
         # indexed as 0 — i.e. which entities just vanished from public search
-        # until the hourly reconcile. Bounded at 26 by the caller (the
-        # production maximum of binds on one case), so this cannot flood.
+        # until the hourly reconcile.
+        #
+        # Callers are responsible for keeping the list small enough that this
+        # is readable: the signal fan-out is bounded at 26 (the production
+        # maximum of binds on one case), and `reindex_entities` chunks its
+        # unbounded catchup set before calling here for exactly this reason.
         # `%s` on the list rather than `", ".join(targets)`: the join would run
         # INSIDE this handler and raise TypeError on a non-string nes_id,
         # escaping a function whose entire contract is to degrade quietly —
