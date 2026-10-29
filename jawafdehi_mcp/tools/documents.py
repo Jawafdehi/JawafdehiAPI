@@ -349,8 +349,12 @@ class SearchDocumentTool(BaseTool):
             "different word, and 'folio' matched the page NUMBER and says "
             "nothing about the text — do not quote a phonetic or folio hit as "
             "though the document used that term. 'total' is the real number of "
-            "hits; if 'truncated' is true you are seeing the first few of many, "
-            "so narrow the query rather than concluding these are all of them."
+            "hits; if 'truncated' is true you are seeing the first few of many "
+            "IN PAGE ORDER - not the most relevant - so the page you want may "
+            "be past the window. 'pages' lists every page carrying a hit, "
+            "including those; read it, then fetch that page directly or pass "
+            "'offset' to walk further. Never conclude a document says nothing "
+            "more from a truncated window."
         )
 
     @property
@@ -373,6 +377,16 @@ class SearchDocumentTool(BaseTool):
                     "description": (
                         f"How many hits to return (1-{self.MAX_LIMIT}). Defaults "
                         "to the maximum; 'total' reports the full count either way."
+                    ),
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Where to start in the result set, 0-based. Hits are "
+                        "in PAGE order, not ranked, so on a common term the "
+                        "first window is the front of the document — use this "
+                        "to reach a later page, or just read 'pages'."
                     ),
                 },
             },
@@ -398,6 +412,13 @@ class SearchDocumentTool(BaseTool):
             if not 1 <= limit <= self.MAX_LIMIT:
                 return _error(f"limit must be between 1 and {self.MAX_LIMIT}.")
             params["limit"] = limit
+        offset = arguments.get("offset")
+        if offset is not None:
+            if not isinstance(offset, int) or isinstance(offset, bool):
+                return _error("offset must be an integer.")
+            if offset < 0:
+                return _error("offset must not be negative.")
+            params["offset"] = offset
 
         result = await _call(self.name, f"{material_path}/search", params=params)
         if isinstance(result, ToolExecutionResult):
@@ -435,12 +456,28 @@ class SearchDocumentTool(BaseTool):
             ),
         }
         if data.get("truncated"):
-            data["citation"]["warning"] = (
-                f"This document holds {data.get('total')} hits and only "
-                f"{data.get('count')} are shown. These are the first by page "
-                "order, NOT the best — narrow the query rather than "
-                "summarising the document from this sample."
+            pages = data.get("pages") or []
+            shown = {hit.get("page_no") for hit in (data.get("hits") or [])}
+            beyond = [page for page in pages if page not in shown]
+            warning = (
+                f"This document holds {data.get('total')} hits and "
+                f"{data.get('count')} are shown, from offset "
+                f"{data.get('offset', 0)}. They are the first in PAGE ORDER, "
+                "not the most relevant, so do not read them as the best ones."
             )
+            if beyond:
+                # The failure this exists to prevent, seen in production: घुस
+                # matches 81 times in the 35th CIAA report, the first 50 run
+                # pages 10-265, and the page actually worth reading is 294 —
+                # outside the window, with nothing in the response to say so.
+                shown_pages = beyond[:20]
+                warning += (
+                    f" {len(beyond)} further page(s) carry hits outside it:"
+                    f" {shown_pages}{' and more' if len(beyond) > 20 else ''}."
+                    " Read one directly with read_document_part, or raise"
+                    " 'offset' to walk the rest."
+                )
+            data["citation"]["warning"] = warning
         return result
 
 

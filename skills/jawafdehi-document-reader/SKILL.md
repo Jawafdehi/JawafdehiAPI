@@ -151,9 +151,14 @@ one cell (`10,245 27.67`). The quality fields describe whether we *read* the pag
 whether the digits are right.
 
 **`truncated: true` means your answer is incomplete.** Narrow the range or fetch one item
-at a time. Never summarise a clipped payload as though it were whole. On a search result
-the same flag means you are seeing the first hits **by page order, not the best ones** —
-`total` is how many the document really holds.
+at a time. Never summarise a clipped payload as though it were whole.
+
+On a search result it means something sharper, and getting it wrong will make you miss the
+answer. Hits come back in **page order, not ranked**, so a truncated window is the FRONT of
+the document rather than the best matches. Searching `घुस` in the 35th CIAA report returns
+81 hits; the first 50 run pages 10–265, and the page actually worth reading is 294. Always
+read **`pages`** — it lists every page carrying a hit, including ones outside the window —
+and go to the page you want with `read_document_part`, or pass `offset` to walk further.
 
 **A search hit's `match` says how strong it is, and they are not interchangeable.**
 `literal` is the term as you typed it. `phonetic` matched by SOUND — a Latin-keyboard query
@@ -227,7 +232,9 @@ cut.
 
 `jawafdehi:search_document` returns at most 50 hits per call and needs no character cap —
 every hit is a short snippet, so a search of the largest report in the archive is a few
-thousand characters. `total` always reports the true count, whatever `limit` you pass.
+thousand characters. `total` always reports the true count, whatever `limit` you pass, and
+`pages` always lists every page with a hit, whatever the window. Use `offset` to walk past
+the first 50.
 
 ## If the tools are missing
 

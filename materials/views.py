@@ -1634,7 +1634,10 @@ def _search_variant(request) -> str:
     """
     params = request.query_params
     query = (params.get("q") or "").strip()
-    return f"search|q={query}|limit={_search_limit(request)[0]}"
+    return (
+        f"search|q={query}|limit={_search_limit(request)[0]}"
+        f"|offset={_search_offset(request)[0]}"
+    )
 
 
 def _search_limit(request) -> tuple[int, str | None]:
@@ -1662,6 +1665,34 @@ def _search_limit(request) -> tuple[int, str | None]:
     return value, None
 
 
+def _search_offset(request) -> tuple[int, str | None]:
+    """``(offset, error)`` — where in the result set this window starts.
+
+    Exists because page order plus a cap hid the tail of a long document:
+    ``घुस`` matches 81 times in the 35th CIAA report and the first 50 run pages
+    10-265, so the page worth reading was past the edge with no way to ask for
+    it. The design note anticipated this for the listings — "add
+    ``limit``/``offset``, the envelope already carries ``count``" — and the
+    same applies here.
+
+    Unbounded above on purpose, unlike ``limit``. An offset past the end is not
+    a malformed request, it is the end of a walk, and it answers with an empty
+    ``hits`` and a truthful ``total`` rather than a 400. Negative IS refused:
+    it would slice from the end of the list and hand back the LAST few hits
+    while the caller believed it had asked for the first.
+    """
+    raw = request.query_params.get("offset")
+    if raw is None:
+        return 0, None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0, "offset must be a non-negative integer."
+    if value < 0:
+        return 0, "offset must not be negative."
+    return value, None
+
+
 SEARCH_PARAMETERS = [
     OpenApiParameter(
         "q",
@@ -1686,6 +1717,19 @@ SEARCH_PARAMETERS = [
         description=(
             f"How many hits to return, 1-{MAX_SEARCH_HITS}. Defaults to the "
             f"maximum. `total` always reports the full count."
+        ),
+    ),
+    OpenApiParameter(
+        "offset",
+        OpenApiTypes.INT,
+        OpenApiParameter.QUERY,
+        description=(
+            "Where in the result set to start, 0-based. Hits are in PAGE "
+            "order, so on a common term the first window is the front of the "
+            "document and a later page needs an offset — or just read "
+            "`pages`, which lists every page with a hit whether or not it is "
+            "in this window. An offset past the end is an empty `hits`, not "
+            "an error."
         ),
     ),
 ]
@@ -1745,6 +1789,9 @@ def material_content_search(request, source: str, ident: str):
     limit, limit_error = _search_limit(request)
     if limit_error is not None:
         return _bad_request(limit_error)
+    offset, offset_error = _search_offset(request)
+    if offset_error is not None:
+        return _bad_request(offset_error)
 
     content = content_for(iri)
     if content is None:
@@ -1761,7 +1808,7 @@ def material_content_search(request, source: str, ident: str):
     if (cached := _not_modified(request, content, variant)) is not None:
         return cached
 
-    result = search_document(iri, query, limit=limit)
+    result = search_document(iri, query, limit=limit, offset=offset)
     return _content_response(
         # ``q`` echoed so an empty result is readable as "this document does not
         # say that" rather than as a request that never carried a query.
