@@ -22,6 +22,7 @@ from jawafdehi_mcp.tools.documents import (
     ListDocumentContentsTool,
     ListDocumentSourcesTool,
     ReadDocumentPartTool,
+    SearchDocumentTool,
     _material_path,
 )
 
@@ -30,6 +31,7 @@ TOOLS = [
     ListDocumentSourcesTool(),
     GetDocumentOverviewTool(),
     ListDocumentContentsTool(),
+    SearchDocumentTool(),
     ReadDocumentPartTool(),
 ]
 
@@ -444,3 +446,88 @@ class TestReadingAnUnparsedDocument:
         # One call, and it is the read. No POST, no second round trip.
         assert caller.await_count == 1
         assert caller.await_args_list[0].args[0] == "GET"
+
+
+class TestSearchDocument:
+    """Finding a term inside a document, without reading the document."""
+
+    @pytest.mark.asyncio
+    async def test_sends_the_query_to_the_search_route(self):
+        caller = AsyncMock(return_value={"data": {}})
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            await SearchDocumentTool().execute({"iri": IRI, "q": "घुस"})
+        assert caller.await_args.args[1].endswith("/ee0b4f80b24b8665/search")
+        assert caller.await_args.kwargs["params"] == {"q": "घुस"}
+
+    @pytest.mark.asyncio
+    async def test_a_limit_is_forwarded_when_given_and_omitted_when_not(self):
+        caller = AsyncMock(return_value={"data": {}})
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            await SearchDocumentTool().execute({"iri": IRI, "q": "घुस", "limit": 5})
+        assert caller.await_args.kwargs["params"] == {"q": "घुस", "limit": 5}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [{}, {"q": ""}, {"q": "   "}, {"q": 7}])
+    async def test_a_missing_query_is_refused_before_any_request(self, bad):
+        # A blank q on the content LISTINGS means "no filter". Here it would
+        # mean the whole document, which is the one thing this surface exists
+        # to prevent — so it is refused rather than forwarded.
+        caller = AsyncMock()
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            result = await SearchDocumentTool().execute({"iri": IRI, **bad})
+        assert result.is_error
+        caller.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("limit", [0, -1, 51, "five", True])
+    async def test_a_bad_limit_is_refused_before_any_request(self, limit):
+        caller = AsyncMock()
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            result = await SearchDocumentTool().execute(
+                {"iri": IRI, "q": "घुस", "limit": limit}
+            )
+        assert result.is_error
+        caller.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_result_is_flagged_as_a_sample(self):
+        caller = AsyncMock(
+            return_value={
+                "data": {
+                    "material": IRI,
+                    "total": 212,
+                    "count": 50,
+                    "truncated": True,
+                    "hits": [],
+                }
+            }
+        )
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            body = _payload(await SearchDocumentTool().execute({"iri": IRI, "q": "घुस"}))
+        warning = body["data"]["citation"]["warning"]
+        # Page order, not relevance order — a model told these are the "best"
+        # 50 of 212 would summarise the document from an arbitrary prefix.
+        assert "212" in warning and "NOT the best" in warning
+
+    @pytest.mark.asyncio
+    async def test_an_untruncated_result_carries_no_warning(self):
+        caller = AsyncMock(
+            return_value={
+                "data": {"material": IRI, "total": 3, "count": 3, "truncated": False, "hits": []}
+            }
+        )
+        with patch("jawafdehi_mcp.tools.documents.request_control_plane", new=caller):
+            body = _payload(await SearchDocumentTool().execute({"iri": IRI, "q": "घुस"}))
+        assert "warning" not in body["data"]["citation"]
+
+    def test_the_description_separates_the_three_kinds_of_match(self):
+        # The model is the consumer that will otherwise quote a phonetic hit as
+        # though the document used that term.
+        d = SearchDocumentTool().description
+        assert "literal" in d and "phonetic" in d and "folio" in d
+
+    def test_the_description_says_why_it_beats_the_index(self):
+        assert "cannot find a paragraph by what it says" in SearchDocumentTool().description
+
+    def test_the_read_tool_points_at_search_first(self):
+        assert "search_document" in ReadDocumentPartTool().description

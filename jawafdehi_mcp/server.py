@@ -48,6 +48,7 @@ from .tools import (
     PatchJawafdehiCaseTool,
     ReadDocumentPartTool,
     SearchControlPlaneTool,
+    SearchDocumentTool,
     SearchJawafdehiCasesTool,
     SubmitNESChangeTool,
     ToolExecutionResult,
@@ -93,10 +94,11 @@ TOOLS: list[BaseTool] = [
     GetNESEntityVersionsTool(),
     DeleteNESEntityTool(),
     BrowseMaterialsTool(),
-    # Document reading: sources → overview → index → one slice.
+    # Document reading: sources → overview → index or search → one slice.
     ListDocumentSourcesTool(),
     GetDocumentOverviewTool(),
     ListDocumentContentsTool(),
+    SearchDocumentTool(),
     ReadDocumentPartTool(),
     ManageMaterialTool(),
     BrowseCourtDataTool(),

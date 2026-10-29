@@ -266,6 +266,7 @@ class TestPublicToolSetIntegrity:
         "list_document_sources",
         "get_document_overview",
         "list_document_contents",
+        "search_document",
         "read_document_part",
         "get_current_user",
         "search_control_plane",
@@ -323,7 +324,7 @@ class TestPublicToolSetIntegrity:
 
     def test_all_tool_names_count(self):
         assert ALL_TOOL_NAMES == self.EXPECTED_ALL_TOOL_NAMES
-        assert len(ALL_TOOL_NAMES) == 30
+        assert len(ALL_TOOL_NAMES) == 31
 
     def test_authentication_required_tool_set(self):
         assert ALL_TOOL_NAMES - ANONYMOUS_TOOL_NAMES == {
@@ -333,6 +334,7 @@ class TestPublicToolSetIntegrity:
             "list_document_sources",
             "get_document_overview",
             "list_document_contents",
+            "search_document",
             "read_document_part",
             "ngm_extract_case_data",
             "create_jawafdehi_case",

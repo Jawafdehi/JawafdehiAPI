@@ -55,6 +55,7 @@ from .sources import build_catalogue
 from .content_api import (
     CONTENT_TYPES,
     MAX_PAGE_SPAN,
+    MAX_SEARCH_HITS,
     content_for,
     content_summary,
     figure_payload,
@@ -66,6 +67,7 @@ from .content_api import (
     list_pages,
     list_tables,
     page_payload,
+    search_document,
     table_payload,
     version_token,
 )
@@ -1543,6 +1545,151 @@ def _keyed_response(request, iri: str, content, kind: str, variant: str = ""):
         )
     return _content_response(
         {"material": iri, "type": kind, "item": item}, content, variant=variant
+    )
+
+
+# ── Search inside one document ───────────────────────────────────────────────
+
+
+def _search_variant(request) -> str:
+    """Which search RESULT this is, for the ETag.
+
+    Deliberately NOT ``_content_variant``'s format. The two routes share a
+    document and therefore share ``ingested_at``, so without a distinguishable
+    prefix a caller echoing a tag by hand between them could be told its
+    ``?type=table`` listing was still fresh when it had asked for search hits.
+    Every string here starts ``search|``, which that format can never produce.
+
+    ``q`` is casefolded and ``limit`` normalised to the number actually applied,
+    so two spellings of one question share a tag rather than minting two cache
+    entries for one body. The digest in ``version_token`` is what keeps the
+    Devanagari out of the header.
+    """
+    params = request.query_params
+    query = (params.get("q") or "").strip().casefold()
+    return f"search|q={query}|limit={_search_limit(request)[0]}"
+
+
+def _search_limit(request) -> tuple[int, str | None]:
+    """``(limit, error)`` for the request — the cap is ours, not the caller's.
+
+    Absent means the maximum, so the common call takes no argument. A value over
+    the cap is REFUSED rather than quietly lowered: a caller that asked for 500
+    hits and received 50 without being told has no way to know its answer is a
+    tenth of the document, which is the same lie the page-range cap refuses to
+    tell.
+    """
+    raw = request.query_params.get("limit")
+    if raw is None:
+        return MAX_SEARCH_HITS, None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return MAX_SEARCH_HITS, "limit must be a positive integer."
+    if value < 1:
+        return MAX_SEARCH_HITS, "limit must be at least 1."
+    if value > MAX_SEARCH_HITS:
+        return MAX_SEARCH_HITS, (
+            f"limit may be at most {MAX_SEARCH_HITS}; got {value}."
+        )
+    return value, None
+
+
+SEARCH_PARAMETERS = [
+    OpenApiParameter(
+        "q",
+        OpenApiTypes.STR,
+        OpenApiParameter.QUERY,
+        required=True,
+        description=(
+            "What to look for inside this document. Searches page text, table "
+            "captions and markdown, and figure titles and notes. Matches "
+            "phonetically as well as literally, so a query typed on a Latin "
+            "keyboard reaches Devanagari text (`ghus` finds घुस). A bare number "
+            "is an exact page folio, and `ujuri 31` is a word on page 31."
+        ),
+    ),
+    OpenApiParameter(
+        "limit",
+        OpenApiTypes.INT,
+        OpenApiParameter.QUERY,
+        description=(
+            f"How many hits to return, 1-{MAX_SEARCH_HITS}. Defaults to the "
+            f"maximum. `total` always reports the full count."
+        ),
+    ),
+]
+
+
+@extend_schema(  # ty: ignore[invalid-argument-type]
+    parameters=SEARCH_PARAMETERS,
+    summary="Search inside one document",
+    tags=["materials"],
+)
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def material_content_search(request, source: str, ident: str):
+    """``GET /api/materials/<source>/<ident>/search?q=…`` → hits inside this document.
+
+    The way into a document you have not read. ``…/content`` can address a page,
+    a table or a figure once you know which one you want; this is how you find
+    out. Hits are MIXED — a paragraph, the table beside it and a chart come back
+    together, in page order — because "where does this report discuss bribery"
+    is one question and three listings would make the caller reassemble it.
+
+    **Snippets, never pages.** Each hit carries ~190 characters around the match
+    plus the ``page_no`` and ``key`` that ``…/content`` takes, so the follow-up
+    fetch is exact. That is the entire reason this endpoint is cheaper than the
+    thing it replaces: one Auditor General report is 3.96 MB and ~1.86M
+    characters, and nobody should have to read it to find one sentence.
+
+    **In Postgres.** The scan is bounded by one document and runs in the
+    database we already have — see the note in ``materials.content_api``, which
+    records why a fragment index in OpenSearch is the wrong price for this.
+
+    Same visibility gate, same ``ETag``/``Vary`` contract and the same
+    "no content at all is a 404" distinction as ``…/content``; see
+    :func:`material_content`.
+    """
+    iri, doc, error = _resolve_for_content(request, source, ident)
+    if error is not None:
+        return error
+
+    query = request.query_params.get("q")
+    if query is None or not query.strip():
+        # Not "every hit in the document" — that is the document. A blank q on
+        # the content listings means "no filter" and means nothing here.
+        return _bad_request("q is required; it is what to search for.")
+    if len(query) > MAX_QUERY_LENGTH:
+        return _bad_request(
+            f"q may be at most {MAX_QUERY_LENGTH} characters; got {len(query)}."
+        )
+    limit, limit_error = _search_limit(request)
+    if limit_error is not None:
+        return _bad_request(limit_error)
+
+    content = content_for(iri)
+    if content is None:
+        return _content_response(
+            {
+                "detail": "No content for this material.",
+                "extractable": material_extract.is_extractable(doc or {}),
+            },
+            None,
+            http_status=status.HTTP_404_NOT_FOUND,
+        )
+
+    variant = _search_variant(request)
+    if (cached := _not_modified(request, content, variant)) is not None:
+        return cached
+
+    result = search_document(iri, query, limit=limit)
+    return _content_response(
+        # ``q`` echoed so an empty result is readable as "this document does not
+        # say that" rather than as a request that never carried a query.
+        {"material": iri, "q": query, **result},
+        content,
+        variant=variant,
     )
 
 

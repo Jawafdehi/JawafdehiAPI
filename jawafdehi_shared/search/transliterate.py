@@ -204,6 +204,19 @@ def _search_fold(text: str) -> str:
     return " ".join(folded.split())
 
 
+def search_fold(text: str) -> str:
+    """The query side of :func:`matches_search`, for callers that need the tokens.
+
+    :func:`matches_search` answers *whether* a string matches; a caller that has
+    to say *where* — to cut a snippet around the matching span — needs the same
+    folded tokens it compares against ``search_key``. Exposed rather than
+    reimplemented so the two can never drift: a second fold would quietly accept
+    or reject different strings than the matcher that decided there was a hit at
+    all. See ``materials.content_api._phonetic_span``.
+    """
+    return _search_fold(text)
+
+
 @lru_cache(maxsize=8192)
 def search_key(text: str) -> str:
     """The form both a stored string and a typed query are reduced to.

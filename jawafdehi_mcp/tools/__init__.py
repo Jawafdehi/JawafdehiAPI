@@ -6,6 +6,7 @@ from .documents import (
     ListDocumentContentsTool,
     ListDocumentSourcesTool,
     ReadDocumentPartTool,
+    SearchDocumentTool,
 )
 from .control_plane import (
     BrowseCourtDataTool,
@@ -52,6 +53,7 @@ __all__ = [
     "ListDocumentContentsTool",
     "ListDocumentSourcesTool",
     "ReadDocumentPartTool",
+    "SearchDocumentTool",
     "ManageMaterialTool",
     "BrowseCourtDataTool",
     "ManageCourtDataTool",

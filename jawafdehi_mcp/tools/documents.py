@@ -3,16 +3,24 @@
 The archive holds 346,341 documents and the largest are a few hundred pages of
 Devanagari. A tool that returns one of those returns something no model can read:
 measured, a single Auditor General report is 3.96 MB of JSON, roughly 600k–900k
-tokens. So nothing here returns a document. These four return the *shape* of one,
+tokens. So nothing here returns a document. These five return the *shape* of one,
 and then bounded slices of it.
 
     list_document_sources     what the archive holds, and how much of it is READ
     get_document_overview     what is inside one document, and whether it is readable
     list_document_contents    its page map / table captions / figure titles — no text
+    search_document           where a term appears inside it — snippets, mixed kinds
     read_document_part        one bounded slice: a page range, a table, a figure
 
 The ordering is the intended call sequence, and each step is cheap enough to be
 wrong about. Only the last one returns document text.
+
+``search_document`` is the branch in that sequence, and the one worth reaching
+for first on a long document: ``list_document_contents`` answers "what is in
+here" and only reaches a table through its CAPTION, so a model looking for what
+a document *says* had no move except reading page ranges until it found
+something. Search answers that directly and returns snippets, so the expensive
+``read_document_part`` call that follows is aimed rather than exploratory.
 
 **Two honesty rules are structural here, not advisory.** A page we hold but could
 not transcribe comes back with empty text, and if that renders the same as a
@@ -310,6 +318,126 @@ class ListDocumentContentsTool(BaseTool):
         return result if isinstance(result, ToolExecutionResult) else _text(result)
 
 
+class SearchDocumentTool(BaseTool):
+    #: Mirrors the API's own ceiling (``materials.content_api.MAX_SEARCH_HITS``).
+    #: Stated here so the schema can bound the argument and the model is told
+    #: the limit before it spends a call discovering it as a 400.
+    MAX_LIMIT = 50
+
+    @property
+    def name(self) -> str:
+        return "search_document"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Find where a term appears INSIDE one document, without reading "
+            "the document. Searches the page text, the table captions and "
+            "table contents, and the figure titles and notes, and returns "
+            "mixed hits — a page, a table and a chart can all come back "
+            "together — in page order, each with a short snippet, its page "
+            "number and the key to fetch it with read_document_part. Use this "
+            "before read_document_part on anything longer than a few pages: "
+            "list_document_contents only reaches a table through its caption, "
+            "so it cannot find a paragraph by what it says. Matches "
+            "phonetically as well as literally, so a Latin-keyboard query "
+            "reaches Devanagari text ('ghus' finds घुस); a bare number means "
+            "that exact printed page. Every hit carries 'match': 'literal' is "
+            "the term as typed, 'phonetic' matched by SOUND and may be a "
+            "different word, and 'folio' matched the page NUMBER and says "
+            "nothing about the text — do not quote a phonetic or folio hit as "
+            "though the document used that term. 'total' is the real number of "
+            "hits; if 'truncated' is true you are seeing the first few of many, "
+            "so narrow the query rather than concluding these are all of them."
+        )
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "iri": {"type": "string", "description": "The document's @id IRI."},
+                "q": {
+                    "type": "string",
+                    "description": (
+                        "What to look for. A word or short phrase, in "
+                        "Devanagari or romanized."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": self.MAX_LIMIT,
+                    "description": (
+                        f"How many hits to return (1-{self.MAX_LIMIT}). Defaults "
+                        "to the maximum; 'total' reports the full count either way."
+                    ),
+                },
+            },
+            "required": ["iri", "q"],
+            "additionalProperties": False,
+        }
+
+    async def execute(self, arguments: dict[str, Any]) -> list[TextContent]:
+        material_path = _material_path(arguments.get("iri", ""))
+        if material_path is None:
+            return _error("iri must be a material @id IRI (…/material/<source>/<ident>).")
+        query = arguments.get("q")
+        if not isinstance(query, str) or not query.strip():
+            return _error("q is required; it is what to search for.")
+
+        params: dict[str, Any] = {"q": query}
+        limit = arguments.get("limit")
+        if limit is not None:
+            # Validated here as well as by the API, so a bad value is a tool
+            # error naming the bound rather than a 400 the model has to parse.
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                return _error("limit must be an integer.")
+            if not 1 <= limit <= self.MAX_LIMIT:
+                return _error(f"limit must be between 1 and {self.MAX_LIMIT}.")
+            params["limit"] = limit
+
+        result = await _call(self.name, f"{material_path}/search", params=params)
+        if isinstance(result, ToolExecutionResult):
+            return result
+        return _text(self._cited(result))
+
+    def _cited(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Attach the citation contract, and say when a result is partial.
+
+        No text ceiling is applied and none is needed: a snippet is bounded by
+        the API at ~190 characters and the hit count is bounded at
+        ``MAX_LIMIT``, so the whole response is a few thousand characters by
+        construction. ``read_document_part``'s budget exists because a single
+        table can be 170 KiB; nothing here can be.
+
+        A snippet is a WINDOW, and that has to be said. Elided ends are marked
+        with an ellipsis in the text, but a model quoting a snippet as a
+        sentence of the document would be quoting a fragment as a whole.
+        """
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return result
+        data["citation"] = {
+            "document": data.get("material"),
+            "note": (
+                "Each snippet is a short window around the match, not the full "
+                "page or table — an ellipsis marks an end that was cut. Fetch "
+                "the page_no or key with read_document_part before quoting. "
+                "Page numbers are the printed folios, checkable against the "
+                "original PDF."
+            ),
+        }
+        if data.get("truncated"):
+            data["citation"]["warning"] = (
+                f"This document holds {data.get('total')} hits and only "
+                f"{data.get('count')} are shown. These are the first by page "
+                "order, NOT the best — narrow the query rather than "
+                "summarising the document from this sample."
+            )
+        return result
+
+
 class ReadDocumentPartTool(BaseTool):
     @property
     def name(self) -> str:
@@ -321,8 +449,11 @@ class ReadDocumentPartTool(BaseTool):
             "Read ONE bounded slice of a document: a page range (at most 50 "
             "pages), one table by its key, or one figure by its key. This is the "
             "only tool that returns document text, and it never returns a whole "
-            "document — call list_document_contents first to choose what to "
-            "read. Address a table or figure by its 'key' (like 'p0030-t1'), "
+            "document — call search_document (to find where a term appears) or "
+            "list_document_contents (to see the index) first, and come here "
+            "with the page number or key it gave you rather than reading "
+            "ranges until you find something. Address a table or figure by its "
+            "'key' (like 'p0030-t1'), "
             "never by its ordinal: ordinals are recomputed whenever a document "
             "is re-parsed, so the same ordinal can later mean a different table. "
             "A page whose text is empty was held but not successfully "
