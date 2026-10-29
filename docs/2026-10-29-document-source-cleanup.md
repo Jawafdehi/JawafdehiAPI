@@ -31,9 +31,18 @@ Eight of the 34 source tokens are a verbatim **`MaterialType` value**
 > `court_order`, `news`, `official_report`, `document`, `charge_sheet`,
 > `press_release`, `legal_corpus`, `social_media`
 
-That is the mechanism. The caseworker upload path leaves the document's *kind*
-in `source` when no real source is given, so the token records what the document
-IS and nothing about who issued it.
+**The mechanism is that nothing constrains the token.** `source` is derived from
+the `@id` that the *caller* builds (`materials/single_source_ingest.py`), and the
+only validation is shape: `is_valid_material_iri` checks a regex, the host and a
+length cap. **There is no allowlist of known source tokens anywhere in the
+codebase.** The admin upload component takes `source` as a plain field
+(`MaterialFileUpload.tsx`). So any string of the right shape mints a new source
+on first write, and it appears in `/api/document-sources/` as a new shelf.
+
+Given that freedom, uploaders reach for the document's type word. That is a
+human pattern, not a code default — worth stating precisely, because it puts the
+fix in a different place (validate the token at the write path) than "change a
+server-side default" would.
 
 Being a type name is not by itself a defect — `court_order` (43,125) and
 `official_report` (223) are type names and are the established, reviewed
@@ -87,11 +96,11 @@ attached to `charge_sheet/20260324.60019b1d` carries YAML front-matter reading
 the Special Court on the report of CIAA investigation officers, with नेपाल सरकार
 as वादी. That is the `ag` class, read off the document itself.
 
-**Why it happened.** `ag` is minted by the scraper in `materials/sourcing/ag/`.
-These 35 are caseworker uploads, which do not go through that shaper, so the
-token falls back to the `MaterialType` (`charge_sheet`) or to free text
-(`chargesheet`). Nothing validates the token against the existing set, so all
-three coexist.
+**Why it happened.** `ag` is minted by the scraper in `materials/sourcing/ag/`,
+which always writes the same token. These 35 are uploads, which do not go
+through that shaper — the uploader supplies the token, picking the type word
+(`charge_sheet`) or a spelling of their own (`chargesheet`). Nothing validates
+it against the existing set, so all three coexist.
 
 **Proposed correction.** Re-token all 35 rows to `ag`. The `@id` is the canonical
 stored form (`/material/<source>/<ident>`), so this rewrites 35 IRIs and needs
@@ -184,6 +193,56 @@ above do **not** fix this and should not be taken to have fixed it.
 `contentUrl`s referenced by more than one material, then compare each
 transcript's case number against its parent's. The four above were found in a
 seven-token sample, so the real count is likely higher.
+
+---
+
+## How to actually do the merges — order matters
+
+**Do not reach for `move_source` first.** Its own docstring rules this out:
+
+> *"The old public URL 404s afterwards. There is no redirect table for
+> materials. That is an accepted cost here … it is the reason this action is
+> used once, for a document that is not what its shelf claims, rather than
+> offered as a general tidying tool."*
+
+60 rows is not "once". Three steps, in this order:
+
+**1. Close the mint. (Independent, cheapest, do it regardless.)**
+Add an allowlist check on the `source` segment at the write path — the one
+upsert primitive is the natural place, since every write funnels through it.
+Without this, you merge 60 rows and the next upload re-creates the problem; the
+`0133` shape also shows the case number leaking in, so reject
+`^<known_token>_\d+$` too. This is the only step that is worth doing even if
+you decide never to touch the existing rows, and it caps the blast radius while
+the rest waits.
+
+**2. Phase 0 from `docs/2026-10-11-material-pretty-idents/PLAN.md`.**
+`MaterialIdentHistory` (retired IRI → current), a visibility-gated 301 on a
+detail miss, and the upsert consulting it so a write to a retired `@id` is
+rewritten rather than reviving the tombstone. That plan's own framing is right:
+it *"is what makes `move_source`, the source-token cleanup, and any future
+corpus correction reversible instead of one-way"*, and it changes no URLs. On a
+CC BY-NC linked-data platform where third parties may have cited an `@id`, the
+alternative is 60 permanent 404s.
+
+**3. Then the merge — and fix a gap in `move_source` when you generalise it.**
+
+> **`move_source` does not repoint `CaseMaterialReference`.** Case evidence
+> binds to a material by `material_iri` *string* (`cases/models.py`), and the
+> action only creates the new row and soft-deletes the old. So re-tokening a
+> charge sheet silently orphans the evidence link on every case citing it.
+
+That is worse than the 404, because a 404 is visible and this is not. The
+repoint has to happen in the same transaction as the move. **Check this before
+anything else:** if these 60 rows are cited by published cases, step 3 is not a
+tidying exercise, it is an edit to case evidence.
+
+### There is no urgency
+
+The labels shipped in this PR already fix the user-facing symptom — a model
+reading `/api/document-sources/` today is told what `charge_sheet` is and that
+it duplicates `ag`. The merge buys tidiness and correct per-shelf counts, not an
+outage fix. Nothing here justifies a hurried one-way rewrite of production rows.
 
 ---
 

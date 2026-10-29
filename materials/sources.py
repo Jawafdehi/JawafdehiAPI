@@ -160,10 +160,17 @@ SOURCE_LABELS: dict[str, dict[str, Any]] = {
     },
     # --- The four "type-as-source" tokens ------------------------------
     # These four are not sources at all. Each is a verbatim ``MaterialType``
-    # value (`materials/jsonld.py`) standing in the ``source`` column, which is
-    # what the caseworker upload path leaves behind when no real source is
-    # given. That is WHY none of them carries a publisher: the token records
-    # what KIND of document it is, and nothing whatever about who issued it.
+    # value (`materials/jsonld.py`) standing in the ``source`` column. That is
+    # WHY none of them carries a publisher: the token records what KIND of
+    # document it is, and nothing whatever about who issued it.
+    #
+    # The token is free text chosen by whoever uploads. ``source`` is derived
+    # from the ``@id`` the CALLER builds (`materials/single_source_ingest.py`),
+    # and the only validation is SHAPE — ``is_valid_material_iri`` checks a
+    # regex, the host and a length cap, with no allowlist of known tokens
+    # anywhere. So any string of the right shape mints a new source on first
+    # write. Reaching for the document's type word is what uploaders do with
+    # that freedom; it is a human pattern, not a code default.
     #
     # Being a type name is not by itself a defect — `court_order` (43,125) and
     # `official_report` (223) are type names too and are the established,
@@ -410,9 +417,9 @@ SOURCE_LABELS: dict[str, dict[str, Any]] = {
         "publisher": {"en": "Office of the Attorney General"},
         "description": (
             "Charge sheets filed at the Special Court in corruption cases, "
-            "from the Office of the Attorney General. Caseworker uploads that "
-            "took the material's TYPE as their source token; pending merge "
-            "into `ag`, which holds the same documents."
+            "from the Office of the Attorney General. Uploaded under the "
+            "material's TYPE as a free-text source token; pending merge into "
+            "`ag`, which holds the same documents."
         ),
     },
     "chargesheet": {
@@ -443,9 +450,8 @@ SOURCE_LABELS: dict[str, dict[str, Any]] = {
         },
         "description": (
             "Press releases issued by the Commission for the Investigation of "
-            "Abuse of Authority. Caseworker uploads that took the material's "
-            "TYPE as their source token; pending merge into "
-            "`ciaa_press_release`."
+            "Abuse of Authority. Uploaded under the material's TYPE as a "
+            "free-text source token; pending merge into `ciaa_press_release`."
         ),
     },
     "court_order_0133": {
