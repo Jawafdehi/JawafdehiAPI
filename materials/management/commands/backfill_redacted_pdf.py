@@ -51,6 +51,19 @@ from jawafdehi_shared.storage import store_file_as_link
 from materials import artifacts, jsonld, provenance
 from materials.models import Material
 
+#: 🛑 **The cost ceiling that `--limit` is not.** `--limit` counts documents
+#: PUBLISHED, which is what makes a batched run advance — but it means a shelf
+#: where every document is blocked has no stopping point at all, and each one
+#: costs a fetch of up to :data:`MAX_PDF_BYTES` plus a `redact_pdf` before it can
+#: be classified. 18 of the 28 charge sheets measured are blocked for good, so
+#: that is the normal case rather than the pathological one.
+#:
+#: ⚠️ The real fix is to RECORD a permanent block so later runs skip it, which
+#: needs a column and a migration. Until then this bounds the damage: a run stops,
+#: reports, and writes its `--report` rather than being killed by a Job timeout
+#: with nothing on disk.
+DEFAULT_MAX_SCANNED = 500
+
 #: A ceiling on what is worth pulling into memory to redact. The largest document
 #: measured upstream — the Auditor General's 63rd annual report — is 79.7 MiB.
 MAX_PDF_BYTES = 192 * 1024 * 1024
@@ -68,6 +81,18 @@ class Command(BaseCommand):
         parser.add_argument("--source")
         parser.add_argument("--iri")
         parser.add_argument("--limit", type=int)
+        parser.add_argument(
+            "--max-scanned",
+            dest="max_scanned",
+            type=int,
+            default=DEFAULT_MAX_SCANNED,
+            help=(
+                "Stop after looking at this many documents, whatever the "
+                f"outcome (default {DEFAULT_MAX_SCANNED}). --limit counts only "
+                "documents published, so without a scan ceiling a shelf where "
+                "everything is blocked walks the whole corpus."
+            ),
+        )
         parser.add_argument("--report", help="Write the run's counts here as JSON.")
 
     def handle(self, *args, **options):
@@ -81,11 +106,16 @@ class Command(BaseCommand):
             f"{'APPLYING' if apply_writes else 'dry run — nothing will be written'}"
         )
 
+        max_scanned = options["max_scanned"]
+        if max_scanned is not None and max_scanned < 1:
+            raise CommandError("--max-scanned must be at least 1.")
+        scanned = 0
         outcomes: Counter = Counter()
         blocked: Counter = Counter()
         acted_on = 0
 
         for material in self._materials(options):
+            scanned += 1
             outcome, detail = self._one(material, mode, apply_writes)
             outcomes[outcome] += 1
             # 🛑 The limit counts documents this run CHANGED, and nothing else.
@@ -104,8 +134,19 @@ class Command(BaseCommand):
                 self.stderr.write(f"  {outcome} {material.iri}: {detail}")
             if limit is not None and acted_on >= limit:
                 break
+            if max_scanned is not None and scanned >= max_scanned:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"stopped after scanning {scanned} document(s) without "
+                        f"reaching the --limit of {limit}; raise --max-scanned to "
+                        "go further"
+                        if limit
+                        else f"stopped at the --max-scanned ceiling of {scanned}"
+                    )
+                )
+                break
 
-        self._report(outcomes, blocked, acted_on, apply_writes)
+        self._report(outcomes, blocked, acted_on, apply_writes, scanned)
         if options.get("report"):
             with open(options["report"], "w", encoding="utf-8") as handle:
                 json.dump(
@@ -311,11 +352,13 @@ class Command(BaseCommand):
             rows = rows.filter(source=options["source"])
         return rows.order_by("iri").iterator(chunk_size=50)
 
-    def _report(self, outcomes, blocked, acted_on, apply_writes) -> None:
+    def _report(self, outcomes, blocked, acted_on, apply_writes, scanned) -> None:
         self.stdout.write("")
         # Not "looked at": the limit counts documents acted on, so this has to
         # name the same thing the limit does or the two read as a contradiction.
-        self.stdout.write(f"acted on {acted_on} document(s)")
+        self.stdout.write(
+            f"scanned {scanned} document(s), acted on {acted_on}"
+        )
         if outcomes:
             self.stdout.write(
                 "  ".join(f"{k}={v}" for k, v in sorted(outcomes.items()))

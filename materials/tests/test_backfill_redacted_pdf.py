@@ -66,7 +66,16 @@ def _raw_for(ident: str) -> dict:
 class BackfillRedactedPdfTests(TestCase):
     databases = "__all__"
 
-    def _run(self, *args, redact=None, fetched=b"%PDF-1.4 body", **kwargs):
+    def _run(self, *args, redact=None, fetched=b"%PDF-1.4 body", expect_error=False, **kwargs):
+        """Run the command under the mock stack. Returns the captured output.
+
+        ⚠️ ``expect_error`` is why this helper exists in one place. The command
+        exits non-zero whenever anything was blocked, refused or unreadable —
+        which is most of the interesting cases — and a caller that wraps the call
+        in ``pytest.raises`` cannot then read the report it needs to assert on.
+        Three call sites hand-rolled this stack to get around that, and the
+        copies had already drifted.
+        """
         out, err = StringIO(), StringIO()
         redactor = redact if redact is not None else mock.DEFAULT
         with (
@@ -82,9 +91,13 @@ class BackfillRedactedPdfTests(TestCase):
                     dst.write_bytes(b"%PDF redacted"),
                     _Report(),
                 )[1]
-            call_command(
-                "backfill_redacted_pdf", *args, stdout=out, stderr=err, **kwargs
-            )
+            try:
+                call_command(
+                    "backfill_redacted_pdf", *args, stdout=out, stderr=err, **kwargs
+                )
+            except CommandError:
+                if not expect_error:
+                    raise
         self.fetch = fetch
         return out.getvalue() + err.getvalue()
 
@@ -165,17 +178,8 @@ class BackfillRedactedPdfTests(TestCase):
         def unverified(src, dst, **kw):
             raise ValueError("verification failed: 1 value(s) of kind ['citizenship']")
 
-        out, err = StringIO(), StringIO()
-        with (
-            mock.patch("materials.extract.fetch_document", return_value=b"%PDF"),
-            mock.patch("likhit.privacy.pdf.redact_pdf", side_effect=unverified),
-            pytest.raises(CommandError),
-        ):
-            call_command(
-                "backfill_redacted_pdf", "--apply", stdout=out, stderr=err
-            )
+        report = self._run("--apply", redact=unverified, expect_error=True)
 
-        report = out.getvalue()
         assert "refused=1" in report, report
         assert "blocked=1" not in report, report
         assert artifacts.REDACTED_PDF_ROLE not in self._roles(material)
@@ -246,15 +250,20 @@ class LimitCountsWorkDoneTests(TestCase):
         with (
             mock.patch(
                 "materials.extract.fetch_document",
-                side_effect=lambda url, **kw: b"%PDF ok" if url.endswith("c.pdf")
-                else b"%PDF blocked",
+                side_effect=lambda url, **kw: (
+                    b"%PDF ok" if url.endswith("c.pdf") else b"%PDF blocked"
+                ),
             ),
             mock.patch("likhit.privacy.pdf.redact_pdf", side_effect=selective),
             pytest.raises(CommandError),
         ):
             call_command(
-                "backfill_redacted_pdf", "--apply", "--limit", "1",
-                stdout=out, stderr=err,
+                "backfill_redacted_pdf",
+                "--apply",
+                "--limit",
+                "1",
+                stdout=out,
+                stderr=err,
             )
 
         # The two blocked documents come first alphabetically. If they counted,
@@ -306,10 +315,48 @@ class PublishOutcomeTests(TestCase):
                 side_effect=publish_first,
             ),
         ):
-            call_command(
-                "backfill_redacted_pdf", "--apply", stdout=out, stderr=err
-            )
+            call_command("backfill_redacted_pdf", "--apply", stdout=out, stderr=err)
 
         report = out.getvalue()
         assert "published=1" not in report, report
         assert "changed_underfoot=1" in report, report
+
+
+@override_settings(JAWAFDEHI_S3_BASE="https://s3.jawafdehi.org")
+class ScanCeilingTests(TestCase):
+    """`--limit` counts publishes, so a blocked shelf needs its own stopping point.
+
+    Each blocked document still costs a fetch of up to `MAX_PDF_BYTES` and a
+    `redact_pdf` before it can be classified, and 18 of the 28 charge sheets
+    measured are blocked for good — so a run that only stops at `--limit`
+    publishes nothing and walks the whole corpus to get there.
+    """
+
+    databases = "__all__"
+
+    def test_a_run_that_publishes_nothing_still_stops(self):
+        for n in "abcde":
+            _material(f"blocked-{n}", [_raw()])
+
+        def blocked(src, dst, **kw):
+            raise ValueError("page 1 is scanned and cannot be redacted")
+
+        out, err = StringIO(), StringIO()
+        with (
+            mock.patch("materials.extract.fetch_document", return_value=b"%PDF") as f,
+            mock.patch("likhit.privacy.pdf.redact_pdf", side_effect=blocked),
+            pytest.raises(CommandError),
+        ):
+            call_command(
+                "backfill_redacted_pdf",
+                "--apply",
+                "--limit",
+                "3",
+                "--max-scanned",
+                "2",
+                stdout=out,
+                stderr=err,
+            )
+
+        assert f.call_count == 2, f"scanned {f.call_count}, ceiling was 2"
+        assert "scanned 2 document(s)" in out.getvalue(), out.getvalue()
