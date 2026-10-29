@@ -1096,6 +1096,9 @@ JAZZMIN_SETTINGS = {
 # Casework Review System (VOL-3)
 # ============================================================================
 REVIEW_CASE_SOURCE = os.getenv("REVIEW_CASE_SOURCE", "local")
+# What publish does with the review verdict: off | warn | enforce (review/gate.py).
+# warn records the verdict on the publish log and never blocks.
+REVIEW_GATE_MODE = os.getenv("REVIEW_GATE_MODE", "warn").strip().lower()
 JAWAFDEHI_API_BASE = os.getenv("JAWAFDEHI_API_BASE", "https://api.jawafdehi.org/api")
 JAWAFDEHI_API_TOKEN = os.getenv("JAWAFDEHI_API_TOKEN", "")
 JAWAFDEHI_S3_BASE = os.getenv("JAWAFDEHI_S3_BASE", "https://s3.jawafdehi.org")

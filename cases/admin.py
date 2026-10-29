@@ -1021,6 +1021,7 @@ class CaseStateChangeAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "to_state",
         "actor",
         "reason",
+        "review_gate",
         "created_at",
     )
 
