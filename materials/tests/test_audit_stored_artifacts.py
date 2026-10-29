@@ -78,14 +78,32 @@ class _Response:
 class AuditTests(TestCase):
     databases = "__all__"
 
-    def _run(self, body: bytes = b"", status: int = 200, **kwargs) -> str:
+    def _run(
+        self,
+        body: bytes = b"",
+        status: int = 200,
+        expect_error: bool = False,
+        **kwargs,
+    ) -> str:
+        """Run the command under the mock. Returns the captured output.
+
+        ⚠️ ``expect_error`` is the reason this is one helper. The command exits
+        non-zero whenever anything is empty or unreachable — which is every
+        interesting case — so a caller that wraps it in ``pytest.raises`` cannot
+        read the report it means to assert on. Two call sites hand-rolled this
+        block to get around that.
+        """
         out, err = StringIO(), StringIO()
         with mock.patch(
             "requests.Session.get", return_value=_Response(status, body)
         ) as get:
-            call_command(
-                "audit_stored_artifacts", stdout=out, stderr=err, **kwargs
-            )
+            try:
+                call_command(
+                    "audit_stored_artifacts", stdout=out, stderr=err, **kwargs
+                )
+            except CommandError:
+                if not expect_error:
+                    raise
         self.get = get
         return out.getvalue() + err.getvalue()
 
@@ -122,14 +140,9 @@ class AuditTests(TestCase):
         """
         _material("empty2", [{"contentUrl": OURS, "jawafdehi:linkRole": "RAW"}])
 
-        out, err = StringIO(), StringIO()
-        with (
-            mock.patch("requests.Session.get", return_value=_Response(200, b"")),
-            pytest.raises(CommandError),
-        ):
-            call_command("audit_stored_artifacts", stdout=out, stderr=err)
+        report = self._run(body=b"", expect_error=True)
 
-        assert "can be re-fetched from the publisher" in out.getvalue()
+        assert "can be re-fetched from the publisher" in report
 
     def test_an_empty_redacted_pdf_is_probed_too(self):
         """The artifact that REPLACES a withheld original is the one that matters.
@@ -145,14 +158,8 @@ class AuditTests(TestCase):
             [{"contentUrl": OURS, "jawafdehi:linkRole": "REDACTED_PDF"}],
         )
 
-        out, err = StringIO(), StringIO()
-        with (
-            mock.patch("requests.Session.get", return_value=_Response(200, b"")),
-            pytest.raises(CommandError),
-        ):
-            call_command("audit_stored_artifacts", stdout=out, stderr=err)
+        report = self._run(body=b"", expect_error=True)
 
-        report = out.getvalue()
         assert "checked 1 stored artifact(s)" in report
         assert "empty=1" in report
         # 🛑 We derived this file; the publisher never had it. Routing it to
