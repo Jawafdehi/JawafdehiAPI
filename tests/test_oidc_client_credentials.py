@@ -268,3 +268,133 @@ def test_bearer_header_returns_bearer_scheme(settings, monkeypatch):
     header = cc.bearer_header()
     assert header == {"Authorization": "Bearer abc"}
     cc.reset_provider()
+
+
+# ---------------------------------------------------------------------------
+# transport vs configuration: which failures are worth retrying
+#
+# The poller used to treat every OIDCTokenError as fatal before entering its
+# loop, so one read timeout against the issuer killed a whole CronJob run while
+# auth.jawafdehi.org was serving thousands of requests with no errors. These
+# pin the split that makes that distinction possible.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    """Keep the retry behaviour, drop the wall-clock cost of it."""
+    monkeypatch.setattr(cc, "_TRANSPORT_BACKOFF_SECONDS", 0)
+
+
+def test_network_error_is_a_transport_error(monkeypatch, no_backoff):
+    def fake_post(url, data=None, headers=None, timeout=None):
+        raise requests.ConnectionError("refused")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(cc.OIDCTransportError):
+        _provider().get_token()
+
+
+def test_read_timeout_is_a_transport_error(monkeypatch, no_backoff):
+    """The exact shape that killed the poller in production."""
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        raise requests.ReadTimeout("Read timed out. (read timeout=30)")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(cc.OIDCTransportError):
+        _provider().get_token()
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+def test_client_error_is_a_configuration_error(monkeypatch, status, no_backoff):
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append(url)
+        return FakeResponse(status_code=status, text="invalid_client")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(cc.OIDCConfigurationError):
+        _provider().get_token()
+    # A credential the issuer has already refused is not re-sent: retrying it
+    # invites a lockout and buries the real error.
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_server_error_is_a_transport_error(monkeypatch, status, no_backoff):
+    def fake_post(url, data=None, headers=None, timeout=None):
+        return FakeResponse(status_code=status, text="upstream unavailable")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(cc.OIDCTransportError):
+        _provider().get_token()
+
+
+def test_unconfigured_is_a_configuration_error():
+    with pytest.raises(cc.OIDCConfigurationError):
+        _provider(client_id="", client_secret="").get_token()
+
+
+def test_non_json_200_is_a_transport_error(monkeypatch, no_backoff):
+    """A 200 of HTML is a proxy talking, not the issuer."""
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        return FakeResponse(json_body=None, text="<html>504 Gateway Timeout</html>")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(cc.OIDCTransportError):
+        _provider().get_token()
+
+
+def test_200_without_access_token_is_a_configuration_error(monkeypatch, no_backoff):
+    """Well-formed JSON means the issuer answered, and declined."""
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        return FakeResponse(json_body={"token_type": "Bearer"})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(cc.OIDCConfigurationError):
+        _provider().get_token()
+
+
+def test_transport_failure_is_retried_then_raised(monkeypatch, no_backoff):
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append(url)
+        raise requests.ReadTimeout("read timeout")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(cc.OIDCTransportError):
+        _provider().get_token()
+    assert len(calls) == cc._TRANSPORT_RETRIES
+
+
+def test_transport_failure_that_clears_returns_a_token(monkeypatch, no_backoff):
+    """The case the retry exists for: one blip, then the issuer answers."""
+    calls = []
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append(url)
+        if len(calls) == 1:
+            raise requests.ReadTimeout("read timeout")
+        return FakeResponse(json_body={"access_token": "tok-after-retry", "expires_in": 3600})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    assert _provider().get_token() == "tok-after-retry"
+    assert len(calls) == 2
+
+
+def test_both_subclasses_remain_catchable_as_the_base_error(monkeypatch, no_backoff):
+    """Existing `except OIDCTokenError` handlers must keep working."""
+    assert issubclass(cc.OIDCTransportError, cc.OIDCTokenError)
+    assert issubclass(cc.OIDCConfigurationError, cc.OIDCTokenError)
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        raise requests.ConnectionError("refused")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(cc.OIDCTokenError):
+        _provider().get_token()

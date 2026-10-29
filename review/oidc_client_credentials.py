@@ -39,8 +39,45 @@ _EXPIRY_SKEW_SECONDS = 60
 _DEFAULT_LIFETIME_SECONDS = 3600
 
 
+#: Transport failures are retried this many times before the error is raised.
+#: Small on purpose: the callers that matter (the poller loop, the scraper
+#: crons) have their own outer retry, so this only has to cover the single-digit
+#: seconds of a broker/proxy blip rather than a real outage.
+_TRANSPORT_RETRIES = 3
+_TRANSPORT_BACKOFF_SECONDS = 0.5
+
+
 class OIDCTokenError(Exception):
-    """Raised when a service-account access token cannot be obtained."""
+    """Raised when a service-account access token cannot be obtained.
+
+    Kept as the base of the two subclasses below so existing
+    ``except OIDCTokenError`` handlers keep catching everything they used to.
+    New code should catch the subclass that matches what it can do about it.
+    """
+
+
+class OIDCConfigurationError(OIDCTokenError):
+    """The credentials are missing, malformed, or rejected by the issuer.
+
+    Fatal: retrying cannot help, and a caller that keeps going will do so
+    unauthenticated. Covers missing settings and any 4xx from the token
+    endpoint — the issuer looked at the credential and said no.
+    """
+
+
+class OIDCTransportError(OIDCTokenError):
+    """The token endpoint could not be reached, or failed to answer.
+
+    Transient by assumption: a DNS blip, a read timeout, a reset connection, a
+    502 from whatever sits in front of the issuer. The credential was never
+    judged, so a caller that can wait should retry rather than die.
+
+    This distinction is the whole point of the split. ``review_poller`` used to
+    treat *any* ``OIDCTokenError`` as fatal before entering its loop, under a
+    comment about invalid credentials — so a single read timeout against
+    auth.jawafdehi.org killed the entire CronJob run, repeatedly, while the
+    issuer itself was serving thousands of requests with no errors at all.
+    """
 
 
 class ClientCredentialsTokenProvider:
@@ -82,11 +119,13 @@ class ClientCredentialsTokenProvider:
     def get_token(self, force_refresh: bool = False) -> str:
         """Return a valid access token, fetching/refreshing as needed.
 
-        Raises ``OIDCTokenError`` with a clear message when the provider is not
-        configured or the token endpoint rejects the credentials.
+        Raises ``OIDCConfigurationError`` when the provider is not configured or
+        the issuer rejects the credentials, and ``OIDCTransportError`` when the
+        token endpoint could not be reached after ``_TRANSPORT_RETRIES``
+        attempts. Both derive from ``OIDCTokenError``.
         """
         if not self._configured():
-            raise OIDCTokenError(
+            raise OIDCConfigurationError(
                 "OIDC client-credentials are not configured. Set OIDC_ISSUER, "
                 "CASEWORK_OIDC_CLIENT_ID and CASEWORK_OIDC_CLIENT_SECRET to the "
                 "Zitadel service account that the casework poller/clients should "
@@ -100,7 +139,24 @@ class ClientCredentialsTokenProvider:
                 and time.monotonic() < self._expires_at
             ):
                 return self._access_token
-            return self._refresh_locked()
+            # Retry only the transport failures. A rejected credential is raised
+            # on the first attempt — hammering the issuer with a secret it has
+            # already refused invites a lockout and delays the real error.
+            #
+            # The sleep happens with the lock held, on purpose: concurrent
+            # callers queue behind one in-flight refresh instead of each opening
+            # its own connection to an endpoint that is already struggling.
+            for attempt in range(_TRANSPORT_RETRIES):
+                try:
+                    return self._refresh_locked()
+                except OIDCTransportError:
+                    if attempt == _TRANSPORT_RETRIES - 1:
+                        raise
+                    time.sleep(_TRANSPORT_BACKOFF_SECONDS * (2**attempt))
+            # Unreachable: the loop either returns or raises on the last pass.
+            raise OIDCTransportError(  # pragma: no cover
+                f"OIDC token request to {self.token_endpoint} failed and was not retried."
+            )
 
     def _refresh_locked(self) -> str:
         data = {
@@ -129,12 +185,21 @@ class ClientCredentialsTokenProvider:
                 timeout=self._timeout,
             )
         except requests.RequestException as exc:
-            raise OIDCTokenError(
+            # Timeouts, resets, DNS, TLS handshakes. The issuer never saw the
+            # credential, so this says nothing about whether it is valid.
+            raise OIDCTransportError(
                 f"OIDC token request to {self.token_endpoint} failed: {exc}"
             ) from exc
 
         if resp.status_code != 200:
-            raise OIDCTokenError(
+            # 5xx is the issuer (or a proxy in front of it) failing to answer;
+            # 429 is it asking us to come back later. Neither is a verdict on
+            # the credential. Everything else in 4xx is: invalid_client,
+            # unauthorized_client, invalid_scope — retrying cannot fix any of
+            # them, and 400 is what Zitadel returns for a bad secret.
+            retryable = resp.status_code >= 500 or resp.status_code == 429
+            error_class = OIDCTransportError if retryable else OIDCConfigurationError
+            raise error_class(
                 f"OIDC token request to {self.token_endpoint} returned "
                 f"HTTP {resp.status_code}: {resp.text[:300]}"
             )
@@ -142,13 +207,17 @@ class ClientCredentialsTokenProvider:
         try:
             body = resp.json()
         except ValueError as exc:
-            raise OIDCTokenError(
+            # A 200 that is not JSON is almost always an intercepting proxy or a
+            # captive portal rather than the issuer, so treat it as transport.
+            raise OIDCTransportError(
                 f"OIDC token endpoint returned a non-JSON body: {resp.text[:300]}"
             ) from exc
 
         access_token = body.get("access_token")
         if not access_token:
-            raise OIDCTokenError(
+            # A 200 of well-formed JSON really is the issuer talking, and it
+            # declined to mint a token. Not retryable.
+            raise OIDCConfigurationError(
                 f"OIDC token response did not contain an access_token: {body!r}"
             )
 

@@ -43,7 +43,11 @@ import requests
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from review.oidc_client_credentials import OIDCTokenError, get_provider
+from review.oidc_client_credentials import (
+    OIDCConfigurationError,
+    OIDCTransportError,
+    get_provider,
+)
 from review.job_handlers import HANDLERS as _REVIEW_HANDLERS
 from materials.job_handlers import HANDLERS as _MATERIAL_HANDLERS
 from case_proposals.job_handlers import HANDLERS as _PROPOSAL_HANDLERS
@@ -58,6 +62,14 @@ from case_proposals.job_handlers import HANDLERS as _PROPOSAL_HANDLERS
 #: case_proposal_intent — nothing enqueues one until the bus's proposal-builder
 #: consumer is running — but it is worth knowing before adding the next.
 HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS, **_PROPOSAL_HANDLERS}
+
+
+#: How many times one outbound HTTP call is attempted before it is reported as
+#: a ``PollerError``. The queue's own lease/retry model is the real safety net —
+#: this only has to ride out the seconds-long blips (a rolling API deploy, a
+#: reset keepalive) that were previously ending whole runs.
+_TRANSPORT_RETRIES = 3
+_TRANSPORT_BACKOFF_SECONDS = 0.5
 
 
 class PollerError(Exception):
@@ -142,22 +154,45 @@ class Command(BaseCommand):
     def _jobs_url(self, path=""):
         return f"{settings.JOBS_API_BASE.rstrip('/')}{path}"
 
+    def _request(self, method, url, *, timeout, **kwargs):
+        """One HTTP call to the platform, with transport failures retried.
+
+        Every call out of this command goes through here so that a reset
+        connection, a read timeout or an unreachable issuer surfaces as a
+        ``PollerError`` — which the caller and the main loop already know how to
+        absorb — instead of as a bare ``requests`` exception escaping to the
+        interpreter and taking the whole run with it.
+
+        That escape was real: ``_claim`` is called inside ``except PollerError``,
+        which never matched ``requests.exceptions.ConnectionError``, so one
+        ``ConnectionResetError(104)`` from the API ended the run.
+        """
+        last = None
+        for attempt in range(_TRANSPORT_RETRIES):
+            try:
+                return requests.request(
+                    method, url, headers=self._headers(), timeout=timeout, **kwargs
+                )
+            except (requests.RequestException, OIDCTransportError) as exc:
+                last = exc
+                if attempt < _TRANSPORT_RETRIES - 1:
+                    time.sleep(_TRANSPORT_BACKOFF_SECONDS * (2**attempt))
+        raise PollerError(
+            f"{method} {url} failed after {_TRANSPORT_RETRIES} attempts: {last}"
+        ) from last
+
     def _post_jobs(self, path, payload, timeout=60):
-        return requests.post(
-            self._jobs_url(path), json=payload, headers=self._headers(), timeout=timeout
+        return self._request(
+            "POST", self._jobs_url(path), json=payload, timeout=timeout
         )
 
     def _get_jobs(self, path, timeout=30):
-        return requests.get(
-            self._jobs_url(path), headers=self._headers(), timeout=timeout
-        )
+        return self._request("GET", self._jobs_url(path), timeout=timeout)
 
     def _post_casework(self, path, payload, timeout=60):
         """Side calls to the review-specific casework API (e.g. markdown attach)."""
         url = f"{settings.CASEWORK_API_BASE.rstrip('/')}{path}"
-        return requests.post(
-            url, json=payload, headers=self._headers(), timeout=timeout
-        )
+        return self._request("POST", url, json=payload, timeout=timeout)
 
     # ---- read-only listing ------------------------------------------
 
@@ -298,11 +333,25 @@ class Command(BaseCommand):
             )
 
         self.token_provider = get_provider()
-        # Fail fast on missing/invalid credentials before entering the loop.
+        # Fail fast on missing/invalid credentials before entering the loop —
+        # but ONLY on those. A transport failure here (read timeout against the
+        # issuer, DNS blip, a 502 from its proxy) says nothing about whether the
+        # credential is good, and treating it as fatal is what used to kill an
+        # entire CronJob run over a few seconds of network weather. The loop
+        # below already tolerates a failed claim and retries, and `_headers()`
+        # re-requests the token on every call, so continuing is safe: either the
+        # blip clears and the run proceeds, or every claim fails and the run
+        # ends up exactly where it would have anyway — just noisily, and after
+        # having given the issuer a chance to come back.
         try:
             self.token_provider.get_token()
-        except OIDCTokenError as e:
+        except OIDCConfigurationError as e:
             raise PollerError(str(e)) from e
+        except OIDCTransportError as e:
+            self.stderr.write(
+                f"warning: could not reach the OIDC token endpoint at startup ({e}); "
+                "continuing — the poll loop will retry."
+            )
 
         # Read-only by default: just report the queued jobs and exit.
         if not apply:
