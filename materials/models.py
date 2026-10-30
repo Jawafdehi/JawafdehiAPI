@@ -12,8 +12,11 @@ Clean slate: no legacy ids. ``iri`` is the only identity.
 
 from __future__ import annotations
 
+import logging
+
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.utils import OperationalError, ProgrammingError
 
 from jawafdehi_shared.entities.ids import (
     JAWAF_SOURCE,
@@ -23,6 +26,9 @@ from jawafdehi_shared.entities.ids import (
 )
 
 from .jsonld import validate_material_jsonld
+
+
+logger = logging.getLogger(__name__)
 
 
 def validate_material_iri(value: str) -> None:
@@ -641,11 +647,35 @@ class MaterialIdentHistory(models.Model):
         # replica-eligible like every other read there. Forcing the primary
         # would put one extra query per 404 — a high-volume class on a public
         # endpoint — onto the write database.
-        row = (
-            cls.objects.select_related("material")
-            .filter(retired_iri=retired_iri)
-            .first()
-        )
+        #
+        # A MISSING TABLE IS TREATED AS AN EMPTY ONE, deliberately and
+        # permanently. Keel rolls the image out automatically while migrations
+        # here are applied by hand, so there is a window in which this code is
+        # live and the table is not. Without this guard that window is severe
+        # rather than cosmetic: the read path 500s on every address that does
+        # not exist, and — because the write path consults history before
+        # creating any material — EVERY new upload and importer write fails
+        # too.
+        #
+        # Degrading to "no history" is not a hack covering a deploy race: it is
+        # the honest answer. This table only ever ADDS redirects, so without it
+        # the archive behaves exactly as it did before this feature existed.
+        # That makes the migration ordering a preference rather than a
+        # prerequisite, which is the right trade for a table that is empty
+        # until the first document is moved.
+        try:
+            row = (
+                cls.objects.select_related("material")
+                .filter(retired_iri=retired_iri)
+                .first()
+            )
+        except (ProgrammingError, OperationalError):
+            logger.warning(
+                "%s is not migrated yet; serving without retired-address "
+                "redirects until 0012 is applied",
+                cls._meta.db_table,
+            )
+            return None
         if row is None or row.material is None or row.material.is_deleted:
             return None
         return row.material

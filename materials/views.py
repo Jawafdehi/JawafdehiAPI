@@ -308,7 +308,8 @@ def _retired_iri_redirect(request, iri: str):
     target = MaterialIdentHistory.resolve(iri)
     if target is None:
         return None
-    if not (_can_see_nonpublic(request) or target.visibility in PUBLIC_VISIBILITIES):
+    is_public = target.visibility in PUBLIC_VISIBILITIES
+    if not (_can_see_nonpublic(request) or is_public):
         return None
     # Preserve the query string: a retired address is most often reached from a
     # citation or an index, and dropping its parameters would silently change
@@ -330,7 +331,15 @@ def _retired_iri_redirect(request, iri: str):
     # two addresses with no way to recover. A corpus correction has to stay
     # reversible, so the redirect is revalidated daily rather than remembered
     # forever.
-    resp["Cache-Control"] = "public, max-age=86400"
+    # `public` only when the TARGET is public. A staff user following a
+    # redirect to a non-public document would otherwise hand a shared cache a
+    # year's licence to repeat "this address moved, and here is where to" —
+    # which is the existence claim the visibility check two lines up just
+    # refused to make to anyone else. Cloudflare bypasses this path today, so
+    # the live risk is small; the header should still say what we mean.
+    resp["Cache-Control"] = (
+        "public, max-age=86400" if is_public else "private, max-age=86400"
+    )
     patch_vary_headers(resp, ("Authorization",))
     return resp
 

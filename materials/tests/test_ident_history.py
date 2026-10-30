@@ -14,6 +14,10 @@ worse than not having it:
 
 from __future__ import annotations
 
+from unittest import mock
+
+from django.db.utils import ProgrammingError
+
 from django.contrib.auth.models import Group, User
 from django.test import TestCase
 from rest_framework.test import APITestCase
@@ -255,3 +259,80 @@ class ReviewRegressionTests(APITestCase):
         self.assertEqual(resp.status_code, 404)
         m.refresh_from_db()
         self.assertEqual(m.data["name"], {"en": "judgement"})
+
+
+class DeployWindowTests(APITestCase):
+    """Behaviour while the image is live and migration 0012 is not.
+
+    Keel rolls the image out automatically; migrations here are applied by
+    hand. Without the guard in resolve() that window is severe rather than
+    cosmetic, so both halves of it are pinned.
+    """
+
+    databases = "__all__"
+
+    def _unmigrated(self):
+        """Patch the table out from under the ORM, as Postgres would."""
+        return mock.patch.object(
+            MaterialIdentHistory.objects,
+            "select_related",
+            side_effect=ProgrammingError(
+                'relation "material_ident_history" does not exist'
+            ),
+        )
+
+    def test_resolve_treats_a_missing_table_as_an_empty_one(self):
+        with self._unmigrated():
+            self.assertIsNone(MaterialIdentHistory.resolve(OLD))
+
+    def test_a_missing_table_404s_rather_than_500s(self):
+        # Every address that does not exist goes through the history lookup.
+        with self._unmigrated():
+            resp = self.client.get("/api/materials/court_order/nope")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_a_missing_table_does_not_block_creating_a_material(self):
+        # The severe half. The write path consults history before creating any
+        # material, so an unguarded missing table fails EVERY upload and
+        # importer write — not merely the redirects.
+        with self._unmigrated():
+            written = upsert_single_source_material(
+                doc("https://jawafdehi.org/material/court_order/fresh-1"),
+                material_type="court_order",
+            )
+        self.assertEqual(written.iri, "https://jawafdehi.org/material/court_order/fresh-1")
+
+    def test_a_missing_table_does_not_block_a_normal_read(self):
+        m = seed(NEW)
+        with self._unmigrated():
+            resp = self.client.get("/api/materials/court_order/0133")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["@id"], m.iri)
+
+
+class RedirectCacheScopeTests(APITestCase):
+    databases = "__all__"
+
+    @classmethod
+    def setUpTestData(cls):
+        group, _ = Group.objects.get_or_create(name="Caseworker")
+        cls.writer = User.objects.create(username="oidc-ngm-writer3")
+        cls.writer.groups.add(group)
+
+    def test_a_public_target_is_publicly_cacheable(self):
+        m = seed(NEW)
+        MaterialIdentHistory.record(m, OLD)
+        resp = self.client.get("/api/materials/court_order_0133/2081")
+        self.assertIn("public", resp["Cache-Control"])
+
+    def test_a_private_target_is_not_publicly_cacheable(self):
+        # The redirect still happens for staff, but a shared cache must not be
+        # licensed to repeat "this address moved, and here is where to" — the
+        # existence claim the visibility check refuses to make to anyone else.
+        m = seed(NEW, visibility=Visibility.PRIVATE, policy=Policy.PRIVATE)
+        MaterialIdentHistory.record(m, OLD)
+        self.client.force_authenticate(user=self.writer)
+        resp = self.client.get("/api/materials/court_order_0133/2081")
+        self.assertEqual(resp.status_code, 301)
+        self.assertIn("private", resp["Cache-Control"])
+        self.assertNotIn("public", resp["Cache-Control"])
