@@ -85,6 +85,16 @@ def captured(mcp_server, monkeypatch):
         seen["bearer"] = jawafdehi_bearer_token.get()
         seen["transport"] = current_transport.get()
         seen["allowed_tools"] = {tool.name for tool in _get_allowed_tools()}
+        # Answer like the real transport does. A stub that sends nothing is now
+        # treated as an abandoned response and completed with a 500 — which is
+        # the point of _finish_abandoned_response, and would otherwise make
+        # every "was the caller challenged?" assertion below read 500.
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": [
+                (b"content-type", b"application/json")
+            ]}
+        )
+        await send({"type": "http.response.body", "body": b"{}"})
 
     monkeypatch.setattr(mcp_server.session_manager, "handle_request", _recorder)
     return seen
@@ -431,7 +441,7 @@ class TestSingleDoor:
         send = _SendRecorder()
         await mcp_server._handle_http(_make_scope([]), _dummy_receive, send)
         # Reached the session manager instead of short-circuiting on a 401.
-        assert send.status is None
+        assert send.status == 200
         assert captured["identity"] is None
 
     async def test_metadata_is_always_served(self, mcp_server, monkeypatch):
@@ -601,10 +611,14 @@ class TestSingleDoor:
         assert json.loads(send.body)["error"] == "invalid_request"
 
     async def test_absent_authorization_is_still_anonymous(self, mcp_server, captured):
-        """The other half: no header at all is anonymous, not an error."""
+        """The other half: no header at all is anonymous, not an error.
+
+        The assertion is "the door did not challenge it" — the request reached
+        the MCP transport, which is what ``captured`` proves.
+        """
         send = _SendRecorder()
         await mcp_server._handle_http(_make_scope([]), _dummy_receive, send)
-        assert send.status is None
+        assert send.status == 200
         assert captured["identity"] is None
 
     async def test_valid_token_proceeds(self, mcp_server, captured, monkeypatch):

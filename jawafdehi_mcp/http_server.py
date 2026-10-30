@@ -8,6 +8,7 @@ transport is hosted only by ``config.asgi:application``.
 """
 
 import json
+import logging
 import os
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
 from typing import Any
@@ -16,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 import structlog
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import INTERNAL_ERROR
 
 from .configuration import get_oidc_config
 from .identity import current_user_identity
@@ -24,6 +26,14 @@ from .request_context import current_transport, jawafdehi_bearer_token
 from .server import app as mcp_app
 
 logger = structlog.get_logger()
+
+#: For the one thing structlog cannot do here: carry an exception all the way
+#: into a LogRecord. Its configured chain runs ``format_exc_info``, which
+#: renders ``exc_info`` to a string and leaves ``record.exc_info is None`` —
+#: and Sentry's LoggingIntegration builds an exception event only from
+#: ``record.exc_info``. Every other log in this module is message-only and
+#: stays on structlog.
+_stdlib_logger = logging.getLogger(__name__)
 
 # The three ASGI plumbing types, spelled out rather than imported from
 # ``starlette.types``. mcp pulls starlette in transitively, but no first-party
@@ -215,6 +225,158 @@ def _protected_resource_metadata(base_url: str) -> dict:
     }
 
 
+#: Exception classes that mean "the peer is gone", by name.
+#:
+#: Matched by name rather than imported because they come from three layers
+#: that are not all guaranteed importable here — anyio's stream errors,
+#: starlette's ClientDisconnect, and the plain OSError uvicorn raises writing
+#: to a closing transport. The point of the list is that it is a LIST: anything
+#: not on it is a server fault, not a hang-up.
+_CLIENT_GONE_ERROR_NAMES = frozenset(
+    {
+        "BrokenPipeError",
+        "BrokenResourceError",
+        "ClientDisconnect",
+        "ClosedResourceError",
+        "ConnectionResetError",
+        "EndOfStream",
+    }
+)
+
+#: Substrings uvicorn/h11 use for the same condition on a bare OSError.
+_CLIENT_GONE_MESSAGES = (
+    "closing transport",
+    "connection lost",
+    "connection reset",
+)
+
+
+def _declared_content_length(message: MutableMapping[str, Any]) -> int | None:
+    """The ``content-length`` an ``http.response.start`` announced, if any."""
+    for name, value in message.get("headers") or []:
+        if bytes(name).lower() == b"content-length":
+            try:
+                return int(bytes(value))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def is_client_gone(exc: BaseException) -> bool:
+    """Whether ``exc`` means the peer hung up rather than that we are broken."""
+    if type(exc).__name__ in _CLIENT_GONE_ERROR_NAMES:
+        return True
+    if isinstance(exc, OSError):
+        text = str(exc).lower()
+        return any(fragment in text for fragment in _CLIENT_GONE_MESSAGES)
+    return False
+
+
+class _ResponseGuard:
+    """Wrap ASGI ``send`` so an abandoned response can still be closed out.
+
+    ``StreamableHTTPSessionManager`` runs the MCP server in a task on the
+    session manager's task group and streams its output back over this ``send``.
+    If that task dies — the tool raised something the protocol layer did not
+    convert, or the task group was cancelled because the worker is shutting down
+    mid-rollout — the transport's write stream closes and ``handle_request``
+    returns *normally*, having started the response but never finished it.
+
+    uvicorn then logs ``ASGI callable returned without completing response`` at
+    ERROR and closes the socket. That message is what the client gets instead of
+    an error: no status, no JSON-RPC error body, nothing naming the tool. It was
+    the single largest real defect in the API's Sentry inbox (555 events across
+    `tools/call list_document_sources` and `ngm_query_judicial`), and it carried
+    no information, because by the time uvicorn notices, the context is gone.
+
+    This records what reached the client so the caller can finish the response
+    deliberately. It deliberately does not buffer or alter anything in flight.
+    """
+
+    __slots__ = (
+        "_send",
+        "_receive",
+        "started",
+        "complete",
+        "disconnected",
+        "declared_length",
+        "bytes_sent",
+    )
+
+    def __init__(self, send: Send, receive: Receive) -> None:
+        self._send = send
+        self._receive = receive
+        self.started = False
+        self.complete = False
+        self.disconnected = False
+        #: Content-Length the transport announced, when it announced one.
+        self.declared_length: int | None = None
+        self.bytes_sent = 0
+
+    async def receive(self) -> MutableMapping[str, Any]:
+        """Watch for the client hanging up.
+
+        This is not bookkeeping for its own sake — it is the difference between
+        a defect and a normal event. The MCP transport answers over
+        ``EventSourceResponse``, whose ``_listen_for_disconnect`` cancels the
+        streaming task when the peer goes away, *skipping* the closing
+        ``more_body: False``. Without this, every client-initiated SSE close and
+        every open stream on a pod rollout would look exactly like an abandoned
+        response and be reported as one.
+
+        uvicorn draws the same line: its "returned without completing response"
+        error is guarded by ``and not self.disconnected`` precisely so a
+        disconnect is not an error. A replacement that fires on a strictly
+        larger set of conditions than the message it replaces would be a
+        regression dressed as a fix.
+        """
+        message = await self._receive()
+        if message.get("type") == "http.disconnect":
+            self.disconnected = True
+        return message
+
+    async def __call__(self, message: MutableMapping[str, Any]) -> None:
+        # Record only what actually went out. Setting the flags before the await
+        # would mark a response complete that the send then failed to deliver
+        # (a disconnected peer raises here), and the finisher's early-exit would
+        # skip precisely the case it exists to catch.
+        message_type = message.get("type")
+        if message_type == "http.response.start":
+            # BEFORE the await, deliberately, and unlike `complete` below.
+            # uvicorn sets its own `response_started` before writing, so if the
+            # write then fails the server considers the response started while
+            # we would not — and the finisher would try to send a SECOND
+            # `http.response.start`, which uvicorn rejects outright. This flag
+            # has to mirror the server's commit point, not the wire.
+            self.started = True
+            self.declared_length = _declared_content_length(message)
+        try:
+            await self._send(message)
+        except Exception as exc:
+            # A write that fails BECAUSE THE PEER IS GONE is the disconnect
+            # signal on paths where nothing reads `receive` again — the
+            # json_response POST path is exactly that shape, since the
+            # transport reads the body once and never polls after.
+            #
+            # Narrowly, though. Treating *any* send failure as a disconnect
+            # would demote genuine ASGI faults — uvicorn's "Unexpected ASGI
+            # message ... after response already completed", "Response content
+            # shorter than Content-Length", a TypeError on a malformed message
+            # — to a benign client hang-up, producing zero Sentry events and a
+            # truncated response. That is the silent failure this change asks
+            # operators to alert on, so it must not be the default reading.
+            if is_client_gone(exc):
+                self.disconnected = True
+            raise
+        if message_type == "http.response.body":
+            self.bytes_sent += len(message.get("body") or b"")
+            # AFTER the await: a final chunk the send failed to deliver has not
+            # completed anything, and the finisher's early-exit would then skip
+            # precisely the case it exists to catch.
+            if not message.get("more_body", False):
+                self.complete = True
+
+
 class JawafdehiMCPServer:
     """Minimal ASGI app wrapping StreamableHTTPSessionManager with per-request
     OIDC bearer authentication (see resolve_bearer_identity)."""
@@ -304,6 +466,41 @@ class JawafdehiMCPServer:
                 return
 
     async def _handle_http(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        """Guarantee a complete response, then run the real handler.
+
+        The guard used to be installed only around
+        ``session_manager.handle_request``, which left the whole authentication
+        prologue outside it. Anything other than ``OIDCError`` raised while
+        resolving a bearer — a renamed OIDC setting making ``_get_jwks_client``
+        raise ``ImproperlyConfigured``, a ``KeyError`` building the identity —
+        escaped with no response sent and nothing reported, reproducing the
+        original 555-event signature in the one place the fix did not cover.
+
+        Everything the request can do now happens inside the guard.
+        """
+        guard = _ResponseGuard(send, receive)
+        # `config/asgi.py` rebases /mcp -> / and moves the prefix into
+        # root_path before this sees the scope, so the bare path logs as "/".
+        # Operators alert on this record; it has to name the real surface.
+        path = f"{scope.get('root_path', '').rstrip('/')}{scope.get('path', '')}"
+        method = scope.get("method", "GET").upper()
+        try:
+            await self._dispatch_http(scope, guard.receive, guard)
+        except Exception as exc:  # noqa: BLE001 - see _finish_abandoned_response
+            await self._finish_abandoned_response(
+                guard, reason="handler raised", path=path, method=method, exc=exc
+            )
+        else:
+            await self._finish_abandoned_response(
+                guard, reason="handler returned early", path=path, method=method
+            )
+
+    async def _dispatch_http(
         self,
         scope: Scope,
         receive: Receive,
@@ -462,3 +659,154 @@ class JawafdehiMCPServer:
                 current_user_identity.reset(identity_ctx)
             if token_ctx is not None:
                 jawafdehi_bearer_token.reset(token_ctx)
+
+    async def _finish_abandoned_response(
+        self,
+        guard: _ResponseGuard,
+        *,
+        reason: str,
+        path: str = "",
+        method: str = "",
+        exc: BaseException | None = None,
+    ) -> None:
+        """Complete a response the MCP transport started but did not finish.
+
+        A no-op on the overwhelming majority of requests, which complete
+        normally. When it is not a no-op it converts an opaque uvicorn error and
+        a truncated stream into a JSON-RPC error the client can act on.
+
+        This is the HTTP framing only. It is deliberately NOT the whole story on
+        the "handler returned early" path, where the MCP server task died inside
+        ``StreamableHTTPSessionManager``'s task group: that task's exception is
+        caught there and logged by ``mcp.server.streamable_http_manager`` as
+        ``"Stateless session crashed"``, with the traceback. Django's LOGGING
+        sets ``disable_existing_loggers: False`` and a root handler at INFO, so
+        that record reaches both the console and Sentry as its own event —
+        which is where the failing tool is actually named. Correlate the two by
+        timestamp and pod; do not expect this message alone to tell you which
+        tool broke.
+        """
+        if guard.complete:
+            if exc is not None:
+                # The response went out and THEN something raised — a context
+                # token reset in the wrong context, a post-send error inside
+                # the session manager. Before this guard existed that escaped
+                # to uvicorn, which logged it at ERROR and so reached Sentry.
+                # Returning here without a word would make this handler a
+                # silent-failure source in the subsystem it was written to
+                # make observable.
+                _stdlib_logger.error(
+                    "mcp_request_failed_after_response (%s %s): %s",
+                    method,
+                    path,
+                    str(exc) or type(exc).__name__,
+                    exc_info=exc,
+                )
+            return
+
+        if guard.disconnected:
+            # The client hung up. Not a defect, and nothing left to send to.
+            # Same rule uvicorn applies to its own version of this message.
+            logger.debug(
+                "mcp_response_client_disconnected",
+                reason=reason,
+                path=path,
+                method=method,
+            )
+            return
+
+        # ONE record, under ONE name, at ERROR, carrying the exception when
+        # there is one. Each of those three is load-bearing:
+        #
+        # * ERROR because sentry_sdk's LoggingIntegration reports at
+        #   `logging.ERROR` and makes anything lower a breadcrumb. The dominant
+        #   production signature has no exception at all, so this log IS the
+        #   whole signal — downgrading it would close the 555-event issue by
+        #   hiding the condition rather than fixing it.
+        # * One name, because this is the message operators are told to alert
+        #   on in place of the /mcp 5xx rate. An earlier version logged
+        #   `mcp_request_failed` on the raised path and demoted this one, which
+        #   left a post-headers crash absent from the very signal the alert
+        #   watches.
+        # * One record, because logging both opened two Sentry issues for one
+        #   failure and split its history across them.
+        #
+        # stdlib rather than structlog: structlog's chain runs
+        # `format_exc_info`, which renders `exc_info` to a string and leaves
+        # `record.exc_info is None`. Sentry builds an exception event ONLY from
+        # `record.exc_info`, and MCP traffic bypasses DjangoIntegration
+        # entirely (see config/asgi.py), so this is the only chance to report
+        # the exception with a type and frames.
+        _stdlib_logger.error(
+            "mcp_response_abandoned (%s %s) reason=%s started=%s: %s",
+            method,
+            path,
+            reason,
+            guard.started,
+            (str(exc) or type(exc).__name__) if exc is not None else "no exception",
+            exc_info=exc,
+        )
+
+        # Both sends below can themselves fail: the peer may be gone, which is
+        # one of the reasons the response was abandoned in the first place.
+        # Letting that escape would replace the original failure with an
+        # opaque "Exception in ASGI application" — exactly what this is here to
+        # prevent.
+        if (
+            guard.declared_length is not None
+            and guard.bytes_sent < guard.declared_length
+        ):
+            # Nothing can rescue this one. The transport already announced a
+            # Content-Length (the json_response path does, via starlette's
+            # Response) and fewer bytes than that went out, so ANY terminator
+            # we send makes h11 raise "Too little data for declared
+            # Content-Length" and uvicorn drops the socket regardless. Sending
+            # it anyway only buys a second swallowed error on top of the first.
+            # The ERROR above is the signal; the dropped socket is unavoidable.
+            logger.debug(
+                "mcp_response_cannot_be_closed_cleanly",
+                declared=guard.declared_length,
+                sent=guard.bytes_sent,
+            )
+            return
+
+        try:
+            if not guard.started:
+                # Nothing reached the client yet, so a complete JSON-RPC error
+                # can still be framed. id is null per JSON-RPC 2.0 for a request
+                # whose id could not be determined.
+                await self._send_json(
+                    guard,
+                    500,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": INTERNAL_ERROR,
+                            "message": (
+                                "MCP request failed before a response was produced."
+                            ),
+                        },
+                    },
+                )
+                return
+            # Headers are already on the wire, so the status cannot be changed.
+            # End the body cleanly rather than letting uvicorn drop the socket:
+            # a client reading a truncated stream cannot tell a server fault
+            # from a network one, and will often retry a call that already ran.
+            #
+            # Known cost, accepted deliberately: the proxy now records a 200
+            # for this request where uvicorn's dropped socket produced a 502.
+            # So a post-headers crash no longer shows in the /mcp 5xx rate —
+            # which is part of how this defect was originally found. HTTP gives
+            # no way to have both once the status line has gone out, and a
+            # correct client beats a convenient metric. The ERROR log above is
+            # the replacement signal; alert on `mcp_response_abandoned`, not on
+            # the 5xx rate, once this ships.
+            await guard({"type": "http.response.body", "body": b"", "more_body": False})
+        except Exception as exc:  # noqa: BLE001 - the peer is gone; nothing left to do
+            logger.warning(
+                "mcp_response_finish_failed",
+                reason=reason,
+                error=str(exc) or type(exc).__name__,
+            )

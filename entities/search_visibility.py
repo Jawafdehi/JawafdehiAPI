@@ -116,6 +116,29 @@ def referenced_iris(*, refresh: bool = False) -> frozenset[str]:
     return iris
 
 
+def _grouped_case_counts(iris: list[str] | None = None) -> dict[str, int]:
+    """``{IRI: DISTINCT published case count}``, optionally scoped to ``iris``.
+
+    The one place the counting rule is written down. The three public spellings
+    above and below differ ONLY in scope and in failure posture, and each used
+    to carry its own copy of this query — so a change to the rule (the module
+    docstring already anticipates one: counting NGM courtcase parties once the
+    resolver runs) had to be made in three places, and missing one would make
+    the bulk reindex and the live path disagree about who is publicly visible.
+
+    DISTINCT cases, not binds: a case naming the same person as both
+    ``accused`` and ``related`` cites them once, and "in 2 cases" must mean two
+    cases.
+
+    Raises whatever the DB raises; each caller applies its own posture.
+    """
+    queryset = _published_bind_queryset()
+    if iris is not None:
+        queryset = queryset.filter(nes_id__in=iris)
+    rows = queryset.values("nes_id").annotate(case_count=Count("case", distinct=True))
+    return {row["nes_id"]: row["case_count"] for row in rows}
+
+
 def case_counts() -> dict[str, int]:
     """``{entity IRI: number of PUBLISHED cases citing it}`` for every cited IRI.
 
@@ -130,16 +153,73 @@ def case_counts() -> dict[str, int]:
     Raises :class:`ReferenceLookupError` if the cases DB cannot be read.
     """
     try:
-        rows = (
-            _published_bind_queryset()
-            .values("nes_id")
-            .annotate(case_count=Count("case", distinct=True))
-        )
-        return {row["nes_id"]: row["case_count"] for row in rows}
+        return _grouped_case_counts()
     except Exception as exc:  # noqa: BLE001 — re-raised as a typed error below.
         raise ReferenceLookupError(
             "could not read published entity-bind counts from the cases DB"
         ) from exc
+
+
+def entity_case_counts(iris: Iterable[str], *, strict: bool = False) -> dict[str, int]:
+    """``{IRI: PUBLISHED case count}`` for ``iris``. The LIVE (batch) path.
+
+    One grouped query for the whole list, where calling :func:`entity_case_count`
+    in a loop issues one per entity. ``cases.signals._refresh_bound_entities``
+    can hand this 26 IRIs — the production maximum for a single case — from
+    inside a commit hook, and Sentry recorded it as an N+1 of 12 repeating
+    ``COUNT(*) ... WHERE nes_id = %s`` spans on ``/api/cases/{slug}/``.
+
+    The geography half of that same loop already resolves in one batch
+    (``entities.search_geography.locations_for_iris``) for exactly this reason;
+    this is the matching half.
+
+    Failure posture follows the LIVE path, not the bulk one: logs and returns an
+    empty mapping rather than raising, because the caller is best-effort
+    indexing from a commit hook. Blast radius is unchanged by batching — the
+    per-entity loop it replaces would have had every one of its calls fail the
+    same way, each returning 0 — and ``reconcile_entity_visibility`` repairs the
+    drift either way.
+
+    An IRI absent from the result has no published citation, so its count is 0.
+    Callers should read it with ``.get(iri, 0)``, which is also what makes the
+    failure case degrade identically to the old one.
+    """
+    targets = [iri for iri in iris if iri]
+    if not targets:
+        return {}
+    try:
+        return _grouped_case_counts(targets)
+    except Exception:  # noqa: BLE001 — best-effort; reconcile repairs the drift.
+        if strict:
+            # The caller can degrade more narrowly than "the whole batch is 0"
+            # and asked to be told. Batching a best-effort read widens a
+            # TRANSIENT failure from one entity to the whole chunk, and a
+            # chunk of entities indexed as 0 is a chunk archived out of public
+            # search until the reconcile. Only `reindex_entities` needs this;
+            # the commit-hook caller genuinely cannot do better.
+            raise
+        # Name them. The per-entity version this replaces logged one line per
+        # IRI, and without that an operator cannot tell which documents were
+        # indexed as 0 — i.e. which entities just vanished from public search
+        # until the hourly reconcile.
+        #
+        # Callers are responsible for keeping the list small enough that this
+        # is readable: the signal fan-out is bounded at 26 (the production
+        # maximum of binds on one case), and `reindex_entities` chunks its
+        # unbounded catchup set before calling here for exactly this reason.
+        # `%s` on the list rather than `", ".join(targets)`: the join would run
+        # INSIDE this handler and raise TypeError on a non-string nes_id,
+        # escaping a function whose entire contract is to degrade quietly —
+        # and taking the case write's commit hook with it, which is the exact
+        # outcome the swallow exists to prevent. Logging defers formatting to
+        # the handler, so even that cannot fire here.
+        logger.warning(
+            "entity_case_counts failed for %d IRI(s); indexing them as 0: %s",
+            len(targets),
+            targets,
+            exc_info=True,
+        )
+        return {}
 
 
 def entity_case_count(iri: str | None) -> int:
@@ -152,17 +232,9 @@ def entity_case_count(iri: str | None) -> int:
     """
     if not iri:
         return 0
-    try:
-        return (
-            _published_bind_queryset()
-            .filter(nes_id=iri)
-            .values("case")
-            .distinct()
-            .count()
-        )
-    except Exception:  # noqa: BLE001 — best-effort; reconcile repairs the drift.
-        logger.warning("entity_case_count failed for %s; indexing as 0", iri, exc_info=True)
-        return 0
+    # Delegates rather than repeating the swallow-and-return-0 rule: one
+    # posture, one log site. An absent IRI has no published citation, so 0.
+    return entity_case_counts([iri]).get(iri, 0)
 
 
 def entity_public_visible(entity: Any, *, case_count: int | None = None) -> bool:

@@ -34,8 +34,16 @@ from jawafdehi_shared.search.opensearch import ENTITY_INDEX
 from jawafdehi_shared.search.reindex import reindex, summary
 from entities import search_index
 from entities.models import StoredEntity
-from entities.search_geography import case_locations, entity_locations
-from entities.search_visibility import case_counts, entity_case_count
+from entities.search_geography import (
+    case_locations,
+    entity_locations,
+    locations_for_iris,
+)
+from entities.search_visibility import (
+    case_counts,
+    entity_case_count,
+    entity_case_counts,
+)
 
 
 class Command(BaseCommand):
@@ -127,11 +135,20 @@ class Command(BaseCommand):
                 _refresh_derived(counts, locations, e.iri)
                 yield e.iri, (None if e.is_deleted else e)
 
-            for iri in _iris_touched_since(since):
-                if iri in seen:
-                    continue
+            # Resolved in ONE pair of queries for the whole set, not two per
+            # IRI. `_iris_touched_since` is unbounded — a single location bind
+            # drags in every sibling bind of its case — so the per-entity shape
+            # here was the same N+1 this change removes from the signal and the
+            # merge path.
+            #
+            # The loop above stays per-entity on purpose: it streams an
+            # `.iterator()` whose whole point is not to materialise, and
+            # batching it would mean buffering the stream. This set is already
+            # materialised, so there is nothing to trade.
+            touched = [iri for iri in _iris_touched_since(since) if iri not in seen]
+            _prefill_derived(counts, locations, touched)
+            for iri in touched:
                 seen.add(iri)
-                _refresh_derived(counts, locations, iri)
                 entity = StoredEntity.objects.filter(iri=iri).first()
                 yield iri, (None if (entity is None or entity.is_deleted) else entity)
 
@@ -166,6 +183,56 @@ def _refresh_derived(
     """
     counts[iri] = entity_case_count(iri)
     locations[iri] = entity_locations(iri)
+
+
+#: Chunk size for the catchup's batch resolution.
+#:
+#: `_iris_touched_since` is UNBOUNDED — a single location bind drags in every
+#: sibling bind of its case — while both batch helpers are documented for a
+#: small, known set: `locations_for_iris` says "SMALL" outright, and
+#: `entity_case_counts`' failure log names every IRI it was given. Handing
+#: either the whole set would build an unbounded `IN (...)` (on sqlite, past
+#: SQLITE_MAX_VARIABLE_NUMBER) and, on a DB failure, emit one WARNING of
+#: hundreds of KB. 500 keeps the query shape sane and the log line readable
+#: while still being ~500x better than one query per IRI.
+_DERIVED_BATCH_SIZE = 500
+
+
+def _chunked(items: list[str], size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _prefill_derived(
+    counts: dict[str, int],
+    locations: dict[str, tuple[list[str], list[str]]],
+    iris: list[str],
+) -> None:
+    """The batch form of :func:`_refresh_derived`, for a materialised set.
+
+    Two queries for the whole list instead of two per IRI. Absent means "no
+    published citation", which is 0 and ``([], [])`` — not "unknown" — so the
+    defaults here are the answer, matching what both batch helpers document.
+
+    Same best-effort posture as the single-IRI version: both helpers degrade to
+    an empty mapping rather than raising, and the catchup is a narrowing of an
+    already-complete pass.
+    """
+    for chunk in _chunked(iris, _DERIVED_BATCH_SIZE):
+        try:
+            resolved_counts = entity_case_counts(chunk, strict=True)
+        except Exception:  # noqa: BLE001 — fall back to the narrower path below
+            # A transient cases-DB blip must not cost the whole chunk. The
+            # batch's swallow would write 0 for all 500 IRIs, and 0 means "no
+            # published citation" to the visibility gate — 500 entities
+            # archived out of public search on the alias swap. The per-entity
+            # path loses exactly one entity to the same blip, because the next
+            # query succeeds, which is how this behaved before batching.
+            resolved_counts = {iri: entity_case_count(iri) for iri in chunk}
+        resolved_locations = locations_for_iris(chunk)
+        for iri in chunk:
+            counts[iri] = resolved_counts.get(iri, 0)
+            locations[iri] = resolved_locations.get(iri, ([], []))
 
 
 def _iris_touched_since(since) -> set[str]:

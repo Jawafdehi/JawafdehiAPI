@@ -43,7 +43,11 @@ import requests
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from review.oidc_client_credentials import OIDCTokenError, get_provider
+from review.oidc_client_credentials import (
+    OIDCTokenError,
+    OIDCTransportError,
+    get_provider,
+)
 from review.job_handlers import HANDLERS as _REVIEW_HANDLERS
 from materials.job_handlers import HANDLERS as _MATERIAL_HANDLERS
 from case_proposals.job_handlers import HANDLERS as _PROPOSAL_HANDLERS
@@ -58,6 +62,29 @@ from case_proposals.job_handlers import HANDLERS as _PROPOSAL_HANDLERS
 #: case_proposal_intent — nothing enqueues one until the bus's proposal-builder
 #: consumer is running — but it is worth knowing before adding the next.
 HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS, **_PROPOSAL_HANDLERS}
+
+
+#: How long claims may keep failing before the consumer gives up and exits
+#: non-zero. A transport failure must not be fatal on the first occurrence —
+#: that was this command's bug — but it must not be *never* fatal either: a pod
+#: spinning forever against a dead API is invisible, where one that exits is a
+#: visible CrashLoopBackOff. Same reasoning as
+#: ``case_events.consumers.runner.connect``.
+#:
+#: Expressed in SECONDS, not in a count of attempts, and that matters. A count
+#: is silently a function of ``--poll``: ten attempts at the 3s default is 30
+#: seconds of tolerance, which is shorter than the API outages this estate
+#: actually has — a Keel deploy that ships before its migration runs produces
+#: 10-14 minute windows of 500s, and four of those shipped in one day. A budget
+#: that cannot ride out the known outage is a budget that turns a recoverable
+#: blip into a failed run.
+_FAILURE_BUDGET_SECONDS = 900.0
+
+#: Floor and ceiling for the exponential backoff between failed claims, so a
+#: `--poll 0` consumer cannot hot-spin and a long outage does not sleep past
+#: the budget it is being measured against.
+_MIN_FAILURE_SLEEP_SECONDS = 1.0
+_MAX_FAILURE_SLEEP_SECONDS = 60.0
 
 
 class PollerError(Exception):
@@ -142,22 +169,66 @@ class Command(BaseCommand):
     def _jobs_url(self, path=""):
         return f"{settings.JOBS_API_BASE.rstrip('/')}{path}"
 
+    def _request(self, method, url, *, timeout, **kwargs):
+        """One HTTP call to the platform, with transport failures typed.
+
+        Every call out of this command goes through here so that a reset
+        connection, a read timeout or an unreachable issuer surfaces as a
+        ``PollerError`` — which the caller and the main loop already know how to
+        absorb — instead of as a bare ``requests`` exception escaping to the
+        interpreter and taking the whole run with it.
+
+        That escape was real: ``_claim`` is called inside ``except PollerError``,
+        which never matched ``requests.exceptions.ConnectionError``, so one
+        ``ConnectionResetError(104)`` from the API ended the run.
+
+        Deliberately does NOT retry. ``requests.RequestException`` includes
+        ``ReadTimeout``, which fires *after* the server has acted, and every POST
+        here is non-idempotent: a retried ``/claim/`` claims a second job while
+        the first stays RUNNING and unworked until its lease expires, and a
+        retried ``/{id}/result/`` submits the result twice. Retrying is also
+        redundant — the poll loop re-claims on the next tick, and the queue's
+        lease/retry model is the real safety net. One attempt, typed clearly.
+        """
+        try:
+            return requests.request(
+                method, url, headers=self._headers(), timeout=timeout, **kwargs
+            )
+        except (requests.RequestException, OIDCTransportError) as exc:
+            raise PollerError(f"{method} {url} failed: {exc}") from exc
+
+    @staticmethod
+    def _json(response):
+        """Decode a response body, as a ``PollerError`` on failure.
+
+        ``requests.exceptions.JSONDecodeError`` is itself a ``RequestException``,
+        so calling ``.json()`` at the call site re-opened the very hole
+        ``_request`` exists to close: an ingress answering 200 with an HTML
+        error page would raise past the loop's ``except PollerError`` and end
+        the run.
+        """
+        try:
+            return response.json()
+        except ValueError as exc:  # JSONDecodeError subclasses ValueError
+            body = (response.text or "")[:200]
+            raise PollerError(
+                f"{response.request.method if response.request else 'request'} "
+                f"{response.url} returned HTTP {response.status_code} with a "
+                f"non-JSON body: {body}"
+            ) from exc
+
     def _post_jobs(self, path, payload, timeout=60):
-        return requests.post(
-            self._jobs_url(path), json=payload, headers=self._headers(), timeout=timeout
+        return self._request(
+            "POST", self._jobs_url(path), json=payload, timeout=timeout
         )
 
     def _get_jobs(self, path, timeout=30):
-        return requests.get(
-            self._jobs_url(path), headers=self._headers(), timeout=timeout
-        )
+        return self._request("GET", self._jobs_url(path), timeout=timeout)
 
     def _post_casework(self, path, payload, timeout=60):
         """Side calls to the review-specific casework API (e.g. markdown attach)."""
         url = f"{settings.CASEWORK_API_BASE.rstrip('/')}{path}"
-        return requests.post(
-            url, json=payload, headers=self._headers(), timeout=timeout
-        )
+        return self._request("POST", url, json=payload, timeout=timeout)
 
     # ---- read-only listing ------------------------------------------
 
@@ -170,7 +241,7 @@ class Command(BaseCommand):
         r = self._get_jobs("/?status=queued&limit=1000")
         if r.status_code != 200:
             raise PollerError(f"list failed: HTTP {r.status_code} {r.text[:200]}")
-        rows = r.json()
+        rows = self._json(r)
         mine = [row for row in rows if row.get("kind") in set(kinds)]
         self.stdout.write(
             f"queue: {len(mine)} queued job(s) for kinds={sorted(set(kinds))} "
@@ -192,7 +263,7 @@ class Command(BaseCommand):
             return None
         if r.status_code != 200:
             raise PollerError(f"claim failed: HTTP {r.status_code} {r.text[:200]}")
-        return r.json()
+        return self._json(r)
 
     def _report_stage(self, job_id, stage):
         try:
@@ -217,9 +288,20 @@ class Command(BaseCommand):
         if handler is None:
             # We claimed a kind we can't handle (shouldn't happen — we only claim
             # our --kinds). Report it as a failure so it isn't stuck RUNNING.
-            self._submit(
-                job_id, {"status": "failed", "error": f"no handler for kind {kind!r}"}
-            )
+            #
+            # Guarded because `_submit` now raises `PollerError` on a transport
+            # failure, and this call sits outside `_process_job`'s try. An
+            # unguarded reset here would propagate past the loop's
+            # `except PollerError` (which wraps only `_claim`) and end the run —
+            # the exact escape the budget exists to bound. The job stays
+            # RUNNING until its lease expires, which the queue already handles.
+            try:
+                self._submit(
+                    job_id,
+                    {"status": "failed", "error": f"no handler for kind {kind!r}"},
+                )
+            except PollerError as e:
+                self.stderr.write(f"  could not report unknown kind for {job_id}: {e}")
             self.stderr.write(f"  job {job_id}: no handler for kind {kind!r}")
             return
 
@@ -298,10 +380,28 @@ class Command(BaseCommand):
             )
 
         self.token_provider = get_provider()
-        # Fail fast on missing/invalid credentials before entering the loop.
+        # Fail fast on missing/invalid credentials before entering the loop —
+        # but ONLY on those. A transport failure here (read timeout against the
+        # issuer, DNS blip, a 502 from its proxy) says nothing about whether the
+        # credential is good, and treating it as fatal is what used to kill an
+        # entire CronJob run over a few seconds of network weather. The loop
+        # below already tolerates a failed claim and retries, and `_headers()`
+        # re-requests the token on every call, so continuing is safe: either the
+        # blip clears and the run proceeds, or every claim fails and the run
+        # ends up exactly where it would have anyway — just noisily, and after
+        # having given the issuer a chance to come back.
         try:
             self.token_provider.get_token()
+        except OIDCTransportError as e:
+            self.stderr.write(
+                f"warning: could not reach the OIDC token endpoint at startup ({e}); "
+                "continuing — the poll loop will retry."
+            )
         except OIDCTokenError as e:
+            # Configuration errors AND the bare base class. Catching only the
+            # two subclasses let a plain `OIDCTokenError` — still public, still
+            # raised by name elsewhere in the tree — escape as a raw traceback
+            # instead of the clean PollerError this command contracts to raise.
             raise PollerError(str(e)) from e
 
         # Read-only by default: just report the queued jobs and exit.
@@ -321,13 +421,47 @@ class Command(BaseCommand):
             )
         )
 
+        failing_since = None
+        consecutive_failures = 0
         while True:
             try:
                 job = self._claim(kinds)
             except PollerError as e:
+                # Absorbing this is the point — one blip must not end the run,
+                # and that applies to `--once` too: a CronJob drain that dies on
+                # the first reset connection is the exact production failure
+                # this command had. `--once` means "drain what is there and
+                # exit", not "exit at the first sign of weather".
+                #
+                # It must still terminate, though, so the same wall-clock budget
+                # bounds both shapes. A pod that keeps retrying past it exits
+                # non-zero, which is visible; one that spins forever is not.
+                now = time.monotonic()
+                if failing_since is None:
+                    failing_since = now
                 self.stderr.write(f"claim error: {e}")
-                time.sleep(poll)
+                elapsed = now - failing_since
+                if elapsed >= _FAILURE_BUDGET_SECONDS:
+                    raise PollerError(
+                        f"giving up after {elapsed:.0f}s of failed claims; "
+                        f"last error: {e}"
+                    ) from e
+                # Back off while it is down. A flat `poll` sleep means ~300
+                # claims per pod across a 900s budget — against a service that
+                # is already failing, and each one costs a token fetch too.
+                # With `--poll 0` it would be a hot spin for the whole window.
+                consecutive_failures += 1
+                base = max(poll, _MIN_FAILURE_SLEEP_SECONDS)
+                # The ceiling must never be SHORTER than the configured poll
+                # interval: with `--poll 300`, clamping to 60 would make a
+                # failing API polled five times MORE often than a healthy one,
+                # each attempt also fetching a token.
+                ceiling = max(poll, _MAX_FAILURE_SLEEP_SECONDS)
+                time.sleep(min(base * (2 ** min(consecutive_failures - 1, 6)), ceiling))
                 continue
+
+            failing_since = None
+            consecutive_failures = 0
 
             if job is None:
                 if once:

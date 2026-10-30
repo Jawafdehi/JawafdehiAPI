@@ -229,7 +229,7 @@ def _refresh_bound_entities(iris) -> None:
     try:
         from entities import search_index as entities_search_index
         from entities.search_geography import locations_for_iris
-        from entities.search_visibility import clear_cache, entity_case_count
+        from entities.search_visibility import clear_cache, entity_case_counts
     except Exception:  # noqa: BLE001 — entities/opensearch stack optional in some contexts
         return
     # The published-bind set just changed → drop the cached copy so the recomputed
@@ -246,11 +246,17 @@ def _refresh_bound_entities(iris) -> None:
     # hook. An IRI absent from the map has no published citation, hence no
     # geography — the ``([], [])`` default is the answer, not a fallback.
     geography = locations_for_iris(targets)
+    # Same reasoning as the geography batch above, and it used to be the missing
+    # half of it: `entity_case_count` per IRI issued one COUNT(*) each from
+    # inside this commit hook, which Sentry reported as an N+1 of 12 repeating
+    # spans on `/api/cases/{slug}/`. An IRI absent from the map has no published
+    # citation, so 0 is the answer rather than a fallback.
+    case_counts = entity_case_counts(targets)
     for iri in targets:
         try:
             entities_search_index.index_by_iri(
                 iri,
-                case_count=entity_case_count(iri),
+                case_count=case_counts.get(iri, 0),
                 locations=geography.get(iri, ([], [])),
             )
         except Exception:  # noqa: BLE001 — best-effort; the reconcile backstops
