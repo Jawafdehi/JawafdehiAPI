@@ -31,6 +31,7 @@ from django.db import transaction
 
 from jawafdehi_shared.entities.ids import build_material_iri
 from materials.models import Material
+from materials.sources import is_known_source, unknown_source_error
 
 #: Every row this command touches lives under this source token. The token is
 #: also what shelves a document as an Auditor General publication on the site,
@@ -260,6 +261,13 @@ def move_source(new_source: str, *, publisher: dict[str, Any]) -> Callable[[Mate
     """
 
     def action(material: Material) -> Result:
+        # This writes rows directly rather than through
+        # `upsert_single_source_material`, so the write-path allowlist never
+        # sees it. Check here too: a correction that invents a shelf is the
+        # same defect as an upload that invents one, and it would arrive with
+        # more authority.
+        if not is_known_source(new_source):
+            raise Skip(unknown_source_error(new_source))
         new_iri = build_material_iri(new_source, material.ident)
         if Material.objects.filter(iri=new_iri, is_deleted=False).exists():
             raise Skip(f"{new_iri} already exists")

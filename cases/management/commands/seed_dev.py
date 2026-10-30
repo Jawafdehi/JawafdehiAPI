@@ -46,11 +46,16 @@ ENTITIES = [
 ]
 
 # NGM materials: (source, ident, material_type, English name).
+# Source tokens must be REAL ones (materials.sources.KNOWN_SOURCES). `ciaa` and
+# `oag` used to sit here and exist nowhere in production — seeded dev data that
+# cannot occur upstream teaches the wrong shape and, because this command writes
+# rows directly rather than through the upsert, it would not have been caught by
+# the write-path gate either.
 MATERIALS = [
-    ("ciaa", "report-1", "official_report", "CIAA Investigation Report 2080"),
-    ("ciaa", "chargesheet-1", "charge_sheet", "Charge Sheet — Ministry of Works"),
-    ("oag", "audit-2079", "official_report", "OAG Audit Report FY2079/80"),
-    ("court", "verdict-075-cr-0123", "court_order", "Verdict 075-CR-0123"),
+    ("ciaa_press_release", "report-1", "official_report", "CIAA Investigation Report 2080"),
+    ("charge_sheet", "chargesheet-1", "charge_sheet", "Charge Sheet — Ministry of Works"),
+    ("official_report", "audit-2079", "official_report", "OAG Audit Report FY2079/80"),
+    ("court_order", "verdict-075-cr-0123", "court_order", "Verdict 075-CR-0123"),
 ]
 
 # v3 authz model: admin == superuser (no group); the single content-staff role
