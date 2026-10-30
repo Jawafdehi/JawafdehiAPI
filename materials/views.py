@@ -22,7 +22,9 @@ import mimetypes
 import jsonpatch
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.http import HttpResponseNotModified
+from urllib.parse import urlencode
+
+from django.http import HttpResponseNotModified, HttpResponsePermanentRedirect
 from django.utils.cache import patch_vary_headers
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
@@ -284,6 +286,69 @@ def _upsert_material(
     return material.data, code, None
 
 
+def _is_retired_iri(iri: str) -> bool:
+    """Whether ``iri`` names no live material but is a recorded former address."""
+    from .models import Material, MaterialIdentHistory
+
+    if Material.objects.filter(pk=iri, is_deleted=False).exists():
+        return False
+    return MaterialIdentHistory.resolve(iri) is not None
+
+
+def _retired_iri_redirect(request, iri: str):
+    """301 a retired material IRI to its current address, or ``None`` for a 404.
+
+    Consulted ONLY after :func:`_resolve_material` has missed, so a live
+    material always wins and a retired address can never shadow one.
+
+    **Visibility is re-checked on the TARGET, with the requester's own
+    permissions.** A redirect is an existence claim: 301-ing to a PRIVATE
+    material would tell anyone who guessed a former address that the document
+    exists, which is precisely the leak the visibility gate prevents on the
+    direct URL. So a non-public target 404s for the public exactly as the
+    direct URL would, and only an authed caseworker is redirected to it.
+    """
+    from .models import PUBLIC_VISIBILITIES, MaterialIdentHistory
+
+    target = MaterialIdentHistory.resolve(iri)
+    if target is None:
+        return None
+    is_public = target.visibility in PUBLIC_VISIBILITIES
+    if not (_can_see_nonpublic(request) or is_public):
+        return None
+    # Preserve the query string: a retired address is most often reached from a
+    # citation or an index, and dropping its parameters would silently change
+    # the request rather than merely move it. `iri` is the exception — it is
+    # how the OTHER route spells the address being requested, so forwarding it
+    # would carry the retired IRI into the new URL and point the redirect back
+    # at the document we just moved away from.
+    params = [
+        (k, v)
+        for k, v in request.GET.items()
+        if k != "iri"
+    ]
+    location = f"/api/materials/{target.source}/{target.ident}"
+    if params:
+        location = f"{location}?{urlencode(params)}"
+    resp = HttpResponsePermanentRedirect(location)
+    # A bare 301 is cached by browsers INDEFINITELY and is not revalidated, so
+    # a document moved back later would leave those clients looping between the
+    # two addresses with no way to recover. A corpus correction has to stay
+    # reversible, so the redirect is revalidated daily rather than remembered
+    # forever.
+    # `public` only when the TARGET is public. A staff user following a
+    # redirect to a non-public document would otherwise hand a shared cache a
+    # year's licence to repeat "this address moved, and here is where to" —
+    # which is the existence claim the visibility check two lines up just
+    # refused to make to anyone else. Cloudflare bypasses this path today, so
+    # the live risk is small; the header should still say what we mean.
+    resp["Cache-Control"] = (
+        "public, max-age=86400" if is_public else "private, max-age=86400"
+    )
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
 def _material_read_response(request, iri: str) -> Response:
     """The shared GET tail for both material routes.
 
@@ -304,6 +369,9 @@ def _material_read_response(request, iri: str) -> Response:
         iri, include_nonpublic=_can_see_nonpublic(request), with_row=True
     )
     if data is None:
+        redirect = _retired_iri_redirect(request, iri)
+        if redirect is not None:
+            return redirect
         resp = Response(
             {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
         )
@@ -806,6 +874,17 @@ def material_detail(request, source: str, ident: str):
         denied = _require_ngm_role(request)
         if denied is not None:
             return denied
+        # A retired address is NOT a write target. Letting the upsert's
+        # redirect-follow run here would accept a PUT at one URL, apply it to a
+        # different document, and report 201 for a row it did not create —
+        # while PATCH, DELETE, /content and /search all 404 on the same IRI.
+        # Silently relocating an explicit write is worse than refusing it, so
+        # this matches the other verbs; the ingestion path still follows,
+        # because a pipeline has no URL to correct.
+        if _is_retired_iri(iri):
+            return Response(
+                {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+            )
         body = request.data if isinstance(request.data, dict) else {}
         material_type = body.get("material_type") if isinstance(body, dict) else None
         doc = body.get("material") if isinstance(body, dict) and "material" in body else body

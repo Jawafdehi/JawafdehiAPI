@@ -12,8 +12,11 @@ Clean slate: no legacy ids. ``iri`` is the only identity.
 
 from __future__ import annotations
 
+import logging
+
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.utils import OperationalError, ProgrammingError
 
 from jawafdehi_shared.entities.ids import (
     JAWAF_SOURCE,
@@ -23,6 +26,9 @@ from jawafdehi_shared.entities.ids import (
 )
 
 from .jsonld import validate_material_jsonld
+
+
+logger = logging.getLogger(__name__)
 
 
 def validate_material_iri(value: str) -> None:
@@ -539,3 +545,137 @@ class ExtractionScan(models.Model):
 
     def __str__(self) -> str:
         return f"scan@{self.last_iri or 'start'} (lap {self.laps})"
+
+
+class MaterialIdentHistory(models.Model):
+    """Retired material IRIs → their current material, for 301-redirecting.
+
+    A material's ``@id`` is its primary key AND its public URL, derived from
+    ``<source>/<ident>``. Correcting either — a misspelled source token, a case
+    number that leaked into one — therefore RETIRES a URL. Without this table
+    the old one hard-404s, which is why
+    ``fix_oag_corpus.move_source`` carries the warning that it is a one-document
+    tool rather than a general tidying one: there was nowhere to record the move.
+
+    This is the materials counterpart of :class:`cases.models.CaseSlugHistory`
+    and of the entity merge tombstones, and it exists so a corpus correction is
+    **reversible rather than one-way**. It is deliberately independent of any
+    particular correction: landing it changes no URLs and enables all of them.
+
+    Invariants (maintained by :meth:`record`):
+      * **A LIVE IRI always wins.** The detail path resolves a live material
+        first and consults this table only on a miss, and :meth:`record`
+        additionally drops any history row colliding with a newly-live IRI, so
+        the table can never shadow a material that exists.
+      * ``retired_iri`` is unique, and a recycled IRI repoints to its
+        most-recent former owner, so a redirect always targets the latest
+        material that vacated the address.
+    """
+
+    # Mirrors Material.iri exactly (same width, same validator) — a retired
+    # address must be storable here, or the move that retired it cannot be
+    # recorded and the redirect is silently lost.
+    retired_iri = models.CharField(
+        max_length=MAX_IRI_LENGTH,
+        unique=True,
+        db_index=True,
+        validators=[validate_material_iri],
+    )
+    # CASCADE: a redirect to a material that no longer exists is worse than a
+    # 404 — it sends the caller somewhere that also fails. Materials are
+    # soft-deleted in normal operation, so this is a safety net, not a routine
+    # path.
+    material = models.ForeignKey(
+        "Material", on_delete=models.CASCADE, related_name="ident_history"
+    )
+    #: Why the address was retired, for the operator reading this later.
+    reason = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Explicit, like every other table in this app (`materials`,
+        # `material_document_content`, …). The Django default here would be
+        # `materials_materialidenthistory`, which both breaks the convention
+        # and makes a SQL filter on "the materials table" ambiguous by prefix.
+        db_table = "material_ident_history"
+        verbose_name = "Material Ident History"
+        verbose_name_plural = "Material Ident Histories"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.retired_iri} → {self.material_id}"
+
+    @classmethod
+    def record(cls, material, old_iri: str, *, reason: str = "") -> None:
+        """Remember that ``old_iri`` used to address ``material``.
+
+        No-ops when there is nothing to record (no prior IRI, or it did not
+        change). Upholds "a live IRI wins" by first dropping any history row
+        that collides with the material's now-live IRI, then upserting
+        ``old_iri → material`` so a recycled address repoints to its newest
+        former owner instead of tripping the unique constraint.
+
+        **Call this inside the same transaction as the move**, before or with
+        the new row: an interrupted rename must leave a redirect rather than a
+        hole.
+        """
+        new_iri = material.iri if material is not None else None
+        if not old_iri or old_iri == new_iri:
+            return
+        if new_iri:
+            cls.objects.using("ngm").filter(retired_iri=new_iri).delete()
+        # REPOINT THE CHAIN. After A→B then B→C, a row still reading "A → the
+        # material formerly at B" is dead: that material is a tombstone, so
+        # resolve() rejects it and A hard-404s — the one outcome this table
+        # exists to prevent. Every address that used to reach the moved
+        # material must now reach its destination, so the chain stays one hop
+        # however many times a document is corrected.
+        cls.objects.using("ngm").filter(material_id=old_iri).update(material=material)
+        cls.objects.using("ngm").update_or_create(
+            retired_iri=old_iri, defaults={"material": material, "reason": reason}
+        )
+
+    @classmethod
+    def resolve(cls, retired_iri: str):
+        """The live material that ``retired_iri`` now points at, or ``None``.
+
+        Returns the row, not a URL — the caller owns the visibility decision,
+        because a redirect that ignored it would confirm the existence of a
+        PRIVATE document to anyone who guessed a former address.
+        """
+        # No .using(): this runs on the public read path, so it must be
+        # replica-eligible like every other read there. Forcing the primary
+        # would put one extra query per 404 — a high-volume class on a public
+        # endpoint — onto the write database.
+        #
+        # A MISSING TABLE IS TREATED AS AN EMPTY ONE, deliberately and
+        # permanently. Keel rolls the image out automatically while migrations
+        # here are applied by hand, so there is a window in which this code is
+        # live and the table is not. Without this guard that window is severe
+        # rather than cosmetic: the read path 500s on every address that does
+        # not exist, and — because the write path consults history before
+        # creating any material — EVERY new upload and importer write fails
+        # too.
+        #
+        # Degrading to "no history" is not a hack covering a deploy race: it is
+        # the honest answer. This table only ever ADDS redirects, so without it
+        # the archive behaves exactly as it did before this feature existed.
+        # That makes the migration ordering a preference rather than a
+        # prerequisite, which is the right trade for a table that is empty
+        # until the first document is moved.
+        try:
+            row = (
+                cls.objects.select_related("material")
+                .filter(retired_iri=retired_iri)
+                .first()
+            )
+        except (ProgrammingError, OperationalError):
+            logger.warning(
+                "%s is not migrated yet; serving without retired-address "
+                "redirects until 0012 is applied",
+                cls._meta.db_table,
+            )
+            return None
+        if row is None or row.material is None or row.material.is_deleted:
+            return None
+        return row.material

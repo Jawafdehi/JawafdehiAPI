@@ -30,7 +30,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from jawafdehi_shared.entities.ids import build_material_iri
-from materials.models import Material
+from materials.models import Material, MaterialIdentHistory
 
 #: Every row this command touches lives under this source token. The token is
 #: also what shelves a document as an Auditor General publication on the site,
@@ -252,11 +252,15 @@ def move_source(new_source: str, *, publisher: dict[str, Any]) -> Callable[[Mate
     so there is no in-place edit: this creates a new row at the new IRI and
     soft-deletes the old one.
 
-    **The old public URL 404s afterwards.** There is no redirect table for
-    materials. That is an accepted cost here — the document is reachable at its
-    new IRI and through search — but it is the reason this action is used once,
-    for a document that is not what its shelf claims, rather than offered as a
-    general tidying tool.
+    **The old public URL now 301s instead of 404ing.** A
+    :class:`~materials.models.MaterialIdentHistory` row is recorded for the
+    retired IRI, so a citation of the old address still resolves. That is what
+    lifts the original restriction on this action: it was a one-document tool
+    precisely because there was nowhere to record the move, and the move was
+    therefore one-way.
+
+    The history row is written in the SAME transaction as the new material (see
+    ``handle``), so an interrupted rename leaves a redirect rather than a hole.
     """
 
     def action(material: Material) -> Result:
@@ -429,6 +433,15 @@ class Command(BaseCommand):
                     for row in result.also_save:
                         row.save()
                     material.save()
+                    if result.what == "move source":
+                        # Same transaction as the move, so an interrupted
+                        # rename leaves a REDIRECT rather than a hole. Recorded
+                        # after the new row exists because the history row
+                        # points at it (FK); the enclosing atomic() is what
+                        # makes the pair all-or-nothing.
+                        MaterialIdentHistory.record(
+                            result.also_save[0], result.before, reason=why
+                        )
 
             if not apply:
                 # Belt and braces. No action writes — they edit in memory and
