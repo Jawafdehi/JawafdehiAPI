@@ -209,3 +209,27 @@ class ReviewRegressionTests(TestCase):
             seed("document", f"a{i}", [link(f"{OURS}/s{i}.md", "MARKDOWN")], text={"en": f"{i}"})
             seed("document", f"b{i}", [link(f"{OURS}/s{i}.md", "MARKDOWN")], text={"en": f"x{i}"})
         self.assertEqual(run(), run())
+
+
+    def test_a_material_without_a_transcript_is_unknown_not_different(self):
+        # Pairing a transcribed row with an untranscribed one is ordinary;
+        # counting the gap as a distinct value reported it as damage.
+        seed("document", "a", [link(f"{OURS}/s.pdf", "RAW")], text={"en": "A"})
+        seed("document", "b", [link(f"{OURS}/s.pdf", "RAW")])
+        out = run()
+        self.assertIn("no damaged artifacts", out)
+        self.assertIn("shared but consistent", out)
+
+    def test_two_untranscribed_materials_are_not_claimed_to_be_fine(self):
+        # The honest limit: with no text on either side there is nothing to
+        # compare, so this is reported as consistent rather than damaged — and
+        # the docstring says so rather than implying full coverage.
+        seed("document", "a", [link(f"{OURS}/s.pdf", "RAW")])
+        seed("document", "b", [link(f"{OURS}/s.pdf", "RAW")])
+        self.assertIn("no damaged artifacts", run())
+
+    def test_disagreeing_text_is_still_damage_when_a_third_row_has_none(self):
+        seed("document", "a", [link(f"{OURS}/s.md", "MARKDOWN")], text={"en": "A"})
+        seed("document", "b", [link(f"{OURS}/s.md", "MARKDOWN")], text={"en": "B"})
+        seed("document", "c", [link(f"{OURS}/s.md", "MARKDOWN")])
+        self.assertIn("DAMAGED", run())

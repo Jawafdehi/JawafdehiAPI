@@ -21,6 +21,14 @@ Three classes, reported apart:
   to another document's transcript. ``conversion.py`` calls this out as
   forward-only — rows damaged before the switch still carry the wrong link.
 
+Text that is ABSENT counts as unknown, never as different. A material with no
+transcript says nothing about whether the shared artifact is the right one, and
+treating the gap as a distinct value would report every pairing of a
+transcribed row with an untranscribed one as damage. The cost of that choice is
+stated plainly: this command can only find a collision that the parents' own
+text DISAGREES about. A collision between two rows that both lack text is
+invisible to it, and no amount of grouping would reveal one.
+
 The verdict therefore comes from each parent's own ``data["text"]``, which is
 per-row and correct even when the stored artifact is not. That is also what
 makes repair cheap: a backfill can re-store the transcript from the database
@@ -120,7 +128,12 @@ class Command(BaseCommand):
 
         damaged, benign = {}, {}
         for url, parents in ours.items():
-            fingerprints = {texts.get(iri, "") for iri in parents}
+            # ABSENT text is unknown, not different. A material with no
+            # transcript tells us nothing about whether the shared artifact is
+            # the right one, and counting "" as a distinct value made every
+            # pairing of a transcribed row with an untranscribed one look like
+            # damage — which is a common and entirely ordinary shape.
+            fingerprints = {fp for fp in (texts.get(iri) for iri in parents) if fp}
             (damaged if len(fingerprints) > 1 else benign)[url] = parents
 
         self.stdout.write(
