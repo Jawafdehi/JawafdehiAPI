@@ -47,6 +47,40 @@ from .sources import is_known_source, unknown_source_error
 logger = logging.getLogger("materials.ingest")
 
 
+
+
+def _source_is_permitted(source: str) -> bool:
+    """Whether a NEW material may be created under ``source``.
+
+    Two ways to qualify, and the second one is what makes this gate safe to
+    turn on.
+
+    ``KNOWN_SOURCES`` is a hand-maintained list, and it was seeded from the
+    PUBLIC catalogue — which cannot see a source whose rows are all private or
+    unlisted. `cib` is the known example: 91 rows, zero of them publicly
+    listed. A token missed that way would start failing writes in production
+    with nothing in review to catch it, because nothing in review can see it.
+
+    So a source that ALREADY HAS ROWS is permitted regardless of the list. That
+    is not a loophole, it is the actual intent restated: the gate exists to stop
+    a new SHELF appearing by typo, and a source with existing materials is not a
+    new shelf. The list then governs only genuinely novel tokens, which is the
+    one case a human should look at.
+
+    LIVE rows only, which matters in both directions. Private and unlisted rows
+    are live — invisible to the public catalogue but perfectly real — so they
+    qualify, and that is the whole point. Tombstones do NOT: once a merge has
+    moved a shelf's rows away and soft-deleted the originals, the retired token
+    stops being writable on its own, without anyone remembering to delete it
+    from the list.
+
+    The query runs only when the list misses, so the common path is unchanged.
+    """
+    if is_known_source(source):
+        return True
+    return Material.objects.filter(source=source, is_deleted=False).exists()
+
+
 def upsert_single_source_material(
     jsonld: dict[str, Any], *, material_type: str, visibility_policy: str | None = None
 ) -> Material:
@@ -126,7 +160,7 @@ def upsert_single_source_material(
             .values("data", "source_text")
             .first()
         )
-        if existing is None and not is_known_source(candidate.source):
+        if existing is None and not _source_is_permitted(candidate.source):
             # INSERT ONLY, and that is the whole design. A new token mints a new
             # public shelf in /api/document-sources/, so it costs a reviewed
             # one-line change — the same price as a label. An UPDATE to a row

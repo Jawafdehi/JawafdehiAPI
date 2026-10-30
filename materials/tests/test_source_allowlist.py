@@ -100,8 +100,13 @@ class ExistingRowTests(TestCase):
                 self.assertFalse(is_known_source("chargesheet"))
                 updated = write("chargesheet", "melamchi", name={"en": "still editable"})
                 self.assertEqual(updated.data["name"], {"en": "still editable"})
-                with pytest.raises(ValueError):
-                    write("chargesheet", "a-brand-new-one")
+                # Still writable: `chargesheet` has LIVE rows, so it is an
+                # existing shelf rather than a new one. It stops being
+                # writable when its merge soft-deletes them — see
+                # InvisibleSourceTests.
+                self.assertEqual(
+                    write("chargesheet", "a-brand-new-one").source, "chargesheet"
+                )
             finally:
                 src.KNOWN_SOURCES = original
 
@@ -171,3 +176,47 @@ class ConsistencyTests(TestCase):
         # CronJob rather than in CI. Pin the five that have a sourcing package.
         for token in ("ag", "nkp", "ciaa_press_release", "bolpatra", "ppmo"):
             self.assertIn(token, KNOWN_SOURCES)
+
+
+class InvisibleSourceTests(TestCase):
+    """The risk review could not check from code, closed in code instead."""
+
+    databases = "__all__"
+
+    def test_a_source_with_existing_rows_is_permitted_even_if_unlisted(self):
+        # KNOWN_SOURCES was seeded from the PUBLIC catalogue, which cannot see
+        # a source whose rows are all private or unlisted. Such a token would
+        # have started failing writes in production with nothing in review able
+        # to catch it. A source that already has rows is not a new shelf.
+        Material.objects.create(
+            iri="https://jawafdehi.org/material/invisible_corpus/1",
+            source="invisible_corpus",
+            ident="1",
+            material_type="document",
+            data=doc("invisible_corpus", "1"),
+        )
+        self.assertFalse(is_known_source("invisible_corpus"))
+        written = write("invisible_corpus", "2")
+        self.assertEqual(written.source, "invisible_corpus")
+
+    def test_a_source_with_no_rows_at_all_is_still_refused(self):
+        # The gate still does its job: a genuinely novel token is the one case
+        # a human should look at.
+        with pytest.raises(ValueError):
+            write("never_seen_before", "1")
+
+    def test_a_shelf_whose_rows_are_all_tombstones_is_refused(self):
+        # The other direction, and it is what makes the cleanup self-closing:
+        # once a merge has moved a shelf away and soft-deleted the originals,
+        # the retired token stops being writable on its own — nobody has to
+        # remember to delete it from KNOWN_SOURCES.
+        m = Material.objects.create(
+            iri="https://jawafdehi.org/material/retired_corpus/1",
+            source="retired_corpus",
+            ident="1",
+            material_type="document",
+            data=doc("retired_corpus", "1"),
+        )
+        Material.objects.filter(pk=m.iri).update(is_deleted=True)
+        with pytest.raises(ValueError):
+            write("retired_corpus", "2")
