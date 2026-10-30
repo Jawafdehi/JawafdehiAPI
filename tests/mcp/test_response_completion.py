@@ -635,3 +635,164 @@ class TestOnlyARealHangUpCountsAsOne:
 
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors, "a genuine ASGI fault must not be demoted to a hang-up"
+
+
+class TestWhatCannotBeClosedIsNotPretended:
+    """Round five: a zero-length terminator breaks a declared Content-Length.
+
+    `json_response=True` means starlette answers with a `Response`, which sets
+    `content-length: N`. If the task dies between the start and the body, ANY
+    terminator makes h11 raise "Too little data for declared Content-Length"
+    and uvicorn drops the socket regardless — so sending one only buys a second
+    swallowed error on top of the first.
+    """
+
+    @staticmethod
+    def _server_with(monkeypatch, handler):
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", handler)
+        return server
+
+    async def test_the_guard_reads_the_declared_length(self):
+        recorder = _SendRecorder()
+        guard = _ResponseGuard(recorder, _dummy_receive)
+        await guard(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-length", b"42")],
+            }
+        )
+        assert guard.declared_length == 42
+
+    async def test_it_counts_what_actually_went_out(self):
+        guard = _ResponseGuard(_SendRecorder(), _dummy_receive)
+        await guard({"type": "http.response.start", "status": 200, "headers": []})
+        await guard({"type": "http.response.body", "body": b"abc", "more_body": True})
+        assert guard.bytes_sent == 3
+
+    async def test_a_short_content_length_body_sends_no_terminator(
+        self, monkeypatch
+    ):
+        async def dies_after_headers(scope, receive, send):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-length", b"99")],
+                }
+            )
+
+        server = self._server_with(monkeypatch, dies_after_headers)
+        send = _SendRecorder()
+        await server._handle_http(_make_scope([]), _dummy_receive, send)
+        assert len(send.messages) == 1, "a doomed terminator must not be attempted"
+
+    async def test_it_is_still_reported_at_error(self, monkeypatch, caplog):
+        import logging
+
+        async def dies_after_headers(scope, receive, send):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-length", b"99")],
+                }
+            )
+
+        server = self._server_with(monkeypatch, dies_after_headers)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    async def test_a_chunked_response_is_still_closed(self, monkeypatch):
+        """No declared length -> the clean close still works and still matters."""
+
+        async def dies_mid_stream(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"x", "more_body": True})
+
+        server = self._server_with(monkeypatch, dies_mid_stream)
+        send = _SendRecorder()
+        await server._handle_http(_make_scope([]), _dummy_receive, send)
+        assert send.messages[-1].get("more_body", False) is False
+
+
+class TestNothingIsSwallowedSilently:
+    """Round five: an exception after the response completed vanished."""
+
+    @staticmethod
+    def _server_with(monkeypatch, handler):
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", handler)
+        return server
+
+    async def test_a_post_response_crash_is_still_reported(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        async def responds_then_explodes(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+            raise RuntimeError("token reset in a different context")
+
+        server = self._server_with(monkeypatch, responds_then_explodes)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors, "it used to reach uvicorn and therefore Sentry"
+        assert errors[0].exc_info[0] is RuntimeError
+
+    async def test_a_clean_response_still_logs_nothing(self, monkeypatch, caplog):
+        import logging
+
+        async def responds(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        server = self._server_with(monkeypatch, responds)
+        with caplog.at_level(logging.DEBUG):
+            await server._handle_http(_make_scope([]), _dummy_receive, _SendRecorder())
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+class TestStartedMirrorsTheServerNotTheWire:
+    """Round five: a failed header write desynced the guard from uvicorn.
+
+    uvicorn sets `response_started = True` and only then writes. If that write
+    raises something that is not a hang-up, the guard used to still read
+    `started=False`, so the finisher would send a SECOND `http.response.start`
+    — which uvicorn rejects, leaving the client with a never-terminated
+    response and the operator with the wrong error.
+    """
+
+    async def test_a_failed_header_write_still_counts_as_started(self):
+        class _Failing:
+            async def __call__(self, message):
+                raise RuntimeError("TLS write failed")
+
+        guard = _ResponseGuard(_Failing(), _dummy_receive)
+        with pytest.raises(RuntimeError):
+            await guard({"type": "http.response.start", "status": 200, "headers": []})
+        assert guard.started, "uvicorn already committed; we must agree"
+
+    async def test_no_second_start_is_attempted(self, monkeypatch):
+        sent = []
+
+        class _FailsOnce:
+            async def __call__(self, message):
+                sent.append(message)
+                if message["type"] == "http.response.start" and len(sent) == 1:
+                    raise RuntimeError("TLS write failed")
+
+        async def writes_headers(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+
+        server = JawafdehiMCPServer()
+        monkeypatch.setattr(server.session_manager, "handle_request", writes_headers)
+        await server._handle_http(_make_scope([]), _dummy_receive, _FailsOnce())
+
+        starts = [m for m in sent if m["type"] == "http.response.start"]
+        assert len(starts) == 1

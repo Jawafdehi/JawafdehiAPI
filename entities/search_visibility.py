@@ -160,7 +160,7 @@ def case_counts() -> dict[str, int]:
         ) from exc
 
 
-def entity_case_counts(iris: Iterable[str]) -> dict[str, int]:
+def entity_case_counts(iris: Iterable[str], *, strict: bool = False) -> dict[str, int]:
     """``{IRI: PUBLISHED case count}`` for ``iris``. The LIVE (batch) path.
 
     One grouped query for the whole list, where calling :func:`entity_case_count`
@@ -190,6 +190,14 @@ def entity_case_counts(iris: Iterable[str]) -> dict[str, int]:
     try:
         return _grouped_case_counts(targets)
     except Exception:  # noqa: BLE001 — best-effort; reconcile repairs the drift.
+        if strict:
+            # The caller can degrade more narrowly than "the whole batch is 0"
+            # and asked to be told. Batching a best-effort read widens a
+            # TRANSIENT failure from one entity to the whole chunk, and a
+            # chunk of entities indexed as 0 is a chunk archived out of public
+            # search until the reconcile. Only `reindex_entities` needs this;
+            # the commit-hook caller genuinely cannot do better.
+            raise
         # Name them. The per-entity version this replaces logged one line per
         # IRI, and without that an operator cannot tell which documents were
         # indexed as 0 — i.e. which entities just vanished from public search
@@ -224,11 +232,9 @@ def entity_case_count(iri: str | None) -> int:
     """
     if not iri:
         return 0
-    try:
-        return _grouped_case_counts([iri]).get(iri, 0)
-    except Exception:  # noqa: BLE001 — best-effort; reconcile repairs the drift.
-        logger.warning("entity_case_count failed for %s; indexing as 0", iri, exc_info=True)
-        return 0
+    # Delegates rather than repeating the swallow-and-return-0 rule: one
+    # posture, one log site. An absent IRI has no published citation, so 0.
+    return entity_case_counts([iri]).get(iri, 0)
 
 
 def entity_public_visible(entity: Any, *, case_count: int | None = None) -> bool:

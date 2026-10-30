@@ -451,13 +451,13 @@ class Command(BaseCommand):
                 # is already failing, and each one costs a token fetch too.
                 # With `--poll 0` it would be a hot spin for the whole window.
                 consecutive_failures += 1
-                time.sleep(
-                    min(
-                        max(poll, _MIN_FAILURE_SLEEP_SECONDS)
-                        * (2 ** min(consecutive_failures - 1, 6)),
-                        _MAX_FAILURE_SLEEP_SECONDS,
-                    )
-                )
+                base = max(poll, _MIN_FAILURE_SLEEP_SECONDS)
+                # The ceiling must never be SHORTER than the configured poll
+                # interval: with `--poll 300`, clamping to 60 would make a
+                # failing API polled five times MORE often than a healthy one,
+                # each attempt also fetching a token.
+                ceiling = max(poll, _MAX_FAILURE_SLEEP_SECONDS)
+                time.sleep(min(base * (2 ** min(consecutive_failures - 1, 6)), ceiling))
                 continue
 
             failing_since = None

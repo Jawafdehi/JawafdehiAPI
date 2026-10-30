@@ -251,6 +251,17 @@ _CLIENT_GONE_MESSAGES = (
 )
 
 
+def _declared_content_length(message: MutableMapping[str, Any]) -> int | None:
+    """The ``content-length`` an ``http.response.start`` announced, if any."""
+    for name, value in message.get("headers") or []:
+        if bytes(name).lower() == b"content-length":
+            try:
+                return int(bytes(value))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def is_client_gone(exc: BaseException) -> bool:
     """Whether ``exc`` means the peer hung up rather than that we are broken."""
     if type(exc).__name__ in _CLIENT_GONE_ERROR_NAMES:
@@ -282,7 +293,15 @@ class _ResponseGuard:
     deliberately. It deliberately does not buffer or alter anything in flight.
     """
 
-    __slots__ = ("_send", "_receive", "started", "complete", "disconnected")
+    __slots__ = (
+        "_send",
+        "_receive",
+        "started",
+        "complete",
+        "disconnected",
+        "declared_length",
+        "bytes_sent",
+    )
 
     def __init__(self, send: Send, receive: Receive) -> None:
         self._send = send
@@ -290,6 +309,9 @@ class _ResponseGuard:
         self.started = False
         self.complete = False
         self.disconnected = False
+        #: Content-Length the transport announced, when it announced one.
+        self.declared_length: int | None = None
+        self.bytes_sent = 0
 
     async def receive(self) -> MutableMapping[str, Any]:
         """Watch for the client hanging up.
@@ -318,6 +340,16 @@ class _ResponseGuard:
         # would mark a response complete that the send then failed to deliver
         # (a disconnected peer raises here), and the finisher's early-exit would
         # skip precisely the case it exists to catch.
+        message_type = message.get("type")
+        if message_type == "http.response.start":
+            # BEFORE the await, deliberately, and unlike `complete` below.
+            # uvicorn sets its own `response_started` before writing, so if the
+            # write then fails the server considers the response started while
+            # we would not — and the finisher would try to send a SECOND
+            # `http.response.start`, which uvicorn rejects outright. This flag
+            # has to mirror the server's commit point, not the wire.
+            self.started = True
+            self.declared_length = _declared_content_length(message)
         try:
             await self._send(message)
         except Exception as exc:
@@ -336,11 +368,13 @@ class _ResponseGuard:
             if is_client_gone(exc):
                 self.disconnected = True
             raise
-        message_type = message.get("type")
-        if message_type == "http.response.start":
-            self.started = True
-        elif message_type == "http.response.body" and not message.get("more_body", False):
-            self.complete = True
+        if message_type == "http.response.body":
+            self.bytes_sent += len(message.get("body") or b"")
+            # AFTER the await: a final chunk the send failed to deliver has not
+            # completed anything, and the finisher's early-exit would then skip
+            # precisely the case it exists to catch.
+            if not message.get("more_body", False):
+                self.complete = True
 
 
 class JawafdehiMCPServer:
@@ -450,7 +484,10 @@ class JawafdehiMCPServer:
         Everything the request can do now happens inside the guard.
         """
         guard = _ResponseGuard(send, receive)
-        path = scope.get("path", "")
+        # `config/asgi.py` rebases /mcp -> / and moves the prefix into
+        # root_path before this sees the scope, so the bare path logs as "/".
+        # Operators alert on this record; it has to name the real surface.
+        path = f"{scope.get('root_path', '').rstrip('/')}{scope.get('path', '')}"
         method = scope.get("method", "GET").upper()
         try:
             await self._dispatch_http(scope, guard.receive, guard)
@@ -650,6 +687,21 @@ class JawafdehiMCPServer:
         tool broke.
         """
         if guard.complete:
+            if exc is not None:
+                # The response went out and THEN something raised — a context
+                # token reset in the wrong context, a post-send error inside
+                # the session manager. Before this guard existed that escaped
+                # to uvicorn, which logged it at ERROR and so reached Sentry.
+                # Returning here without a word would make this handler a
+                # silent-failure source in the subsystem it was written to
+                # make observable.
+                _stdlib_logger.error(
+                    "mcp_request_failed_after_response (%s %s): %s",
+                    method,
+                    path,
+                    str(exc) or type(exc).__name__,
+                    exc_info=exc,
+                )
             return
 
         if guard.disconnected:
@@ -700,6 +752,24 @@ class JawafdehiMCPServer:
         # Letting that escape would replace the original failure with an
         # opaque "Exception in ASGI application" — exactly what this is here to
         # prevent.
+        if (
+            guard.declared_length is not None
+            and guard.bytes_sent < guard.declared_length
+        ):
+            # Nothing can rescue this one. The transport already announced a
+            # Content-Length (the json_response path does, via starlette's
+            # Response) and fewer bytes than that went out, so ANY terminator
+            # we send makes h11 raise "Too little data for declared
+            # Content-Length" and uvicorn drops the socket regardless. Sending
+            # it anyway only buys a second swallowed error on top of the first.
+            # The ERROR above is the signal; the dropped socket is unavoidable.
+            logger.debug(
+                "mcp_response_cannot_be_closed_cleanly",
+                declared=guard.declared_length,
+                sent=guard.bytes_sent,
+            )
+            return
+
         try:
             if not guard.started:
                 # Nothing reached the client yet, so a complete JSON-RPC error

@@ -31,6 +31,7 @@ worse than the nats-py default it replaces. stdlib keeps the real exception.
 
 from __future__ import annotations
 
+import functools
 import logging
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 _SHUTDOWN_ERROR_NAMES = frozenset({"DrainTimeoutError", "ConnectionDrainingError"})
 
 
+@functools.lru_cache(maxsize=1)
 def _shutdown_error_classes() -> tuple[type[BaseException], ...]:
     """The real ``nats.errors`` classes, when they can be imported.
 
@@ -66,8 +68,11 @@ def _shutdown_error_classes() -> tuple[type[BaseException], ...]:
 
 def is_shutdown_noise(exc: BaseException) -> bool:
     classes = _shutdown_error_classes()
-    if classes and isinstance(exc, classes):
-        return True
+    if classes:
+        # Classes resolved, so they are the answer — falling through to the
+        # name check here would re-admit the thing class matching exists to
+        # exclude: an unrelated exception that merely shares the name.
+        return isinstance(exc, classes)
     return type(exc).__name__ in _SHUTDOWN_ERROR_NAMES
 
 

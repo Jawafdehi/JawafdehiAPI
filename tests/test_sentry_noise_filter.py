@@ -289,3 +289,54 @@ class TestTheWindowIsPerHost:
         monkeypatch.setattr(logging_config, "_reports_this_window", 0)
         fresh = _host_event("later.example")
         assert drop_transport_noise(fresh, {}) is fresh
+
+
+class TestTheCeilingCannotSilenceARealHost:
+    """Round five: one shared window meant a rotating burst bought a day.
+
+    With the global ceiling on the same day-long window as the per-host
+    dedupe, a scanner rotating hosts at 00:00:01 exhausts it and a genuine
+    ALLOWED_HOSTS misconfiguration at 00:01:00 reports nothing until the next
+    day — losing the exact signal rate-limiting was chosen over dropping to
+    keep.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset(self, monkeypatch):
+        monkeypatch.setattr(logging_config, "_disallowed_host_last_reported", {})
+        monkeypatch.setattr(logging_config, "_window_started_at", float("-inf"))
+        monkeypatch.setattr(logging_config, "_reports_this_window", 0)
+
+    def test_the_global_window_is_much_shorter_than_the_per_host_one(self):
+        assert (
+            logging_config._GLOBAL_WINDOW_SECONDS
+            < logging_config._DEFAULT_DISALLOWED_HOST_WINDOW
+        )
+
+    def test_an_exhausted_ceiling_recovers_within_the_hour(self, monkeypatch):
+        for n in range(100):
+            drop_transport_noise(_host_event(f"rot{n}.example"), {})
+        assert drop_transport_noise(_host_event("www.jawafdehi.org"), {}) is None
+
+        # One global window later, not one day later.
+        monkeypatch.setattr(
+            logging_config,
+            "_window_started_at",
+            -logging_config._GLOBAL_WINDOW_SECONDS * 2,
+        )
+        genuine = _host_event("www.jawafdehi.org")
+        assert drop_transport_noise(genuine, {}) is genuine
+
+    def test_a_single_host_scanner_is_still_one_event_per_day(self):
+        """The per-host window stays long; only the ceiling is hourly."""
+        first = _host_event("mcp.jawafdehi.org")
+        assert drop_transport_noise(first, {}) is first
+        for _ in range(100):
+            assert drop_transport_noise(_host_event("mcp.jawafdehi.org"), {}) is None
+
+    def test_a_rotating_scanner_stays_bounded(self):
+        reported = sum(
+            drop_transport_noise(_host_event(f"h{n}.example"), {}) is not None
+            for n in range(5000)
+        )
+        assert reported <= logging_config._MAX_REPORTS_PER_WINDOW

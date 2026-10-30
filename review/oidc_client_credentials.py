@@ -218,6 +218,15 @@ class ClientCredentialsTokenProvider:
                 f"OIDC token endpoint returned a non-JSON body: {resp.text[:300]}"
             ) from exc
 
+        if not isinstance(body, dict):
+            # Valid JSON, wrong shape — `null`, a list, a bare string. A proxy
+            # or a cache, not the issuer. Without this, `body.get` raises a
+            # bare AttributeError that is neither subclass, so it escapes the
+            # poller's typed catch and ends the run with a raw traceback.
+            raise OIDCTransportError(
+                f"OIDC token endpoint returned JSON that is not an object: {body!r}"
+            )
+
         access_token = body.get("access_token")
         if not access_token:
             # A 200 of well-formed JSON really is the issuer talking, and it

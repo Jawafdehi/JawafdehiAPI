@@ -440,3 +440,34 @@ class TestSubmitFailuresDoNotEndTheRun:
             rp.requests, "request", side_effect=requests.ConnectionError("reset")
         ):
             command._process_job({"id": 9, "kind": "a_kind_with_no_handler"})
+
+
+class TestBackoffNeverOutpacesThePollInterval:
+    """Round five: the ceiling was clamped below a large `--poll`.
+
+    With `--poll 300` the backoff capped at 60s, so a FAILING API was claimed
+    five times more often than a healthy one — each attempt also fetching an
+    OIDC token.
+    """
+
+    def test_a_large_poll_is_never_sped_up_by_failure(self, monkeypatch):
+        clock = itertools.count(0.0, 100.0)
+        monkeypatch.setattr(rp.time, "monotonic", lambda: next(clock))
+        sleeps = []
+
+        def always_fails(self, kinds):
+            raise rp.PollerError("unreachable")
+
+        provider = mock.Mock()
+        provider.get_token.return_value = "tok"
+        monkeypatch.setattr(rp, "get_provider", lambda: provider)
+        monkeypatch.setattr(rp.settings, "CASEWORK_POLLER_TOKEN", "", raising=False)
+        monkeypatch.setattr(rp.time, "sleep", sleeps.append)
+        monkeypatch.setattr(rp.Command, "_claim", always_fails)
+
+        with pytest.raises(rp.PollerError):
+            rp.Command().handle(
+                apply=True, once=False, poll=300.0, kinds=["case_review"]
+            )
+
+        assert min(sleeps) >= 300.0, "failure must never poll faster than steady state"

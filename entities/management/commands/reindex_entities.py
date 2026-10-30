@@ -219,7 +219,16 @@ def _prefill_derived(
     already-complete pass.
     """
     for chunk in _chunked(iris, _DERIVED_BATCH_SIZE):
-        resolved_counts = entity_case_counts(chunk)
+        try:
+            resolved_counts = entity_case_counts(chunk, strict=True)
+        except Exception:  # noqa: BLE001 — fall back to the narrower path below
+            # A transient cases-DB blip must not cost the whole chunk. The
+            # batch's swallow would write 0 for all 500 IRIs, and 0 means "no
+            # published citation" to the visibility gate — 500 entities
+            # archived out of public search on the alias swap. The per-entity
+            # path loses exactly one entity to the same blip, because the next
+            # query succeeds, which is how this behaved before batching.
+            resolved_counts = {iri: entity_case_count(iri) for iri in chunk}
         resolved_locations = locations_for_iris(chunk)
         for iri in chunk:
             counts[iri] = resolved_counts.get(iri, 0)

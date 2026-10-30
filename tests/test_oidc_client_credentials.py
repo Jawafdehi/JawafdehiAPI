@@ -395,3 +395,36 @@ def test_both_subclasses_remain_catchable_as_the_base_error(monkeypatch):
     monkeypatch.setattr(requests, "post", fake_post)
     with pytest.raises(cc.OIDCTokenError):
         _provider().get_token()
+
+
+def test_a_200_whose_json_is_not_an_object_is_a_transport_error(monkeypatch):
+    """`null`, a list, a bare string — a proxy or a cache, not the issuer.
+
+    Without this, `body.get` raised a bare AttributeError that is neither
+    subclass, so it escaped the poller's typed catch and ended the run with a
+    raw traceback — the same hole `_json` was added to close for the jobs API.
+    """
+
+    class _NonObject(FakeResponse):
+        def json(self):
+            return None
+
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: _NonObject(status_code=200, text="null")
+    )
+    with pytest.raises(cc.OIDCTransportError) as exc:
+        _provider().get_token()
+    assert "not an object" in str(exc.value)
+
+
+@pytest.mark.parametrize("body", [[], "a string", 42])
+def test_other_non_object_shapes_too(monkeypatch, body):
+    class _NonObject(FakeResponse):
+        def json(self):
+            return body
+
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: _NonObject(status_code=200, text="x")
+    )
+    with pytest.raises(cc.OIDCTransportError):
+        _provider().get_token()

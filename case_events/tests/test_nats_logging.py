@@ -19,12 +19,14 @@ import pytest
 from case_events import nats_logging
 
 
-class _FakeDrainTimeoutError(Exception):
-    """Stands in for ``nats.errors.DrainTimeoutError``.
+#: The REAL class. Matching is by class where nats-py is importable, so a
+#: stand-in with the right name is an impostor, not a stand-in — see
+#: TestTheNameFallbackIsOnlyAFallback, which pins that it is treated as one.
+from nats.errors import DrainTimeoutError as _RealDrainTimeoutError
 
-    Matched by class name on purpose — see the note in ``nats_logging`` — so a
-    stand-in with the right name is the honest way to test the classifier.
-    """
+
+class _FakeDrainTimeoutError(Exception):
+    """An unrelated class that merely shares the name. Must NOT be downgraded."""
 
 
 _FakeDrainTimeoutError.__name__ = "DrainTimeoutError"
@@ -39,7 +41,7 @@ _FakeAuthError.__name__ = "AuthorizationError"
 
 class TestClassification:
     def test_a_drain_timeout_is_shutdown_noise(self):
-        assert nats_logging.is_shutdown_noise(_FakeDrainTimeoutError())
+        assert nats_logging.is_shutdown_noise(_RealDrainTimeoutError())
 
     def test_a_real_failure_is_not(self):
         assert not nats_logging.is_shutdown_noise(_FakeAuthError("bad creds"))
@@ -53,7 +55,7 @@ class TestCallback:
 
     async def test_a_drain_timeout_logs_at_warning(self, caplog):
         with caplog.at_level(logging.DEBUG):
-            await nats_logging.error_cb(_FakeDrainTimeoutError())
+            await nats_logging.error_cb(_RealDrainTimeoutError())
         record = caplog.records[-1]
         assert record.levelno == logging.WARNING
 
@@ -95,15 +97,15 @@ class TestSentryGetsARealException:
     async def test_the_shutdown_path_keeps_the_exception_too(self, caplog):
         """Downgraded to WARNING, not stripped of detail."""
         try:
-            raise _FakeDrainTimeoutError("drain timed out")
-        except _FakeDrainTimeoutError as exc:
+            raise _RealDrainTimeoutError("drain timed out")
+        except _RealDrainTimeoutError as exc:
             with caplog.at_level(logging.DEBUG):
                 await nats_logging.error_cb(exc)
 
         record = caplog.records[-1]
         assert record.levelno == logging.WARNING
         assert record.exc_info is not None
-        assert record.exc_info[0] is _FakeDrainTimeoutError
+        assert record.exc_info[0] is _RealDrainTimeoutError
 
     async def test_the_message_names_the_class(self, caplog):
         with caplog.at_level(logging.DEBUG):
@@ -175,3 +177,24 @@ class TestTheMessageIsNeverEmpty:
         message = caplog.records[-1].getMessage()
         assert message.endswith("ClosedResourceError")
         assert not message.endswith(": ")
+
+
+class TestTheNameFallbackIsOnlyAFallback:
+    """Round five: the fallback ran unconditionally, so class matching bought
+    nothing. An unrelated exception merely NAMED `DrainTimeoutError` was still
+    downgraded to WARNING and kept out of Sentry — the precise risk the class
+    lookup was added to remove."""
+
+    def test_an_impostor_is_not_downgraded(self):
+        assert nats_logging._shutdown_error_classes(), "premise: classes resolve"
+        assert not nats_logging.is_shutdown_noise(_FakeDrainTimeoutError())
+
+    def test_the_real_one_still_is(self):
+        from nats import errors
+
+        assert nats_logging.is_shutdown_noise(errors.DrainTimeoutError())
+
+    def test_the_classes_are_resolved_once(self):
+        assert nats_logging._shutdown_error_classes() is (
+            nats_logging._shutdown_error_classes()
+        )

@@ -57,9 +57,13 @@ _DEFAULT_DISALLOWED_HOST_WINDOW = 86400.0
 #: a day, and the heartbeat that did get through would name the scanner's host.
 #: Per-host, a hostname nobody has seen before always reports immediately.
 #:
-#: Bounded so a scanner rotating Host headers cannot grow it without limit;
-#: when full it is cleared rather than evicted one-by-one, which costs at most
-#: one extra event per host and keeps this allocation-free on the hot path.
+#: Bounded so a scanner rotating Host headers cannot grow it without limit.
+#: Overflow evicts the OLDEST entry (an O(n) scan, on a path that by
+#: construction runs at most a few times an hour) rather than clearing the map:
+#: clearing would drop the timestamp of the host that is actually flooding, so
+#: it would report again on its next request — overflow making the limiter
+#: looser instead of tighter. With the global ceiling in place this path is
+#: nearly unreachable anyway; it is a backstop, not a hot path.
 #:
 #: Process-local and lock-free: ``before_send`` runs on the reporting thread,
 #: and the worst case from a race is one duplicate event — cheaper than
@@ -67,11 +71,22 @@ _DEFAULT_DISALLOWED_HOST_WINDOW = 86400.0
 _MAX_TRACKED_HOSTS = 512
 _disallowed_host_last_reported: dict[str, float] = {}
 
-#: Total DisallowedHost events reported per window per process, across all
-#: hosts. The per-host map alone is not a limit against a scanner that rotates
-#: its Host header — every request would look like a new host and report. This
-#: is the ceiling that makes the volume bounded no matter what the client does.
-_MAX_REPORTS_PER_WINDOW = 10
+#: Global ceiling, on its OWN much shorter window than the per-host dedupe.
+#:
+#: Two timescales, because the two limits answer different questions. Per-host
+#: at a day keeps a single-hostname scanner down to one event. The global
+#: ceiling exists only to bound a scanner that ROTATES its Host header, and
+#: putting it on the same day-long window would mean a burst of rotated hosts
+#: at 00:00:01 silences a genuine ALLOWED_HOSTS misconfiguration for the rest
+#: of the day — losing the exact signal rate-limiting was chosen over dropping
+#: in order to keep.
+#:
+#: At an hour, a rotating scanner costs at most 72 events a day (against
+#: 25,293 lifetime on the issue that prompted this) and a real misconfiguration
+#: waits at most an hour to be seen. It is also never the only signal: Django
+#: logs every occurrence through ``django.security.DisallowedHost``.
+_MAX_REPORTS_PER_WINDOW = 3
+_GLOBAL_WINDOW_SECONDS = 3600.0
 _window_started_at = float("-inf")
 _reports_this_window = 0
 
@@ -118,9 +133,9 @@ def _allow_disallowed_host_report(host, now=None):
     if last is not None and current - last < window:
         return False
 
-    # Global ceiling, reset once per window.
+    # Global ceiling, on its own (shorter) window — see the constant.
     global _window_started_at, _reports_this_window
-    if current - _window_started_at >= window:
+    if current - _window_started_at >= min(window, _GLOBAL_WINDOW_SECONDS):
         _window_started_at = current
         _reports_this_window = 0
     if _reports_this_window >= _MAX_REPORTS_PER_WINDOW:
